@@ -1,0 +1,768 @@
+@page "/performance"
+@inject HttpClient Http
+@inject NavigationManager NavManager
+
+<PageTitle>性能测试 - Obsidian RAG</PageTitle>
+
+<div class="page-container">
+    <header class="page-header">
+        <h1>⚡ 性能测试</h1>
+    </header>
+
+    <!-- 标签页导航 -->
+    <div class="tabs">
+        <button class="tab @(activeTab == "benchmark" ? "active" : "")" @onclick='() => activeTab = "benchmark"'>
+            📊 向量生成测试
+        </button>
+        <button class="tab @(activeTab == "semantic" ? "active" : "")" @onclick='() => activeTab = "semantic"'>
+            🎯 语义查询测试
+        </button>
+        <button class="tab @(activeTab == "records" ? "active" : "")" @onclick='() => activeTab = "records"'>
+            📋 测试记录
+        </button>
+    </div>
+
+    <!-- 向量生成测试 -->
+    @if (activeTab == "benchmark")
+    {
+        <div class="test-section">
+            <div class="test-card">
+                <h2>📊 长文本向量索引性能测试</h2>
+                <p class="test-desc">测试不同长度文本的向量生成性能，评估处理效率。</p>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>文本长度（字符数）</label>
+                        <input type="number" @bind="benchmarkRequest.TextLength" class="form-control" />
+                    </div>
+                    <div class="form-group">
+                        <label>分段大小（tokens）</label>
+                        <input type="number" @bind="benchmarkRequest.ChunkSize" class="form-control" />
+                    </div>
+                    <div class="form-group">
+                        <label>重叠大小（tokens）</label>
+                        <input type="number" @bind="benchmarkRequest.OverlapSize" class="form-control" />
+                    </div>
+                    <div class="form-group">
+                        <label>批处理大小</label>
+                        <input type="number" @bind="benchmarkRequest.BatchSize" class="form-control" />
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" @bind="benchmarkRequest.IncludeCodeBlocks" /> 包含代码块
+                        </label>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" @bind="benchmarkRequest.IncludeHeadings" /> 包含标题
+                        </label>
+                    </div>
+                </div>
+
+                <div class="quick-presets">
+                    <span>快速预设：</span>
+                    <button class="btn btn-sm btn-secondary" @onclick='() => SetBenchmarkPreset(5000)'>5K 字符</button>
+                    <button class="btn btn-sm btn-secondary" @onclick='() => SetBenchmarkPreset(10000)'>10K 字符</button>
+                    <button class="btn btn-sm btn-secondary" @onclick='() => SetBenchmarkPreset(50000)'>50K 字符</button>
+                    <button class="btn btn-sm btn-secondary" @onclick='() => SetBenchmarkPreset(100000)'>100K 字符</button>
+                </div>
+
+                <button class="btn btn-primary" @onclick="RunBenchmark" disabled="@isRunningBenchmark">
+                    @if (isRunningBenchmark)
+                    {
+                        <span>⏳ 测试中...</span>
+                    }
+                    else
+                    {
+                        <span>🚀 开始测试</span>
+                    }
+                </button>
+            </div>
+
+            @if (benchmarkResult != null)
+            {
+                <div class="result-card">
+                    <h3>📈 测试结果</h3>
+                    
+                    <div class="result-grid">
+                        <div class="result-item">
+                            <span class="result-label">文本长度</span>
+                            <span class="result-value">@benchmarkResult.TextLength.ToString("N0") 字符</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">实际字符</span>
+                            <span class="result-value">@benchmarkResult.TotalChars.ToString("N0")</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Token 总数</span>
+                            <span class="result-value">@benchmarkResult.TotalTokens.ToString("N0")</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">分段数量</span>
+                            <span class="result-value">@benchmarkResult.ChunkCount 个</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">向量维度</span>
+                            <span class="result-value">@benchmarkResult.VectorDimension</span>
+                        </div>
+                        <div class="result-item highlight">
+                            <span class="result-label">总耗时</span>
+                            <span class="result-value">@benchmarkResult.TotalMs ms</span>
+                        </div>
+                    </div>
+
+                    <div class="timing-breakdown">
+                        <h4>耗时分解</h4>
+                        <div class="timing-bar">
+                            <div class="timing-segment text-gen" style="width: @($"{(double)benchmarkResult.TextGenerationMs / benchmarkResult.TotalMs * 100}%")">
+                                <span>生成文本</span>
+                            </div>
+                            <div class="timing-segment chunking" style="width: @($"{(double)benchmarkResult.ChunkingMs / benchmarkResult.TotalMs * 100}%")">
+                                <span>分段</span>
+                            </div>
+                            <div class="timing-segment token-count" style="width: @($"{(double)benchmarkResult.TokenCountMs / benchmarkResult.TotalMs * 100}%")">
+                                <span>Token统计</span>
+                            </div>
+                            <div class="timing-segment embedding" style="width: @($"{(double)benchmarkResult.EmbeddingMs / benchmarkResult.TotalMs * 100}%")">
+                                <span>向量化</span>
+                            </div>
+                        </div>
+                        <div class="timing-legend">
+                            <span class="legend-item"><span class="dot text-gen"></span> 生成文本: @benchmarkResult.TextGenerationMs ms</span>
+                            <span class="legend-item"><span class="dot chunking"></span> 分段: @benchmarkResult.ChunkingMs ms</span>
+                            <span class="legend-item"><span class="dot token-count"></span> Token统计: @benchmarkResult.TokenCountMs ms</span>
+                            <span class="legend-item"><span class="dot embedding"></span> 向量化: @benchmarkResult.EmbeddingMs ms</span>
+                        </div>
+                    </div>
+
+                    <div class="performance-metrics">
+                        <h4>性能指标</h4>
+                        <div class="metrics-grid">
+                            <div class="metric">
+                                <span class="metric-value">@benchmarkResult.TokensPerSecond.ToString("N0")</span>
+                                <span class="metric-label">Token/秒</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value">@benchmarkResult.CharsPerSecond.ToString("N0")</span>
+                                <span class="metric-label">字符/秒</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value">@benchmarkResult.ChunksPerSecond.ToString("N1")</span>
+                                <span class="metric-label">分段/秒</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value">@benchmarkResult.VectorsPerSecond.ToString("N1")</span>
+                                <span class="metric-label">向量/秒</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value">@benchmarkResult.EstimatedMemoryMB.ToString("N2")</span>
+                                <span class="metric-label">内存 (MB)</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="batch-stats">
+                        <h4>其他统计</h4>
+                        <div class="stats-row">
+                            <span>平均分段Token: @benchmarkResult.AvgChunkTokens.ToString("N1")</span>
+                            <span>向量数量: @benchmarkResult.VectorCount</span>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+
+    <!-- 语义查询测试 -->
+    @if (activeTab == "semantic")
+    {
+        <div class="test-section">
+            <div class="test-card">
+                <h2>🎯 语义查询能力测试</h2>
+                <p class="test-desc">测试模型的语义理解和检索能力，评估查询准确度。</p>
+
+                <div class="test-type-selector">
+                    <button class="@(semanticTestType == "short" ? "active" : "")" @onclick='() => semanticTestType = "short"'>
+                        短文本相似度
+                    </button>
+                    <button class="@(semanticTestType == "long" ? "active" : "")" @onclick='() => semanticTestType = "long"'>
+                        长文本检索
+                    </button>
+                </div>
+
+                <!-- 短文本测试 -->
+                @if (semanticTestType == "short")
+                {
+                    <div class="short-text-test">
+                        <div class="form-group">
+                            <label>查询文本</label>
+                            <textarea @bind="shortTextRequest.Query" class="form-control" rows="2" placeholder="输入查询文本..."></textarea>
+                        </div>
+
+                        <div class="form-group">
+                            <label>候选文本（每行一个，格式：文本|期望相似度）</label>
+                            <textarea @bind="shortTextCandidates" class="form-control" rows="6" placeholder="编程学习需要从基础开始|0.9&#10;今天天气很好|0.1"></textarea>
+                        </div>
+
+                        <div class="preset-buttons">
+                            <span>预设测试：</span>
+                            <button class="btn btn-sm btn-secondary" @onclick='() => LoadPreset("chinese-similarity")'>中文相似度</button>
+                            <button class="btn btn-sm btn-secondary" @onclick='() => LoadPreset("english-similarity")'>英文相似度</button>
+                            <button class="btn btn-sm btn-secondary" @onclick='() => LoadPreset("qa-matching")'>问答匹配</button>
+                        </div>
+
+                        <button class="btn btn-primary" @onclick="RunShortTextTest" disabled="@isRunningSemantic">
+                            @if (isRunningSemantic)
+                            {
+                                <span>⏳ 测试中...</span>
+                            }
+                            else
+                            {
+                                <span>🚀 开始测试</span>
+                            }
+                        </button>
+                    </div>
+                }
+
+                <!-- 长文本测试 -->
+                @if (semanticTestType == "long")
+                {
+                    <div class="long-text-test">
+                        <div class="form-group">
+                            <label>查询文本</label>
+                            <textarea @bind="longTextRequest.Query" class="form-control" rows="2" placeholder="输入查询文本..."></textarea>
+                        </div>
+
+                        <div class="form-group">
+                            <label>文档段落（每行一个，格式：ID|文本|是否相关）</label>
+                            <textarea @bind="longTextPassages" class="form-control" rows="8" placeholder="p1|这是第一段相关内容|true&#10;p2|这是无关内容|false"></textarea>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>返回数量 (Top-K)</label>
+                                <input type="number" @bind="longTextRequest.TopK" class="form-control" min="1" max="20" />
+                            </div>
+                        </div>
+
+                        <button class="btn btn-primary" @onclick="RunLongTextTest" disabled="@isRunningSemantic">
+                            @if (isRunningSemantic)
+                            {
+                                <span>⏳ 测试中...</span>
+                            }
+                            else
+                            {
+                                <span>🚀 开始测试</span>
+                            }
+                        </button>
+                    </div>
+                }
+            </div>
+
+            @if (semanticResult != null)
+            {
+                <div class="result-card">
+                    <h3>🎯 语义测试结果</h3>
+                    
+                    <div class="result-meta">
+                        <span>模型: @semanticResult.ModelName</span>
+                        <span>类型: @semanticResult.TestType</span>
+                        <span>时间: @semanticResult.Timestamp.ToString("HH:mm:ss")</span>
+                    </div>
+
+                    @if (semanticResult is ShortTextSemanticResult shortResult)
+                    {
+                        <div class="short-results">
+                            <div class="metrics-row">
+                                <div class="metric-box">
+                                    <span class="metric-value">@shortResult.MeanAbsoluteError.ToString("F4")</span>
+                                    <span class="metric-label">MAE</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-value">@shortResult.CorrelationCoefficient.ToString("F4")</span>
+                                    <span class="metric-label">相关系数</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-value">@shortResult.RankingAccuracy.ToString("P1")</span>
+                                    <span class="metric-label">排序准确率</span>
+                                </div>
+                            </div>
+
+                            <h4>候选结果</h4>
+                            <div class="candidate-list">
+                                @foreach (var candidate in shortResult.Candidates.OrderByDescending(c => c.Similarity))
+                                {
+                                    <div class="candidate-item">
+                                        <div class="candidate-text">@candidate.Text</div>
+                                        <div class="candidate-scores">
+                                            <span class="actual">实际: @candidate.Similarity.ToString("F4")</span>
+                                            <span class="expected">期望: @candidate.ExpectedSimilarity.ToString("F2")</span>
+                                            <span class="deviation @(candidate.Deviation > 0.1 ? "high" : "")">偏差: @candidate.Deviation.ToString("F4")</span>
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+
+                    @if (semanticResult is LongTextSemanticResult longResult)
+                    {
+                        <div class="long-results">
+                            <div class="metrics-row">
+                                <div class="metric-box">
+                                    <span class="metric-value">@longResult.Precision.ToString("P1")</span>
+                                    <span class="metric-label">精确率</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-value">@longResult.Recall.ToString("P1")</span>
+                                    <span class="metric-label">召回率</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-value">@longResult.F1Score.ToString("F4")</span>
+                                    <span class="metric-label">F1 Score</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-value">@longResult.Ndcg.ToString("F4")</span>
+                                    <span class="metric-label">NDCG</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-value">@longResult.Mrr.ToString("F4")</span>
+                                    <span class="metric-label">MRR</span>
+                                </div>
+                            </div>
+
+                            <h4>检索结果</h4>
+                            <div class="passage-list">
+                                @foreach (var passage in longResult.Passages.OrderByDescending(p => p.Similarity).Take(10))
+                                {
+                                    <div class="passage-item @(passage.IsRelevant ? "relevant" : "irrelevant")">
+                                        <div class="passage-header">
+                                            <span class="passage-id">@passage.Id</span>
+                                            <span class="passage-score">@passage.Similarity.ToString("F4")</span>
+                                            <span class="passage-badge">@(passage.IsRelevant ? "✓ 相关" : "✗ 不相关")</span>
+                                        </div>
+                                        <div class="passage-text">@passage.Text</div>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    }
+
+    <!-- 测试记录 -->
+    @if (activeTab == "records")
+    {
+        <div class="test-section">
+            <div class="filter-bar">
+                <div class="form-group">
+                    <label>模型</label>
+                    <select @bind="filterModel" class="form-control-sm">
+                        <option value="">全部</option>
+                        @foreach (var model in availableModels)
+                        {
+                            <option value="@model">@model</option>
+                        }
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>测试类型</label>
+                    <select @bind="filterTestType" class="form-control-sm">
+                        <option value="">全部</option>
+                        <option value="short-text">短文本</option>
+                        <option value="long-text">长文本</option>
+                        <option value="benchmark">性能测试</option>
+                    </select>
+                </div>
+                <button class="btn btn-sm btn-primary" @onclick="LoadRecords">刷新</button>
+            </div>
+
+            @if (testStatistics != null)
+            {
+                <div class="statistics-card">
+                    <h3>📊 统计汇总</h3>
+                    <div class="stats-overview">
+                        <div class="stat-item">
+                            <span class="stat-value">@testStatistics.TotalTests</span>
+                            <span class="stat-label">总测试数</span>
+                        </div>
+                    </div>
+
+                    <h4>按模型统计</h4>
+                    <div class="model-stats-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>模型</th>
+                                    <th>测试数</th>
+                                    <th>短文本</th>
+                                    <th>长文本</th>
+                                    <th>MAE</th>
+                                    <th>相关系数</th>
+                                    <th>精确率</th>
+                                    <th>召回率</th>
+                                    <th>F1</th>
+                                    <th>平均耗时(ms)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var stat in testStatistics.ByModel)
+                                {
+                                    <tr>
+                                        <td>@stat.ModelName</td>
+                                        <td>@stat.TotalTests</td>
+                                        <td>@stat.ShortTextTests</td>
+                                        <td>@stat.LongTextTests</td>
+                                        <td>@stat.AvgMae.ToString("F4")</td>
+                                        <td>@stat.AvgCorrelation.ToString("F4")</td>
+                                        <td>@stat.AvgPrecision.ToString("P1")</td>
+                                        <td>@stat.AvgRecall.ToString("P1")</td>
+                                        <td>@stat.AvgF1.ToString("F4")</td>
+                                        <td>@stat.AvgEmbeddingMs.ToString("F1")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            }
+
+            @if (testRecords != null && testRecords.Count > 0)
+            {
+                <div class="records-card">
+                    <h3>📋 测试记录</h3>
+                    <div class="records-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>类型</th>
+                                    <th>模型</th>
+                                    <th>查询</th>
+                                    <th>结果</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var record in testRecords)
+                                {
+                                    <tr>
+                                        <td>@record.Timestamp.ToString("MM-dd HH:mm")</td>
+                                        <td><span class="type-badge @record.TestType">@record.TestType</span></td>
+                                        <td>@record.ModelName</td>
+                                        <td class="query-cell">@(record.Query.Length > 50 ? record.Query[..50] + "..." : record.Query)</td>
+                                        <td>
+                                            @if (record.Results.ContainsKey("meanAbsoluteError"))
+                                            {
+                                                <span>MAE: @Convert.ToDouble(record.Results["meanAbsoluteError"]).ToString("F4")</span>
+                                            }
+                                            @if (record.Results.ContainsKey("f1Score"))
+                                            {
+                                                <span>F1: @Convert.ToDouble(record.Results["f1Score"]).ToString("F4")</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private string activeTab = "benchmark";
+    
+    // 基准测试
+    private BenchmarkRequest benchmarkRequest = new() { TextLength = 10000, ChunkSize = 512, OverlapSize = 50 };
+    private bool isRunningBenchmark;
+    private BenchmarkResult? benchmarkResult;
+
+    // 语义测试
+    private string semanticTestType = "short";
+    private bool isRunningSemantic;
+    private SemanticTestResult? semanticResult;
+
+    private ShortTextTestRequest shortTextRequest = new();
+    private string shortTextCandidates = "";
+    
+    private LongTextTestRequest longTextRequest = new() { TopK = 5 };
+    private string longTextPassages = "";
+
+    // 测试记录
+    private string filterModel = "";
+    private string filterTestType = "";
+    private List<TestRecord>? testRecords;
+    private TestStatistics? testStatistics;
+    private List<string> availableModels = new() { "bge-small-zh-v1.5" };
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadRecords();
+    }
+
+    private void SetBenchmarkPreset(int textLength)
+    {
+        benchmarkRequest.TextLength = textLength;
+    }
+
+    private async Task RunBenchmark()
+    {
+        isRunningBenchmark = true;
+        try
+        {
+            var response = await Http.PostAsJsonAsync("/api/performance/benchmark", benchmarkRequest);
+            if (response.IsSuccessStatusCode)
+            {
+                benchmarkResult = await response.Content.ReadFromJsonAsync<BenchmarkResult>();
+            }
+        }
+        finally
+        {
+            isRunningBenchmark = false;
+        }
+    }
+
+    private async Task LoadPreset(string presetName)
+    {
+        try
+        {
+            var response = await Http.PostAsync($"/api/semantic-test/preset/{presetName}", null);
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<SemanticTestResult>();
+                if (result != null)
+                {
+                    semanticResult = result;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading preset: {ex.Message}");
+        }
+    }
+
+    private async Task RunShortTextTest()
+    {
+        // 解析候选文本
+        shortTextRequest.Candidates = shortTextCandidates.Split('\n')
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .Select(line =>
+            {
+                var parts = line.Split('|');
+                return new CandidateText
+                {
+                    Text = parts[0].Trim(),
+                    ExpectedSimilarity = parts.Length > 1 ? double.Parse(parts[1].Trim()) : 0.5
+                };
+            })
+            .ToList();
+
+        isRunningSemantic = true;
+        try
+        {
+            var response = await Http.PostAsJsonAsync("/api/semantic-test/short-text", shortTextRequest);
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<ShortTextSemanticResult>();
+                semanticResult = result;
+            }
+        }
+        finally
+        {
+            isRunningSemantic = false;
+        }
+    }
+
+    private async Task RunLongTextTest()
+    {
+        // 解析段落
+        longTextRequest.Passages = longTextPassages.Split('\n')
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .Select(line =>
+            {
+                var parts = line.Split('|');
+                return new Passage
+                {
+                    Id = parts[0].Trim(),
+                    Text = parts.Length > 1 ? parts[1].Trim() : "",
+                    IsRelevant = parts.Length > 2 && parts[2].Trim().ToLower() == "true"
+                };
+            })
+            .ToList();
+
+        isRunningSemantic = true;
+        try
+        {
+            var response = await Http.PostAsJsonAsync("/api/semantic-test/long-text", longTextRequest);
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<LongTextSemanticResult>();
+                semanticResult = result;
+            }
+        }
+        finally
+        {
+            isRunningSemantic = false;
+        }
+    }
+
+    private async Task LoadRecords()
+    {
+        try
+        {
+            // 加载记录
+            var recordsUrl = $"/api/semantic-test/records?modelName={filterModel}&testType={filterTestType}&limit=100";
+            testRecords = await Http.GetFromJsonAsync<List<TestRecord>>(recordsUrl);
+
+            // 加载统计
+            testStatistics = await Http.GetFromJsonAsync<TestStatistics>($"/api/semantic-test/statistics?modelName={filterModel}");
+        }
+        catch
+        {
+            testRecords = new List<TestRecord>();
+        }
+    }
+
+    // 数据模型
+    public class BenchmarkRequest
+    {
+        public int TextLength { get; set; }
+        public int ChunkSize { get; set; }
+        public int OverlapSize { get; set; }
+        public int? BatchSize { get; set; }  // null = 使用配置文件值
+        public bool IncludeCodeBlocks { get; set; } = true;
+        public bool IncludeHeadings { get; set; } = true;
+    }
+
+    public class BenchmarkResult
+    {
+        public int TextLength { get; set; }
+        public int ChunkSize { get; set; }
+        public int OverlapSize { get; set; }
+        public int BatchSize { get; set; }
+        public long TextGenerationMs { get; set; }
+        public long ChunkingMs { get; set; }
+        public long TokenCountMs { get; set; }
+        public long EmbeddingMs { get; set; }
+        public long StoragePrepMs { get; set; }
+        public long TotalMs { get; set; }
+        public int ChunkCount { get; set; }
+        public int TotalChars { get; set; }
+        public int TotalTokens { get; set; }
+        public double AvgChunkTokens { get; set; }
+        public int VectorCount { get; set; }
+        public int VectorDimension { get; set; }
+        public double TokensPerSecond { get; set; }
+        public double CharsPerSecond { get; set; }
+        public double ChunksPerSecond { get; set; }
+        public double VectorsPerSecond { get; set; }
+        public double EstimatedMemoryMB { get; set; }
+    }
+
+    public class ShortTextTestRequest
+    {
+        public string Query { get; set; } = "";
+        public List<CandidateText> Candidates { get; set; } = new();
+        public string? ModelName { get; set; }
+    }
+
+    public class CandidateText
+    {
+        public string Text { get; set; } = "";
+        public double ExpectedSimilarity { get; set; }
+    }
+
+    public class LongTextTestRequest
+    {
+        public string Query { get; set; } = "";
+        public List<Passage> Passages { get; set; } = new();
+        public int TopK { get; set; }
+        public string? ModelName { get; set; }
+    }
+
+    public class Passage
+    {
+        public string Id { get; set; } = "";
+        public string Text { get; set; } = "";
+        public bool IsRelevant { get; set; }
+    }
+
+    public class SemanticTestResult
+    {
+        public string TestType { get; set; } = "";
+        public string ModelName { get; set; } = "";
+        public DateTime Timestamp { get; set; }
+    }
+
+    public class ShortTextSemanticResult : SemanticTestResult
+    {
+        public List<CandidateResultItem> Candidates { get; set; } = new();
+        public double MeanAbsoluteError { get; set; }
+        public double CorrelationCoefficient { get; set; }
+        public double RankingAccuracy { get; set; }
+    }
+
+    public class LongTextSemanticResult : SemanticTestResult
+    {
+        public List<PassageResultItem> Passages { get; set; } = new();
+        public double Precision { get; set; }
+        public double Recall { get; set; }
+        public double F1Score { get; set; }
+        public double Ndcg { get; set; }
+        public double Mrr { get; set; }
+    }
+
+    public class CandidateResultItem
+    {
+        public string Text { get; set; } = "";
+        public double Similarity { get; set; }
+        public double ExpectedSimilarity { get; set; }
+        public double Deviation { get; set; }
+    }
+
+    public class PassageResultItem
+    {
+        public string Id { get; set; } = "";
+        public string Text { get; set; } = "";
+        public double Similarity { get; set; }
+        public bool IsRelevant { get; set; }
+    }
+
+    public class TestRecord
+    {
+        public string Id { get; set; } = "";
+        public string TestType { get; set; } = "";
+        public string ModelName { get; set; } = "";
+        public DateTime Timestamp { get; set; }
+        public string Query { get; set; } = "";
+        public Dictionary<string, object> Results { get; set; } = new();
+    }
+
+    public class TestStatistics
+    {
+        public int TotalTests { get; set; }
+        public List<ModelStatistics> ByModel { get; set; } = new();
+    }
+
+    public class ModelStatistics
+    {
+        public string ModelName { get; set; } = "";
+        public int TotalTests { get; set; }
+        public int ShortTextTests { get; set; }
+        public int LongTextTests { get; set; }
+        public double AvgMae { get; set; }
+        public double AvgCorrelation { get; set; }
+        public double AvgPrecision { get; set; }
+        public double AvgRecall { get; set; }
+        public double AvgF1 { get; set; }
+        public double AvgEmbeddingMs { get; set; }
+    }
+}

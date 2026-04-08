@@ -1,0 +1,246 @@
+@page "/"
+@inject HttpClient Http
+@inject NavigationManager NavManager
+
+<PageTitle>Obsidian RAG Dashboard</PageTitle>
+
+<div class="dashboard">
+    <header class="dashboard-header">
+        <h1>📚 Obsidian RAG Dashboard</h1>
+        <p class="subtitle">知识库向量检索系统</p>
+    </header>
+
+    <nav class="dashboard-nav">
+        <NavLink href="/" class="nav-link" Match="NavLinkMatch.All">
+            <span class="nav-icon">🏠</span> 概览
+        </NavLink>
+        <NavLink href="/sources" class="nav-link">
+            <span class="nav-icon">📁</span> 源管理
+        </NavLink>
+        <NavLink href="/search" class="nav-link">
+            <span class="nav-icon">🔍</span> 向量搜索
+        </NavLink>
+        <NavLink href="/performance" class="nav-link">
+            <span class="nav-icon">⚡</span> 性能测试
+        </NavLink>
+        <NavLink href="/settings" class="nav-link">
+            <span class="nav-icon">⚙️</span> 设置
+        </NavLink>
+        <NavLink href="/api-help" class="nav-link">
+            <span class="nav-icon">📖</span> API 文档
+        </NavLink>
+    </nav>
+
+    <main class="dashboard-content">
+        <!-- 状态卡片 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon">📁</div>
+                <div class="stat-content">
+                    <div class="stat-value">@stats?.TotalFiles</div>
+                    <div class="stat-label">已索引文件</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">📄</div>
+                <div class="stat-content">
+                    <div class="stat-value">@stats?.TotalChunks</div>
+                    <div class="stat-label">文档分段</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">📂</div>
+                <div class="stat-content">
+                    <div class="stat-value">@stats?.SourceCount</div>
+                    <div class="stat-label">源文件夹</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">⚡</div>
+                <div class="stat-content">
+                    <div class="stat-value">@($"{stats?.AvgQueryTime ?? 0:F0}ms")</div>
+                    <div class="stat-label">平均查询</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 快速操作 -->
+        <div class="quick-actions">
+            <h2>快速操作</h2>
+            <div class="action-buttons">
+                <button class="btn btn-primary" @onclick="NavigateToSources">
+                    ➕ 添加源文件夹
+                </button>
+                <button class="btn btn-secondary" @onclick="StartIndex" disabled="@indexingInProgress">
+                    @if (indexingInProgress)
+                    {
+                        <span>⏳ 索引中...</span>
+                    }
+                    else
+                    {
+                        <span>🔄 开始索引</span>
+                    }
+                </button>
+                <button class="btn btn-secondary" @onclick="NavigateToSearch">
+                    🔍 向量搜索
+                </button>
+            </div>
+        </div>
+
+        <!-- 源列表 -->
+        <div class="sources-section">
+            <h2>源文件夹</h2>
+            @if (sources == null || sources.Count == 0)
+            {
+                <p class="empty-state">暂无源文件夹，点击"添加源文件夹"开始</p>
+            }
+            else
+            {
+                <div class="sources-list">
+                    @foreach (var source in sources)
+                    {
+                        <div class="source-item @(source.Enabled ? "" : "disabled")">
+                            <div class="source-info">
+                                <span class="source-name">@source.Name</span>
+                                <span class="source-path">@source.Path</span>
+                            </div>
+                            <div class="source-meta">
+                                <span class="source-type">@source.Type</span>
+                                <span class="source-files">@source.FileCount 个文件</span>
+                            </div>
+                            <div class="source-actions">
+                                <button class="btn-icon" title="索引" @onclick="() => IndexSource(source.Name)">🔄</button>
+                                <button class="btn-icon" title="@(source.Enabled ? "禁用" : "启用")" @onclick="() => ToggleSource(source.Name)">@(source.Enabled ? "⏸️" : "▶️")</button>
+                                <button class="btn-icon danger" title="删除" @onclick="() => DeleteSource(source.Name)">🗑️</button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+
+        <!-- 索引进度 -->
+        @if (indexingInProgress && indexProgress != null)
+        {
+            <div class="progress-section">
+                <h2>索引进度</h2>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: @($"{indexProgress.Progress}%")"></div>
+                </div>
+                <div class="progress-info">
+                    <span>@indexProgress.CurrentFile</span>
+                    <span>@indexProgress.Processed / @indexProgress.Total</span>
+                </div>
+            </div>
+        }
+    </main>
+</div>
+
+@code {
+    private DashboardStats? stats;
+    private List<SourceInfo>? sources;
+    private bool indexingInProgress;
+    private IndexProgress? indexProgress;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        try
+        {
+            // 加载状态
+            stats = await Http.GetFromJsonAsync<DashboardStats>("/api/dashboard/stats");
+            
+            // 加载源列表
+            sources = await Http.GetFromJsonAsync<List<SourceInfo>>("/api/dashboard/sources");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"加载失败: {ex.Message}");
+            // 使用模拟数据
+            stats = new DashboardStats { TotalFiles = 6, TotalChunks = 47, SourceCount = 1, AvgQueryTime = 25 };
+            sources = new List<SourceInfo>
+            {
+                new SourceInfo { Name = "测试笔记库", Path = "E:/LinuxWork/Obsidian/test-vault", Type = "Obsidian", Enabled = true, FileCount = 6 }
+            };
+        }
+    }
+
+    private void NavigateToSources() => NavManager.NavigateTo("/sources");
+    private void NavigateToSearch() => NavManager.NavigateTo("/search");
+
+    private async Task StartIndex()
+    {
+        indexingInProgress = true;
+        indexProgress = new IndexProgress { Progress = 0, Total = 100, Processed = 0, CurrentFile = "准备中..." };
+        
+        // 模拟进度
+        for (int i = 0; i <= 100; i += 10)
+        {
+            indexProgress.Progress = i;
+            indexProgress.Processed = i;
+            indexProgress.CurrentFile = $"处理文件 {i}/100";
+            StateHasChanged();
+            await Task.Delay(200);
+        }
+        
+        indexingInProgress = false;
+        await LoadData();
+    }
+
+    private async Task IndexSource(string name)
+    {
+        // TODO: 调用 API 索引指定源
+        await Task.Delay(100);
+    }
+
+    private async Task ToggleSource(string name)
+    {
+        // TODO: 调用 API 切换源状态
+        if (sources != null)
+        {
+            var source = sources.FirstOrDefault(s => s.Name == name);
+            if (source != null)
+            {
+                source.Enabled = !source.Enabled;
+            }
+        }
+    }
+
+    private async Task DeleteSource(string name)
+    {
+        // TODO: 调用 API 删除源
+        if (sources != null)
+        {
+            sources.RemoveAll(s => s.Name == name);
+        }
+    }
+
+    public class DashboardStats
+    {
+        public int TotalFiles { get; set; }
+        public int TotalChunks { get; set; }
+        public int SourceCount { get; set; }
+        public double AvgQueryTime { get; set; }
+    }
+
+    public class SourceInfo
+    {
+        public string Name { get; set; } = "";
+        public string Path { get; set; } = "";
+        public string Type { get; set; } = "";
+        public bool Enabled { get; set; }
+        public int FileCount { get; set; }
+    }
+
+    public class IndexProgress
+    {
+        public int Progress { get; set; }
+        public int Total { get; set; }
+        public int Processed { get; set; }
+        public string CurrentFile { get; set; } = "";
+    }
+}

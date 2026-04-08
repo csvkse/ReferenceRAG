@@ -1,0 +1,28 @@
+# Build outputs
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Runtime data
+data/
+test-vault/
+
+# Background shell
+.bg-shell/
+
+# Session files
+*.html
+
+# User-specific config
+obsidian-rag.json
+
+# Model files (large binary)
+models/

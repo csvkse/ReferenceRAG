@@ -1,0 +1,66 @@
+{
+  "dataPath": "data",
+  "sources": [
+    {
+      "path": "/path/to/obsidian/vault",
+      "name": "Obsidian笔记",
+      "enabled": true,
+      "type": "Obsidian",
+      "filePatterns": ["*.md"],
+      "recursive": true,
+      "excludeDirs": [".obsidian", ".trash", ".git"],
+      "priority": 10
+    },
+    {
+      "path": "/path/to/documents",
+      "name": "文档库",
+      "enabled": true,
+      "type": "Documents",
+      "filePatterns": ["*.md", "*.txt"],
+      "recursive": true,
+      "excludeDirs": [".git", "node_modules"],
+      "priority": 5
+    },
+    {
+      "path": "/path/to/project/docs",
+      "name": "项目文档",
+      "enabled": true,
+      "type": "CodeDocs",
+      "filePatterns": ["*.md"],
+      "recursive": true,
+      "excludeDirs": [".git", "node_modules", "dist"],
+      "priority": 8
+    }
+  ],
+  "embedding": {
+    "modelPath": "models/bge-small-zh-fp16/model.onnx",
+    "modelName": "bge-small-zh-fp16",
+    "useCuda": true,
+    "cudaDeviceId": 0,
+    "cudaLibraryPath": "C:/Users/hlr/AppData/Local/Programs/Ollama/lib/ollama/cuda_v12",
+    "maxSequenceLength": 512,
+    "batchSize": 16
+  },
+  "chunking": {
+    "maxTokens": 512,
+    "minTokens": 50,
+    "overlapTokens": 50,
+    "preserveHeadings": true,
+    "preserveCodeBlocks": true
+  },
+  "search": {
+    "defaultTopK": 10,
+    "contextWindow": 1,
+    "similarityThreshold": 0.5,
+    "enableMmr": true,
+    "mmrLambda": 0.7,
+    "defaultSources": []
+  },
+  "service": {
+    "port": 5000,
+    "host": "localhost",
+    "enableCors": true,
+    "enableSwagger": true,
+    "logLevel": "Information"
+  }
+}

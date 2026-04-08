@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  obsidian-rag:
+    build: .
+    container_name: obsidian-rag
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./vault:/app/vault:ro
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - DataPath=/app/data
+      - ModelPath=/app/models/bge-small-zh-v1.5.onnx
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: PostgreSQL for production
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: obsidian-rag-db
+  #   environment:
+  #     POSTGRES_DB: obsidianrag
+  #     POSTGRES_USER: obsidian
+  #     POSTGRES_PASSWORD: obsidian123
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+
+volumes:
+  postgres-data:

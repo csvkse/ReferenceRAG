@@ -1,0 +1,111 @@
+using Microsoft.AspNetCore.Mvc;
+using ObsidianRAG.Core.Interfaces;
+using ObsidianRAG.Core.Models;
+
+namespace ObsidianRAG.Service.Controllers;
+
+/// <summary>
+/// AI 专用查询接口
+/// </summary>
+[ApiController]
+[Route("api/ai")]
+public class AIQueryController : ControllerBase
+{
+    private readonly ISearchService _searchService;
+    private readonly ILogger<AIQueryController> _logger;
+
+    public AIQueryController(ISearchService searchService, ILogger<AIQueryController> logger)
+    {
+        _searchService = searchService;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// 智能查询 - AI 第一次调用的推荐接口
+    /// </summary>
+    [HttpPost("query")]
+    public async Task<ActionResult<AIQueryResponse>> Query([FromBody] AIQueryRequest request)
+    {
+        try
+        {
+            // 根据模式自动调整参数
+            var adjustedRequest = AdjustRequestByMode(request);
+
+            var response = await _searchService.SearchAsync(adjustedRequest);
+
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "查询失败: {Query}", request.Query);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// 深入查询 - 当 AI 需要更多细节时
+    /// </summary>
+    [HttpPost("drill-down")]
+    public async Task<ActionResult<DrillDownResponse>> DrillDown([FromBody] DrillDownRequest request)
+    {
+        try
+        {
+            var response = await _searchService.DrillDownAsync(request);
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "深入查询失败");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// 根据模式调整请求参数
+    /// </summary>
+    private AIQueryRequest AdjustRequestByMode(AIQueryRequest request)
+    {
+        var adjusted = new AIQueryRequest
+        {
+            Query = request.Query,
+            Mode = request.Mode,
+            Filters = request.Filters,
+            Options = request.Options
+        };
+
+        return request.Mode switch
+        {
+            QueryMode.Quick => new AIQueryRequest
+            {
+                Query = request.Query,
+                Mode = request.Mode,
+                TopK = 3,
+                ContextWindow = 0,
+                MaxTokens = 1000,
+                Filters = request.Filters,
+                Options = request.Options
+            },
+            QueryMode.Standard => new AIQueryRequest
+            {
+                Query = request.Query,
+                Mode = request.Mode,
+                TopK = 10,
+                ContextWindow = 1,
+                MaxTokens = 3000,
+                Filters = request.Filters,
+                Options = request.Options
+            },
+            QueryMode.Deep => new AIQueryRequest
+            {
+                Query = request.Query,
+                Mode = request.Mode,
+                TopK = 20,
+                ContextWindow = 2,
+                MaxTokens = 6000,
+                Filters = request.Filters,
+                Options = request.Options
+            },
+            _ => adjusted
+        };
+    }
+}

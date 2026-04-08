@@ -1,0 +1,6 @@
+@ObsidianRAG.Service_HostAddress = http://localhost:5294
+
+GET {{ObsidianRAG.Service_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

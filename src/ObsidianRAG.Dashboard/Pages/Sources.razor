@@ -1,0 +1,332 @@
+@page "/sources"
+@inject HttpClient Http
+@inject NavigationManager NavManager
+
+<PageTitle>源管理 - Obsidian RAG</PageTitle>
+
+<div class="page-container">
+    <header class="page-header">
+        <h1>📁 源文件夹管理</h1>
+        <button class="btn btn-primary" @onclick="ShowAddDialog">➕ 添加源</button>
+    </header>
+
+    <!-- 添加对话框 -->
+    @if (showAddDialog)
+    {
+        <div class="modal-overlay" @onclick="HideAddDialog">
+            <div class="modal" @onclick:stopPropagation="true">
+                <div class="modal-header">
+                    <h2>添加源文件夹</h2>
+                    <button class="btn-close" @onclick="HideAddDialog">✕</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>文件夹路径</label>
+                        <input type="text" @bind="newSource.Path" placeholder="/path/to/folder" class="form-control" />
+                    </div>
+                    <div class="form-group">
+                        <label>显示名称</label>
+                        <input type="text" @bind="newSource.Name" placeholder="我的笔记" class="form-control" />
+                    </div>
+                    <div class="form-group">
+                        <label>源类型</label>
+                        <select @bind="newSource.Type" class="form-control">
+                            <option value="Obsidian">Obsidian 笔记库</option>
+                            <option value="Markdown">Markdown 文件夹</option>
+                            <option value="Documents">文档目录</option>
+                            <option value="CodeDocs">代码文档</option>
+                            <option value="Custom">自定义</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>文件模式（逗号分隔）</label>
+                        <input type="text" @bind="filePatterns" placeholder="*.md, *.txt" class="form-control" />
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" @bind="newSource.Recursive" /> 递归索引子目录
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" @onclick="HideAddDialog">取消</button>
+                    <button class="btn btn-primary" @onclick="AddSource" disabled="@string.IsNullOrEmpty(newSource.Path)">添加</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    <!-- 源列表 -->
+    <div class="sources-grid">
+        @if (sources == null || sources.Count == 0)
+        {
+            <div class="empty-state">
+                <div class="empty-icon">📂</div>
+                <p>暂无源文件夹</p>
+                <button class="btn btn-primary" @onclick="ShowAddDialog">添加第一个源</button>
+            </div>
+        }
+        else
+        {
+            @foreach (var source in sources)
+            {
+                <div class="source-card @(source.Enabled ? "" : "disabled")">
+                    <div class="source-header">
+                        <div class="source-type-badge @source.Type.ToLower()">@source.Type</div>
+                        <div class="source-toggle">
+                            <input type="checkbox" @bind="source.Enabled" @bind:event="oninput" />
+                        </div>
+                    </div>
+                    <h3 class="source-name">@source.Name</h3>
+                    <p class="source-path" title="@source.Path">@source.Path</p>
+                    
+                    <div class="source-stats">
+                        <div class="stat">
+                            <span class="stat-value">@source.FileCount</span>
+                            <span class="stat-label">文件</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-value">@source.ChunkCount</span>
+                            <span class="stat-label">分段</span>
+                        </div>
+                    </div>
+
+                    <div class="source-config">
+                        <div class="config-item">
+                            <span class="config-label">文件模式:</span>
+                            <span class="config-value">@string.Join(", ", source.FilePatterns)</span>
+                        </div>
+                        <div class="config-item">
+                            <span class="config-label">递归:</span>
+                            <span class="config-value">@(source.Recursive ? "是" : "否")</span>
+                        </div>
+                    </div>
+
+                    <div class="source-actions">
+                        <button class="btn btn-sm btn-primary" @onclick="() => IndexSource(source)" disabled="@source.IsIndexing">
+                            @if (source.IsIndexing)
+                            {
+                                <span>⏳ 索引中...</span>
+                            }
+                            else
+                            {
+                                <span>🔄 索引</span>
+                            }
+                        </button>
+                        <button class="btn btn-sm btn-secondary" @onclick="() => ShowFiles(source)">📄 文件</button>
+                        <button class="btn btn-sm btn-danger" @onclick="() => DeleteSource(source)">🗑️ 删除</button>
+                    </div>
+
+                    @if (source.IndexProgress != null && source.IsIndexing)
+                    {
+                        <div class="index-progress">
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: @($"{source.IndexProgress.Progress}%")"></div>
+                            </div>
+                            <span class="progress-text">@source.IndexProgress.CurrentFile</span>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    </div>
+
+    <!-- 文件列表对话框 -->
+    @if (showFilesDialog && selectedSource != null)
+    {
+        <div class="modal-overlay" @onclick="HideFilesDialog">
+            <div class="modal modal-lg" @onclick:stopPropagation="true">
+                <div class="modal-header">
+                    <h2>📄 @selectedSource.Name - 文件列表</h2>
+                    <button class="btn-close" @onclick="HideFilesDialog">✕</button>
+                </div>
+                <div class="modal-body">
+                    <div class="files-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>文件名</th>
+                                    <th>分段数</th>
+                                    <th>索引时间</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var file in selectedSource.Files)
+                                {
+                                    <tr>
+                                        <td>@file.Name</td>
+                                        <td>@file.ChunkCount</td>
+                                        <td>@file.IndexedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                                        <td>
+                                            <span class="status-badge @file.Status.ToLower()">@file.Status</span>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private List<SourceConfig>? sources;
+    private bool showAddDialog;
+    private bool showFilesDialog;
+    private SourceConfig? selectedSource;
+    private string filePatterns = "*.md";
+    
+    private SourceConfig newSource = new()
+    {
+        Type = "Markdown",
+        Recursive = true,
+        FilePatterns = new List<string> { "*.md" }
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadSources();
+    }
+
+    private async Task LoadSources()
+    {
+        try
+        {
+            sources = await Http.GetFromJsonAsync<List<SourceConfig>>("/api/sources");
+        }
+        catch
+        {
+            // 模拟数据
+            sources = new List<SourceConfig>
+            {
+                new SourceConfig
+                {
+                    Name = "测试笔记库",
+                    Path = "E:/LinuxWork/Obsidian/test-vault",
+                    Type = "Obsidian",
+                    Enabled = true,
+                    Recursive = true,
+                    FilePatterns = new List<string> { "*.md" },
+                    FileCount = 6,
+                    ChunkCount = 47
+                }
+            };
+        }
+    }
+
+    private void ShowAddDialog()
+    {
+        newSource = new SourceConfig
+        {
+            Type = "Markdown",
+            Recursive = true,
+            FilePatterns = new List<string> { "*.md" }
+        };
+        filePatterns = "*.md";
+        showAddDialog = true;
+    }
+
+    private void HideAddDialog() => showAddDialog = false;
+
+    private async Task AddSource()
+    {
+        if (string.IsNullOrEmpty(newSource.Path)) return;
+
+        newSource.FilePatterns = filePatterns.Split(',')
+            .Select(p => p.Trim())
+            .Where(p => !string.IsNullOrEmpty(p))
+            .ToList();
+
+        if (sources == null) sources = new List<SourceConfig>();
+        sources.Add(new SourceConfig
+        {
+            Name = newSource.Name ?? Path.GetFileName(newSource.Path) ?? "新源",
+            Path = newSource.Path,
+            Type = newSource.Type,
+            Enabled = true,
+            Recursive = newSource.Recursive,
+            FilePatterns = newSource.FilePatterns
+        });
+
+        showAddDialog = false;
+        
+        // TODO: 调用 API 保存
+    }
+
+    private async Task IndexSource(SourceConfig source)
+    {
+        source.IsIndexing = true;
+        source.IndexProgress = new IndexProgressInfo { Progress = 0, Total = 100, CurrentFile = "准备中..." };
+
+        // 模拟索引进度
+        for (int i = 0; i <= 100; i += 5)
+        {
+            source.IndexProgress.Progress = i;
+            source.IndexProgress.Processed = i;
+            source.IndexProgress.CurrentFile = $"处理文件 {i}/100";
+            StateHasChanged();
+            await Task.Delay(100);
+        }
+
+        source.IsIndexing = false;
+        source.FileCount = 100;
+        source.ChunkCount = 500;
+    }
+
+    private void ShowFiles(SourceConfig source)
+    {
+        selectedSource = source;
+        selectedSource.Files = new List<FileInfo>
+        {
+            new FileInfo { Name = "README.md", ChunkCount = 8, IndexedAt = DateTime.Now, Status = "已索引" },
+            new FileInfo { Name = "API文档.md", ChunkCount = 8, IndexedAt = DateTime.Now, Status = "已索引" },
+            new FileInfo { Name = "项目计划.md", ChunkCount = 6, IndexedAt = DateTime.Now, Status = "已索引" }
+        };
+        showFilesDialog = true;
+    }
+
+    private void HideFilesDialog() => showFilesDialog = false;
+
+    private async Task DeleteSource(SourceConfig source)
+    {
+        if (sources != null)
+        {
+            sources.Remove(source);
+        }
+        // TODO: 调用 API 删除
+    }
+
+    public class SourceConfig
+    {
+        public string Name { get; set; } = "";
+        public string Path { get; set; } = "";
+        public string Type { get; set; } = "Markdown";
+        public bool Enabled { get; set; } = true;
+        public bool Recursive { get; set; } = true;
+        public List<string> FilePatterns { get; set; } = new() { "*.md" };
+        public int FileCount { get; set; }
+        public int ChunkCount { get; set; }
+        public bool IsIndexing { get; set; }
+        public IndexProgressInfo? IndexProgress { get; set; }
+        public List<FileInfo>? Files { get; set; }
+    }
+
+    public class IndexProgressInfo
+    {
+        public int Progress { get; set; }
+        public int Total { get; set; }
+        public int Processed { get; set; }
+        public string CurrentFile { get; set; } = "";
+    }
+
+    public class FileInfo
+    {
+        public string Name { get; set; } = "";
+        public int ChunkCount { get; set; }
+        public DateTime IndexedAt { get; set; }
+        public string Status { get; set; } = "";
+    }
+}

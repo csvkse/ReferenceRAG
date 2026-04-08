@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ObsidianRAG.CLI/ObsidianRAG.CLI.csproj" />
+    <Project Path="src/ObsidianRAG.Core/ObsidianRAG.Core.csproj" />
+    <Project Path="src/ObsidianRAG.Dashboard/ObsidianRAG.Dashboard.csproj" />
+    <Project Path="src/ObsidianRAG.Service/ObsidianRAG.Service.csproj" />
+    <Project Path="src/ObsidianRAG.Storage/ObsidianRAG.Storage.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ObsidianRAG.Tests/ObsidianRAG.Tests.csproj" />
+  </Folder>
+</Solution>

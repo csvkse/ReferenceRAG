@@ -1,0 +1,386 @@
+@page "/api-help"
+@inject HttpClient Http
+@inject NavigationManager NavManager
+
+<PageTitle>API 文档 - Obsidian RAG</PageTitle>
+
+<div class="page-container">
+    <header class="page-header">
+        <h1>📖 API 文档</h1>
+    </header>
+
+    <div class="api-docs">
+        <!-- 概述 -->
+        <section class="api-section">
+            <h2>概述</h2>
+            <p>Obsidian RAG 提供 RESTful API 和 WebSocket 接口，支持向量搜索、索引管理等功能。</p>
+            <div class="api-base-url">
+                <strong>Base URL:</strong> <code>@Http.BaseAddress</code>
+            </div>
+        </section>
+
+        <!-- 查询接口 -->
+        <section class="api-section">
+            <h2>🔍 查询接口</h2>
+            
+            <div class="api-endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="path">/api/ai/query</span>
+                </div>
+                <p>执行向量语义搜索，返回相关文档片段。</p>
+                
+                <div class="code-block">
+                    <h4>请求体</h4>
+                    <pre><code class="language-json">{
+  "query": "如何配置系统",
+  "mode": "standard",
+  "topK": 10,
+  "sources": ["我的笔记"]
+}</code></pre>
+                </div>
+
+                <div class="params-table">
+                    <h4>参数说明</h4>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>参数</th>
+                                <th>类型</th>
+                                <th>必填</th>
+                                <th>说明</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>query</code></td>
+                                <td>string</td>
+                                <td>✓</td>
+                                <td>查询文本</td>
+                            </tr>
+                            <tr>
+                                <td><code>mode</code></td>
+                                <td>string</td>
+                                <td></td>
+                                <td>查询模式: quick/standard/deep</td>
+                            </tr>
+                            <tr>
+                                <td><code>topK</code></td>
+                                <td>int</td>
+                                <td></td>
+                                <td>返回结果数量，默认 10</td>
+                            </tr>
+                            <tr>
+                                <td><code>sources</code></td>
+                                <td>string[]</td>
+                                <td></td>
+                                <td>限定搜索的源名称</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="code-block">
+                    <h4>响应示例</h4>
+                    <pre><code class="language-json">{
+  "query": "如何配置系统",
+  "chunks": [
+    {
+      "refId": "@@1",
+      "source": "我的笔记",
+      "filePath": "/path/to/file.md",
+      "content": "配置说明...",
+      "score": 0.89,
+      "startLine": 10,
+      "endLine": 25
+    }
+  ],
+  "stats": {
+    "totalMatches": 5,
+    "durationMs": 25
+  }
+}</code></pre>
+                </div>
+
+                <div class="try-it">
+                    <h4>在线测试</h4>
+                    <div class="try-form">
+                        <input type="text" @bind="testQuery" placeholder="输入查询内容" class="form-control" />
+                        <button class="btn btn-primary" @onclick="TryQuery">发送请求</button>
+                    </div>
+                    @if (testResult != null)
+                    {
+                        <div class="try-result">
+                            <pre><code>@testResult</code></pre>
+                        </div>
+                    }
+                </div>
+            </div>
+        </section>
+
+        <!-- 深入查询 -->
+        <section class="api-section">
+            <h2>📖 深入查询</h2>
+            
+            <div class="api-endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="path">/api/ai/drilldown</span>
+                </div>
+                <p>展开指定结果的上下文，获取更多相邻内容。</p>
+                
+                <div class="code-block">
+                    <pre><code class="language-json">{
+  "query": "原始查询",
+  "refIds": ["@@1", "@@2"],
+  "expandContext": 2
+}</code></pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- 索引接口 -->
+        <section class="api-section">
+            <h2>📁 索引接口</h2>
+            
+            <div class="api-endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="path">/api/index/start</span>
+                </div>
+                <p>启动索引任务。</p>
+                <div class="code-block">
+                    <pre><code class="language-json">{
+  "sources": ["我的笔记"],
+  "force": false
+}</code></pre>
+                </div>
+            </div>
+
+            <div class="api-endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="path">/api/index/status</span>
+                </div>
+                <p>获取索引状态。</p>
+            </div>
+
+            <div class="api-endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="path">/api/index/stop</span>
+                </div>
+                <p>停止正在进行的索引任务。</p>
+            </div>
+        </section>
+
+        <!-- 源管理接口 -->
+        <section class="api-section">
+            <h2>📂 源管理接口</h2>
+            
+            <div class="api-endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="path">/api/sources</span>
+                </div>
+                <p>获取所有源文件夹列表。</p>
+            </div>
+
+            <div class="api-endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="path">/api/sources</span>
+                </div>
+                <p>添加新的源文件夹。</p>
+                <div class="code-block">
+                    <pre><code class="language-json">{
+  "path": "/path/to/folder",
+  "name": "我的笔记",
+  "type": "Obsidian",
+  "filePatterns": ["*.md"],
+  "recursive": true
+}</code></pre>
+                </div>
+            </div>
+
+            <div class="api-endpoint">
+                <div class="endpoint-header">
+                    <span class="method delete">DELETE</span>
+                    <span class="path">/api/sources/{name}</span>
+                </div>
+                <p>删除指定的源文件夹配置。</p>
+            </div>
+        </section>
+
+        <!-- WebSocket -->
+        <section class="api-section">
+            <h2>🔌 WebSocket 推送</h2>
+            
+            <div class="api-endpoint">
+                <div class="endpoint-header">
+                    <span class="method ws">WS</span>
+                    <span class="path">/hubs/index</span>
+                </div>
+                <p>实时接收索引进度更新。</p>
+                
+                <div class="code-block">
+                    <h4>JavaScript 示例</h4>
+                    <pre><code class="language-javascript">const connection = new signalR.HubConnectionBuilder()
+    .withUrl("/hubs/index")
+    .build();
+
+connection.on("ProgressUpdate", (progress) => {
+    console.log(`进度: ${progress.progress}%`);
+    console.log(`当前文件: ${progress.currentFile}`);
+});
+
+await connection.start();</code></pre>
+                </div>
+
+                <div class="params-table">
+                    <h4>推送事件</h4>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>事件名</th>
+                                <th>说明</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>ProgressUpdate</code></td>
+                                <td>索引进度更新</td>
+                            </tr>
+                            <tr>
+                                <td><code>IndexComplete</code></td>
+                                <td>索引完成</td>
+                            </tr>
+                            <tr>
+                                <td><code>Error</code></td>
+                                <td>错误通知</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- AI 集成指南 -->
+        <section class="api-section">
+            <h2>🤖 AI 集成指南</h2>
+            
+            <div class="integration-guide">
+                <h3>与 AI 助手集成</h3>
+                <p>Obsidian RAG 可以作为 AI 助手的知识库后端，提供上下文检索能力。</p>
+                
+                <div class="code-block">
+                    <h4>Python 示例</h4>
+                    <pre><code class="language-python">import requests
+
+def search_knowledge(query, sources=None):
+    response = requests.post(
+        "http://localhost:5000/api/ai/query",
+        json={
+            "query": query,
+            "mode": "standard",
+            "topK": 10,
+            "sources": sources
+        }
+    )
+    return response.json()
+
+# 使用示例
+result = search_knowledge("如何配置系统")
+for chunk in result["chunks"]:
+    print(f"[{chunk['score']:.2f}] {chunk['content'][:100]}...")</code></pre>
+                </div>
+
+                <div class="code-block">
+                    <h4>与 OpenAI 集成</h4>
+                    <pre><code class="language-python">import openai
+
+def rag_chat(query):
+    # 1. 检索相关内容
+    context = search_knowledge(query)
+    
+    # 2. 构建 prompt
+    prompt = f"""基于以下知识库内容回答问题：
+
+{context['context']}
+
+问题：{query}
+
+请根据上述内容提供准确回答，并引用来源。"""
+
+    # 3. 调用 AI
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    
+    return response.choices[0].message.content</code></pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- 错误码 -->
+        <section class="api-section">
+            <h2>⚠️ 错误码</h2>
+            
+            <div class="params-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>状态码</th>
+                            <th>说明</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>200</code></td>
+                            <td>成功</td>
+                        </tr>
+                        <tr>
+                            <td><code>400</code></td>
+                            <td>请求参数错误</td>
+                        </tr>
+                        <tr>
+                            <td><code>404</code></td>
+                            <td>资源不存在</td>
+                        </tr>
+                        <tr>
+                            <td><code>500</code></td>
+                            <td>服务器内部错误</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+</div>
+
+@code {
+    private string testQuery = "";
+    private string? testResult;
+
+    private async Task TryQuery()
+    {
+        if (string.IsNullOrEmpty(testQuery)) return;
+
+        try
+        {
+            var response = await Http.PostAsJsonAsync("/api/ai/query", new
+            {
+                query = testQuery,
+                mode = "standard",
+                topK = 5
+            });
+
+            testResult = await response.Content.ReadAsStringAsync();
+        }
+        catch (Exception ex)
+        {
+            testResult = $"错误: {ex.Message}";
+        }
+    }
+}
