@@ -454,9 +454,16 @@ class Program
                         }
                     }
 
+                    // 先生成分块，以便正确设置 ChunkCount
+                    var chunks = chunker.Chunk(content, new FileRecord { Path = filePath }).ToList();
+                    foreach (var chunk in chunks)
+                    {
+                        chunk.Source = source.Name;
+                    }
+
                     var fileRecord = new FileRecord
                     {
-                        Id = Guid.NewGuid().ToString(),
+                        Id = chunks.FirstOrDefault()?.FileId ?? Guid.NewGuid().ToString(),
                         Path = filePath,
                         Title = Path.GetFileNameWithoutExtension(filePath),
                         ContentHash = contentHash,
@@ -464,17 +471,18 @@ class Program
                         Source = source.Name,
                         CreatedAt = File.GetCreationTime(filePath),
                         ModifiedAt = File.GetLastWriteTime(filePath),
+                        ChunkCount = chunks.Count,
                         IndexedAt = DateTime.UtcNow
                     };
 
                     await vectorStore.UpsertFileAsync(fileRecord);
 
-                    var chunks = chunker.Chunk(content, fileRecord).ToList();
+                    // 更新 chunks 的 FileId
                     foreach (var chunk in chunks)
                     {
-                        chunk.Source = source.Name;
+                        chunk.FileId = fileRecord.Id;
                     }
-                    
+
                     await vectorStore.UpsertChunksAsync(chunks);
 
                     var vectors = new List<VectorRecord>();

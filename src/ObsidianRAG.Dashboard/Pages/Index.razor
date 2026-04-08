@@ -153,19 +153,16 @@
         {
             // 加载状态
             stats = await Http.GetFromJsonAsync<DashboardStats>("/api/dashboard/stats");
-            
+
             // 加载源列表
             sources = await Http.GetFromJsonAsync<List<SourceInfo>>("/api/dashboard/sources");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"加载失败: {ex.Message}");
-            // 使用模拟数据
-            stats = new DashboardStats { TotalFiles = 6, TotalChunks = 47, SourceCount = 1, AvgQueryTime = 25 };
-            sources = new List<SourceInfo>
-            {
-                new SourceInfo { Name = "测试笔记库", Path = "E:/LinuxWork/Obsidian/test-vault", Type = "Obsidian", Enabled = true, FileCount = 6 }
-            };
+            // API 失败时使用空数据
+            stats = new DashboardStats();
+            sources = new List<SourceInfo>();
         }
     }
 
@@ -234,6 +231,7 @@
         public string Type { get; set; } = "";
         public bool Enabled { get; set; }
         public int FileCount { get; set; }
+        public int ChunkCount { get; set; }
     }
 
     public class IndexProgress

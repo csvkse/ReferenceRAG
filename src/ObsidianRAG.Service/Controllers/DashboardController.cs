@@ -56,6 +56,14 @@ public class DashboardController : ControllerBase
         var files = await _vectorStore.GetAllFilesAsync();
         var fileList = files.ToList();
 
+        // 获取所有 chunks 并按 fileId 分组计算实际数量
+        var chunkCounts = new Dictionary<string, int>();
+        foreach (var file in fileList)
+        {
+            var chunks = await _vectorStore.GetChunksByFileAsync(file.Id);
+            chunkCounts[file.Id] = chunks.Count();
+        }
+
         var sources = config.Sources.Select(s =>
         {
             var sourceFiles = fileList.Where(f => f.Source == s.Name).ToList();
@@ -66,11 +74,58 @@ public class DashboardController : ControllerBase
                 Type = s.Type.ToString(),
                 Enabled = s.Enabled,
                 FileCount = sourceFiles.Count,
-                ChunkCount = sourceFiles.Sum(f => f.ChunkCount)
+                ChunkCount = sourceFiles.Sum(f => chunkCounts.GetValueOrDefault(f.Id, 0))
             };
         }).ToList();
 
         return Ok(sources);
+    }
+
+    /// <summary>
+    /// 调试：检查向量存储状态
+    /// </summary>
+    [HttpGet("debug/vectors")]
+    public async Task<ActionResult> DebugVectors()
+    {
+        var files = await _vectorStore.GetAllFilesAsync();
+        var fileList = files.ToList();
+
+        var firstFile = fileList.FirstOrDefault();
+        if (firstFile == null)
+        {
+            return Ok(new { error = "No files found" });
+        }
+
+        var chunks = await _vectorStore.GetChunksByFileAsync(firstFile.Id);
+        var chunkList = chunks.ToList();
+
+        var firstChunk = chunkList.FirstOrDefault();
+        if (firstChunk == null)
+        {
+            return Ok(new { error = "No chunks found", fileCount = fileList.Count });
+        }
+
+        var vector = await _vectorStore.GetVectorByChunkIdAsync(firstChunk.Id);
+
+        return Ok(new
+        {
+            fileCount = fileList.Count,
+            chunkCount = chunkList.Count,
+            firstChunk = new
+            {
+                id = firstChunk.Id,
+                fileId = firstChunk.FileId,
+                content = firstChunk.Content?.Substring(0, Math.Min(50, firstChunk.Content?.Length ?? 0))
+            },
+            vectorInfo = vector == null ? null : new
+            {
+                id = vector.Id,
+                chunkId = vector.ChunkId,
+                dimension = vector.Dimension,
+                vectorLength = vector.Vector?.Length ?? 0,
+                firstFewValues = vector.Vector?.Take(5).ToArray()
+            }
+        });
     }
 }
 

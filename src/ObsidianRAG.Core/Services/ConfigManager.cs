@@ -13,7 +13,55 @@ public class ConfigManager
 
     public ConfigManager(string? configPath = null)
     {
-        _configPath = configPath ?? GetDefaultConfigPath();
+        _configPath = configPath ?? GetConfigPathFromAppSettings() ?? GetDefaultConfigPath();
+    }
+
+    /// <summary>
+    /// 从 appsettings.json 读取配置文件路径
+    /// </summary>
+    private static string? GetConfigPathFromAppSettings()
+    {
+        // 尝试从当前目录读取 appsettings.json
+        var currentDir = Directory.GetCurrentDirectory();
+        var appSettingsPath = Path.Combine(currentDir, "appsettings.json");
+
+        if (!File.Exists(appSettingsPath))
+        {
+            // 尝试开发环境路径
+            appSettingsPath = Path.Combine(currentDir, "appsettings.Development.json");
+        }
+
+        if (!File.Exists(appSettingsPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var json = File.ReadAllText(appSettingsPath);
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("ObsidianRAG", out var obsidianRag) &&
+                obsidianRag.TryGetProperty("ConfigPath", out var configPathElement))
+            {
+                var configPath = configPathElement.GetString();
+                if (!string.IsNullOrEmpty(configPath))
+                {
+                    // 支持相对路径转换为绝对路径
+                    if (!Path.IsPathRooted(configPath))
+                    {
+                        configPath = Path.GetFullPath(Path.Combine(currentDir, configPath));
+                    }
+                    Console.WriteLine($"[ConfigManager] 从 appsettings.json 读取配置路径: {configPath}");
+                    return configPath;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ConfigManager] 读取 appsettings.json 失败: {ex.Message}");
+        }
+
+        return null;
     }
 
     /// <summary>
