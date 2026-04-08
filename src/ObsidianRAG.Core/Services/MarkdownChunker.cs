@@ -24,7 +24,13 @@ public class MarkdownChunker : IMarkdownChunker
     /// </summary>
     public List<ChunkRecord> Chunk(string content, FileRecord file)
     {
-        return Chunk(content, _options);
+        var chunks = Chunk(content, _options);
+        // 设置 FileId
+        foreach (var chunk in chunks)
+        {
+            chunk.FileId = file.Id;
+        }
+        return chunks;
     }
 
     /// <summary>

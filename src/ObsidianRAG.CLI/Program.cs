@@ -216,6 +216,10 @@ class Program
         });
         rootCommand.AddCommand(watchCommand);
 
+        // 添加模型和测试命令
+        rootCommand.AddCommand(ObsidianRAG.CLI.Commands.ModelCommands.CreateModelCommand());
+        rootCommand.AddCommand(ObsidianRAG.CLI.Commands.TestCommands.CreateTestCommand());
+
         return await rootCommand.InvokeAsync(args);
     }
 
@@ -481,7 +485,10 @@ class Program
                         {
                             Id = Guid.NewGuid().ToString(),
                             ChunkId = chunk.Id,
+                            FileId = chunk.FileId,  // 修复：正确关联 FileId
                             Vector = embedding,
+                            Dimension = embedding.Length,
+                            Source = chunk.Source,
                             ModelName = embeddingService.ModelName
                         });
                     }

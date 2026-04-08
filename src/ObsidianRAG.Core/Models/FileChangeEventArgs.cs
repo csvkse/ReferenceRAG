@@ -9,6 +9,7 @@ public class FileChangeEventArgs : EventArgs
     public string? OldFilePath { get; set; }
     public ChangeType ChangeType { get; set; }
     public DateTime Timestamp { get; set; }
+    public string? Source { get; set; }
 }
 
 /// <summary>

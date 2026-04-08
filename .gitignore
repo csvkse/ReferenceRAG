@@ -26,3 +26,6 @@ obsidian-rag.json
 
 # Model files (large binary)
 models/
+
+# GSD workflow
+.gsd/

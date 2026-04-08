@@ -238,9 +238,12 @@ public class IndexingPipeline : IDisposable
                 var chunk = embeddedBatch.Chunks[i];
                 records.Add(new VectorRecord
                 {
-                    Id = chunk.Id,
+                    Id = Guid.NewGuid().ToString(),
                     ChunkId = chunk.Id,
+                    FileId = chunk.FileId,  // 修复：正确关联 FileId
                     Vector = embeddedBatch.Vectors[i],
+                    Dimension = embeddedBatch.Vectors[i].Length,
+                    Source = chunk.Source,
                     ModelName = _embeddingService.ModelName
                 });
             }
