@@ -169,15 +169,15 @@ public class ConfigManager
     /// <summary>
     /// 添加源文件夹
     /// </summary>
-    public void AddSource(SourceFolder source)
+    public bool AddSource(SourceFolder source)
     {
         var config = Load();
-        
-        // 检查是否已存在
+
+        // 检查是否已存在（使用不区分大小写的路径比较）
         if (config.Sources.Any(s => s.Path.Equals(source.Path, StringComparison.OrdinalIgnoreCase)))
         {
-            Console.WriteLine($"[ConfigManager] 源已存在: {source.Path}");
-            return;
+            Console.WriteLine($"[ConfigManager] 源路径已存在: {source.Path}");
+            return false;
         }
 
         // 自动设置名称
@@ -188,8 +188,9 @@ public class ConfigManager
 
         config.Sources.Add(source);
         Save(config);
-        
+
         Console.WriteLine($"[ConfigManager] 已添加源: {source.Name} ({source.Path})");
+        return true;
     }
 
     /// <summary>

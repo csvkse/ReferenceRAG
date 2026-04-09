@@ -4,12 +4,14 @@ obj/
 *.dll
 *.exe
 *.pdb
+dist/
 
 # IDE
 .vs/
 .vscode/
 *.user
 *.suo
+.claude/
 
 # Runtime data
 data/
@@ -23,9 +25,28 @@ test-vault/
 
 # User-specific config
 obsidian-rag.json
+CODEBUDDY.md
 
 # Model files (large binary)
 models/
 
+# Node.js
+node_modules/
+
+# Reference projects (large)
+reference/
+
+# Archived resources
+resource/archived/
+resource/skills/
+resource/test-suites/
+
 # GSD workflow
 .gsd/
+
+# Sensitive files
+.env
+*.pfx
+*.pem
+*.key
+appsettings.Production.json

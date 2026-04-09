@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
 
@@ -12,27 +13,27 @@ public interface IFileMonitorService
     /// 启动监控
     /// </summary>
     Task StartAsync(CancellationToken cancellationToken = default);
-    
+
     /// <summary>
     /// 停止监控
     /// </summary>
     Task StopAsync();
-    
+
     /// <summary>
     /// 获取监控状态
     /// </summary>
     FileMonitorStatus GetStatus();
-    
+
     /// <summary>
     /// 添加监控源
     /// </summary>
     void AddSource(string path, string name);
-    
+
     /// <summary>
     /// 移除监控源
     /// </summary>
     void RemoveSource(string name);
-    
+
     /// <summary>
     /// 文件变动事件
     /// </summary>
@@ -53,16 +54,29 @@ public class FileMonitorStatus
 }
 
 /// <summary>
+/// 待处理的文件变更记录
+/// </summary>
+internal class PendingChange
+{
+    public string FilePath { get; set; } = string.Empty;
+    public string? OldFilePath { get; set; }
+    public ChangeType ChangeType { get; set; }
+    public DateTime Timestamp { get; set; }
+    public string? Source { get; set; }
+}
+
+/// <summary>
 /// 文件监控服务实现
 /// </summary>
 public class FileMonitorService : IFileMonitorService, IDisposable
 {
     private readonly Dictionary<string, FileSystemWatcher> _watchers;
     private readonly Dictionary<string, string> _sources;
-    private readonly Dictionary<string, DateTime> _pendingChanges;
+    private readonly Dictionary<string, PendingChange> _pendingChanges;
     private readonly Timer _debounceTimer;
     private readonly Timer _statusTimer;
     private readonly int _debounceMs;
+    private readonly ILogger<FileMonitorService>? _logger;
     private readonly object _lock = new();
     private bool _disposed;
     private bool _isRunning;
@@ -71,30 +85,32 @@ public class FileMonitorService : IFileMonitorService, IDisposable
 
     public event EventHandler<FileChangeEventArgs>? FileChanged;
 
-    public FileMonitorService(int debounceMs = 500)
+    public FileMonitorService(int debounceMs = 500, ILogger<FileMonitorService>? logger = null)
     {
         _watchers = new Dictionary<string, FileSystemWatcher>();
         _sources = new Dictionary<string, string>();
-        _pendingChanges = new Dictionary<string, DateTime>();
+        _pendingChanges = new Dictionary<string, PendingChange>();
         _debounceMs = debounceMs;
-        
+        _logger = logger;
+
         _debounceTimer = new Timer(ProcessPendingChanges, null, debounceMs, debounceMs);
         _statusTimer = new Timer(UpdateStatus, null, 5000, 5000);
     }
 
     public void AddSource(string path, string name)
     {
+        var normalizedPath = PathUtility.NormalizePath(path);
         lock (_lock)
         {
-            _sources[name] = path;
-            
+            _sources[name] = normalizedPath;
+
             if (_isRunning)
             {
-                CreateWatcher(path, name);
+                CreateWatcher(normalizedPath, name);
             }
         }
-        
-        Console.WriteLine($"[FileMonitor] 添加监控源: {name} ({path})");
+
+        _logger?.LogInformation("添加监控源: {Name} ({Path})", name, normalizedPath);
     }
 
     public void RemoveSource(string name)
@@ -110,8 +126,8 @@ public class FileMonitorService : IFileMonitorService, IDisposable
                 }
             }
         }
-        
-        Console.WriteLine($"[FileMonitor] 移除监控源: {name}");
+
+        _logger?.LogInformation("移除监控源: {Name}", name);
     }
 
     public Task StartAsync(CancellationToken cancellationToken = default)
@@ -120,7 +136,7 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         {
             if (_isRunning)
             {
-                Console.WriteLine("[FileMonitor] 监控已在运行");
+                _logger?.LogWarning("监控已在运行");
                 return Task.CompletedTask;
             }
 
@@ -134,7 +150,7 @@ public class FileMonitorService : IFileMonitorService, IDisposable
             _lastChange = null;
         }
 
-        Console.WriteLine($"[FileMonitor] 监控已启动，监控 {_watchers.Count} 个目录");
+        _logger?.LogInformation("监控已启动，监控 {Count} 个目录", _watchers.Count);
         return Task.CompletedTask;
     }
 
@@ -146,12 +162,12 @@ public class FileMonitorService : IFileMonitorService, IDisposable
             {
                 watcher.Dispose();
             }
-            
+
             _watchers.Clear();
             _isRunning = false;
         }
 
-        Console.WriteLine("[FileMonitor] 监控已停止");
+        _logger?.LogInformation("监控已停止");
         return Task.CompletedTask;
     }
 
@@ -184,7 +200,7 @@ public class FileMonitorService : IFileMonitorService, IDisposable
     {
         if (!Directory.Exists(path))
         {
-            Console.WriteLine($"[FileMonitor] 目录不存在: {path}");
+            _logger?.LogWarning("目录不存在: {Path}", path);
             return;
         }
 
@@ -199,81 +215,100 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         watcher.Created += (s, e) => OnFileChanged(e.FullPath, name, ChangeType.Created);
         watcher.Deleted += (s, e) => OnFileChanged(e.FullPath, name, ChangeType.Deleted);
         watcher.Renamed += (s, e) => OnFileRenamed(e.OldFullPath, e.FullPath, name);
-        watcher.Error += (s, e) => Console.WriteLine($"[FileMonitor] 错误: {e.GetException()?.Message}");
+        watcher.Error += (s, e) => _logger?.LogError(e.GetException(), "文件监控错误");
 
         watcher.EnableRaisingEvents = true;
         _watchers[name] = watcher;
 
-        Console.WriteLine($"[FileMonitor] 开始监控: {path}");
+        _logger?.LogInformation("开始监控: {Path}", path);
     }
 
     private void OnFileChanged(string filePath, string source, ChangeType changeType)
     {
         lock (_lock)
         {
-            _pendingChanges[filePath] = DateTime.UtcNow;
+            _pendingChanges[filePath] = new PendingChange
+            {
+                FilePath = filePath,
+                ChangeType = changeType,
+                Timestamp = DateTime.UtcNow,
+                Source = source
+            };
             _changesDetected++;
             _lastChange = DateTime.UtcNow;
         }
 
-#if DEBUG
-        Console.WriteLine($"[FileMonitor] 文件变动: {Path.GetFileName(filePath)} ({changeType})");
-#endif
+        _logger?.LogDebug("文件变动: {FileName} ({ChangeType})", Path.GetFileName(filePath), changeType);
     }
 
     private void OnFileRenamed(string oldPath, string newPath, string source)
     {
         lock (_lock)
         {
-            _pendingChanges[newPath] = DateTime.UtcNow;
+            // 移除旧路径的待处理变更（如果存在）
+            _pendingChanges.Remove(oldPath);
+
+            // 添加重命名事件
+            _pendingChanges[newPath] = new PendingChange
+            {
+                FilePath = newPath,
+                OldFilePath = oldPath,
+                ChangeType = ChangeType.Renamed,
+                Timestamp = DateTime.UtcNow,
+                Source = source
+            };
             _changesDetected++;
             _lastChange = DateTime.UtcNow;
         }
 
-        Console.WriteLine($"[FileMonitor] 文件重命名: {Path.GetFileName(oldPath)} -> {Path.GetFileName(newPath)}");
+        _logger?.LogInformation("文件重命名: {OldName} -> {NewName}", Path.GetFileName(oldPath), Path.GetFileName(newPath));
     }
 
     private void ProcessPendingChanges(object? state)
     {
-        List<KeyValuePair<string, DateTime>> changesToProcess;
+        List<PendingChange> changesToProcess;
 
         lock (_lock)
         {
             var now = DateTime.UtcNow;
             changesToProcess = _pendingChanges
-                .Where(kvp => (now - kvp.Value).TotalMilliseconds >= _debounceMs)
+                .Where(kvp => (now - kvp.Value.Timestamp).TotalMilliseconds >= _debounceMs)
+                .Select(kvp => kvp.Value)
                 .ToList();
 
-            foreach (var kvp in changesToProcess)
+            foreach (var change in changesToProcess)
             {
-                _pendingChanges.Remove(kvp.Key);
+                _pendingChanges.Remove(change.FilePath);
             }
         }
 
-        foreach (var (filePath, timestamp) in changesToProcess)
+        foreach (var change in changesToProcess)
         {
-            var changeType = File.Exists(filePath) ? ChangeType.Modified : ChangeType.Deleted;
-            
-            // 查找对应的源
-            string? source = null;
-            lock (_lock)
+            // 重命名事件：保持原始 ChangeType，不重新判定
+            if (change.ChangeType == ChangeType.Renamed)
             {
-                foreach (var (name, path) in _sources)
+                FileChanged?.Invoke(this, new FileChangeEventArgs
                 {
-                    if (filePath.StartsWith(path, StringComparison.OrdinalIgnoreCase))
-                    {
-                        source = name;
-                        break;
-                    }
-                }
+                    FilePath = change.FilePath,
+                    OldFilePath = change.OldFilePath,
+                    Source = change.Source ?? "Unknown",
+                    ChangeType = ChangeType.Renamed,
+                    Timestamp = change.Timestamp
+                });
+                continue;
             }
+
+            // 其他事件：根据文件存在状态判定最终类型
+            var finalChangeType = File.Exists(change.FilePath)
+                ? ChangeType.Modified
+                : ChangeType.Deleted;
 
             FileChanged?.Invoke(this, new FileChangeEventArgs
             {
-                FilePath = filePath,
-                Source = source ?? "Unknown",
-                ChangeType = changeType,
-                Timestamp = timestamp
+                FilePath = change.FilePath,
+                Source = change.Source ?? "Unknown",
+                ChangeType = finalChangeType,
+                Timestamp = change.Timestamp
             });
         }
     }
@@ -281,10 +316,11 @@ public class FileMonitorService : IFileMonitorService, IDisposable
     private void UpdateStatus(object? state)
     {
         var status = GetStatus();
-        
+
         if (status.ChangesDetected > 0)
         {
-            Console.WriteLine($"[FileMonitor] 状态: 监控 {status.WatchedDirectories} 个目录, {status.TotalFiles} 个文件, {status.ChangesDetected} 次变动");
+            _logger?.LogInformation("状态: 监控 {WatchedDirectories} 个目录, {TotalFiles} 个文件, {ChangesDetected} 次变动",
+                status.WatchedDirectories, status.TotalFiles, status.ChangesDetected);
         }
     }
 
@@ -311,6 +347,7 @@ public class AutoIndexService : IDisposable
     private readonly IEmbeddingService _embeddingService;
     private readonly MarkdownChunker _chunker;
     private readonly ContentHashDetector _hashDetector;
+    private readonly ILogger<AutoIndexService>? _logger;
     private readonly Queue<FileChangeEventArgs> _indexQueue;
     private readonly Timer _processTimer;
     private bool _isProcessing;
@@ -324,7 +361,8 @@ public class AutoIndexService : IDisposable
         IVectorStore vectorStore,
         IEmbeddingService embeddingService,
         MarkdownChunker chunker,
-        ContentHashDetector hashDetector)
+        ContentHashDetector hashDetector,
+        ILogger<AutoIndexService>? logger = null)
     {
         _fileMonitor = fileMonitor;
         _indexingService = indexingService;
@@ -332,10 +370,11 @@ public class AutoIndexService : IDisposable
         _embeddingService = embeddingService;
         _chunker = chunker;
         _hashDetector = hashDetector;
+        _logger = logger;
         _indexQueue = new Queue<FileChangeEventArgs>();
-        
+
         _processTimer = new Timer(ProcessQueue, null, 1000, 1000);
-        
+
         _fileMonitor.FileChanged += OnFileChanged;
     }
 
@@ -346,7 +385,7 @@ public class AutoIndexService : IDisposable
             _indexQueue.Enqueue(e);
         }
 
-        Console.WriteLine($"[AutoIndex] 队列添加: {Path.GetFileName(e.FilePath)} ({e.ChangeType})");
+        _logger?.LogDebug("队列添加: {FileName} ({ChangeType})", Path.GetFileName(e.FilePath), e.ChangeType);
     }
 
     private async void ProcessQueue(object? state)
@@ -371,7 +410,7 @@ public class AutoIndexService : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[AutoIndex] 处理失败: {ex.Message}");
+            _logger?.LogError(ex, "处理失败");
         }
         finally
         {
@@ -381,7 +420,7 @@ public class AutoIndexService : IDisposable
 
     private async Task ProcessChangeAsync(FileChangeEventArgs change)
     {
-        Console.WriteLine($"[AutoIndex] 开始处理: {Path.GetFileName(change.FilePath)}");
+        _logger?.LogInformation("开始处理: {FileName}", Path.GetFileName(change.FilePath));
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -394,7 +433,7 @@ public class AutoIndexService : IDisposable
                 if (file != null)
                 {
                     await _vectorStore.DeleteFileAsync(file.Id);
-                    Console.WriteLine($"[AutoIndex] 已删除索引: {Path.GetFileName(change.FilePath)}");
+                    _logger?.LogInformation("已删除索引: {FileName}", Path.GetFileName(change.FilePath));
                 }
             }
             else
@@ -405,7 +444,7 @@ public class AutoIndexService : IDisposable
 
                 if (existingFile != null && existingFile.ContentHash == newHash)
                 {
-                    Console.WriteLine($"[AutoIndex] 内容未变化，跳过: {Path.GetFileName(change.FilePath)}");
+                    _logger?.LogDebug("内容未变化，跳过: {FileName}", Path.GetFileName(change.FilePath));
                     return;
                 }
 
@@ -444,11 +483,11 @@ public class AutoIndexService : IDisposable
                 // 生成向量
                 var vectors = new List<VectorRecord>();
                 var batchSize = 16;
-                
+
                 for (int i = 0; i < chunks.Count; i += batchSize)
                 {
                     var batch = chunks.Skip(i).Take(batchSize).ToList();
-                    var embeddings = await _embeddingService.EncodeBatchAsync(batch.Select(c => c.Content));
+                    var embeddings = await _embeddingService.EncodeBatchAsync(batch.Select(c => c.Content), EmbeddingMode.Document);
 
                     for (int j = 0; j < batch.Count; j++)
                     {
@@ -472,8 +511,8 @@ public class AutoIndexService : IDisposable
 
                 sw.Stop();
 
-                Console.WriteLine($"[AutoIndex] 索引完成: {Path.GetFileName(change.FilePath)} " +
-                    $"({chunks.Count} 分段, {vectors.Count} 向量, {sw.ElapsedMilliseconds}ms)");
+                _logger?.LogInformation("索引完成: {FileName} ({ChunksCount} 分段, {VectorsCount} 向量, {ElapsedMilliseconds}ms)",
+                    Path.GetFileName(change.FilePath), chunks.Count, vectors.Count, sw.ElapsedMilliseconds);
 
                 Progress?.Invoke(this, new AutoIndexProgressEventArgs
                 {
@@ -487,7 +526,7 @@ public class AutoIndexService : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[AutoIndex] 索引失败: {Path.GetFileName(change.FilePath)} - {ex.Message}");
+            _logger?.LogError(ex, "索引失败: {FileName}", Path.GetFileName(change.FilePath));
         }
     }
 

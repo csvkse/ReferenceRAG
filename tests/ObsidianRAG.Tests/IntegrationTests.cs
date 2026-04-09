@@ -183,7 +183,7 @@ public class IntegrationTests : IDisposable
             // 生成向量
             foreach (var chunk in chunks)
             {
-                var embedding = await embeddingService.EncodeAsync(chunk.Content);
+                var embedding = await embeddingService.EncodeAsync(chunk.Content, EmbeddingMode.Document);
                 await vectorStore.UpsertVectorAsync(new VectorRecord
                 {
                     Id = Guid.NewGuid().ToString(),
@@ -212,7 +212,8 @@ public class IntegrationTests : IDisposable
 
         // Assert - 查询结果
         Assert.NotEmpty(result.Chunks);
-        Assert.Contains(result.Chunks, c => c.FilePath.Contains("README"));
+        // FilePath 在错误消息中可能被截断，使用 EndsWith 检查
+        Assert.Contains(result.Chunks, c => c.FilePath.EndsWith("README.md") || c.FilePath.Contains("README"));
     }
 
     [Fact]
@@ -299,7 +300,7 @@ public class IntegrationTests : IDisposable
         var embeddingService = _services.GetRequiredService<IEmbeddingService>();
 
         // Act
-        var vector = await embeddingService.EncodeAsync("这是一个测试文本");
+        var vector = await embeddingService.EncodeAsync("这是一个测试文本", EmbeddingMode.Symmetric);
 
         // Assert
         Assert.NotNull(vector);
@@ -317,9 +318,9 @@ public class IntegrationTests : IDisposable
         var embeddingService = _services.GetRequiredService<IEmbeddingService>();
 
         // Act
-        var v1 = await embeddingService.EncodeAsync("如何配置系统");
-        var v2 = await embeddingService.EncodeAsync("系统配置方法");
-        var v3 = await embeddingService.EncodeAsync("今天天气很好");
+        var v1 = await embeddingService.EncodeAsync("如何配置系统", EmbeddingMode.Symmetric);
+        var v2 = await embeddingService.EncodeAsync("系统配置方法", EmbeddingMode.Symmetric);
+        var v3 = await embeddingService.EncodeAsync("今天天气很好", EmbeddingMode.Symmetric);
 
         var sim12 = embeddingService.Similarity(v1, v2);
         var sim13 = embeddingService.Similarity(v1, v3);
@@ -418,7 +419,7 @@ public class IntegrationTests : IDisposable
 
             foreach (var chunk in chunks)
             {
-                var embedding = await embeddingService.EncodeAsync(chunk.Content);
+                var embedding = await embeddingService.EncodeAsync(chunk.Content, EmbeddingMode.Document);
                 await vectorStore.UpsertVectorAsync(new VectorRecord
                 {
                     Id = Guid.NewGuid().ToString(),

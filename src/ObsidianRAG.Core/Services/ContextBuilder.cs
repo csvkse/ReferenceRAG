@@ -10,11 +10,13 @@ public class ContextBuilder
 {
     private readonly IVectorStore _vectorStore;
     private readonly ITokenizer _tokenizer;
+    private readonly ObsidianLinkGenerator _linkGenerator;
 
-    public ContextBuilder(IVectorStore vectorStore, ITokenizer tokenizer)
+    public ContextBuilder(IVectorStore vectorStore, ITokenizer tokenizer, ObsidianLinkGenerator linkGenerator)
     {
         _vectorStore = vectorStore;
         _tokenizer = tokenizer;
+        _linkGenerator = linkGenerator;
     }
 
     /// <summary>
@@ -182,20 +184,8 @@ public class ContextBuilder
             StartLine = r.StartLine,
             EndLine = r.EndLine,
             HeadingPath = r.HeadingPath,
-            ObsidianLink = BuildObsidianLink(r.FilePath, r.StartLine, r.EndLine)
+            ObsidianLink = _linkGenerator.GenerateLink(r.FilePath, r.StartLine, r.EndLine)
         }).ToList();
     }
 
-    /// <summary>
-    /// 构建 Obsidian 链接
-    /// </summary>
-    private string BuildObsidianLink(string filePath, int startLine, int endLine)
-    {
-        var fileName = Path.GetFileNameWithoutExtension(filePath);
-        if (startLine == endLine)
-        {
-            return $"[[{fileName}#L{startLine}]]";
-        }
-        return $"[[{fileName}#L{startLine}-L{endLine}]]";
-    }
 }

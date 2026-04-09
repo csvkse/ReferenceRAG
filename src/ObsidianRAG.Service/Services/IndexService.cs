@@ -6,6 +6,7 @@ using ObsidianRAG.Core.Services;
 using ObsidianRAG.Service.Hubs;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace ObsidianRAG.Service.Services;
 
@@ -20,7 +21,6 @@ public class IndexService : IHostedService
     private readonly ILogger<IndexService> _logger;
 
     private readonly ConcurrentDictionary<string, IndexJob> _activeJobs = new();
-    private CancellationTokenSource? _watcherCts;
 
     public IndexService(
         IServiceProvider serviceProvider,
@@ -58,14 +58,14 @@ public class IndexService : IHostedService
         // 后台执行索引
         _ = Task.Run(async () =>
         {
-            using var scope = _serviceProvider.CreateScope();
-            var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
-            var chunker = scope.ServiceProvider.GetRequiredService<MarkdownChunker>();
-            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
-            var fileDetector = scope.ServiceProvider.GetRequiredService<IFileChangeDetector>();
-
             try
             {
+                using var scope = _serviceProvider.CreateScope();
+                var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
+                var chunker = scope.ServiceProvider.GetRequiredService<IMarkdownChunker>();
+                var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+                var fileDetector = scope.ServiceProvider.GetRequiredService<IFileChangeDetector>();
+
                 job.Status = IndexStatus.Running;
 
                 // 广播开始事件
@@ -84,9 +84,15 @@ public class IndexService : IHostedService
                 var allFiles = new List<string>();
                 foreach (var source in sources)
                 {
-                    if (!Directory.Exists(source.Path)) continue;
+                    // 转换路径格式（WSL 环境下将 Windows 路径转为 /mnt/x/ 格式）
+                    var normalizedPath = PathUtility.NormalizePath(source.Path);
+                    if (!Directory.Exists(normalizedPath))
+                    {
+                        _logger.LogWarning("源目录不存在或无法访问: {Path} (normalized: {NormalizedPath})", source.Path, normalizedPath);
+                        continue;
+                    }
 
-                    var files = Directory.GetFiles(source.Path, "*.*", SearchOption.AllDirectories)
+                    var files = Directory.GetFiles(normalizedPath, "*.*", SearchOption.AllDirectories)
                         .Where(f => source.FilePatterns.Any(p => MatchesPattern(f, p)))
                         .Where(f => !source.ExcludeDirs.Any(d => f.Contains(d)));
 
@@ -200,13 +206,24 @@ public class IndexService : IHostedService
     private async Task ProcessFileAsync(
         string filePath,
         IEmbeddingService embeddingService,
-        MarkdownChunker chunker,
+        IMarkdownChunker chunker,
         IVectorStore vectorStore,
         List<SourceFolder> sources)
     {
         var content = await File.ReadAllTextAsync(filePath);
-        var source = sources.FirstOrDefault(s => filePath.StartsWith(s.Path));
-        var relativePath = source != null ? Path.GetRelativePath(source.Path, filePath) : Path.GetFileName(filePath);
+
+        // 尝试用原始路径和标准化路径匹配 source
+        var source = sources.FirstOrDefault(s =>
+            filePath.StartsWith(s.Path) ||
+            filePath.StartsWith(PathUtility.NormalizePath(s.Path)));
+
+        // 使用标准化路径计算相对路径
+        var sourcePathForRelative = source != null
+            ? (filePath.StartsWith(PathUtility.NormalizePath(source.Path))
+                ? PathUtility.NormalizePath(source.Path)
+                : source.Path)
+            : filePath;
+        var relativePath = source != null ? Path.GetRelativePath(sourcePathForRelative, filePath) : Path.GetFileName(filePath);
 
         // 分段
         var chunks = chunker.Chunk(content, new ChunkingOptions
@@ -242,6 +259,9 @@ public class IndexService : IHostedService
         };
 
         await vectorStore.UpsertFileAsync(fileRecord);
+
+        // 删除该文件关联的旧chunks和vectors（防止重复索引）
+        await vectorStore.DeleteChunksByFileAsync(fileId);
 
         // 为每个 chunk 设置文件信息
         foreach (var chunk in chunks)
@@ -281,7 +301,6 @@ public class IndexService : IHostedService
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
-        _watcherCts?.Cancel();
         _logger.LogInformation("Index service stopped");
         return Task.CompletedTask;
     }

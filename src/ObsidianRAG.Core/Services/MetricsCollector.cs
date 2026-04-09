@@ -4,18 +4,110 @@ using ObsidianRAG.Core.Interfaces;
 namespace ObsidianRAG.Core.Services;
 
 /// <summary>
+/// 有界直方图 - 限制最大样本数，自动淘汰最旧数据
+/// </summary>
+public class BoundedHistogram
+{
+    private readonly int _maxSamples;
+    private readonly object _lock = new();
+    private readonly Queue<long> _samples;
+    private long _sum;
+
+    public BoundedHistogram(int maxSamples = 1000)
+    {
+        _maxSamples = maxSamples;
+        _samples = new Queue<long>();
+    }
+
+    public void Add(long value)
+    {
+        lock (_lock)
+        {
+            if (_samples.Count >= _maxSamples)
+            {
+                var oldest = _samples.Dequeue();
+                _sum -= oldest;
+            }
+
+            _samples.Enqueue(value);
+            _sum += value;
+        }
+    }
+
+    public HistogramStatistics GetStatistics()
+    {
+        lock (_lock)
+        {
+            var samples = _samples.ToList();
+
+            if (samples.Count == 0)
+                return new HistogramStatistics();
+
+            samples.Sort();
+
+            return new HistogramStatistics
+            {
+                Count = samples.Count,
+                Sum = _sum,
+                Average = samples.Count > 0 ? samples.Average() : 0,
+                Min = samples.Count > 0 ? samples[0] : 0,
+                Max = samples.Count > 0 ? samples[^1] : 0,
+                P50 = GetPercentile(samples, 50),
+                P95 = GetPercentile(samples, 95),
+                P99 = GetPercentile(samples, 99)
+            };
+        }
+    }
+
+    private static long GetPercentile(List<long> sortedSamples, int percentile)
+    {
+        if (sortedSamples.Count == 0) return 0;
+        var index = (int)Math.Ceiling(sortedSamples.Count * percentile / 100.0) - 1;
+        return sortedSamples[Math.Max(0, index)];
+    }
+
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _samples.Clear();
+            _sum = 0;
+        }
+    }
+}
+
+/// <summary>
+/// 直方图统计信息
+/// </summary>
+public class HistogramStatistics
+{
+    public int Count { get; set; }
+    public long Sum { get; set; }
+    public double Average { get; set; }
+    public long Min { get; set; }
+    public long Max { get; set; }
+    public long P50 { get; set; }
+    public long P95 { get; set; }
+    public long P99 { get; set; }
+}
+
+/// <summary>
 /// 监控指标采集服务
 /// </summary>
 public class MetricsCollector
 {
     private readonly IVectorStore _vectorStore;
     private readonly Dictionary<string, MetricValue> _metrics;
+    private readonly Dictionary<string, BoundedHistogram> _histograms;
+    private readonly int _maxHistogramSamples;
     private readonly object _lock = new();
 
-    public MetricsCollector(IVectorStore vectorStore)
+    public MetricsCollector(IVectorStore vectorStore, int maxHistogramSamples = 1000)
     {
         _vectorStore = vectorStore;
         _metrics = new Dictionary<string, MetricValue>();
+        _histograms = new Dictionary<string, BoundedHistogram>();
+        _maxHistogramSamples = maxHistogramSamples;
     }
 
     /// <summary>
@@ -70,24 +162,27 @@ public class MetricsCollector
             var key = "queries_total";
             if (!_metrics.ContainsKey(key))
             {
-                _metrics[key] = new MetricValue { Name = key, Type = MetricType.Counter, Value = 0 };
+                _metrics[key] = new MetricValue { Name = key, Type = MetricType.Counter, Value = 0L };
             }
             _metrics[key].Value = (long)_metrics[key].Value + 1;
 
-            var latencyKey = "query_latency_ms";
-            if (!_metrics.ContainsKey(latencyKey))
-            {
-                _metrics[latencyKey] = new MetricValue { Name = latencyKey, Type = MetricType.Histogram, Values = new List<long>() };
-            }
-            ((List<long>)_metrics[latencyKey].Values!).Add(durationMs);
-
-            var resultsKey = "query_results_count";
-            if (!_metrics.ContainsKey(resultsKey))
-            {
-                _metrics[resultsKey] = new MetricValue { Name = resultsKey, Type = MetricType.Histogram, Values = new List<long>() };
-            }
-            ((List<long>)_metrics[resultsKey].Values!).Add(resultCount);
+            // 使用有界直方图
+            GetOrCreateHistogram("query_latency_ms").Add(durationMs);
+            GetOrCreateHistogram("query_results_count").Add(resultCount);
         }
+    }
+
+    /// <summary>
+    /// 获取或创建有界直方图
+    /// </summary>
+    private BoundedHistogram GetOrCreateHistogram(string name)
+    {
+        if (!_histograms.TryGetValue(name, out var histogram))
+        {
+            histogram = new BoundedHistogram(_maxHistogramSamples);
+            _histograms[name] = histogram;
+        }
+        return histogram;
     }
 
     /// <summary>
@@ -100,7 +195,7 @@ public class MetricsCollector
             var key = "index_runs_total";
             if (!_metrics.ContainsKey(key))
             {
-                _metrics[key] = new MetricValue { Name = key, Type = MetricType.Counter, Value = 0 };
+                _metrics[key] = new MetricValue { Name = key, Type = MetricType.Counter, Value = 0L };
             }
             _metrics[key].Value = (long)_metrics[key].Value + 1;
 
@@ -151,27 +246,35 @@ public class MetricsCollector
                 summary.TotalQueries = (long)queries.Value;
             }
 
-            if (_metrics.TryGetValue("query_latency_ms", out var latency) && latency.Values != null)
+            if (_histograms.TryGetValue("query_latency_ms", out var latencyHistogram))
             {
-                var values = (List<long>)latency.Values;
-                if (values.Count > 0)
-                {
-                    summary.AvgQueryLatencyMs = values.Average();
-                    summary.P95QueryLatencyMs = GetPercentile(values, 95);
-                    summary.P99QueryLatencyMs = GetPercentile(values, 99);
-                }
+                var stats = latencyHistogram.GetStatistics();
+                summary.AvgQueryLatencyMs = stats.Average;
+                summary.P95QueryLatencyMs = stats.P95;
+                summary.P99QueryLatencyMs = stats.P99;
             }
 
-            if (_metrics.TryGetValue("query_results_count", out var results) && results.Values != null)
+            if (_histograms.TryGetValue("query_results_count", out var resultsHistogram))
             {
-                var values = (List<long>)results.Values;
-                if (values.Count > 0)
-                {
-                    summary.AvgResultsPerQuery = values.Average();
-                }
+                var stats = resultsHistogram.GetStatistics();
+                summary.AvgResultsPerQuery = stats.Average;
             }
 
             return summary;
+        }
+    }
+
+    /// <summary>
+    /// 清理所有直方图数据（用于重置统计）
+    /// </summary>
+    public void ClearHistograms()
+    {
+        lock (_lock)
+        {
+            foreach (var histogram in _histograms.Values)
+            {
+                histogram.Clear();
+            }
         }
     }
 
@@ -194,18 +297,6 @@ public class MetricsCollector
         var cpuUsageTotal = cpuUsedMs / (Environment.ProcessorCount * totalMsPassed);
 
         return cpuUsageTotal * 100;
-    }
-
-    /// <summary>
-    /// 计算百分位数
-    /// </summary>
-    private double GetPercentile(List<long> values, int percentile)
-    {
-        if (values.Count == 0) return 0;
-
-        var sorted = values.OrderBy(v => v).ToList();
-        var index = (int)Math.Ceiling(sorted.Count * percentile / 100.0) - 1;
-        return sorted[Math.Max(0, index)];
     }
 }
 

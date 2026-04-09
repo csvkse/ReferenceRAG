@@ -130,6 +130,23 @@ public interface IVectorStore
     /// 批量存储向量记录
     /// </summary>
     Task StoreBatchAsync(IEnumerable<VectorRecord> records, CancellationToken cancellationToken = default);
+
+    // ==================== 统计与管理操作 ====================
+
+    /// <summary>
+    /// 获取所有模型的向量统计信息
+    /// </summary>
+    Task<List<VectorStats>> GetVectorStatsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 删除指定模型的向量
+    /// </summary>
+    Task<int> DeleteVectorsByModelAsync(string modelName, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 删除无关联模型的向量（孤立项清理）
+    /// </summary>
+    Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

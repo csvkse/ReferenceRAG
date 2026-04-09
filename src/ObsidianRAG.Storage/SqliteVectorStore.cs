@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using ObsidianRAG.Core.Helpers;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
 using System.Text.Json;
@@ -85,19 +86,42 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         ExecuteNonQuery(createChunksTable, transaction);
 
         // 向量表（使用 JSON 存储，因为 sqlite-vec 需要扩展）
+        // 添加 dimension 字段支持多模型索引分离
         var createVectorsTable = @"
             CREATE TABLE IF NOT EXISTS vectors (
                 id TEXT PRIMARY KEY,
                 chunk_id TEXT NOT NULL UNIQUE,
                 vector BLOB NOT NULL,
                 model_name TEXT,
+                dimension INTEGER DEFAULT 0,
                 created_at TEXT,
                 FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_vectors_chunk ON vectors(chunk_id);
+            CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model_name, dimension);
         ";
         
         ExecuteNonQuery(createVectorsTable, transaction);
+
+        // 向后兼容：为已有数据库添加 dimension 列（如果不存在）
+        try
+        {
+            ExecuteNonQuery("ALTER TABLE vectors ADD COLUMN dimension INTEGER DEFAULT 0", transaction);
+        }
+        catch
+        {
+            // 列已存在，忽略错误
+        }
+
+        // 确保索引存在
+        try
+        {
+            ExecuteNonQuery("CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model_name, dimension)", transaction);
+        }
+        catch
+        {
+            // 索引已存在，忽略错误
+        }
 
         transaction.Commit();
     }
@@ -358,8 +382,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     public async Task UpsertVectorAsync(VectorRecord vector, CancellationToken cancellationToken = default)
     {
         var sql = @"
-            INSERT OR REPLACE INTO vectors (id, chunk_id, vector, model_name, created_at)
-            VALUES (@id, @chunkId, @vector, @modelName, @createdAt)
+            INSERT OR REPLACE INTO vectors (id, chunk_id, vector, model_name, dimension, created_at)
+            VALUES (@id, @chunkId, @vector, @modelName, @dimension, @createdAt)
         ";
 
         using var command = _connection.CreateCommand();
@@ -368,6 +392,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         AddParameter(command, "@chunkId", vector.ChunkId);
         AddParameter(command, "@vector", VectorToBlob(vector.Vector));
         AddParameter(command, "@modelName", vector.ModelName ?? "");
+        AddParameter(command, "@dimension", vector.Vector.Length);
         AddParameter(command, "@createdAt", DateTime.UtcNow.ToString("O"));
 
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -380,18 +405,19 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
         // 使用单条批量 INSERT 语句（SQLite 支持 VALUES 多行）
         var sql = new System.Text.StringBuilder();
-        sql.AppendLine("INSERT OR REPLACE INTO vectors (id, chunk_id, vector, model_name, created_at) VALUES");
+        sql.AppendLine("INSERT OR REPLACE INTO vectors (id, chunk_id, vector, model_name, dimension, created_at) VALUES");
 
         var parameters = new List<(string Name, object Value)>();
         for (int i = 0; i < vectorList.Count; i++)
         {
             if (i > 0) sql.AppendLine(",");
-            sql.Append($"(@id{i}, @chunkId{i}, @vector{i}, @modelName{i}, @createdAt{i})");
+            sql.Append($"(@id{i}, @chunkId{i}, @vector{i}, @modelName{i}, @dimension{i}, @createdAt{i})");
 
             parameters.Add(($"@id{i}", vectorList[i].Id));
             parameters.Add(($"@chunkId{i}", vectorList[i].ChunkId));
             parameters.Add(($"@vector{i}", VectorToBlob(vectorList[i].Vector)));
             parameters.Add(($"@modelName{i}", vectorList[i].ModelName ?? ""));
+            parameters.Add(($"@dimension{i}", vectorList[i].Vector.Length));
             parameters.Add(($"@createdAt{i}", DateTime.UtcNow.ToString("O")));
         }
 
@@ -461,20 +487,27 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         int topK,
         CancellationToken cancellationToken = default)
     {
+        // 获取查询向量的维度，用于过滤相同维度的向量
+        var queryDimension = queryVector.Length;
+
         var sql = @"
-            SELECT v.id, v.chunk_id, v.vector, v.model_name,
-                   c.file_id, c.content, c.start_line, c.end_line, 
-                   c.heading_path, c.level, c.aggregate_type, c.child_chunk_count,
+            SELECT v.id, v.chunk_id, v.vector, v.model_name, v.dimension,
+                   c.id, c.file_id, c.content, c.chunk_index, c.token_count,
+                   c.start_line, c.end_line, c.start_column, c.end_column,
+                   c.heading_path, c.level, c.weight, c.chunk_type,
+                   c.aggregate_type, c.child_chunk_count,
                    f.path, f.title
             FROM vectors v
             JOIN chunks c ON v.chunk_id = c.id
             JOIN files f ON c.file_id = f.id
+            WHERE v.dimension = @dimension OR v.dimension = 0
         ";
 
         var results = new List<(VectorRecord Vector, ChunkRecord Chunk, FileRecord File, float Score)>();
 
         using var command = _connection.CreateCommand();
         command.CommandText = sql;
+        AddParameter(command, "@dimension", queryDimension);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -488,7 +521,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 Title = reader.GetString(reader.GetOrdinal("title"))
             };
 
-            var score = CosineSimilarity(queryVector, vector.Vector);
+            var score = MathHelper.CosineSimilarity(queryVector, vector.Vector);
             results.Add((vector, chunk, file, score));
         }
 
@@ -518,15 +551,18 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         int topK,
         CancellationToken cancellationToken = default)
     {
+        var queryDimension = queryVector.Length;
         var sql = @"
-            SELECT v.id, v.chunk_id, v.vector, v.model_name,
-                   c.file_id, c.content, c.start_line, c.end_line, 
-                   c.heading_path, c.level, c.aggregate_type, c.child_chunk_count,
+            SELECT v.id, v.chunk_id, v.vector, v.model_name, v.dimension,
+                   c.id, c.file_id, c.content, c.chunk_index, c.token_count,
+                   c.start_line, c.end_line, c.start_column, c.end_column,
+                   c.heading_path, c.level, c.weight, c.chunk_type,
+                   c.aggregate_type, c.child_chunk_count,
                    f.path, f.title
             FROM vectors v
             JOIN chunks c ON v.chunk_id = c.id
             JOIN files f ON c.file_id = f.id
-            WHERE c.aggregate_type = @aggregateType
+            WHERE c.aggregate_type = @aggregateType AND (v.dimension = @dimension OR v.dimension = 0)
         ";
 
         var results = new List<(VectorRecord Vector, ChunkRecord Chunk, FileRecord File, float Score)>();
@@ -534,6 +570,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         using var command = _connection.CreateCommand();
         command.CommandText = sql;
         AddParameter(command, "@aggregateType", (int)aggregateType);
+        AddParameter(command, "@dimension", queryDimension);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -547,7 +584,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 Title = reader.GetString(reader.GetOrdinal("title"))
             };
 
-            var score = CosineSimilarity(queryVector, vector.Vector);
+            var score = MathHelper.CosineSimilarity(queryVector, vector.Vector);
             results.Add((vector, chunk, file, score));
         }
 
@@ -580,9 +617,10 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         var idList = ids.ToList();
         if (idList.Count == 0) return Enumerable.Empty<SearchResult>();
 
+        var queryDimension = queryVector.Length;
         var placeholders = string.Join(",", idList.Select((_, i) => $"@id{i}"));
         var sql = $@"
-            SELECT v.id, v.chunk_id, v.vector, v.model_name,
+            SELECT v.id, v.chunk_id, v.vector, v.model_name, v.dimension,
                    c.file_id, c.content, c.start_line, c.end_line, 
                    c.heading_path, c.level, c.aggregate_type, c.child_chunk_count,
                    f.path, f.title
@@ -590,12 +628,14 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             JOIN chunks c ON v.chunk_id = c.id
             JOIN files f ON c.file_id = f.id
             WHERE v.chunk_id IN ({placeholders})
+              AND (v.dimension = @dimension OR v.dimension = 0)
         ";
 
         var results = new List<(VectorRecord Vector, ChunkRecord Chunk, FileRecord File, float Score)>();
 
         using var command = _connection.CreateCommand();
         command.CommandText = sql;
+        AddParameter(command, "@dimension", queryDimension);
         
         for (int i = 0; i < idList.Count; i++)
         {
@@ -614,7 +654,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 Title = reader.GetString(reader.GetOrdinal("title"))
             };
 
-            var score = CosineSimilarity(queryVector, vector.Vector);
+            var score = MathHelper.CosineSimilarity(queryVector, vector.Vector);
             results.Add((vector, chunk, file, score));
         }
 
@@ -664,6 +704,85 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     {
         // 复用 UpsertVectorsAsync 的批量实现
         await UpsertVectorsAsync(records, cancellationToken);
+    }
+
+    // ==================== 统计与管理操作 ====================
+
+    public async Task<List<VectorStats>> GetVectorStatsAsync(CancellationToken cancellationToken = default)
+    {
+        var sql = @"
+            SELECT
+                model_name,
+                dimension,
+                COUNT(*) as vector_count,
+                SUM(LENGTH(vector)) as storage_bytes,
+                MAX(created_at) as last_updated
+            FROM vectors
+            WHERE model_name IS NOT NULL AND model_name != ''
+            GROUP BY model_name, dimension
+            ORDER BY model_name
+        ";
+
+        var stats = new List<VectorStats>();
+
+        using var command = _connection.CreateCommand();
+        command.CommandText = sql;
+
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            stats.Add(new VectorStats
+            {
+                ModelName = reader.GetString(reader.GetOrdinal("model_name")),
+                Dimension = reader.GetInt32(reader.GetOrdinal("dimension")),
+                VectorCount = reader.GetInt32(reader.GetOrdinal("vector_count")),
+                StorageBytes = reader.GetInt64(reader.GetOrdinal("storage_bytes")),
+                ModelExists = true,
+                LastUpdated = !reader.IsDBNull(reader.GetOrdinal("last_updated"))
+                    ? DateTime.Parse(reader.GetString(reader.GetOrdinal("last_updated")))
+                    : null
+            });
+        }
+
+        return stats;
+    }
+
+    public async Task<int> DeleteVectorsByModelAsync(string modelName, CancellationToken cancellationToken = default)
+    {
+        var sql = "DELETE FROM vectors WHERE model_name = @modelName";
+
+        using var command = _connection.CreateCommand();
+        command.CommandText = sql;
+        AddParameter(command, "@modelName", modelName);
+
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default)
+    {
+        var modelNamesList = existingModelNames.ToList();
+
+        if (modelNamesList.Count == 0)
+        {
+            var deleteSql = "DELETE FROM vectors WHERE model_name IS NOT NULL AND model_name != ''";
+            using var deleteCommand = _connection.CreateCommand();
+            deleteCommand.CommandText = deleteSql;
+            return await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // 删除 model_name 不在现有模型列表中的向量
+        var placeholders = string.Join(",", modelNamesList.Select((_, i) => $"@name{i}"));
+        var sql = $"DELETE FROM vectors WHERE model_name NOT IN ({placeholders}) AND model_name IS NOT NULL AND model_name != ''";
+
+        using var command = _connection.CreateCommand();
+        command.CommandText = sql;
+
+        for (int i = 0; i < modelNamesList.Count; i++)
+        {
+            AddParameter(command, $"@name{i}", modelNamesList[i]);
+        }
+
+        return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     // ==================== 辅助方法 ====================
@@ -726,7 +845,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             Id = reader.GetString(reader.GetOrdinal("id")),
             ChunkId = reader.GetString(reader.GetOrdinal("chunk_id")),
             Vector = BlobToVector(reader.GetFieldValue<byte[]>(reader.GetOrdinal("vector"))),
-            ModelName = reader.GetString(reader.GetOrdinal("model_name"))
+            ModelName = reader.GetString(reader.GetOrdinal("model_name")),
+            Dimension = reader.GetInt32(reader.GetOrdinal("dimension"))
         };
     }
 
@@ -742,22 +862,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         var vector = new float[blob.Length / sizeof(float)];
         Buffer.BlockCopy(blob, 0, vector, 0, blob.Length);
         return vector;
-    }
-
-    private float CosineSimilarity(float[] a, float[] b)
-    {
-        if (a.Length != b.Length) return 0;
-
-        float dot = 0, normA = 0, normB = 0;
-        for (int i = 0; i < a.Length; i++)
-        {
-            dot += a[i] * b[i];
-            normA += a[i] * a[i];
-            normB += b[i] * b[i];
-        }
-
-        var denominator = MathF.Sqrt(normA) * MathF.Sqrt(normB);
-        return denominator < 1e-10f ? 0 : dot / denominator;
     }
 
     public void Dispose()

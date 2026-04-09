@@ -136,22 +136,38 @@ public class SourcesController : ControllerBase
             return BadRequest(new { error = "路径不能为空" });
         }
 
-        if (!Directory.Exists(request.Path))
+        // Path traversal prevention
+        if (request.Path.Contains(".."))
         {
-            return BadRequest(new { error = "目录不存在" });
+            return BadRequest(new { error = "路径不能包含 '..' 目录遍历字符" });
+        }
+
+        if (!Path.IsPathRooted(request.Path))
+        {
+            return BadRequest(new { error = "路径必须是绝对路径" });
+        }
+
+        var fullPath = Path.GetFullPath(request.Path);
+        if (!Directory.Exists(fullPath))
+        {
+            return BadRequest(new { error = $"目录不存在: {fullPath}" });
         }
 
         var config = _configManager.Load();
 
-        // 检查是否已存在
-        if (config.Sources.Any(s => s.Path == request.Path || s.Name == request.Name))
+        // 检查是否已存在（使用不区分大小写的路径比较）
+        var existingSource = config.Sources.FirstOrDefault(s =>
+            s.Path.Equals(fullPath, StringComparison.OrdinalIgnoreCase) ||
+            (!string.IsNullOrEmpty(request.Name) && s.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase)));
+
+        if (existingSource != null)
         {
-            return Conflict(new { error = "源已存在" });
+            return Conflict(new { error = $"源已存在: {existingSource.Name} ({existingSource.Path})" });
         }
 
         var source = new SourceFolder
         {
-            Path = Path.GetFullPath(request.Path),
+            Path = fullPath,
             Name = request.Name ?? Path.GetFileName(request.Path) ?? "新源",
             Type = request.Type ?? SourceType.Markdown,
             Enabled = true,
@@ -166,9 +182,18 @@ public class SourcesController : ControllerBase
             source.ExcludeDirs.AddRange(new[] { ".obsidian", ".trash" });
         }
 
-        _configManager.AddSource(source);
-
-        return CreatedAtAction(nameof(Get), new { name = source.Name }, source);
+        try
+        {
+            _configManager.AddSource(source);
+            _logger.LogInformation("已添加源: {Name} ({Path})", source.Name, source.Path);
+            return CreatedAtAction(nameof(Get), new { name = source.Name }, source);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "添加源失败: {Path}", request.Path);
+            _logger.LogError(ex, "添加源失败: {Path}", request.Path);
+            return StatusCode(500, new { error = "添加源失败，请查看服务日志" });
+        }
     }
 
     /// <summary>
@@ -282,12 +307,14 @@ public class SourcesController : ControllerBase
             return NotFound(new { error = $"源 '{name}' 不存在" });
         }
 
-        if (!Directory.Exists(source.Path))
+        // 转换路径格式（WSL 环境下将 Windows 路径转为 /mnt/x/ 格式）
+        var normalizedPath = PathUtility.NormalizePath(source.Path);
+        if (!Directory.Exists(normalizedPath))
         {
-            return BadRequest(new { error = "源目录不存在" });
+            return BadRequest(new { error = $"源目录不存在或无法访问: {source.Path}" });
         }
 
-        var files = Directory.GetFiles(source.Path, "*.*", 
+        var files = Directory.GetFiles(normalizedPath, "*.*",
             source.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
             .Where(f => source.FilePatterns.Any(p => MatchesPattern(f, p)))
             .Where(f => !source.ExcludeDirs.Any(d => f.Contains(d)))
@@ -301,7 +328,7 @@ public class SourcesController : ControllerBase
                 .ToDictionary(g => g.Key, g => g.Count()),
             Files = files.Take(100).Select(f => new FileItem
             {
-                Path = Path.GetRelativePath(source.Path, f),
+                Path = Path.GetRelativePath(normalizedPath, f),
                 Size = new System.IO.FileInfo(f).Length,
                 Modified = System.IO.File.GetLastWriteTime(f)
             }).ToList()

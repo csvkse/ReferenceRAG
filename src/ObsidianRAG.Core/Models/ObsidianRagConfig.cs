@@ -192,6 +192,11 @@ public class EmbeddingConfig
     /// 批处理大小（RTX 4060 推荐 64-128）
     /// </summary>
     public int BatchSize { get; set; } = 32;
+
+    /// <summary>
+    /// 模型保存根目录（所有模型统一存放）
+    /// </summary>
+    public string ModelsPath { get; set; } = "models";
 }
 
 /// <summary>

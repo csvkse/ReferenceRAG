@@ -1,0 +1,185 @@
+import axios from 'axios'
+import type {
+  AddSourceRequest,
+  SourceDetail,
+  AIQueryRequest,
+  AIQueryResponse,
+  DrilldownRequest,
+  DrilldownResponse,
+  DashboardStats,
+  ObsidianRagConfig,
+  IndexRequest,
+  IndexJob,
+  BenchmarkRequest,
+  BenchmarkResult,
+  QuickTestResult,
+  BatchOptimizationRequest,
+  BatchOptimizationResult,
+  MemoryTestResult,
+  ShortTextTestRequest,
+  SemanticTestResult,
+  LongTextTestRequest,
+  LongTextTestResult,
+  ModelInfo,
+  ConvertFormatRequest,
+  AddCustomModelRequest,
+  VectorStats,
+  SystemStatus,
+  SystemMetrics,
+  IndexMetrics,
+  MetricsSummary,
+  Alert,
+  AlertRule
+} from '@/types/api'
+
+// PascalCase ↔ camelCase conversion utilities
+// Backend uses PropertyNamingPolicy = null (PascalCase), frontend uses camelCase
+
+const toCamel = (str: string) =>
+  str.charAt(0).toLowerCase() + str.slice(1)
+
+const toPascal = (str: string) =>
+  str.charAt(0).toUpperCase() + str.slice(1)
+
+function transformKeysDeep(obj: unknown, keyFn: (key: string) => string): unknown {
+  if (obj === null || obj === undefined) return obj
+  if (typeof obj === 'string' || typeof obj === 'number' || typeof obj === 'boolean') return obj
+  if (Array.isArray(obj)) return obj.map((item) => transformKeysDeep(item, keyFn))
+  if (obj instanceof Date) return obj
+  const result: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    result[keyFn(k)] = transformKeysDeep(v, keyFn)
+  }
+  return result
+}
+
+const api = axios.create({
+  baseURL: '/api',
+  timeout: 60000,
+  headers: { 'Content-Type': 'application/json' }
+})
+
+// Transform outgoing request body: camelCase → PascalCase
+api.interceptors.request.use((config) => {
+  if (config.data && typeof config.data === 'object') {
+    config.data = transformKeysDeep(config.data, toPascal)
+  }
+  return config
+})
+
+// Transform incoming response data: PascalCase → camelCase
+api.interceptors.response.use(
+  (response) => {
+    if (response.data && typeof response.data === 'object') {
+      response.data = transformKeysDeep(response.data, toCamel)
+    }
+    return response
+  },
+  (error) => {
+    console.error('API Error:', error.response?.data || error.message)
+    return Promise.reject(error)
+  }
+)
+
+// AI Query
+export const aiQueryApi = {
+  query: (data: AIQueryRequest) => api.post<AIQueryResponse>('/ai/query', data),
+  drilldown: (data: DrilldownRequest) => api.post<DrilldownResponse>('/ai/drill-down', data)
+}
+
+// Dashboard
+export const dashboardApi = {
+  getStats: () => api.get<DashboardStats>('/Dashboard/stats'),
+  getSources: () => api.get<SourceDetail[]>('/Dashboard/sources')
+}
+
+// Sources
+export const sourcesApi = {
+  getAll: () => api.get<SourceDetail[]>('/Sources'),
+  getByName: (name: string) => api.get<SourceDetail>(`/Sources/${name}`),
+  create: (data: AddSourceRequest) => api.post('/Sources', data),
+  update: (name: string, data: { name?: string; enabled?: boolean; recursive?: boolean; filePatterns?: string[] }) =>
+    api.put(`/Sources/${name}`, data),
+  delete: (name: string, deleteData = false) =>
+    api.delete(`/Sources/${name}?deleteData=${deleteData}`),
+  toggle: (name: string, enabled: boolean) =>
+    api.patch(`/Sources/${name}/toggle`, { enabled }),
+  startIndex: (name: string, force = false) =>
+    api.post(`/Sources/${name}/index`, { force }),
+  scan: (name: string) => api.get(`/Sources/${name}/scan`),
+  getFiles: (name: string) => api.get(`/Sources/${name}/files`)
+}
+
+// Index
+export const indexApi = {
+  start: (data?: IndexRequest) => api.post<IndexJob>('/Index/start', data || {}),
+  getStatus: (indexId: string) => api.get<IndexJob>(`/Index/${indexId}/status`),
+  getActive: () => api.get<IndexJob[]>('/Index/active'),
+  stop: (indexId: string) => api.post(`/Index/${indexId}/stop`)
+}
+
+// Settings
+export const settingsApi = {
+  get: () => api.get<ObsidianRagConfig>('/Settings'),
+  save: (config: ObsidianRagConfig) => api.post('/Settings', config),
+  updateModelsPath: (modelsPath: string, migrateExisting = false) =>
+    api.patch('/Settings/models-path', { modelsPath, migrateExisting })
+}
+
+// Performance
+export const performanceApi = {
+  benchmark: (data?: BenchmarkRequest) => api.post<BenchmarkResult>('/Performance/benchmark', data || {}),
+  quickTest: (textLength = 10000) => api.get<QuickTestResult>(`/Performance/quick-test?textLength=${textLength}`),
+  batchSizes: (data?: BatchOptimizationRequest) => api.post<BatchOptimizationResult>('/Performance/batch-sizes', data || {}),
+  memoryTest: (vectorCount = 1000, dimension = 512) =>
+    api.get<MemoryTestResult>(`/Performance/memory-test?vectorCount=${vectorCount}&dimension=${dimension}`)
+}
+
+// Semantic Test
+export const semanticTestApi = {
+  shortText: (data: ShortTextTestRequest) => api.post<SemanticTestResult>('/SemanticTest/short-text', data),
+  longText: (data: LongTextTestRequest) => api.post<LongTextTestResult>('/SemanticTest/long-text', data),
+  getRecords: () => api.get<SemanticTestResult[]>('/SemanticTest/records'),
+  clearRecords: () => api.delete('/SemanticTest/records'),
+  getPresets: () => api.get('/SemanticTest/presets'),
+  runPreset: (suiteName: string) => api.post(`/SemanticTest/preset/${suiteName}`),
+  getStatistics: () => api.get('/SemanticTest/statistics')
+}
+
+// Models
+export const modelsApi = {
+  getAll: () => api.get<ModelInfo[]>('/Models'),
+  getCurrent: () => api.get<ModelInfo>('/Models/current'),
+  switch: (modelName: string, deleteOldVectors = false) => api.post(`/Models/switch`, { modelName, deleteOldVectors }),
+  download: (modelName: string, targetFormat?: 'embedded' | 'external') =>
+    api.post(`/Models/download/${modelName}`, targetFormat ? { targetFormat } : undefined),
+  getDownloadProgress: (modelName: string) => api.get(`/Models/download/${modelName}/progress`),
+  convert: (modelName: string, targetFormat: 'embedded' | 'external') =>
+    api.post(`/Models/${modelName}/convert`, { targetFormat }),
+  getConvertProgress: (modelName: string) => api.get(`/Models/${modelName}/convert/progress`),
+  addCustom: (huggingFaceId: string, displayName?: string) =>
+    api.post('/Models/custom', { huggingFaceId, displayName }),
+  delete: (modelName: string) => api.delete(`/Models/${modelName}`)
+}
+
+// Vectors
+export const vectorsApi = {
+  getStats: () => api.get<VectorStats[]>('/Vectors/stats'),
+  getStatsByModel: (modelName: string) => api.get<VectorStats>(`/Vectors/stats/${modelName}`),
+  deleteByModel: (modelName: string) => api.delete(`/Vectors/model/${modelName}`),
+  deleteOrphaned: () => api.delete('/Vectors/orphaned')
+}
+
+// System
+export const systemApi = {
+  getStatus: () => api.get<SystemStatus>('/system/status'),
+  getHealth: () => api.get('/system/health'),
+  getMetrics: () => api.get<SystemMetrics>('/system/metrics'),
+  getIndexMetrics: () => api.get<IndexMetrics>('/system/metrics/index'),
+  getMetricsSummary: () => api.get<MetricsSummary>('/system/metrics/queries'),
+  getAlerts: () => api.get<Alert[]>('/system/alerts'),
+  checkAlerts: () => api.post<Alert[]>('/system/alerts/check'),
+  getAlertRules: () => api.get<AlertRule[]>('/system/alerts/rules')
+}
+
+export default api

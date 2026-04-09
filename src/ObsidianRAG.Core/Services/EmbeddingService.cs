@@ -1,6 +1,7 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using ObsidianRAG.Core.Interfaces;
+using ObsidianRAG.Core.Models;
 using ObsidianRAG.Core.Services.Tokenizers;
 
 namespace ObsidianRAG.Core.Services;
@@ -11,22 +12,36 @@ namespace ObsidianRAG.Core.Services;
 /// </summary>
 public class EmbeddingService : IEmbeddingService, IDisposable
 {
-    private readonly InferenceSession? _session;
     private readonly EmbeddingOptions _options;
-    private readonly ITextTokenizer _tokenizer;
+    private InferenceSession? _session;
+    private ITextTokenizer _tokenizer;
+    private bool _simulationMode;
+    private bool _isEmbeddedFormat;
+    private readonly object _lock = new();
     private bool _disposed;
 
     public string ModelName => _options.ModelName;
-    public int Dimension { get; }
+    public int Dimension { get; private set; }
+    public bool IsSimulationMode => _simulationMode;
+    public bool SupportsAsymmetricEncoding { get; private set; }
 
     public EmbeddingService(EmbeddingOptions options)
     {
         _options = options;
+        _tokenizer = new FallbackTokenizer();
 
+        LoadModel(options.ModelPath, options.ModelName);
+    }
+
+    /// <summary>
+    /// 加载模型
+    /// </summary>
+    private void LoadModel(string modelPath, string modelName)
+    {
         // 设置 CUDA/TensorRT 库路径（必须在加载 ONNX Runtime 之前）
-        if (options.UseCuda && !string.IsNullOrEmpty(options.CudaLibraryPath))
+        if (_options.UseCuda && !string.IsNullOrEmpty(_options.CudaLibraryPath))
         {
-            var cudaPath = options.CudaLibraryPath;
+            var cudaPath = _options.CudaLibraryPath;
             var currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
             if (!currentPath.Contains(cudaPath))
             {
@@ -36,85 +51,153 @@ public class EmbeddingService : IEmbeddingService, IDisposable
         }
 
         // 检查模型文件是否存在
-        if (!File.Exists(options.ModelPath))
+        if (!File.Exists(modelPath))
         {
-            Console.WriteLine($"[EmbeddingService] 模型文件不存在: {options.ModelPath}");
-            Console.WriteLine("[EmbeddingService] 使用模拟模式（返回随机向量）");
+            Console.WriteLine($"[EmbeddingService] 模型文件不存在: {modelPath}");
+            Console.WriteLine("[EmbeddingService] 使用模拟模式（返回随机向量，搜索结果将无意义）");
             Dimension = 384;
             _tokenizer = new FallbackTokenizer();
+            _simulationMode = true;
+            SupportsAsymmetricEncoding = _options.AsymmetricEncoding != null;
             return;
         }
 
         try
         {
+            // 释放旧的 session
+            var oldSession = _session;
+            _session = null;
+            oldSession?.Dispose();
+
             // 加载 ONNX 模型
             var sessionOptions = new SessionOptions();
             sessionOptions.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
 
-            if (options.UseCuda)
+            if (_options.UseCuda)
             {
                 try
                 {
-                    sessionOptions.AppendExecutionProvider_CUDA(options.CudaDeviceId);
-                    Console.WriteLine($"[EmbeddingService] 使用 CUDA GPU: {options.CudaDeviceId}");
+                    // CUDA 执行提供程序在动态 batch size 时有缓冲区重用问题
+                    // 嵌入式格式模型关闭内存模式以支持动态 batch
+                    var modelDir2 = Path.GetDirectoryName(modelPath);
+                    var isEmbedded = modelDir2 != null && !File.Exists(Path.Combine(modelDir2, "model.onnx.data"));
+                    if (isEmbedded)
+                    {
+                        sessionOptions.EnableMemoryPattern = false;
+                    }
+                    sessionOptions.AppendExecutionProvider_CUDA(_options.CudaDeviceId);
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    Console.WriteLine($"[EmbeddingService] 使用 CUDA GPU: {_options.CudaDeviceId} (动态batch: {isEmbedded})");
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[EmbeddingService] CUDA 不可用，回退到 CPU: {ex.Message}");
+                    sessionOptions.AppendExecutionProvider_CPU();
                 }
             }
-            sessionOptions.AppendExecutionProvider_CPU();
+            else
+            {
+                sessionOptions.AppendExecutionProvider_CPU();
+            }
 
-            _session = new InferenceSession(options.ModelPath, sessionOptions);
+            _session = new InferenceSession(modelPath, sessionOptions);
 
-            // 获取维度
+            // 获取输出形状信息
             var outputMeta = _session.OutputMetadata;
-            Dimension = outputMeta.First().Value.Dimensions[^1];
+            var outputInfo = outputMeta.First();
+            var outputShape = outputInfo.Value.Dimensions;
+            Dimension = outputShape[^1];
+            var isPooled = outputShape.Length == 2; // 2D = 已 pooling, 3D = 需要 mean pooling
 
-            Console.WriteLine($"[EmbeddingService] 模型加载成功: {options.ModelName}");
-            Console.WriteLine($"[EmbeddingService] 向量维度: {Dimension}");
+            _options.ModelPath = modelPath;
+            _options.ModelName = modelName;
+
+            Console.WriteLine($"[EmbeddingService] 模型加载成功: {modelName}");
+            Console.WriteLine($"[EmbeddingService] 向量维度: {Dimension}, 输出形状: [{string.Join(", ", outputShape)}] ({(isPooled ? "已内置pooling" : "需要mean pooling")})");
 
             // 加载分词器（优先使用 Microsoft.ML.Tokenizers）
-            _tokenizer = LoadTokenizer(options.ModelPath);
+            _tokenizer = LoadTokenizer(modelPath);
             Console.WriteLine($"[EmbeddingService] 分词器: {_tokenizer.Name}, 词汇表大小: {_tokenizer.VocabSize}");
+
+            // 从声明式配置检测非对称编码支持
+            SupportsAsymmetricEncoding = _options.AsymmetricEncoding != null;
+            if (SupportsAsymmetricEncoding)
+            {
+                Console.WriteLine($"[EmbeddingService] 启用非对称编码支持 (query: \"{_options.AsymmetricEncoding!.QueryPrefix}\" / passage: \"{_options.AsymmetricEncoding.DocumentPrefix}\")");
+            }
+
+            _simulationMode = false;
+
+            // 检测 ONNX 格式：存在 .data 文件为外部格式，否则为嵌入式
+            var modelDir = Path.GetDirectoryName(modelPath);
+            _isEmbeddedFormat = modelDir != null && !File.Exists(Path.Combine(modelDir, "model.onnx.data"));
+            var formatLabel = _isEmbeddedFormat ? "embedded" : "external";
+            Console.WriteLine($"[EmbeddingService] ONNX 格式: {formatLabel}");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[EmbeddingService] 模型加载失败: {ex.Message}");
             Dimension = 384;
             _tokenizer = new FallbackTokenizer();
+            _simulationMode = true;
+            SupportsAsymmetricEncoding = _options.AsymmetricEncoding != null;
         }
     }
 
     /// <summary>
-    /// 加载分词器（优先级：Microsoft.ML.Tokenizers > BERTTokenizers > 自定义实现）
+    /// 重新加载模型
+    /// </summary>
+    public Task<bool> ReloadModelAsync(string modelPath, string modelName)
+    {
+        return Task.Run(() =>
+        {
+            lock (_lock)
+            {
+                try
+                {
+                    Console.WriteLine($"[EmbeddingService] 正在切换模型: {modelName}");
+                    LoadModel(modelPath, modelName);
+                    Console.WriteLine($"[EmbeddingService] 模型切换完成: {modelName}, 维度: {Dimension}");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[EmbeddingService] 模型切换失败: {ex.Message}");
+                    return false;
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// 加载分词器（优先级：自定义 BertTokenizer > Microsoft.ML.Tokenizers > BERTTokenizers）
     /// </summary>
     private static ITextTokenizer LoadTokenizer(string modelPath)
     {
         var modelDir = Path.GetDirectoryName(modelPath) ?? "";
 
-        // 1. 优先尝试 Microsoft.ML.Tokenizers（微软官方，最高性能）
-        var mlTokenizer = MLBertTokenizer.CreateFromDirectory(modelDir);
-        if (mlTokenizer != null)
-        {
-            Console.WriteLine("[EmbeddingService] 使用 Microsoft.ML.Tokenizers（官方高性能模式）");
-            return mlTokenizer;
-        }
-
-        // 2. 尝试 BERTTokenizers（第三方高性能库）
-        var bertTokenizer = BertTokenizerWrapper.CreateFromDirectory(modelDir);
-        if (bertTokenizer != null)
-        {
-            Console.WriteLine("[EmbeddingService] 使用 BERTTokenizers（高性能模式）");
-            return bertTokenizer;
-        }
-
-        // 3. 回退到自定义 BertTokenizer（基于 tokenizer.json）
+        // 1. 优先使用自定义 BertTokenizer（基于 tokenizer.json）
         var tokenizerPath = Path.Combine(modelDir, "tokenizer.json");
         if (File.Exists(tokenizerPath))
         {
-            Console.WriteLine("[EmbeddingService] 使用自定义 BertTokenizer");
+            Console.WriteLine("[EmbeddingService] 使用自定义 BertTokenizer（tokenizer.json）");
             return new BertTokenizer(tokenizerPath);
+        }
+
+        // 2. 回退到 Microsoft.ML.Tokenizers
+        var mlTokenizer = MLBertTokenizer.CreateFromDirectory(modelDir);
+        if (mlTokenizer != null)
+        {
+            Console.WriteLine("[EmbeddingService] 使用 Microsoft.ML.Tokenizers");
+            return mlTokenizer;
+        }
+
+        // 3. 回退到 BERTTokenizers（第三方库，对中文模型可能卡住）
+        var bertTokenizer = BertTokenizerWrapper.CreateFromDirectory(modelDir);
+        if (bertTokenizer != null)
+        {
+            Console.WriteLine("[EmbeddingService] 使用 BERTTokenizers");
+            return bertTokenizer;
         }
 
         // 4. 最后回退到简单分词器
@@ -132,6 +215,15 @@ public class EmbeddingService : IEmbeddingService, IDisposable
     }
 
     /// <summary>
+    /// 按模式编码单个文本（支持非对称编码）
+    /// </summary>
+    public Task<float[]> EncodeAsync(string text, EmbeddingMode mode, CancellationToken cancellationToken = default)
+    {
+        var prefixedText = ApplyModePrefix(text, mode);
+        return EncodeAsync(prefixedText, cancellationToken);
+    }
+
+    /// <summary>
     /// 批量编码
     /// </summary>
     public async Task<float[][]> EncodeBatchAsync(IEnumerable<string> texts, CancellationToken cancellationToken = default)
@@ -139,18 +231,170 @@ public class EmbeddingService : IEmbeddingService, IDisposable
         var textList = texts.ToList();
         if (textList.Count == 0) return Array.Empty<float[]>();
 
-        // 如果模型未加载，返回模拟向量
-        if (_session == null)
+        // CUDA 模式下：外部格式模型逐条推理（ORT CUDA EP 已知限制），
+        // 嵌入式格式模型使用动态 batch 推理
+        if (_options.UseCuda && !_isEmbeddedFormat)
         {
-            return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
+            return await Task.Run(() =>
+            {
+                lock (_lock)
+                {
+                    return textList.Select(text => EncodeSingleInternal(text)).ToArray();
+                }
+            }, cancellationToken);
         }
 
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        lock (_lock)
+        {
+            // 如果模型未加载，返回模拟向量
+            if (_session == null)
+            {
+                Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
+                return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
+            }
 
-        // Tokenize
-        var tokens = _tokenizer.Tokenize(textList, _options.MaxSequenceLength);
-        var tokenizeMs = sw.ElapsedMilliseconds;
-        sw.Restart();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            // Tokenize
+            var tokens = _tokenizer.Tokenize(textList, _options.MaxSequenceLength);
+            var tokenizeMs = sw.ElapsedMilliseconds;
+            sw.Restart();
+
+            // ONNX 推理
+            var inputNames = _session.InputNames;
+            var hasTokenTypeIds = inputNames.Contains("token_type_ids");
+
+            NamedOnnxValue[] inputs = hasTokenTypeIds
+                ? new NamedOnnxValue[3]
+                : new NamedOnnxValue[2];
+
+            inputs[0] = NamedOnnxValue.CreateFromTensor("input_ids", tokens.InputIds);
+            inputs[1] = NamedOnnxValue.CreateFromTensor("attention_mask", tokens.AttentionMask);
+            if (hasTokenTypeIds)
+            {
+                inputs[2] = NamedOnnxValue.CreateFromTensor("token_type_ids", tokens.TokenTypeIds);
+            }
+
+            using var results = _session.Run(inputs);
+            var outputTensor = results.First().AsTensor<float>();
+            var outputShape = outputTensor.Dimensions;
+
+            var inferenceMs = sw.ElapsedMilliseconds;
+            sw.Restart();
+
+            // ONNX 输出可能是:
+            //   2D [batch, dim] — 模型已内置 pooling（如 sentence-transformers 导出）
+            //   3D [batch, seq_len, dim] — 原始 last_hidden_state，需要 mean pooling
+            var batchEmbeddings = new float[textList.Count][];
+            var batchSize = textList.Count;
+
+            if (outputShape.Length == 2)
+            {
+                // 模型已内置 pooling，直接按 batch 维度切片
+                for (int i = 0; i < batchSize; i++)
+                {
+                    batchEmbeddings[i] = new float[Dimension];
+                    for (int j = 0; j < Dimension; j++)
+                    {
+                        batchEmbeddings[i][j] = outputTensor[i, j];
+                    }
+                    Normalize(batchEmbeddings[i]);
+                }
+            }
+            else if (outputShape.Length == 3)
+            {
+                // 原始 last_hidden_state [batch, seq_len, dim] — 需要 mean pooling
+                var seqLen = outputShape[1];
+                // 获取 attention_mask 用于 mean pooling
+                var attentionMask = tokens.AttentionMask;
+
+                for (int i = 0; i < batchSize; i++)
+                {
+                    var embedding = new float[Dimension];
+                    float maskSum = 0;
+
+                    for (int s = 0; s < seqLen; s++)
+                    {
+                        var maskVal = attentionMask[i, s];
+                        if (maskVal == 0) continue;
+                        maskSum += maskVal;
+
+                        for (int d = 0; d < Dimension; d++)
+                        {
+                            embedding[d] += outputTensor[i, s, d] * maskVal;
+                        }
+                    }
+
+                    // 平均 + 归一化
+                    if (maskSum > 0)
+                    {
+                        for (int d = 0; d < Dimension; d++)
+                        {
+                            embedding[d] /= maskSum;
+                        }
+                    }
+                    Normalize(embedding);
+                    batchEmbeddings[i] = embedding;
+                }
+            }
+            else
+            {
+                throw new InvalidOperationException($"不支持的 ONNX 输出维度: {outputShape.Length}D");
+            }
+
+            var postProcessMs = sw.ElapsedMilliseconds;
+
+#if DEBUG
+            if (textList.Count >= 4)
+            {
+                Console.WriteLine($"[EmbeddingService] Batch {textList.Count}: Tokenize={tokenizeMs}ms, Inference={inferenceMs}ms, PostProcess={postProcessMs}ms");
+            }
+#endif
+
+            return batchEmbeddings;
+        }
+    }
+
+    /// <summary>
+    /// 按模式批量编码（支持非对称编码）
+    /// </summary>
+    public Task<float[][]> EncodeBatchAsync(IEnumerable<string> texts, EmbeddingMode mode, CancellationToken cancellationToken = default)
+    {
+        var prefixedTexts = texts.Select(t => ApplyModePrefix(t, mode));
+        return EncodeBatchAsync(prefixedTexts, cancellationToken);
+    }
+
+    /// <summary>
+    /// 应用编码模式前缀（BGE 非对称编码）
+    /// </summary>
+    private string ApplyModePrefix(string text, EmbeddingMode mode)
+    {
+        if (mode == EmbeddingMode.Symmetric || _options.AsymmetricEncoding == null)
+        {
+            return text;
+        }
+
+        var config = _options.AsymmetricEncoding;
+        return mode switch
+        {
+            EmbeddingMode.Query => $"{config.QueryPrefix}{text}",
+            EmbeddingMode.Document => $"{config.DocumentPrefix}{text}",
+            _ => text
+        };
+    }
+
+    /// <summary>
+    /// 单条文本推理（CUDA 模式使用，避免动态 batch size 问题）
+    /// </summary>
+    private float[] EncodeSingleInternal(string text)
+    {
+        if (_session == null || _simulationMode)
+        {
+            return CreateRandomVector(Dimension);
+        }
+
+        // Tokenize 单条文本
+        var tokens = _tokenizer.Tokenize(new List<string> { text }, _options.MaxSequenceLength);
 
         // ONNX 推理
         var inputNames = _session.InputNames;
@@ -168,30 +412,54 @@ public class EmbeddingService : IEmbeddingService, IDisposable
         }
 
         using var results = _session.Run(inputs);
-        var embeddings = results.First().AsEnumerable<float>().ToArray();
+        var outputTensor = results.First().AsTensor<float>();
+        var outputShape = outputTensor.Dimensions;
 
-        var inferenceMs = sw.ElapsedMilliseconds;
-        sw.Restart();
+        var embedding = new float[Dimension];
 
-        // 重塑为 [batch, dimension]
-        var batchEmbeddings = new float[textList.Count][];
-        for (int i = 0; i < textList.Count; i++)
+        if (outputShape.Length == 2)
         {
-            batchEmbeddings[i] = new float[Dimension];
-            Array.Copy(embeddings, i * Dimension, batchEmbeddings[i], 0, Dimension);
-            Normalize(batchEmbeddings[i]);
+            // 2D [1, dim] - 已内置 pooling
+            for (int j = 0; j < Dimension; j++)
+            {
+                embedding[j] = outputTensor[0, j];
+            }
+            Normalize(embedding);
+        }
+        else if (outputShape.Length == 3)
+        {
+            // 3D [1, seq_len, dim] - 需要 mean pooling
+            var seqLen = outputShape[1];
+            var attentionMask = tokens.AttentionMask;
+            float maskSum = 0;
+
+            for (int s = 0; s < seqLen; s++)
+            {
+                var maskVal = attentionMask[0, s];
+                if (maskVal == 0) continue;
+                maskSum += maskVal;
+
+                for (int d = 0; d < Dimension; d++)
+                {
+                    embedding[d] += outputTensor[0, s, d] * maskVal;
+                }
+            }
+
+            if (maskSum > 0)
+            {
+                for (int d = 0; d < Dimension; d++)
+                {
+                    embedding[d] /= maskSum;
+                }
+            }
+            Normalize(embedding);
+        }
+        else
+        {
+            throw new InvalidOperationException($"不支持的 ONNX 输出维度: {outputShape.Length}D");
         }
 
-        var postProcessMs = sw.ElapsedMilliseconds;
-
-#if DEBUG
-        if (textList.Count >= 4)
-        {
-            Console.WriteLine($"[EmbeddingService] Batch {textList.Count}: Tokenize={tokenizeMs}ms, Inference={inferenceMs}ms, PostProcess={postProcessMs}ms");
-        }
-#endif
-
-        return await Task.FromResult(batchEmbeddings);
+        return embedding;
     }
 
     /// <summary>
@@ -322,4 +590,5 @@ public class EmbeddingOptions
     public string? CudaLibraryPath { get; set; }
     public int MaxSequenceLength { get; set; } = 512;
     public int BatchSize { get; set; } = 32;
+    public AsymmetricEncodingConfig? AsymmetricEncoding { get; set; }
 }

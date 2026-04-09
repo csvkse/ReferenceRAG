@@ -27,9 +27,11 @@ public class FileChangeDetector : IFileChangeDetector, IDisposable
         _debounceMs = debounceMs;
         _debounceTimer = new Timer(ProcessPendingChanges, null, debounceMs, debounceMs);
 
-        if (Directory.Exists(watchPath))
+        // 转换路径格式（WSL 环境下将 Windows 路径转为 /mnt/x/ 格式）
+        var normalizedPath = PathUtility.NormalizePath(watchPath);
+        if (Directory.Exists(normalizedPath))
         {
-            _watcher = new FileSystemWatcher(watchPath)
+            _watcher = new FileSystemWatcher(normalizedPath)
             {
                 Filter = "*.md",
                 IncludeSubdirectories = true,
@@ -43,6 +45,10 @@ public class FileChangeDetector : IFileChangeDetector, IDisposable
             _watcher.Error += OnWatcherError;
 
             _watcher.EnableRaisingEvents = true;
+        }
+        else
+        {
+            Console.WriteLine($"[FileChangeDetector] 目录不存在或无法访问: {watchPath} (normalized: {normalizedPath})");
         }
     }
 
@@ -61,11 +67,12 @@ public class FileChangeDetector : IFileChangeDetector, IDisposable
     {
         await Task.CompletedTask; // 避免编译器警告
         var changes = new List<FileChangeEventArgs>();
-        
-        if (!Directory.Exists(directory))
+
+        var normalizedPath = PathUtility.NormalizePath(directory);
+        if (!Directory.Exists(normalizedPath))
             return changes;
 
-        var files = Directory.EnumerateFiles(directory, "*.md", SearchOption.AllDirectories);
+        var files = Directory.EnumerateFiles(normalizedPath, "*.md", SearchOption.AllDirectories);
         foreach (var file in files)
         {
             var lastWrite = File.GetLastWriteTime(file);
@@ -111,10 +118,11 @@ public class FileChangeDetector : IFileChangeDetector, IDisposable
     /// </summary>
     public IEnumerable<string> ScanMarkdownFiles(string directory)
     {
-        if (!Directory.Exists(directory))
+        var normalizedPath = PathUtility.NormalizePath(directory);
+        if (!Directory.Exists(normalizedPath))
             return Enumerable.Empty<string>();
 
-        return Directory.EnumerateFiles(directory, "*.md", SearchOption.AllDirectories);
+        return Directory.EnumerateFiles(normalizedPath, "*.md", SearchOption.AllDirectories);
     }
 
     /// <summary>

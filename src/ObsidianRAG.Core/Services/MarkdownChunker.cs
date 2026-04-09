@@ -1,5 +1,6 @@
 using Markdig;
 using Markdig.Syntax;
+using ObsidianRAG.Core.Helpers;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
 
@@ -10,6 +11,7 @@ namespace ObsidianRAG.Core.Services;
 /// </summary>
 public class MarkdownChunker : IMarkdownChunker
 {
+    private const int ShortContentThreshold = 200;
     private readonly ITokenizer? _tokenizer;
     private ChunkingOptions _options;
 
@@ -49,7 +51,7 @@ public class MarkdownChunker : IMarkdownChunker
 
         foreach (var section in sections)
         {
-            var sectionTokens = _tokenizer?.CountTokens(section.Content) ?? EstimateTokens(section.Content);
+            var sectionTokens = _tokenizer?.CountTokens(section.Content) ?? TokenEstimator.EstimateTokens(section.Content);
 
             if (sectionTokens <= _options.MaxTokens)
             {
@@ -178,7 +180,7 @@ public class MarkdownChunker : IMarkdownChunker
 
         foreach (var para in paragraphs)
         {
-            var paraTokens = _tokenizer?.CountTokens(para.Content) ?? EstimateTokens(para.Content);
+            var paraTokens = _tokenizer?.CountTokens(para.Content) ?? TokenEstimator.EstimateTokens(para.Content);
 
             // 长段落处理
             if (paraTokens > _options.MaxTokens)
@@ -293,7 +295,7 @@ public class MarkdownChunker : IMarkdownChunker
 
         foreach (var sentence in sentences)
         {
-            var sentenceTokens = _tokenizer?.CountTokens(sentence) ?? EstimateTokens(sentence);
+            var sentenceTokens = _tokenizer?.CountTokens(sentence) ?? TokenEstimator.EstimateTokens(sentence);
 
             if (bufferTokens + sentenceTokens > _options.MaxTokens && buffer.Count > 0)
             {
@@ -362,7 +364,7 @@ public class MarkdownChunker : IMarkdownChunker
             FileId = fileId,
             ChunkIndex = chunkIndex,
             Content = content,
-            TokenCount = _tokenizer?.CountTokens(content) ?? EstimateTokens(content),
+            TokenCount = _tokenizer?.CountTokens(content) ?? TokenEstimator.EstimateTokens(content),
             StartLine = startLine,
             EndLine = endLine,
             StartColumn = 1,
@@ -417,7 +419,7 @@ public class MarkdownChunker : IMarkdownChunker
         };
 
         // 内容越短，信息密度越高
-        if (content.Length < 200) weight *= 1.2f;
+        if (content.Length < ShortContentThreshold) weight *= 1.2f;
 
         return weight;
     }
@@ -456,17 +458,6 @@ public class MarkdownChunker : IMarkdownChunker
         }
 
         return sentences;
-    }
-
-    /// <summary>
-    /// 估算 token 数量
-    /// </summary>
-    private int EstimateTokens(string text)
-    {
-        // 简单估算：中文约 1.5 字符/token，英文约 4 字符/token
-        var chineseCount = text.Count(c => c > 0x4E00 && c < 0x9FFF);
-        var otherCount = text.Length - chineseCount;
-        return (int)(chineseCount / 1.5 + otherCount / 4);
     }
 
     /// <summary>

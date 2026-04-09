@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ObsidianRAG.Core.Helpers;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
 
@@ -164,7 +165,7 @@ public class JsonVectorStore : IVectorStore, IDisposable
 
         foreach (var (chunkId, vector) in _vectors)
         {
-            var score = CosineSimilarity(queryVector, vector.Vector);
+            var score = MathHelper.CosineSimilarity(queryVector, vector.Vector);
             results.Add((chunkId, score));
         }
 
@@ -190,7 +191,7 @@ public class JsonVectorStore : IVectorStore, IDisposable
             var chunk = _chunks.GetValueOrDefault(chunkId);
             if (chunk == null || chunk.AggregateType != aggregateType) continue;
 
-            var score = CosineSimilarity(queryVector, vector.Vector);
+            var score = MathHelper.CosineSimilarity(queryVector, vector.Vector);
             results.Add((chunkId, score));
         }
 
@@ -216,7 +217,7 @@ public class JsonVectorStore : IVectorStore, IDisposable
         {
             if (!idSet.Contains(chunkId)) continue;
 
-            var score = CosineSimilarity(queryVector, vector.Vector);
+            var score = MathHelper.CosineSimilarity(queryVector, vector.Vector);
             results.Add((chunkId, score));
         }
 
@@ -256,6 +257,51 @@ public class JsonVectorStore : IVectorStore, IDisposable
         await SaveDataAsync(cancellationToken);
     }
 
+    // ==================== 统计与管理操作 ====================
+
+    public Task<List<VectorStats>> GetVectorStatsAsync(CancellationToken cancellationToken = default)
+    {
+        var stats = _vectors.Values
+            .GroupBy(v => v.ModelName)
+            .Select(g => new VectorStats
+            {
+                ModelName = g.Key,
+                Dimension = g.First().Dimension,
+                VectorCount = g.Count(),
+                StorageBytes = g.Sum(v => v.Vector.Length * sizeof(float)),
+                ModelExists = true,
+                LastUpdated = g.Max(v => v.CreatedAt)
+            })
+            .ToList();
+
+        return Task.FromResult(stats);
+    }
+
+    public async Task<int> DeleteVectorsByModelAsync(string modelName, CancellationToken cancellationToken = default)
+    {
+        var toRemove = _vectors.Values.Where(v => v.ModelName == modelName).ToList();
+        foreach (var v in toRemove)
+        {
+            _vectors.Remove(v.ChunkId);
+        }
+        await SaveDataAsync(cancellationToken);
+        return toRemove.Count;
+    }
+
+    public async Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default)
+    {
+        var modelSet = existingModelNames.ToHashSet();
+        var toRemove = _vectors.Values
+            .Where(v => !string.IsNullOrEmpty(v.ModelName) && !modelSet.Contains(v.ModelName))
+            .ToList();
+        foreach (var v in toRemove)
+        {
+            _vectors.Remove(v.ChunkId);
+        }
+        await SaveDataAsync(cancellationToken);
+        return toRemove.Count;
+    }
+
     // ==================== 辅助方法 ====================
 
     private List<SearchResult> BuildSearchResults(List<(string ChunkId, float Score)> topResults)
@@ -289,22 +335,6 @@ public class JsonVectorStore : IVectorStore, IDisposable
         }
 
         return searchResults;
-    }
-
-    private float CosineSimilarity(float[] a, float[] b)
-    {
-        if (a.Length != b.Length) return 0;
-
-        float dot = 0, normA = 0, normB = 0;
-        for (int i = 0; i < a.Length; i++)
-        {
-            dot += a[i] * b[i];
-            normA += a[i] * a[i];
-            normB += b[i] * b[i];
-        }
-
-        var denominator = MathF.Sqrt(normA) * MathF.Sqrt(normB);
-        return denominator < 1e-10f ? 0 : dot / denominator;
     }
 
     private async Task LoadDataAsync()

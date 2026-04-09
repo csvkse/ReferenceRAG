@@ -14,15 +14,18 @@ public class DashboardController : ControllerBase
 {
     private readonly IVectorStore _vectorStore;
     private readonly ConfigManager _configManager;
+    private readonly QueryStatsService _statsService;
     private readonly ILogger<DashboardController> _logger;
 
     public DashboardController(
         IVectorStore vectorStore,
         ConfigManager configManager,
+        QueryStatsService statsService,
         ILogger<DashboardController> logger)
     {
         _vectorStore = vectorStore;
         _configManager = configManager;
+        _statsService = statsService;
         _logger = logger;
     }
 
@@ -36,13 +39,14 @@ public class DashboardController : ControllerBase
         var fileList = files.ToList();
 
         var config = _configManager.Load();
+        var avgQueryTime = await _statsService.GetAverageQueryTimeAsync();
 
         return Ok(new DashboardStats
         {
             TotalFiles = fileList.Count,
             TotalChunks = fileList.Sum(f => f.ChunkCount),
             SourceCount = config.Sources.Count,
-            AvgQueryTime = 25 // TODO: 从实际查询统计获取
+            AvgQueryTime = avgQueryTime
         });
     }
 

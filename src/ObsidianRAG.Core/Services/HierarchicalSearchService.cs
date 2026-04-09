@@ -1,3 +1,4 @@
+using ObsidianRAG.Core.Helpers;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
 
@@ -12,17 +13,20 @@ public class HierarchicalSearchService
     private readonly IEmbeddingService _embeddingService;
     private readonly ITextEnhancer _textEnhancer;
     private readonly QueryOptimizer _queryOptimizer;
+    private readonly ObsidianLinkGenerator _linkGenerator;
 
     public HierarchicalSearchService(
         IVectorStore vectorStore,
         IEmbeddingService embeddingService,
         ITextEnhancer textEnhancer,
-        QueryOptimizer queryOptimizer)
+        QueryOptimizer queryOptimizer,
+        ObsidianLinkGenerator linkGenerator)
     {
         _vectorStore = vectorStore;
         _embeddingService = embeddingService;
         _textEnhancer = textEnhancer;
         _queryOptimizer = queryOptimizer;
+        _linkGenerator = linkGenerator;
     }
 
     /// <summary>
@@ -35,7 +39,7 @@ public class HierarchicalSearchService
         var startTime = DateTime.UtcNow;
 
         // 1. 编码查询向量
-        var queryVector = await _embeddingService.EncodeAsync(request.Query, cancellationToken);
+        var queryVector = await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
 
         // 2. 层级检索
         var results = await HierarchicalSearchAsync(queryVector, request, cancellationToken);
@@ -64,13 +68,13 @@ public class HierarchicalSearchService
                 StartLine = r.StartLine,
                 EndLine = r.EndLine,
                 HeadingPath = r.HeadingPath,
-                ObsidianLink = BuildObsidianLink(r.FilePath, r.StartLine, r.EndLine)
+                ObsidianLink = _linkGenerator.GenerateLink(r.FilePath, r.StartLine, r.EndLine)
             }).ToList(),
             Stats = new SearchStats
             {
                 TotalMatches = optimizedResults.Count,
                 DurationMs = (long)(DateTime.UtcNow - startTime).TotalMilliseconds,
-                EstimatedTokens = EstimateTokens(context)
+                EstimatedTokens = TokenEstimator.EstimateTokens(context)
             },
             HasMore = optimizedResults.Count >= request.TopK
         };
@@ -219,30 +223,6 @@ public class HierarchicalSearchService
     }
 
     /// <summary>
-    /// 构建 Obsidian 链接
-    /// </summary>
-    private string BuildObsidianLink(string filePath, int startLine, int endLine)
-    {
-        var fileName = Path.GetFileNameWithoutExtension(filePath);
-        if (startLine == endLine)
-        {
-            return $"[[{fileName}#L{startLine}]]";
-        }
-        return $"[[{fileName}#L{startLine}-L{endLine}]]";
-    }
-
-    /// <summary>
-    /// 估算 token 数
-    /// </summary>
-    private int EstimateTokens(string text)
-    {
-        // 简单估算
-        var chineseCount = text.Count(c => c > 0x4E00 && c < 0x9FFF);
-        var otherCount = text.Length - chineseCount;
-        return (int)(chineseCount / 1.5 + otherCount / 4);
-    }
-
-    /// <summary>
     /// 生成建议
     /// </summary>
     private string? GenerateSuggestion(AIQueryResponse response)
@@ -300,7 +280,7 @@ public class HierarchicalSearchService
                     StartLine = adjChunk.StartLine,
                     EndLine = adjChunk.EndLine,
                     HeadingPath = adjChunk.HeadingPath,
-                    ObsidianLink = BuildObsidianLink(file.Path, adjChunk.StartLine, adjChunk.EndLine)
+                    ObsidianLink = _linkGenerator.GenerateLink(file.Path, adjChunk.StartLine, adjChunk.EndLine)
                 });
             }
         }

@@ -8,6 +8,9 @@ namespace ObsidianRAG.Core.Services;
 /// </summary>
 public class VectorAggregator
 {
+    private const int MinTokenWeightThreshold = 100;
+    private const int MaxTokenWeightThreshold = 500;
+
     private readonly IEmbeddingService _embeddingService;
     private readonly IVectorStore _vectorStore;
 
@@ -187,8 +190,8 @@ public class VectorAggregator
         };
 
         // 内容长度权重（短内容信息密度高）
-        if (chunk.TokenCount < 100) weight *= 1.2f;
-        if (chunk.TokenCount > 500) weight *= 0.8f;
+        if (chunk.TokenCount < MinTokenWeightThreshold) weight *= 1.2f;
+        if (chunk.TokenCount > MaxTokenWeightThreshold) weight *= 0.8f;
 
         // 预设权重
         weight *= chunk.Weight;

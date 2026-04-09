@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using ObsidianRAG.Core.Helpers;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
 using Microsoft.Extensions.Logging;
@@ -13,18 +14,21 @@ public class SearchService : ISearchService
     private readonly IVectorStore _vectorStore;
     private readonly IEmbeddingService _embeddingService;
     private readonly ITextEnhancer _textEnhancer;
+    private readonly HybridSearchService? _hybridSearchService;
     private readonly ILogger<SearchService> _logger;
 
     public SearchService(
         IVectorStore vectorStore,
         IEmbeddingService embeddingService,
         ITextEnhancer textEnhancer,
-        ILogger<SearchService> logger)
+        ILogger<SearchService> logger,
+        HybridSearchService? hybridSearchService = null)
     {
         _vectorStore = vectorStore;
         _embeddingService = embeddingService;
         _textEnhancer = textEnhancer;
         _logger = logger;
+        _hybridSearchService = hybridSearchService;
     }
 
     /// <summary>
@@ -34,33 +38,52 @@ public class SearchService : ISearchService
     {
         var sw = Stopwatch.StartNew();
 
-        // 1. 查询向量化
-        var queryVector = await _embeddingService.EncodeAsync(request.Query, cancellationToken);
+        List<SearchResult> topResults;
 
-        // 2. 向量检索
-        var results = await _vectorStore.SearchAsync(queryVector, request.TopK * 2, cancellationToken);
-
-        // 3. 应用源过滤
-        if (request.Sources?.Count > 0)
+        // 混合搜索模式
+        if (request.Mode == QueryMode.Hybrid && _hybridSearchService != null)
         {
-            results = results.Where(r => 
-                request.Sources.Contains(r.Source) || 
-                request.Sources.Any(s => r.FilePath.Contains(s)));
+            var hybridResults = await _hybridSearchService.SearchAsync(request.Query, request.TopK, cancellationToken);
+            topResults = hybridResults.Select(h => new SearchResult
+            {
+                ChunkId = h.ChunkId,
+                FileId = h.FileId,
+                FilePath = h.FilePath,
+                Title = h.Title,
+                Content = h.Content,
+                Score = h.Score,
+                StartLine = h.StartLine,
+                EndLine = h.EndLine,
+                HeadingPath = h.HeadingPath
+            }).ToList();
+        }
+        else
+        {
+            // 标准向量搜索
+            var queryVector = await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
+            var results = await _vectorStore.SearchAsync(queryVector, request.TopK * 2, cancellationToken);
+
+            // 应用源过滤
+            if (request.Sources?.Count > 0)
+            {
+                results = results.Where(r =>
+                    request.Sources.Contains(r.Source) ||
+                    request.Sources.Any(s => r.FilePath.Contains(s)));
+            }
+
+            // 应用其他过滤条件
+            var filteredResults = ApplyFilters(results, request.Filters);
+
+            // 流行度去偏
+            if (request.Options?.DebiasPopularity ?? true)
+            {
+                filteredResults = DebiasByPopularity(filteredResults);
+            }
+
+            topResults = filteredResults.Take(request.TopK).ToList();
         }
 
-        // 4. 应用其他过滤条件
-        var filteredResults = ApplyFilters(results, request.Filters);
-
-        // 5. 流行度去偏
-        if (request.Options?.DebiasPopularity ?? true)
-        {
-            filteredResults = DebiasByPopularity(filteredResults);
-        }
-
-        // 6. 取 Top-K
-        var topResults = filteredResults.Take(request.TopK).ToList();
-
-        // 7. 构建响应
+        // 构建响应
         var chunks = BuildChunkResults(topResults);
         var files = BuildFileSummaries(topResults);
         var context = BuildContext(chunks, request.MaxTokens);
@@ -80,11 +103,11 @@ public class SearchService : ISearchService
             {
                 TotalMatches = topResults.Count,
                 DurationMs = sw.ElapsedMilliseconds,
-                EstimatedTokens = EstimateTokens(context)
+                EstimatedTokens = TokenEstimator.EstimateTokens(context)
             },
-            HasMore = filteredResults.Count() > request.TopK,
-            Suggestion = filteredResults.Count() > request.TopK 
-                ? "如需更多结果，可使用 drill-down 接口深入查询" 
+            HasMore = topResults.Count >= request.TopK,
+            Suggestion = topResults.Count >= request.TopK
+                ? "如需更多结果，可使用 drill-down 接口深入查询"
                 : null
         };
     }
@@ -204,7 +227,7 @@ public class SearchService : ISearchService
 
         foreach (var chunk in chunks)
         {
-            var chunkTokens = EstimateTokens(chunk.Content);
+            var chunkTokens = TokenEstimator.EstimateTokens(chunk.Content);
             if (currentTokens + chunkTokens > maxTokens) break;
 
             context.AppendLine($"## {chunk.Title ?? Path.GetFileNameWithoutExtension(chunk.FilePath)}");
@@ -267,14 +290,4 @@ public class SearchService : ISearchService
             .ToList();
     }
 
-    /// <summary>
-    /// 估算 token 数量
-    /// </summary>
-    private int EstimateTokens(string text)
-    {
-        // 简单估算
-        var chineseCount = text.Count(c => c > 0x4E00 && c < 0x9FFF);
-        var otherCount = text.Length - chineseCount;
-        return (int)(chineseCount / 1.5 + otherCount / 4);
-    }
 }

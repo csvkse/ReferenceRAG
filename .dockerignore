@@ -1,0 +1,14 @@
+bin/
+obj/
+.git/
+.gitignore
+.vs/
+.vscode/
+data/
+models/
+*.user
+*.suo
+resource/
+docs/
+tests/
+*.md

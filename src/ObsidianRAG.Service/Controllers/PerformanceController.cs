@@ -56,7 +56,8 @@ public class PerformanceController : ControllerBase
         {
             // 1. 生成测试文本
             var sw = Stopwatch.StartNew();
-            var text = GenerateTestText(request.TextLength, request.IncludeCodeBlocks, request.IncludeHeadings);
+            var textLength = Math.Min(request.TextLength, 500000);
+            var text = GenerateTestText(textLength, request.IncludeCodeBlocks, request.IncludeHeadings);
             sw.Stop();
             result.TextGenerationMs = sw.ElapsedMilliseconds;
 
@@ -105,7 +106,7 @@ public class PerformanceController : ControllerBase
             var batchResults = new ConcurrentBag<(int Index, float[][] Vectors)>();
             Parallel.For(0, batches.Count, parallelOptions, i =>
             {
-                var batchVectors = _embeddingService.EncodeBatchAsync(batches[i]).GetAwaiter().GetResult();
+                var batchVectors = _embeddingService.EncodeBatchAsync(batches[i], EmbeddingMode.Document).GetAwaiter().GetResult();
                 batchResults.Add((i, batchVectors));
             });
 
@@ -165,7 +166,10 @@ public class PerformanceController : ControllerBase
     [HttpGet("quick-test")]
     public async Task<ActionResult<QuickTestResult>> QuickTest([FromQuery] int textLength = 10000)
     {
-        var result = new QuickTestResult { TextLength = textLength };
+        if (textLength > 500000)
+            return BadRequest(new { error = "textLength 不能超过 500000" });
+
+        var result = new QuickTestResult { TextLength = Math.Min(textLength, 500000) };
 
         try
         {
@@ -178,7 +182,7 @@ public class PerformanceController : ControllerBase
             result.ChunkCount = chunks.Count;
 
             sw.Restart();
-            var vectors = await _embeddingService.EncodeBatchAsync(chunks.Select(c => c.Content).Take(5).ToList());
+            var vectors = await _embeddingService.EncodeBatchAsync(chunks.Select(c => c.Content).Take(5).ToList(), EmbeddingMode.Document);
             sw.Stop();
             result.SampleEmbeddingTimeMs = sw.ElapsedMilliseconds;
 
@@ -188,14 +192,15 @@ public class PerformanceController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { error = ex.Message });
+            _logger.LogError(ex, "Batch optimization test failed");
+            return StatusCode(500, new { error = "测试执行失败，请查看服务日志" });
         }
     }
 
     /// <summary>
     /// 批量大小优化测试
     /// </summary>
-    [HttpPost("batch-optimization")]
+    [HttpPost("batch-sizes")]
     public async Task<ActionResult<BatchOptimizationResult>> TestBatchSizes([FromBody] BatchOptimizationRequest request)
     {
         var text = GenerateTestText(request.TextLength, false, false);
@@ -215,7 +220,7 @@ public class PerformanceController : ControllerBase
             foreach (var batch in batches.Take(3)) // 只测试前3批
             {
                 var sw = Stopwatch.StartNew();
-                await _embeddingService.EncodeBatchAsync(batch);
+                await _embeddingService.EncodeBatchAsync(batch, EmbeddingMode.Document);
                 times.Add(sw.ElapsedMilliseconds);
             }
 
@@ -242,6 +247,15 @@ public class PerformanceController : ControllerBase
     [HttpGet("memory-test")]
     public ActionResult<MemoryTestResult> MemoryTest([FromQuery] int vectorCount = 1000, [FromQuery] int dimension = 512)
     {
+        // Input validation to prevent DoS via excessive memory allocation
+        if (vectorCount < 1 || vectorCount > 10000)
+        {
+            return BadRequest(new { error = "vectorCount 必须在 1-10000 之间" });
+        }
+        if (dimension < 1 || dimension > 2048)
+        {
+            return BadRequest(new { error = "dimension 必须在 1-2048 之间" });
+        }
         var sw = Stopwatch.StartNew();
 
         // 分配内存
@@ -353,7 +367,7 @@ public class PerformanceController : ControllerBase
 public class BenchmarkRequest
 {
     /// <summary>
-    /// 文本长度（字符数）
+    /// 文本长度（字符数），最大 500000
     /// </summary>
     public int TextLength { get; set; } = 10000;
 

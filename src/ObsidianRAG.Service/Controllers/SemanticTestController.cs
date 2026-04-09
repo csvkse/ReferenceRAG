@@ -1,7 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
+using ObsidianRAG.Core.Helpers;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Services;
+using ObsidianRAG.Core.Models;
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace ObsidianRAG.Service.Controllers;
 
@@ -16,6 +19,7 @@ public class SemanticTestController : ControllerBase
     private readonly ITokenizer _tokenizer;
     private readonly TestRecordStore _recordStore;
     private readonly ILogger<SemanticTestController> _logger;
+    private readonly string _testSuitesPath;
 
     public SemanticTestController(
         IEmbeddingService embeddingService,
@@ -27,6 +31,7 @@ public class SemanticTestController : ControllerBase
         _tokenizer = tokenizer;
         _recordStore = recordStore;
         _logger = logger;
+        _testSuitesPath = Path.Combine(Environment.CurrentDirectory, "data", "test-suites");
     }
 
     /// <summary>
@@ -46,22 +51,26 @@ public class SemanticTestController : ControllerBase
         {
             var sw = Stopwatch.StartNew();
 
-            // 生成查询向量
-            var queryVector = await _embeddingService.EncodeAsync(request.Query);
+            // 分离编码：query 用 Query 模式，candidates 用 Document 模式（支持非对称编码模型）
+            var queryVectors = await _embeddingService.EncodeBatchAsync(
+                new[] { request.Query }, EmbeddingMode.Query);
+            var queryVector = queryVectors[0];
+
+            var candidateTexts = request.Candidates.Select(c => c.Text).ToArray();
+            var candidateVectors = await _embeddingService.EncodeBatchAsync(
+                candidateTexts, EmbeddingMode.Document);
             result.QueryEmbeddingMs = sw.ElapsedMilliseconds;
             result.QueryTokenCount = _tokenizer.CountTokens(request.Query);
 
             // 测试每个候选文本
             var candidateResults = new List<CandidateResult>();
-            var totalEmbeddingMs = 0L;
 
-            foreach (var candidate in request.Candidates)
+            for (int i = 0; i < request.Candidates.Count; i++)
             {
-                sw.Restart();
-                var candidateVector = await _embeddingService.EncodeAsync(candidate.Text);
-                totalEmbeddingMs += sw.ElapsedMilliseconds;
+                var candidate = request.Candidates[i];
+                var candidateVector = candidateVectors[i];
 
-                var similarity = CosineSimilarity(queryVector, candidateVector);
+                var similarity = MathHelper.CosineSimilarity(queryVector, candidateVector);
                 var expectedScore = candidate.ExpectedSimilarity;
 
                 candidateResults.Add(new CandidateResult
@@ -75,8 +84,8 @@ public class SemanticTestController : ControllerBase
             }
 
             result.Candidates = candidateResults;
-            result.TotalEmbeddingMs = totalEmbeddingMs;
-            result.AvgEmbeddingMs = (double)totalEmbeddingMs / request.Candidates.Count;
+            result.TotalEmbeddingMs = sw.ElapsedMilliseconds;
+            result.AvgEmbeddingMs = (double)sw.ElapsedMilliseconds / (request.Candidates.Count + 1);
 
             // 计算准确度指标
             result.MeanAbsoluteError = candidateResults.Average(c => c.Deviation);
@@ -124,7 +133,7 @@ public class SemanticTestController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Short text test failed");
-            return StatusCode(500, new { error = ex.Message });
+            return StatusCode(500, new { error = "语义测试执行失败，请查看服务日志" });
         }
     }
 
@@ -145,22 +154,26 @@ public class SemanticTestController : ControllerBase
         {
             var sw = Stopwatch.StartNew();
 
-            // 1. 生成查询向量
-            var queryVector = await _embeddingService.EncodeAsync(request.Query);
+            // 分离编码：query 用 Query 模式，passages 用 Document 模式（支持非对称编码模型）
+            var queryVectors = await _embeddingService.EncodeBatchAsync(
+                new[] { request.Query }, EmbeddingMode.Query);
+            var queryVector = queryVectors[0];
+
+            var passageTexts = request.Passages.Select(p => p.Text).ToArray();
+            var passageVectors = await _embeddingService.EncodeBatchAsync(
+                passageTexts, EmbeddingMode.Document);
             result.QueryEmbeddingMs = sw.ElapsedMilliseconds;
             result.QueryTokenCount = _tokenizer.CountTokens(request.Query);
 
             // 2. 处理长文本段落
             var passageResults = new List<PassageResult>();
-            var embeddingTimes = new List<long>();
 
-            foreach (var passage in request.Passages)
+            for (int i = 0; i < request.Passages.Count; i++)
             {
-                sw.Restart();
-                var passageVector = await _embeddingService.EncodeAsync(passage.Text);
-                embeddingTimes.Add(sw.ElapsedMilliseconds);
+                var passage = request.Passages[i];
+                var passageVector = passageVectors[i];
 
-                var similarity = CosineSimilarity(queryVector, passageVector);
+                var similarity = MathHelper.CosineSimilarity(queryVector, passageVector);
 
                 passageResults.Add(new PassageResult
                 {
@@ -174,8 +187,8 @@ public class SemanticTestController : ControllerBase
             }
 
             result.Passages = passageResults;
-            result.TotalEmbeddingMs = embeddingTimes.Sum();
-            result.AvgEmbeddingMs = embeddingTimes.Average();
+            result.TotalEmbeddingMs = sw.ElapsedMilliseconds;
+            result.AvgEmbeddingMs = (double)sw.ElapsedMilliseconds / (request.Passages.Count + 1);
 
             // 3. 计算检索指标
             var relevantIds = request.Passages
@@ -240,7 +253,7 @@ public class SemanticTestController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Long text test failed");
-            return StatusCode(500, new { error = ex.Message });
+            return StatusCode(500, new { error = "长文本测试执行失败，请查看服务日志" });
         }
     }
 
@@ -372,22 +385,6 @@ public class SemanticTestController : ControllerBase
 
     // ==================== 辅助方法 ====================
 
-    private float CosineSimilarity(float[] a, float[] b)
-    {
-        if (a.Length != b.Length) return 0;
-
-        float dot = 0, normA = 0, normB = 0;
-        for (int i = 0; i < a.Length; i++)
-        {
-            dot += a[i] * b[i];
-            normA += a[i] * a[i];
-            normB += b[i] * b[i];
-        }
-
-        var denominator = MathF.Sqrt(normA) * MathF.Sqrt(normB);
-        return denominator < 1e-10f ? 0 : dot / denominator;
-    }
-
     private double CalculateCorrelation(List<double> expected, List<double> actual)
     {
         if (expected.Count != actual.Count || expected.Count < 2) return 0;
@@ -438,6 +435,47 @@ public class SemanticTestController : ControllerBase
 
     private PresetSuite? GetPresetSuite(string name)
     {
+        // Path traversal prevention: reject names with path separators or parent references
+        if (name.Contains("..") || name.Contains('/') || name.Contains('\\') || name.Contains(Path.DirectorySeparatorChar))
+        {
+            return null;
+        }
+
+        // 优先从文件加载
+        var filePath = Path.Combine(_testSuitesPath, $"{name}.json");
+        if (System.IO.File.Exists(filePath))
+        {
+            try
+            {
+                var json = System.IO.File.ReadAllText(filePath);
+                var suite = JsonSerializer.Deserialize<PresetSuiteFile>(json, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+                if (suite != null)
+                {
+                    return new PresetSuite
+                    {
+                        Type = suite.Type,
+                        ShortTextRequest = new ShortTextTestRequest
+                        {
+                            Query = suite.Query,
+                            Candidates = suite.Candidates?.Select(c => new CandidateText
+                            {
+                                Text = c.Text,
+                                ExpectedSimilarity = c.ExpectedSimilarity
+                            }).ToList() ?? new List<CandidateText>()
+                        }
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to load preset suite from file: {File}", filePath);
+            }
+        }
+
+        // 内置默认测试集（当文件不存在时使用）
         return name switch
         {
             "chinese-similarity" => new PresetSuite
@@ -491,6 +529,24 @@ public class SemanticTestController : ControllerBase
             _ => null
         };
     }
+}
+
+/// <summary>
+/// 预设测试集文件格式
+/// </summary>
+public class PresetSuiteFile
+{
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string Type { get; set; } = "";
+    public string Query { get; set; } = "";
+    public List<CandidateTextFile>? Candidates { get; set; }
+}
+
+public class CandidateTextFile
+{
+    public string Text { get; set; } = "";
+    public double ExpectedSimilarity { get; set; }
 }
 
 // ==================== 请求/响应模型 ====================

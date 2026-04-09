@@ -4,17 +4,104 @@ using ObsidianRAG.Core.Models;
 namespace ObsidianRAG.Core.Services;
 
 /// <summary>
+/// 文件元数据提供者接口 - 用于查询优化器获取文件元数据
+/// </summary>
+public interface IFileMetadataProvider
+{
+    /// <summary>
+    /// 根据文件ID获取标签列表
+    /// </summary>
+    Task<List<string>?> GetTagsAsync(string fileId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 根据文件ID获取修改时间
+    /// </summary>
+    Task<DateTime?> GetModifiedAtAsync(string fileId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 批量获取文件元数据
+    /// </summary>
+    Task<Dictionary<string, FileMetadata>> GetBatchAsync(
+        IEnumerable<string> fileIds,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// 文件元数据
+/// </summary>
+public class FileMetadata
+{
+    public string FileId { get; set; } = string.Empty;
+    public List<string>? Tags { get; set; }
+    public DateTime? ModifiedAt { get; set; }
+    public DateTime? CreatedAt { get; set; }
+}
+
+/// <summary>
+/// 基于 IVectorStore 的文件元数据提供者实现
+/// </summary>
+public class VectorStoreFileMetadataProvider : IFileMetadataProvider
+{
+    private readonly IVectorStore _vectorStore;
+
+    public VectorStoreFileMetadataProvider(IVectorStore vectorStore)
+    {
+        _vectorStore = vectorStore;
+    }
+
+    public async Task<List<string>?> GetTagsAsync(string fileId, CancellationToken cancellationToken = default)
+    {
+        var file = await _vectorStore.GetFileAsync(fileId, cancellationToken);
+        return file?.Tags;
+    }
+
+    public async Task<DateTime?> GetModifiedAtAsync(string fileId, CancellationToken cancellationToken = default)
+    {
+        var file = await _vectorStore.GetFileAsync(fileId, cancellationToken);
+        return file?.ModifiedAt;
+    }
+
+    public async Task<Dictionary<string, FileMetadata>> GetBatchAsync(
+        IEnumerable<string> fileIds,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<string, FileMetadata>();
+
+        foreach (var fileId in fileIds.Distinct())
+        {
+            var file = await _vectorStore.GetFileAsync(fileId, cancellationToken);
+            if (file != null)
+            {
+                result[fileId] = new FileMetadata
+                {
+                    FileId = fileId,
+                    Tags = file.Tags,
+                    ModifiedAt = file.ModifiedAt,
+                    CreatedAt = file.CreatedAt
+                };
+            }
+        }
+
+        return result;
+    }
+}
+
+/// <summary>
 /// 查询优化器 - 属性过滤、流行度去偏
 /// </summary>
 public class QueryOptimizer
 {
     private readonly IVectorStore _vectorStore;
+    private readonly IFileMetadataProvider _metadataProvider;
     private readonly QueryOptimizeOptions _options;
+    private readonly SynonymService _synonymService;
 
-    public QueryOptimizer(IVectorStore vectorStore, QueryOptimizeOptions? options = null)
+    public QueryOptimizer(IVectorStore vectorStore, IFileMetadataProvider? metadataProvider = null, QueryOptimizeOptions? options = null)
     {
         _vectorStore = vectorStore;
+        _metadataProvider = metadataProvider ?? new VectorStoreFileMetadataProvider(vectorStore);
         _options = options ?? new QueryOptimizeOptions();
+        _synonymService = new SynonymService();
     }
 
     /// <summary>
@@ -29,7 +116,7 @@ public class QueryOptimizer
         // 1. 应用过滤器
         if (request.Filters != null)
         {
-            resultlist = ApplyFilters(resultlist, request.Filters);
+            resultlist = await ApplyFiltersAsync(resultlist, request.Filters);
         }
 
         // 2. 流行度去偏
@@ -51,7 +138,7 @@ public class QueryOptimizer
     /// <summary>
     /// 应用过滤器
     /// </summary>
-    private List<SearchResult> ApplyFilters(List<SearchResult> results, SearchFilter filters)
+    private async Task<List<SearchResult>> ApplyFiltersAsync(List<SearchResult> results, SearchFilter filters)
     {
         var query = results.AsQueryable();
 
@@ -61,10 +148,43 @@ public class QueryOptimizer
             query = query.Where(r => filters.Folders.Any(f => r.FilePath.StartsWith(f)));
         }
 
-        // 标签过滤 - 需要从文件记录中获取标签
-        // 时间范围过滤 - 需要从文件记录中获取时间
+        var filteredResults = query.ToList();
 
-        return query.ToList();
+        // 标签过滤 - 从文件记录中获取标签
+        if (filters.Tags?.Count > 0)
+        {
+            var fileIds = filteredResults.Select(r => r.FileId).Distinct();
+            var metadata = await _metadataProvider.GetBatchAsync(fileIds);
+
+            filteredResults = filteredResults
+                .Where(r => metadata.TryGetValue(r.FileId, out var meta)
+                    && meta.Tags != null
+                    && filters.Tags.Any(t => meta.Tags.Contains(t, StringComparer.OrdinalIgnoreCase)))
+                .ToList();
+        }
+
+        // 时间范围过滤 - 从文件记录中获取时间
+        if (filters.DateRange != null)
+        {
+            var fileIds = filteredResults.Select(r => r.FileId).Distinct();
+            var metadata = await _metadataProvider.GetBatchAsync(fileIds);
+
+            filteredResults = filteredResults
+                .Where(r =>
+                {
+                    if (!metadata.TryGetValue(r.FileId, out var meta) || meta.ModifiedAt == null)
+                        return false;
+
+                    var modifiedAt = meta.ModifiedAt.Value;
+                    var afterStart = filters.DateRange.Start == null || modifiedAt >= filters.DateRange.Start;
+                    var beforeEnd = filters.DateRange.End == null || modifiedAt <= filters.DateRange.End;
+
+                    return afterStart && beforeEnd;
+                })
+                .ToList();
+        }
+
+        return filteredResults;
     }
 
     /// <summary>
@@ -158,8 +278,10 @@ public class QueryOptimizer
     /// </summary>
     public string ExpandQuery(string query)
     {
-        // 简化实现：可以集成同义词词典
-        return query;
+        if (string.IsNullOrWhiteSpace(query))
+            return query;
+
+        return _synonymService.ExpandQuery(query);
     }
 
     /// <summary>
@@ -202,12 +324,11 @@ public class QueryOptimizer
     /// </summary>
     private List<string> ExtractKeywords(string query)
     {
-        // 简化实现：分词后过滤停用词
-        var stopWords = new HashSet<string> { "的", "是", "在", "了", "和", "与", "或", "但", "这", "那" };
-        
-        return query.Split(' ', '　', '，', '。', '？', '！')
-            .Where(w => w.Length > 1 && !stopWords.Contains(w))
+        var words = query.Split(' ', '　', '，', '。', '？', '！')
+            .Where(w => w.Length > 1 && !_synonymService.IsStopWord(w))
             .ToList();
+
+        return words;
     }
 }
 

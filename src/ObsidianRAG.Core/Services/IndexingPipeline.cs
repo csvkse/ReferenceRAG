@@ -196,7 +196,7 @@ public class IndexingPipeline : IDisposable
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var texts = chunkBatch.Chunks.Select(c => c.Content).ToList();
-                var vectors = await _embeddingService.EncodeBatchAsync(texts, cancellationToken);
+                var vectors = await _embeddingService.EncodeBatchAsync(texts, EmbeddingMode.Document, cancellationToken);
 
                 var embeddedBatch = new EmbeddedBatch
                 {

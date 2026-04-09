@@ -66,16 +66,21 @@ public enum QueryMode
     /// 快速模式：~1000 tokens
     /// </summary>
     Quick = 0,
-    
+
     /// <summary>
     /// 标准模式：~3000 tokens（默认）
     /// </summary>
     Standard = 1,
-    
+
     /// <summary>
     /// 深度模式：~6000 tokens
     /// </summary>
-    Deep = 2
+    Deep = 2,
+
+    /// <summary>
+    /// 混合模式：BM25 + Embedding 混合搜索
+    /// </summary>
+    Hybrid = 3
 }
 
 /// <summary>

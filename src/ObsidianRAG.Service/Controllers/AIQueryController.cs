@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
+using ObsidianRAG.Core.Services;
 
 namespace ObsidianRAG.Service.Controllers;
 
@@ -12,11 +13,16 @@ namespace ObsidianRAG.Service.Controllers;
 public class AIQueryController : ControllerBase
 {
     private readonly ISearchService _searchService;
+    private readonly QueryStatsService _statsService;
     private readonly ILogger<AIQueryController> _logger;
 
-    public AIQueryController(ISearchService searchService, ILogger<AIQueryController> logger)
+    public AIQueryController(
+        ISearchService searchService,
+        QueryStatsService statsService,
+        ILogger<AIQueryController> logger)
     {
         _searchService = searchService;
+        _statsService = statsService;
         _logger = logger;
     }
 
@@ -33,12 +39,21 @@ public class AIQueryController : ControllerBase
 
             var response = await _searchService.SearchAsync(adjustedRequest);
 
+            // 记录查询统计
+            await _statsService.RecordQueryAsync(
+                query: request.Query,
+                durationMs: response.Stats?.DurationMs ?? 0,
+                resultCount: response.Stats?.TotalMatches ?? 0,
+                sources: request.Sources,
+                mode: request.Mode.ToString()
+            );
+
             return Ok(response);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "查询失败: {Query}", request.Query);
-            return StatusCode(500, new { error = ex.Message });
+            return StatusCode(500, new { error = "查询处理失败，请稍后重试" });
         }
     }
 
@@ -56,7 +71,7 @@ public class AIQueryController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "深入查询失败");
-            return StatusCode(500, new { error = ex.Message });
+            return StatusCode(500, new { error = "深入查询处理失败，请稍后重试" });
         }
     }
 
@@ -92,6 +107,16 @@ public class AIQueryController : ControllerBase
                 TopK = 10,
                 ContextWindow = 1,
                 MaxTokens = 3000,
+                Filters = request.Filters,
+                Options = request.Options
+            },
+            QueryMode.Hybrid => new AIQueryRequest
+            {
+                Query = request.Query,
+                Mode = request.Mode,
+                TopK = 15,
+                ContextWindow = 1,
+                MaxTokens = 4000,
                 Filters = request.Filters,
                 Options = request.Options
             },

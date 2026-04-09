@@ -4,6 +4,7 @@ using ObsidianRAG.Storage;
 using ObsidianRAG.Service.Hubs;
 using ObsidianRAG.Service.Services;
 using ObsidianRAG.Service.Controllers;
+using ObsidianRAG.Service.Middleware;
 using Microsoft.OpenApi;
 using System.Text.Json.Serialization;
 
@@ -11,6 +12,11 @@ Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.InputEncoding= System.Text.Encoding.UTF8;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// 文件日志（写入 logs/ 目录，按日期轮转）
+var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
+Directory.CreateDirectory(logDir);
+builder.Logging.AddProvider(new ObsidianRAG.Service.Services.FileLoggerProvider(logDir));
 
 // Add services to the container
 builder.Services.AddControllers()
@@ -32,6 +38,16 @@ builder.Services.AddSwaggerGen(c =>
 
 // 注册配置管理
 builder.Services.AddSingleton<ConfigManager>();
+
+// 注册模型管理器
+builder.Services.AddSingleton<IModelManager>(sp =>
+{
+    var configManager = sp.GetRequiredService<ConfigManager>();
+    var cfg = configManager.Load();
+    var dataPath = cfg.DataPath ?? "data";
+    var modelsPath = Path.Combine(dataPath, "models");
+    return new ModelManager(modelsPath, configManager);
+});
 
 // 注册核心服务
 builder.Services.AddSingleton<ITokenizer, SimpleTokenizer>();
@@ -68,6 +84,15 @@ builder.Services.AddSingleton<ContextBuilder>();
 builder.Services.AddSingleton<ObsidianLinkGenerator>();
 builder.Services.AddSingleton<MetricsCollector>();
 builder.Services.AddSingleton<AlertService>();
+// 查询统计服务 - 使用独立的 SQLite 数据库
+builder.Services.AddSingleton(sp =>
+{
+    var configManager = sp.GetRequiredService<ConfigManager>();
+    var config = configManager.Load();
+    var dataPath = config.DataPath ?? "data";
+    var statsDbPath = Path.Combine(dataPath, "query_stats.db");
+    return new QueryStatsService(statsDbPath);
+});
 // FileChangeDetector 需要配置路径，使用工厂方法延迟创建
 builder.Services.AddSingleton<IFileChangeDetector>(sp => 
 {
@@ -89,7 +114,7 @@ builder.Services.AddSingleton<TestRecordStore>();
 // 注册 SignalR
 builder.Services.AddSignalR(options =>
 {
-    options.EnableDetailedErrors = true;
+    options.EnableDetailedErrors = builder.Environment.IsDevelopment();
     options.KeepAliveInterval = TimeSpan.FromSeconds(15);
 });
 
@@ -98,9 +123,22 @@ builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.AllowAnyOrigin()
-              .AllowAnyMethod()
-              .AllowAnyHeader();
+        if (builder.Environment.IsDevelopment())
+        {
+            policy.AllowAnyOrigin()
+                  .AllowAnyMethod()
+                  .AllowAnyHeader();
+        }
+        else
+        {
+            // Production: restrict to configured origins
+            var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+                ?? new[] { "http://localhost:5000", "http://localhost:5001" };
+            policy.WithOrigins(allowedOrigins)
+                  .AllowAnyMethod()
+                  .AllowAnyHeader()
+                  .AllowCredentials();
+        }
     });
 });
 
@@ -117,6 +155,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors();
+app.UseApiKeyAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 

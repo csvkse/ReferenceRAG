@@ -16,8 +16,9 @@ public class BertTokenizer : ITextTokenizer
     private readonly string _clsToken;
     private readonly string _sepToken;
     private readonly string _padToken;
+    private readonly bool _doLowerCase;
 
-    public string Name => "Custom BertTokenizer";
+    public string Name => $"Custom BertTokenizer ({(_doLowerCase ? "cased" : "uncased")})";
 
     public int VocabSize => _vocab.Count;
 
@@ -45,6 +46,12 @@ public class BertTokenizer : ITextTokenizer
         _sepToken = config?.SepToken ?? "[SEP]";
         _padToken = config?.PadToken ?? "[PAD]";
 
+        // 从 tokenizer_config.json 读取 do_lower_case 配置
+        var configDir = Path.GetDirectoryName(tokenizerPath) ?? "";
+        var configPath = Path.Combine(configDir, "tokenizer_config.json");
+        _doLowerCase = ReadDoLowerCase(configPath);
+        Console.WriteLine($"[BertTokenizer] do_lower_case={_doLowerCase}");
+
         // 预缓存特殊 token ID
         ClsTokenId = GetTokenId(_clsToken);
         SepTokenId = GetTokenId(_sepToken);
@@ -56,6 +63,27 @@ public class BertTokenizer : ITextTokenizer
     }
 
     /// <summary>
+    /// 从 tokenizer_config.json 读取 do_lower_case
+    /// </summary>
+    private static bool ReadDoLowerCase(string configPath)
+    {
+        if (!File.Exists(configPath)) return true; // 默认 lowercased（自定义分词器预分词逻辑与 HuggingFace 不同，需要 lowercasing 来匹配 vocab）
+        try
+        {
+            var json = File.ReadAllText(configPath);
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("do_lower_case", out var el))
+            {
+                // HuggingFace do_lower_case=false 的完整行为依赖 BasicTokenizer 的 Unicode 处理，
+                // 自定义分词器没有实现该逻辑，强制使用 lowercasing 以确保 vocab 匹配
+                return true;
+            }
+        }
+        catch { /* 忽略解析错误，使用默认值 */ }
+        return true;
+    }
+
+    /// <summary>
     /// 预缓存常用 token 以加速查找
     /// </summary>
     private void PreCacheCommonTokens()
@@ -64,8 +92,8 @@ public class BertTokenizer : ITextTokenizer
         for (int i = 32; i < 127; i++)
         {
             var key = (char)i;
-            var keyLower = char.ToLower(key);
-            if (_vocab.TryGetValue(keyLower.ToString(), out var id))
+            var lookupKey = _doLowerCase ? char.ToLower(key) : key;
+            if (_vocab.TryGetValue(lookupKey.ToString(), out var id))
             {
                 _singleCharCache.TryAdd(i, id);
             }
@@ -131,9 +159,13 @@ public class BertTokenizer : ITextTokenizer
         Span<char> singleCharBuffer = stackalloc char[1];
         var bufferPos = 0;
 
+        var prevWasChinese = false;
+
         foreach (var c in textSpan)
         {
             if (tokenCount >= maxTokens) break;
+
+            var isChinese = IsChinese(c);
 
             if (char.IsWhiteSpace(c))
             {
@@ -142,31 +174,57 @@ public class BertTokenizer : ITextTokenizer
                     tokenCount += AddToken(tokenBuffer[..bufferPos], inputIds, attentionMask, batchIndex, tokenCount);
                     bufferPos = 0;
                 }
+                prevWasChinese = false;
             }
-            else if (IsChinese(c))
+            else if (isChinese)
             {
+                // CJK 字符前 flush 非 CJK buffer（对应 HuggingFace tokenize_chinese_chars 插入空格）
                 if (bufferPos > 0)
                 {
                     tokenCount += AddToken(tokenBuffer[..bufferPos], inputIds, attentionMask, batchIndex, tokenCount);
                     bufferPos = 0;
                 }
-                // 中文字符单独成 token
+                // CJK 字符单独成 token
                 singleCharBuffer[0] = c;
                 tokenCount += AddToken(singleCharBuffer, inputIds, attentionMask, batchIndex, tokenCount);
+                prevWasChinese = true;
+            }
+            else if (IsPunctuation(c))
+            {
+                // 标点字符单独成 token（与 HuggingFace BasicTokenizer 对齐）
+                // 例如 C++ → [c, +, +], 3.5 → [3, ., 5]
+                if (bufferPos > 0)
+                {
+                    tokenCount += AddToken(tokenBuffer[..bufferPos], inputIds, attentionMask, batchIndex, tokenCount);
+                    bufferPos = 0;
+                }
+                singleCharBuffer[0] = _doLowerCase ? char.ToLower(c) : c;
+                tokenCount += AddToken(singleCharBuffer, inputIds, attentionMask, batchIndex, tokenCount);
+                prevWasChinese = false;
             }
             else
             {
+                // 非 CJK 字符紧跟 CJK 字符时，先 flush（对应 HuggingFace 在 CJK 后插入空格）
+                if (prevWasChinese)
+                {
+                    if (bufferPos > 0)
+                    {
+                        tokenCount += AddToken(tokenBuffer[..bufferPos], inputIds, attentionMask, batchIndex, tokenCount);
+                        bufferPos = 0;
+                    }
+                }
                 if (bufferPos < tokenBuffer.Length)
                 {
-                    tokenBuffer[bufferPos++] = char.ToLower(c);
+                    tokenBuffer[bufferPos++] = _doLowerCase ? char.ToLower(c) : c;
                 }
+                prevWasChinese = false;
             }
         }
 
         // 处理剩余的 token
         if (bufferPos > 0 && tokenCount < maxTokens)
         {
-            AddToken(tokenBuffer[..bufferPos], inputIds, attentionMask, batchIndex, tokenCount);
+            tokenCount += AddToken(tokenBuffer[..bufferPos], inputIds, attentionMask, batchIndex, tokenCount);
         }
 
         // [SEP]
@@ -217,7 +275,7 @@ public class BertTokenizer : ITextTokenizer
                 if (addedCount == 0)
                 {
                     for (int i = 0; i < length; i++)
-                        subwordBuffer[i] = char.ToLower(token[start + i]);
+                        subwordBuffer[i] = _doLowerCase ? char.ToLower(token[start + i]) : token[start + i];
 
                     var subId = GetTokenIdFastSpan(subwordBuffer[..length]);
                     if (subId != UnkTokenId)
@@ -238,7 +296,7 @@ public class BertTokenizer : ITextTokenizer
                     subwordBuffer[0] = '#';
                     subwordBuffer[1] = '#';
                     for (int i = 0; i < length; i++)
-                        subwordBuffer[i + 2] = char.ToLower(token[start + i]);
+                        subwordBuffer[i + 2] = _doLowerCase ? char.ToLower(token[start + i]) : token[start + i];
 
                     var subId = GetTokenIdFastSpan(subwordBuffer[..(length + 2)]);
                     if (subId != UnkTokenId)
@@ -280,14 +338,15 @@ public class BertTokenizer : ITextTokenizer
         if (token.Length == 1)
         {
             var c = token[0];
-            var key = (int)char.ToLower(c);
+            var lookupChar = _doLowerCase ? char.ToLower(c) : c;
+            var key = (int)lookupChar;
 
             if (_singleCharCache.TryGetValue(key, out var cachedId))
             {
                 return cachedId;
             }
 
-            var tokenStr = char.ToLower(c).ToString();
+            var tokenStr = lookupChar.ToString();
             if (_vocab.TryGetValue(tokenStr, out var id))
             {
                 _singleCharCache.TryAdd(key, id);
@@ -299,17 +358,16 @@ public class BertTokenizer : ITextTokenizer
 
         if (token.Length == 2)
         {
-            var key = ((long)char.ToLower(token[0]) << 16) | char.ToLower(token[1]);
+            var c0 = _doLowerCase ? char.ToLower(token[0]) : token[0];
+            var c1 = _doLowerCase ? char.ToLower(token[1]) : token[1];
+            var key = ((long)c0 << 16) | c1;
 
             if (_doubleCharCache.TryGetValue(key, out var cachedId))
             {
                 return cachedId;
             }
 
-            Span<char> lowerBuffer = stackalloc char[2];
-            lowerBuffer[0] = char.ToLower(token[0]);
-            lowerBuffer[1] = char.ToLower(token[1]);
-            var tokenStr = lowerBuffer.ToString();
+            var tokenStr = new string(new[] { c0, c1 });
 
             if (_vocab.TryGetValue(tokenStr, out var id))
             {
@@ -320,13 +378,21 @@ public class BertTokenizer : ITextTokenizer
             return UnkTokenId;
         }
 
-        var str = token.Length <= 256
-            ? string.Create(token.Length, token, (span, src) =>
-            {
-                for (int i = 0; i < src.Length; i++)
-                    span[i] = char.ToLower(src[i]);
-            })
-            : token.ToString().ToLower();
+        string str;
+        if (_doLowerCase)
+        {
+            str = token.Length <= 256
+                ? string.Create(token.Length, token, (span, src) =>
+                {
+                    for (int i = 0; i < src.Length; i++)
+                        span[i] = char.ToLower(src[i]);
+                })
+                : token.ToString().ToLower();
+        }
+        else
+        {
+            str = token.ToString();
+        }
 
         if (_vocab.TryGetValue(str, out var longId))
         {
@@ -346,10 +412,13 @@ public class BertTokenizer : ITextTokenizer
         ReadOnlySpan<char> textSpan = text.AsSpan();
         Span<char> tokenBuffer = stackalloc char[256];
         var bufferPos = 0;
+        var prevWasChinese = false;
 
         foreach (var c in textSpan)
         {
             if (result.Count >= maxLength - 1) break;
+
+            var isChinese = IsChinese(c);
 
             if (char.IsWhiteSpace(c))
             {
@@ -358,8 +427,9 @@ public class BertTokenizer : ITextTokenizer
                     AddTokensToList(tokenBuffer[..bufferPos], result, maxLength);
                     bufferPos = 0;
                 }
+                prevWasChinese = false;
             }
-            else if (IsChinese(c))
+            else if (isChinese)
             {
                 if (bufferPos > 0)
                 {
@@ -371,13 +441,34 @@ public class BertTokenizer : ITextTokenizer
                 {
                     result.Add(id);
                 }
+                prevWasChinese = true;
+            }
+            else if (IsPunctuation(c))
+            {
+                if (bufferPos > 0)
+                {
+                    AddTokensToList(tokenBuffer[..bufferPos], result, maxLength);
+                    bufferPos = 0;
+                }
+                var id = GetTokenIdFastSpan(stackalloc[] { _doLowerCase ? char.ToLower(c) : c });
+                if (result.Count < maxLength - 1)
+                {
+                    result.Add(id);
+                }
+                prevWasChinese = false;
             }
             else
             {
+                if (prevWasChinese && bufferPos > 0)
+                {
+                    AddTokensToList(tokenBuffer[..bufferPos], result, maxLength);
+                    bufferPos = 0;
+                }
                 if (bufferPos < tokenBuffer.Length)
                 {
-                    tokenBuffer[bufferPos++] = char.ToLower(c);
+                    tokenBuffer[bufferPos++] = _doLowerCase ? char.ToLower(c) : c;
                 }
+                prevWasChinese = false;
             }
         }
 
@@ -419,14 +510,14 @@ public class BertTokenizer : ITextTokenizer
                     if (isFirst)
                     {
                         for (int i = 0; i < length; i++)
-                            subword[i] = char.ToLower(token[start + i]);
+                            subword[i] = _doLowerCase ? char.ToLower(token[start + i]) : token[start + i];
                     }
                     else
                     {
                         subword[0] = '#';
                         subword[1] = '#';
                         for (int i = 0; i < length; i++)
-                            subword[i + 2] = char.ToLower(token[start + i]);
+                            subword[i + 2] = _doLowerCase ? char.ToLower(token[start + i]) : token[start + i];
                     }
 
                     var subId = GetTokenIdFastSpan(subword);
@@ -453,9 +544,41 @@ public class BertTokenizer : ITextTokenizer
         return Encode(text).Count;
     }
 
-    private bool IsChinese(char c)
+    /// <summary>
+    /// 判断字符是否为 CJK 字符（与 HuggingFace BasicTokenizer._is_chinese_char 对齐）
+    /// 注意：仅包含汉字，不含标点。CJK 标点由 IsPunctuation 处理。
+    /// </summary>
+    private static bool IsChinese(char c)
     {
-        return c >= 0x4E00 && c <= 0x9FFF;
+        return (c >= 0x4E00 && c <= 0x9FFF) ||   // CJK Unified Ideographs
+               (c >= 0x3400 && c <= 0x4DBF) ||   // CJK Unified Ideographs Extension A
+               (c >= 0xF900 && c <= 0xFAFF);      // CJK Compatibility Ideographs
+    }
+
+    /// <summary>
+    /// 判断字符是否为标点（与 HuggingFace BasicTokenizer._is_punctuation 对齐）
+    /// 标点字符会在预分词阶段被单独切分
+    /// </summary>
+    private static bool IsPunctuation(char c)
+    {
+        // ASCII 标点范围
+        if ((c >= 33 && c <= 47) ||    // !"#$%&'()*+,-./
+            (c >= 58 && c <= 64) ||    // :;<=>?@
+            (c >= 91 && c <= 96) ||    // [\]^_`
+            (c >= 123 && c <= 126))    // {|}~
+        {
+            return true;
+        }
+
+        // Unicode 标点类别
+        var cat = char.GetUnicodeCategory(c);
+        return cat == System.Globalization.UnicodeCategory.ConnectorPunctuation ||
+               cat == System.Globalization.UnicodeCategory.DashPunctuation ||
+               cat == System.Globalization.UnicodeCategory.OpenPunctuation ||
+               cat == System.Globalization.UnicodeCategory.ClosePunctuation ||
+               cat == System.Globalization.UnicodeCategory.InitialQuotePunctuation ||
+               cat == System.Globalization.UnicodeCategory.FinalQuotePunctuation ||
+               cat == System.Globalization.UnicodeCategory.OtherPunctuation;
     }
 
     private int GetTokenId(string token)
