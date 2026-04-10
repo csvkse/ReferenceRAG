@@ -105,7 +105,7 @@ builder.Services.AddSingleton<IFileChangeDetector>(sp =>
 });
 builder.Services.AddScoped<ISearchService, SearchService>();
 builder.Services.AddScoped<HierarchicalSearchService>();
-builder.Services.AddScoped<HybridSearchService>();
+builder.Services.AddSingleton<HybridSearchService>();
 
 // 注册索引服务（后台服务）
 builder.Services.AddSingleton<IndexService>();
