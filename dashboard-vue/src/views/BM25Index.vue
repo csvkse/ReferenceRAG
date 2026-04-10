@@ -121,7 +121,7 @@
                         <n-tag type="success" size="small">Score: {{ result.score.toFixed(4) }}</n-tag>
                       </n-space>
                     </template>
-                    <n-text>{{ result.snippet || result.document }}</n-text>
+                    <n-text>{{ result.content }}</n-text>
                   </n-thing>
                 </n-list-item>
               </n-list>
@@ -255,7 +255,7 @@ const savingConfig = ref(false)
 const selectedModelName = ref<string | null>(null)
 const rebuildProgress = ref<{ percent: number; status: 'default' | 'success' | 'error'; message: string } | null>(null)
 
-const searchResults = ref<{ document: string; score: number; snippet?: string }[]>([])
+const searchResults = ref<{ chunkId: string; content: string; score: number; rank: number }[]>([])
 const searchDuration = ref(0)
 
 const createForm = ref({
@@ -287,24 +287,19 @@ const modelColumns: DataTableColumns<BM25Model> = [
     width: 150
   },
   {
-    title: '描述',
-    key: 'description',
-    ellipsis: { tooltip: true }
-  },
-  {
     title: '状态',
     key: 'enabled',
     width: 100,
     render(row) {
       return h(NTag, {
-        type: row.enabled ? 'success' : 'warning',
+        type: row.isEnabled ? 'success' : 'warning',
         size: 'small'
-      }, { default: () => row.enabled ? '启用' : '禁用' })
+      }, { default: () => row.isEnabled ? '启用' : '禁用' })
     }
   },
   {
     title: '文档数',
-    key: 'documentCount',
+    key: 'totalDocuments',
     width: 100
   },
   {
@@ -314,18 +309,18 @@ const modelColumns: DataTableColumns<BM25Model> = [
   },
   {
     title: 'avgDL',
-    key: 'averageDocumentLength',
+    key: 'averageDocLength',
     width: 100,
     render(row) {
-      return row.averageDocumentLength?.toFixed(2) || '-'
+      return row.averageDocLength?.toFixed(2) || '-'
     }
   },
   {
-    title: '最后更新',
-    key: 'lastUpdated',
+    title: '创建时间',
+    key: 'createdAt',
     width: 180,
     render(row) {
-      return row.lastUpdated ? new Date(row.lastUpdated).toLocaleString() : '-'
+      return row.createdAt ? new Date(row.createdAt).toLocaleString() : '-'
     }
   },
   {
@@ -338,9 +333,9 @@ const modelColumns: DataTableColumns<BM25Model> = [
       // Enable/Disable button
       buttons.push(h(NButton, {
         size: 'small',
-        type: row.enabled ? 'warning' : 'primary',
+        type: row.isEnabled ? 'warning' : 'primary',
         onClick: () => handleToggle(row)
-      }, { default: () => row.enabled ? '禁用' : '启用' }))
+      }, { default: () => row.isEnabled ? '禁用' : '启用' }))
 
       // Delete button
       buttons.push(h(NButton, {
@@ -415,7 +410,7 @@ const handleDelete = async (model: BM25Model) => {
 
 const handleToggle = async (model: BM25Model) => {
   try {
-    if (model.enabled) {
+    if (model.isEnabled) {
       await bm25IndexApi.disableModel(model.name)
       message.success(`模型 "${model.name}" 已禁用`)
     } else {

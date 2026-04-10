@@ -311,13 +311,16 @@ public class BM25IndexController : ControllerBase
             return BadRequest(new { error = "查询语句不能为空" });
         }
 
+        var startTime = DateTime.UtcNow;
         var results = await _bm25Store.SearchAsync(modelName, query, topK);
+        var durationMs = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
 
         return Ok(new BM25SearchResponse
         {
             ModelName = modelName,
             Query = query,
             TotalResults = results.Count,
+            DurationMs = durationMs,
             Results = results.Select((r, index) => new BM25SearchResultItem
             {
                 ChunkId = r.ChunkId,
@@ -420,6 +423,7 @@ public class BM25SearchResponse
     public string ModelName { get; set; } = string.Empty;
     public string Query { get; set; } = string.Empty;
     public int TotalResults { get; set; }
+    public int DurationMs { get; set; }
     public List<BM25SearchResultItem> Results { get; set; } = new();
 }
 

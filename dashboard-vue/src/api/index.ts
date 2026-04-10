@@ -237,22 +237,27 @@ export const bm25IndexApi = {
 // BM25 Types
 export interface BM25Model {
   name: string
-  description?: string
-  enabled: boolean
-  documentCount: number
+  k1: number
+  b: number
+  averageDocLength: number
+  totalDocuments: number
   vocabularySize: number
-  averageDocumentLength: number
-  lastUpdated: string | null
+  isEnabled: boolean
+  createdAt: string
+  message?: string
 }
 
 export interface BM25SearchResult {
+  modelName: string
   query: string
-  results: {
-    document: string
-    score: number
-    snippet?: string
-  }[]
+  totalResults: number
   durationMs: number
+  results: {
+    chunkId: string
+    content: string
+    score: number
+    rank: number
+  }[]
 }
 
 export interface BM25Config {
