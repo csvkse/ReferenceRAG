@@ -269,14 +269,14 @@ public class HybridSearchOptions
     public int RRFK { get; set; } = 60;
 
     /// <summary>
-    /// BM25 权重
+    /// BM25 权重（关键词精确匹配权重）
     /// </summary>
-    public float BM25Weight { get; set; } = 0.4f;
+    public float BM25Weight { get; set; } = 0.6f;
 
     /// <summary>
-    /// Embedding 权重
+    /// Embedding 权重（语义相似度权重）
     /// </summary>
-    public float EmbeddingWeight { get; set; } = 0.6f;
+    public float EmbeddingWeight { get; set; } = 0.4f;
 
     /// <summary>
     /// BM25 配置
