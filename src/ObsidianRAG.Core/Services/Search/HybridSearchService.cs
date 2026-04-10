@@ -143,15 +143,23 @@ public class HybridSearchService
             var bm25Rank = bm25RankMap.GetValueOrDefault(docId, int.MaxValue);
             var embeddingRank = embeddingRankMap.GetValueOrDefault(docId, int.MaxValue);
 
+            // 对于只在 BM25 中的文档（embeddingRank = int.MaxValue），使用 BM25 排名作为虚拟 embedding 排名
+            // 这意味着：如果 BM25 说某文档是 #1，则在 embedding 排名中也视为 #1
+            var effectiveEmbeddingRank = embeddingRank;
+            if (embeddingRank == int.MaxValue && bm25Rank < int.MaxValue)
+            {
+                effectiveEmbeddingRank = bm25Rank;
+            }
+
             // RRF 分数 = 1/(k + rank_bm25) + 1/(k + rank_embedding)
             var rrfScore = 0f;
             if (bm25Rank < int.MaxValue)
             {
                 rrfScore += _options.BM25Weight / (k + bm25Rank + 1);
             }
-            if (embeddingRank < int.MaxValue)
+            if (effectiveEmbeddingRank < int.MaxValue)
             {
-                rrfScore += _options.EmbeddingWeight / (k + embeddingRank + 1);
+                rrfScore += _options.EmbeddingWeight / (k + effectiveEmbeddingRank + 1);
             }
 
             rrfScores[docId] = rrfScore;
