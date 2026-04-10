@@ -7,6 +7,7 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.24.4" />
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="1.0.1" />
     <PackageReference Include="BERTTokenizers" Version="1.2.0" />
+    <PackageReference Include="Tokenizers.HuggingFace" Version="1.21.4" />
   </ItemGroup>
 
 </Project>

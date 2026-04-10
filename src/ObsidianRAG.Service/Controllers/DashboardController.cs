@@ -35,16 +35,52 @@ public class DashboardController : ControllerBase
     [HttpGet("stats")]
     public async Task<ActionResult<DashboardStats>> GetStats()
     {
+        var config = _configManager.Load();
+
+        // 回填旧数据中 source 为空的孤儿记录
+        try
+        {
+            var sourceNameToPath = config.Sources.ToDictionary(s => s.Name, s => s.Path);
+            var backfilled = await _vectorStore.BackfillSourceAsync(sourceNameToPath);
+            if (backfilled > 0)
+            {
+                _logger.LogInformation("Backfilled source for {Count} orphaned file records", backfilled);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to backfill source for orphaned records");
+        }
+
         var files = await _vectorStore.GetAllFilesAsync();
         var fileList = files.ToList();
 
-        var config = _configManager.Load();
+        // 仅统计属于已配置源的文件，排除不属于任何源的孤儿记录
+        var sourceNames = config.Sources.Select(s => s.Name).ToHashSet();
+        var validFiles = fileList.Where(f => sourceNames.Contains(f.Source)).ToList();
+
+        // 直接从 chunks 表统计，避免依赖 FileRecord.ChunkCount（旧数据可能为0）
+        var totalChunks = 0;
+        foreach (var file in validFiles)
+        {
+            if (file.ChunkCount > 0)
+            {
+                totalChunks += file.ChunkCount;
+            }
+            else
+            {
+                // 旧记录 ChunkCount 为 0，回退到查询 chunks 表
+                var chunks = await _vectorStore.GetChunksByFileAsync(file.Id);
+                totalChunks += chunks.Count();
+            }
+        }
+
         var avgQueryTime = await _statsService.GetAverageQueryTimeAsync();
 
         return Ok(new DashboardStats
         {
-            TotalFiles = fileList.Count,
-            TotalChunks = fileList.Sum(f => f.ChunkCount),
+            TotalFiles = validFiles.Count,
+            TotalChunks = totalChunks,
             SourceCount = config.Sources.Count,
             AvgQueryTime = avgQueryTime
         });

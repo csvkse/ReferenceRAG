@@ -45,10 +45,15 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             CREATE TABLE IF NOT EXISTS files (
                 id TEXT PRIMARY KEY,
                 path TEXT NOT NULL UNIQUE,
+                file_name TEXT DEFAULT '',
                 title TEXT,
                 content_hash TEXT,
+                content_length INTEGER DEFAULT 0,
                 tags TEXT,
                 parent_folder TEXT,
+                source TEXT DEFAULT '',
+                chunk_count INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
                 created_at TEXT,
                 updated_at TEXT,
                 indexed_at TEXT
@@ -113,6 +118,27 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             // 列已存在，忽略错误
         }
 
+        // 向后兼容：为已有 files 表添加缺失的列
+        var fileMigrations = new[]
+        {
+            "ALTER TABLE files ADD COLUMN file_name TEXT DEFAULT ''",
+            "ALTER TABLE files ADD COLUMN content_length INTEGER DEFAULT 0",
+            "ALTER TABLE files ADD COLUMN source TEXT DEFAULT ''",
+            "ALTER TABLE files ADD COLUMN chunk_count INTEGER DEFAULT 0",
+            "ALTER TABLE files ADD COLUMN total_tokens INTEGER DEFAULT 0",
+        };
+        foreach (var migration in fileMigrations)
+        {
+            try
+            {
+                ExecuteNonQuery(migration, transaction);
+            }
+            catch
+            {
+                // 列已存在，忽略错误
+            }
+        }
+
         // 确保索引存在
         try
         {
@@ -132,19 +158,24 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     {
         var sql = @"
             INSERT OR REPLACE INTO files 
-            (id, path, title, content_hash, tags, parent_folder, created_at, updated_at, indexed_at)
+            (id, path, file_name, title, content_hash, content_length, tags, parent_folder, source, chunk_count, total_tokens, created_at, updated_at, indexed_at)
             VALUES 
-            (@id, @path, @title, @contentHash, @tags, @parentFolder, @createdAt, @updatedAt, @indexedAt)
+            (@id, @path, @fileName, @title, @contentHash, @contentLength, @tags, @parentFolder, @source, @chunkCount, @totalTokens, @createdAt, @updatedAt, @indexedAt)
         ";
 
         using var command = _connection.CreateCommand();
         command.CommandText = sql;
         AddParameter(command, "@id", file.Id);
         AddParameter(command, "@path", file.Path);
+        AddParameter(command, "@fileName", file.FileName ?? "");
         AddParameter(command, "@title", file.Title ?? "");
         AddParameter(command, "@contentHash", file.ContentHash ?? "");
+        AddParameter(command, "@contentLength", file.ContentLength);
         AddParameter(command, "@tags", file.Tags != null ? JsonSerializer.Serialize(file.Tags) : "[]");
         AddParameter(command, "@parentFolder", file.ParentFolder ?? "");
+        AddParameter(command, "@source", file.Source ?? "");
+        AddParameter(command, "@chunkCount", file.ChunkCount);
+        AddParameter(command, "@totalTokens", file.TotalTokens);
         AddParameter(command, "@createdAt", file.CreatedAt?.ToString("O") ?? "");
         AddParameter(command, "@updatedAt", file.ModifiedAt?.ToString("O") ?? "");
         AddParameter(command, "@indexedAt", file.IndexedAt.ToString("O"));
@@ -785,6 +816,46 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<int> BackfillSourceAsync(IDictionary<string, string> sourceNameToPath, CancellationToken cancellationToken = default)
+    {
+        // 查找 source 为空的孤儿记录，根据文件路径前缀匹配回填
+        var sql = "SELECT id, path FROM files WHERE source = '' OR source IS NULL";
+        var orphanedFiles = new List<(string Id, string Path)>();
+
+        using (var command = _connection.CreateCommand())
+        {
+            command.CommandText = sql;
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                orphanedFiles.Add((reader.GetString(0), reader.GetString(1)));
+            }
+        }
+
+        var updated = 0;
+        foreach (var (id, path) in orphanedFiles)
+        {
+            // 规范化路径分隔符用于匹配
+            var normalizedPath = path.Replace('\\', '/');
+            var matchedSource = sourceNameToPath.FirstOrDefault(kvp =>
+            {
+                var normalizedSourcePath = kvp.Value.Replace('\\', '/');
+                return normalizedPath.StartsWith(normalizedSourcePath, StringComparison.OrdinalIgnoreCase);
+            });
+
+            if (matchedSource.Key != null)
+            {
+                using var updateCommand = _connection.CreateCommand();
+                updateCommand.CommandText = "UPDATE files SET source = @source WHERE id = @id";
+                AddParameter(updateCommand, "@source", matchedSource.Key);
+                AddParameter(updateCommand, "@id", id);
+                updated += await updateCommand.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        return updated;
+    }
+
     // ==================== 辅助方法 ====================
 
     private void ExecuteNonQuery(string sql, SqliteTransaction transaction)
@@ -806,14 +877,37 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         {
             Id = reader.GetString(reader.GetOrdinal("id")),
             Path = reader.GetString(reader.GetOrdinal("path")),
+            FileName = TryGetString(reader, "file_name") ?? "",
             Title = reader.GetString(reader.GetOrdinal("title")),
             ContentHash = reader.GetString(reader.GetOrdinal("content_hash")),
+            ContentLength = TryGetLong(reader, "content_length"),
             Tags = JsonSerializer.Deserialize<List<string>>(reader.GetString(reader.GetOrdinal("tags"))) ?? new List<string>(),
             ParentFolder = reader.GetString(reader.GetOrdinal("parent_folder")),
+            Source = TryGetString(reader, "source"),
+            ChunkCount = TryGetInt(reader, "chunk_count"),
+            TotalTokens = TryGetLong(reader, "total_tokens"),
             CreatedAt = DateTime.TryParse(reader.GetString(reader.GetOrdinal("created_at")), out var createdAt) ? createdAt : null,
             ModifiedAt = DateTime.TryParse(reader.GetString(reader.GetOrdinal("updated_at")), out var modifiedAt) ? modifiedAt : null,
             IndexedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("indexed_at")))
         };
+    }
+
+    private static string? TryGetString(SqliteDataReader reader, string columnName)
+    {
+        try { return reader.GetString(reader.GetOrdinal(columnName)); }
+        catch { return null; }
+    }
+
+    private static int TryGetInt(SqliteDataReader reader, string columnName)
+    {
+        try { return reader.GetInt32(reader.GetOrdinal(columnName)); }
+        catch { return 0; }
+    }
+
+    private static long TryGetLong(SqliteDataReader reader, string columnName)
+    {
+        try { return reader.GetInt64(reader.GetOrdinal(columnName)); }
+        catch { return 0; }
     }
 
     private ChunkRecord ReadChunkRecord(SqliteDataReader reader)

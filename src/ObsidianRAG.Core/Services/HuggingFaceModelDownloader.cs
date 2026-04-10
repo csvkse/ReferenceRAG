@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Diagnostics;
+using ObsidianRAG.Core.Models;
 
 namespace ObsidianRAG.Core.Services;
 
@@ -33,7 +34,8 @@ internal class HuggingFaceModelDownloader : IDisposable
         string targetDir,
         IProgress<float>? progress = null,
         CancellationToken cancellationToken = default,
-        string? onnxFormat = null)
+        string? onnxFormat = null,
+        string? onnxVariantPath = null)
     {
         Directory.CreateDirectory(targetDir);
 
@@ -51,7 +53,7 @@ internal class HuggingFaceModelDownloader : IDisposable
         {
             // 方案1: 直接下载已有的 ONNX 模型
             Console.WriteLine($"[Downloader] 检测到 ONNX 文件，直接下载模式");
-            await DownloadOnnxModelAsync(modelId, targetDir, files, progress, cancellationToken);
+            await DownloadOnnxModelAsync(modelId, targetDir, files, progress, cancellationToken, onnxVariantPath);
         }
         else
         {
@@ -65,6 +67,373 @@ internal class HuggingFaceModelDownloader : IDisposable
     }
 
     /// <summary>
+    /// 获取模型可用的 ONNX 变体列表（向后兼容）
+    /// </summary>
+    [Obsolete("Use GetDownloadOptionsAsync instead")]
+    public async Task<List<OnnxVariant>> GetOnnxVariantsAsync(
+        string modelId,
+        CancellationToken cancellationToken = default)
+    {
+        var options = await GetDownloadOptionsAsync(modelId, cancellationToken);
+        return options.AllOptions.Select(o => new OnnxVariant
+        {
+            Path = o.Path,
+            DisplayName = o.DisplayName,
+            Description = o.Description,
+            Size = o.Size,
+            IsQuantized = o.IsQuantized,
+            TargetPlatform = o.TargetPlatform,
+            IsRecommended = o.IsRecommended
+        }).ToList();
+    }
+
+    /// <summary>
+    /// 获取模型的下载选项
+    /// </summary>
+    public async Task<ModelDownloadOptions> GetDownloadOptionsAsync(
+        string modelId,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new ModelDownloadOptions { ModelName = modelId };
+
+        try
+        {
+            var files = await GetModelFilesAsync(modelId, cancellationToken);
+
+            // 查找所有 ONNX 文件
+            var onnxFiles = files.Where(f =>
+                f.Path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)).ToList();
+
+            // 查找所有外部数据文件（.onnx.data 或 .onnx_data 两种命名约定）
+            var dataFiles = files.Where(f =>
+                f.Path.EndsWith(".onnx.data", StringComparison.OrdinalIgnoreCase) ||
+                f.Path.EndsWith(".onnx_data", StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (onnxFiles.Count == 0)
+            {
+                // 没有 ONNX 文件，需要转换
+                result.HasOnnx = false;
+                result.NeedsConversion = true;
+
+                // 估算模型大小（PyTorch 文件）
+                result.EstimatedSize = files
+                    .Where(f => f.Path.EndsWith(".bin") || f.Path.EndsWith(".safetensors"))
+                    .Sum(f => f.Size);
+            }
+            else
+            {
+                result.HasOnnx = true;
+                result.NeedsConversion = false;
+
+                // 分离根目录和子目录的文件
+                var rootOnnxFiles = onnxFiles.Where(f => !f.Path.Contains("/")).ToList();
+                var subfolderOnnxFiles = onnxFiles.Where(f => f.Path.Contains("/")).ToList();
+
+                // 处理根目录文件
+                foreach (var file in rootOnnxFiles)
+                {
+                    var option = CreateFileOption(file, dataFiles, false);
+                    result.RootOptions.Add(option);
+                }
+
+                // 处理子目录文件
+                foreach (var file in subfolderOnnxFiles)
+                {
+                    var option = CreateFileOption(file, dataFiles, true);
+                    result.SubfolderOptions.Add(option);
+                }
+
+                // 合并所有选项
+                result.AllOptions = result.RootOptions.Concat(result.SubfolderOptions).ToList();
+
+                // 确定推荐选项
+                DetermineRecommendedOption(result);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Downloader] 获取下载选项失败: {ex.Message}");
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 创建文件选项
+    /// </summary>
+    private OnnxFileOption CreateFileOption(HuggingFaceFile file, List<HuggingFaceFile> dataFiles, bool isInSubfolder)
+    {
+        var fileName = System.IO.Path.GetFileName(file.Path);
+        var option = new OnnxFileOption
+        {
+            Path = file.Path,
+            Size = file.Size,
+            IsInSubfolder = isInSubfolder,
+            IsQuantized = false,
+            HasExternalData = false
+        };
+
+        // 检查是否有配套的外部数据文件（支持 .onnx.data 和 .onnx_data 两种命名约定）
+        // HuggingFace 使用: model.onnx 的外部数据文件名为 model.onnx_data
+        var dataPathDotData = file.Path + ".data";   // e.g. onnx/model.onnx -> onnx/model.onnx.data
+        var baseWithoutOnnx = file.Path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)
+            ? file.Path[..^5]                         // 去掉 ".onnx"
+            : file.Path;
+        var dataPathUnderscore = baseWithoutOnnx + ".onnx_data";  // e.g. onnx/model.onnx -> onnx/model.onnx_data
+        var dataPaths = new[] { dataPathDotData, dataPathUnderscore };
+        var dataFile = dataFiles.FirstOrDefault(d => dataPaths.Contains(d.Path, StringComparer.OrdinalIgnoreCase));
+        if (dataFile != null)
+        {
+            option.HasExternalData = true;
+            option.ExternalDataPath = dataFile.Path;
+            option.Size += dataFile.Size;
+        }
+
+        // 解析文件名推断类型
+        var lowerName = fileName.ToLowerInvariant();
+
+        if (fileName == "model.onnx")
+        {
+            option.DisplayName = option.HasExternalData ? "标准版本 (外部格式)" : "标准版本 (嵌入式)";
+            option.Description = option.HasExternalData
+                ? "外部数据格式，支持大模型，下载后可转换为嵌入式"
+                : "嵌入式格式，单个文件，兼容性最好";
+            option.IsRecommended = !option.HasExternalData; // 嵌入式优先推荐
+        }
+        else if (lowerName.Contains("qint8") || lowerName.Contains("int8"))
+        {
+            option.IsQuantized = true;
+            option.DisplayName = "INT8 量化";
+
+            if (lowerName.Contains("arm64"))
+            {
+                option.TargetPlatform = "arm64";
+                option.DisplayName += " (ARM64)";
+                option.Description = "针对 ARM64 优化的 INT8 量化模型";
+            }
+            else if (lowerName.Contains("avx512"))
+            {
+                option.TargetPlatform = "avx512";
+                option.DisplayName += " (AVX512)";
+                option.Description = "针对 AVX512 优化的 INT8 量化模型";
+            }
+            else if (lowerName.Contains("avx2"))
+            {
+                option.TargetPlatform = "avx2";
+                option.DisplayName += " (AVX2)";
+                option.Description = "针对 AVX2 优化的 INT8 量化模型";
+            }
+            else
+            {
+                option.Description = "INT8 量化模型，体积更小，速度更快";
+            }
+        }
+        else if (lowerName.Contains("quint8"))
+        {
+            option.IsQuantized = true;
+            option.DisplayName = "UINT8 量化";
+
+            if (lowerName.Contains("avx2"))
+            {
+                option.TargetPlatform = "avx2";
+                option.DisplayName += " (AVX2)";
+            }
+            option.Description = "UINT8 量化模型";
+        }
+        else if (lowerName.Contains("_o"))
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(fileName, @"_o(\d)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (match.Success)
+            {
+                var level = int.Parse(match.Groups[1].Value);
+                option.DisplayName = $"O{level} 优化";
+                option.Description = $"优化级别 {level}，推理速度更快";
+            }
+        }
+        else if (lowerName.Contains("fp16") || lowerName.Contains("float16"))
+        {
+            option.DisplayName = "FP16 版本";
+            option.Description = "半精度模型，体积约为一半";
+        }
+        else
+        {
+            option.DisplayName = fileName.Replace(".onnx", "").Replace("_", " ");
+            option.Description = $"变体: {fileName}";
+        }
+
+        // 添加来源信息
+        if (isInSubfolder)
+        {
+            option.Description += " (来自 onnx/ 子目录)";
+        }
+
+        return option;
+    }
+
+    /// <summary>
+    /// 确定推荐选项
+    /// </summary>
+    private static void DetermineRecommendedOption(ModelDownloadOptions result)
+    {
+        if (result.AllOptions.Count == 0) return;
+
+        if (result.AllOptions.Count == 1)
+        {
+            result.AllOptions[0].IsRecommended = true;
+            result.RecommendedOption = result.AllOptions[0];
+            return;
+        }
+
+        // 优先推荐：根目录的嵌入式标准版本
+        var embeddedStandard = result.RootOptions.FirstOrDefault(o =>
+            System.IO.Path.GetFileName(o.Path) == "model.onnx" && !o.HasExternalData);
+
+        if (embeddedStandard != null)
+        {
+            embeddedStandard.IsRecommended = true;
+            result.RecommendedOption = embeddedStandard;
+            return;
+        }
+
+        // 次选：子目录的嵌入式标准版本
+        var subfolderEmbedded = result.SubfolderOptions.FirstOrDefault(o =>
+            System.IO.Path.GetFileName(o.Path) == "model.onnx" && !o.HasExternalData);
+
+        if (subfolderEmbedded != null)
+        {
+            subfolderEmbedded.IsRecommended = true;
+            result.RecommendedOption = subfolderEmbedded;
+            return;
+        }
+
+        // 再次：根目录的标准版本（即使是外部格式）
+        var rootStandard = result.RootOptions.FirstOrDefault(o =>
+            System.IO.Path.GetFileName(o.Path) == "model.onnx");
+
+        if (rootStandard != null)
+        {
+            rootStandard.IsRecommended = true;
+            result.RecommendedOption = rootStandard;
+            return;
+        }
+
+        // 最后：子目录的标准版本
+        var subfolderStandard = result.SubfolderOptions.FirstOrDefault(o =>
+            System.IO.Path.GetFileName(o.Path) == "model.onnx");
+
+        if (subfolderStandard != null)
+        {
+            subfolderStandard.IsRecommended = true;
+            result.RecommendedOption = subfolderStandard;
+        }
+    }
+
+    /// <summary>
+    /// 解析 ONNX 文件变体信息
+    /// </summary>
+    private static OnnxVariant? ParseOnnxVariant(HuggingFaceFile file)
+    {
+        var fileName = System.IO.Path.GetFileName(file.Path);
+        var displayName = "ONNX 模型";
+        var description = "";
+        var isQuantized = false;
+        var targetPlatform = "";
+        var relativeSize = file.Size; // 如果有精确大小则使用，否则为 0
+
+        // 解析文件名推断变体类型
+        var lowerName = fileName.ToLowerInvariant();
+
+        if (fileName == "model.onnx")
+        {
+            displayName = "标准版本";
+            description = "标准 ONNX 模型，兼容性最好";
+        }
+        else if (lowerName.Contains("qint8") || lowerName.Contains("int8") || lowerName.Contains("quantized"))
+        {
+            isQuantized = true;
+            displayName = "INT8 量化";
+            // 量化版本通常是标准版本的 ~1/4 到 ~1/2 大小
+            relativeSize = relativeSize > 0 ? relativeSize : 1; // 标记为较小
+
+            if (lowerName.Contains("arm64"))
+            {
+                targetPlatform = "arm64";
+                displayName += " (ARM64)";
+                description = "针对 ARM64 优化的 INT8 量化模型";
+            }
+            else if (lowerName.Contains("avx512"))
+            {
+                targetPlatform = "avx512";
+                displayName += " (AVX512)";
+                description = "针对 AVX512 优化的 INT8 量化模型";
+            }
+            else if (lowerName.Contains("avx2"))
+            {
+                targetPlatform = "avx2";
+                displayName += " (AVX2)";
+                description = "针对 AVX2 优化的 INT8 量化模型";
+            }
+            else
+            {
+                description = "INT8 量化模型，体积更小，速度更快";
+            }
+        }
+        else if (lowerName.Contains("quint8"))
+        {
+            isQuantized = true;
+            displayName = "UINT8 量化";
+            relativeSize = relativeSize > 0 ? relativeSize : 1;
+
+            if (lowerName.Contains("avx2"))
+            {
+                targetPlatform = "avx2";
+                displayName += " (AVX2)";
+                description = "针对 AVX2 优化的 UINT8 量化模型";
+            }
+            else
+            {
+                description = "UINT8 量化模型";
+            }
+        }
+        else if (lowerName.Contains("_o"))
+        {
+            // 优化级别 O1-O4
+            var match = System.Text.RegularExpressions.Regex.Match(fileName, @"_o(\d)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (match.Success)
+            {
+                var level = int.Parse(match.Groups[1].Value);
+                displayName = $"O{level} 优化";
+                description = $"优化级别 {level}，推理速度更快";
+                // O4 通常是最小的（包含更多优化）
+                relativeSize = relativeSize > 0 ? relativeSize : 4 - level;
+            }
+        }
+        else if (lowerName.Contains("fp16") || lowerName.Contains("float16"))
+        {
+            displayName = "FP16 版本";
+            description = "半精度模型，体积约为一半";
+            relativeSize = relativeSize > 0 ? relativeSize : 2;
+        }
+        else
+        {
+            // 其他情况，使用文件名
+            displayName = fileName.Replace(".onnx", "").Replace("_", " ");
+            description = $"变体: {fileName}";
+        }
+
+        return new OnnxVariant
+        {
+            Path = file.Path,
+            DisplayName = displayName,
+            Description = description,
+            Size = relativeSize,
+            IsQuantized = isQuantized,
+            TargetPlatform = string.IsNullOrEmpty(targetPlatform) ? null : targetPlatform,
+            IsRecommended = false
+        };
+    }
+
+    /// <summary>
     /// 方案1: 直接下载已有 ONNX 模型
     /// </summary>
     private async Task DownloadOnnxModelAsync(
@@ -72,12 +441,136 @@ internal class HuggingFaceModelDownloader : IDisposable
         string targetDir,
         List<HuggingFaceFile> files,
         IProgress<float>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? onnxVariantPath = null)
     {
-        var totalSize = files.Sum(f => f.Size);
+        // 对于预转换的 ONNX 模型，只下载必要文件，跳过 PyTorch 模型文件
+
+        // 如果指定了变体路径，直接使用指定的变体
+        List<HuggingFaceFile> onnxFiles;
+        bool needMoveFromSubfolder = false;
+
+        if (!string.IsNullOrEmpty(onnxVariantPath))
+        {
+            Console.WriteLine($"[Downloader] 使用指定的 ONNX 变体: {onnxVariantPath}");
+
+            // 查找指定变体的主文件和可能的 .data 文件
+            var variantFile = files.FirstOrDefault(f => f.Path == onnxVariantPath);
+            if (variantFile == null)
+            {
+                throw new InvalidOperationException($"指定的 ONNX 变体不存在: {onnxVariantPath}");
+            }
+
+            // 查找配套的 .data 文件（如果有，支持 .onnx.data 和 .onnx_data 两种命名）
+            var dataPathDotData = onnxVariantPath + ".data";
+            var baseWithoutOnnx = onnxVariantPath.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)
+                ? onnxVariantPath[..^5]
+                : onnxVariantPath;
+            var dataPathUnderscore = baseWithoutOnnx + ".onnx_data";
+            var dataFile = files.FirstOrDefault(f => f.Path == dataPathDotData || f.Path == dataPathUnderscore);
+
+            onnxFiles = new List<HuggingFaceFile> { variantFile };
+            if (dataFile != null)
+            {
+                onnxFiles.Add(dataFile);
+            }
+
+            // 如果变体在子目录中，需要移动到根目录
+            if (onnxVariantPath.Contains("/"))
+            {
+                needMoveFromSubfolder = true;
+            }
+        }
+        else
+        {
+            // 未指定变体，自动选择最佳 ONNX 文件
+            // ONNX 文件处理：优先根目录的 model.onnx，避免重复下载 onnx/ 子目录
+            var rootOnnxFiles = files.Where(f =>
+                (f.Path == "model.onnx" || f.Path == "model.onnx.data" || f.Path == "model.onnx_data") ||
+                (!f.Path.Contains("/") && f.Path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)) ||
+                (!f.Path.Contains("/") && f.Path.EndsWith(".onnx.data", StringComparison.OrdinalIgnoreCase)) ||
+                (!f.Path.Contains("/") && f.Path.EndsWith(".onnx_data", StringComparison.OrdinalIgnoreCase))).ToList();
+
+            var subfolderOnnxFiles = files.Where(f =>
+                f.Path.StartsWith("onnx/", StringComparison.OrdinalIgnoreCase) &&
+                (f.Path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase) ||
+                 f.Path.EndsWith(".onnx.data", StringComparison.OrdinalIgnoreCase) ||
+                 f.Path.EndsWith(".onnx_data", StringComparison.OrdinalIgnoreCase))).ToList();
+
+            // 如果根目录有 ONNX 文件，使用根目录的；否则使用子目录的
+            if (rootOnnxFiles.Any(f => f.Path == "model.onnx"))
+            {
+                onnxFiles = rootOnnxFiles;
+                Console.WriteLine("[Downloader] 使用根目录的 ONNX 文件");
+            }
+            else if (subfolderOnnxFiles.Any(f => f.Path == "onnx/model.onnx"))
+            {
+                // 使用子目录的 ONNX 文件，下载后移动到根目录
+                onnxFiles = subfolderOnnxFiles;
+                needMoveFromSubfolder = true;
+                Console.WriteLine("[Downloader] 使用 onnx/ 子目录的 ONNX 文件（将移动到根目录）");
+            }
+            else
+            {
+                onnxFiles = rootOnnxFiles.Any() ? rootOnnxFiles : subfolderOnnxFiles;
+
+                // 如果有多个变体且未指定，选择标准的 model.onnx 或最小的非量化版本
+                if (onnxFiles.Count > 2)
+                {
+                    var standardOnnx = onnxFiles.FirstOrDefault(f =>
+                        System.IO.Path.GetFileName(f.Path) == "model.onnx");
+                    if (standardOnnx != null)
+                    {
+                        var dataFile = onnxFiles.FirstOrDefault(f =>
+                            f.Path == "model.onnx.data");
+                        onnxFiles = dataFile != null
+                            ? new List<HuggingFaceFile> { standardOnnx, dataFile }
+                            : new List<HuggingFaceFile> { standardOnnx };
+                        Console.WriteLine("[Downloader] 自动选择标准 ONNX 版本");
+                    }
+                }
+            }
+        }
+
+        var tokenizerFiles = files.Where(f =>
+            f.Path.EndsWith("tokenizer.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("tokenizer_config.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("vocab.txt", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("special_tokens_map.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("tokenizer.model", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("sentencepiece.bpe.model", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("bpe.vocab", StringComparison.OrdinalIgnoreCase)).ToList();
+
+        var configFiles = files.Where(f =>
+            f.Path.EndsWith("config.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("sentence_bert_config.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("config_sentence_transformers.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("modules.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path == "1_Pooling/config.json").ToList();
+
+        // 合并需要下载的文件
+        var filesToDownload = onnxFiles.Concat(tokenizerFiles).Concat(configFiles).Distinct().ToList();
+
+        // 过滤掉不需要的文件
+        var skippedFiles = files.Where(f => !filesToDownload.Contains(f)).ToList();
+        if (skippedFiles.Count > 0)
+        {
+            var skippedSize = skippedFiles.Sum(f => f.Size) / 1024.0 / 1024.0;
+            Console.WriteLine($"[Downloader] 跳过不需要的文件 ({skippedFiles.Count} 个, 共 {skippedSize:F2} MB):");
+            foreach (var f in skippedFiles.Take(5))
+            {
+                Console.WriteLine($"  - {f.Path}");
+            }
+            if (skippedFiles.Count > 5)
+            {
+                Console.WriteLine($"  ... 等 {skippedFiles.Count - 5} 个文件");
+            }
+        }
+
+        var totalSize = filesToDownload.Sum(f => f.Size);
         var downloadedSize = 0L;
 
-        foreach (var file in files)
+        foreach (var file in filesToDownload)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -94,6 +587,76 @@ internal class HuggingFaceModelDownloader : IDisposable
             await DownloadFileAsync(url, filePath, downloadedSize, totalSize, progress, cancellationToken);
             downloadedSize += file.Size;
         }
+
+        // 如果 ONNX 文件在子目录或使用非标准文件名，需要移动/重命名
+        if (needMoveFromSubfolder)
+        {
+            // 查找下载的 ONNX 主文件（非 .data 文件）
+            var mainOnnxFile = onnxFiles.FirstOrDefault(f =>
+                !f.Path.EndsWith(".data", StringComparison.OrdinalIgnoreCase));
+
+            if (mainOnnxFile != null)
+            {
+                var sourceOnnxPath = Path.Combine(targetDir, mainOnnxFile.Path);
+                var rootOnnxPath = Path.Combine(targetDir, "model.onnx");
+
+                if (File.Exists(sourceOnnxPath) && sourceOnnxPath != rootOnnxPath)
+                {
+                    Console.WriteLine($"[Downloader] 移动 ONNX 文件到根目录: {mainOnnxFile.Path} -> model.onnx");
+                    if (File.Exists(rootOnnxPath))
+                    {
+                        File.Delete(rootOnnxPath);
+                    }
+
+                    // 确保目标目录存在
+                    var rootDir = Path.GetDirectoryName(rootOnnxPath);
+                    if (!string.IsNullOrEmpty(rootDir) && !Directory.Exists(rootDir))
+                    {
+                        Directory.CreateDirectory(rootDir);
+                    }
+
+                    File.Move(sourceOnnxPath, rootOnnxPath);
+                }
+
+                // 移动配套的 .data 文件（如果存在，支持 .onnx.data 和 .onnx_data 两种命名）
+                var mainBase = mainOnnxFile.Path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)
+                    ? mainOnnxFile.Path[..^5]
+                    : mainOnnxFile.Path;
+                var dataFile = onnxFiles.FirstOrDefault(f =>
+                    f.Path == mainOnnxFile.Path + ".data" ||
+                    f.Path == mainBase + ".onnx_data");
+
+                if (dataFile != null)
+                {
+                    var sourceDataPath = Path.Combine(targetDir, dataFile.Path);
+                    var rootDataPath = Path.Combine(targetDir, "model.onnx.data");
+
+                    if (File.Exists(sourceDataPath) && sourceDataPath != rootDataPath)
+                    {
+                        Console.WriteLine($"[Downloader] 移动外部数据文件: {dataFile.Path} -> model.onnx.data");
+                        if (File.Exists(rootDataPath))
+                        {
+                            File.Delete(rootDataPath);
+                        }
+                        File.Move(sourceDataPath, rootDataPath);
+                    }
+                }
+            }
+
+            // 删除空的子目录
+            try
+            {
+                var onnxDir = Path.Combine(targetDir, "onnx");
+                if (Directory.Exists(onnxDir) && !Directory.EnumerateFileSystemEntries(onnxDir).Any())
+                {
+                    Directory.Delete(onnxDir);
+                    Console.WriteLine("[Downloader] 已删除空的 onnx 子目录");
+                }
+            }
+            catch { }
+        }
+
+        Console.WriteLine($"[Downloader] 预转换 ONNX 模型下载完成");
     }
 
     /// <summary>
@@ -152,11 +715,61 @@ internal class HuggingFaceModelDownloader : IDisposable
             return;
         }
 
+        // 计算模型大小，判断是否需要使用 external 格式
+        // ONNX 嵌入式格式有 ~2GB 限制，经验估算 ONNX 文件约为 PyTorch 的 1.5-2 倍
+        var modelSize = filesToDownload
+            .Where(f => f.Path.EndsWith(".bin") || f.Path.EndsWith(".safetensors"))
+            .Sum(f => f.Size);
+        
+        // 阈值: 1.5GB (预留缓冲空间)
+        const long EMBEDDED_SIZE_LIMIT = 1610612736; // 1.5 * 1024 * 1024 * 1024
+        
+        // 自动判断格式：如果指定了格式用指定格式；否则根据大小自动判断
+        var actualFormat = onnxFormat;
+        if (string.IsNullOrEmpty(actualFormat))
+        {
+            if (modelSize > EMBEDDED_SIZE_LIMIT)
+            {
+                actualFormat = "external";
+                Console.WriteLine($"[Downloader] 检测到模型大小 {modelSize / 1024.0 / 1024.0 / 1024.0:F2} GB > 1.5 GB，自动使用 external 格式");
+            }
+            else
+            {
+                actualFormat = "embedded";
+                Console.WriteLine($"[Downloader] 模型大小 {modelSize / 1024.0 / 1024.0:F2} MB，使用 embedded 格式");
+            }
+        }
+
         // 执行 ONNX 转换
-        Console.WriteLine("[Downloader] 开始 ONNX 转换...");
+        Console.WriteLine($"[Downloader] 开始 ONNX 转换 (格式: {actualFormat})...");
         progress?.Report(90);
 
-        var success = await ConvertToOnnxAsync(targetDir, onnxPath, onnxFormat ?? "embedded", null, cancellationToken);
+        var success = await ConvertToOnnxAsync(targetDir, onnxPath, actualFormat, null, cancellationToken);
+        
+        // 如果 embedded 格式转换失败，尝试 external 格式
+        if (!success && actualFormat == "embedded")
+        {
+            Console.WriteLine("[Downloader] Embedded 格式转换失败，尝试 external 格式...");
+            
+            // 清理之前可能的残留文件
+            var failedOnnxPath = Path.Combine(targetDir, "model.onnx");
+            if (File.Exists(failedOnnxPath))
+            {
+                try { File.Delete(failedOnnxPath); } catch { }
+            }
+            var failedDataPath = Path.Combine(targetDir, "model.onnx.data");
+            if (File.Exists(failedDataPath))
+            {
+                try { File.Delete(failedDataPath); } catch { }
+            }
+            
+            success = await ConvertToOnnxAsync(targetDir, onnxPath, "external", null, cancellationToken);
+            if (success)
+            {
+                actualFormat = "external";
+                Console.WriteLine("[Downloader] External 格式转换成功");
+            }
+        }
         
         if (!success)
         {
@@ -169,12 +782,66 @@ internal class HuggingFaceModelDownloader : IDisposable
             if (!optimumOnnxDownloaded)
             {
                 throw new InvalidOperationException(
-                    $"自动转换失败。\n\n" +
-                    $"请手动转换模型：\n" +
-                    $"1. 安装依赖：pip install optimum[onnx] onnx\n" +
-                    $"2. 运行转换：optimum-cli export onnx --model {modelId} {targetDir}\n" +
-                    $"3. 或下载预转换版本：huggingface-cli download optimum/{modelId.Split('/').Last()} --local-dir {targetDir}");
+                    $"模型转换失败。\n\n" +
+                    $"可能原因：\n" +
+                    $"1. 模型体积较大，嵌入式格式受限\n" +
+                    $"2. Python 环境缺少必要的库\n\n" +
+                    $"建议解决方案：\n" +
+                    $"1. 使用 external 格式重试（支持大模型）\n" +
+                    $"2. 确保已安装 Python 和依赖：pip install torch transformers optimum onnx\n\n" +
+                    $"手动转换命令：\n" +
+                    $"optimum-cli export onnx --model {modelId} --dtype float16 {targetDir}");
             }
+            else
+            {
+                // 预转换模型下载成功，清理原始 PyTorch 文件
+                CleanupPyTorchFiles(targetDir);
+            }
+        }
+        else
+        {
+            Console.WriteLine($"[Downloader] ONNX 转换完成 (格式: {actualFormat})");
+
+            // 清理原始 PyTorch 模型文件，节省磁盘空间
+            CleanupPyTorchFiles(targetDir);
+        }
+    }
+
+    /// <summary>
+    /// 清理 PyTorch 模型文件（ONNX 转换成功后调用）
+    /// </summary>
+    private static void CleanupPyTorchFiles(string targetDir)
+    {
+        // 需要删除的文件列表
+        var filesToDelete = new[]
+        {
+            "pytorch_model.bin",
+            "model.safetensors"
+        };
+
+        long savedSpace = 0;
+        foreach (var fileName in filesToDelete)
+        {
+            var filePath = Path.Combine(targetDir, fileName);
+            if (File.Exists(filePath))
+            {
+                try
+                {
+                    var fileSize = new FileInfo(filePath).Length;
+                    File.Delete(filePath);
+                    savedSpace += fileSize;
+                    Console.WriteLine($"[Downloader] 已清理: {fileName} ({fileSize / 1024.0 / 1024.0:F2} MB)");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Downloader] 清理 {fileName} 失败: {ex.Message}");
+                }
+            }
+        }
+
+        if (savedSpace > 0)
+        {
+            Console.WriteLine($"[Downloader] 共释放空间: {savedSpace / 1024.0 / 1024.0:F2} MB");
         }
     }
 
@@ -237,7 +904,7 @@ internal class HuggingFaceModelDownloader : IDisposable
             var startInfo = new ProcessStartInfo
             {
                 FileName = "python",
-                Arguments = $"\"{scriptPath}\" --model_dir \"{modelDir}\" --output \"{outputPath}\"",
+                Arguments = $"\"{scriptPath}\" --model_dir \"{modelDir}\" --output \"{outputPath}\" --format {format}",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -346,6 +1013,46 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
+def convert_onnx_format(model_dir, output_path, format):
+    # Convert between ONNX embedded and external formats using onnx library
+    import onnx
+    from onnx import numpy_helper
+
+    src_onnx = os.path.join(model_dir, "model.onnx")
+    print(f"Loading existing ONNX model from: {src_onnx}")
+    onnx_model = onnx.load(src_onnx, load_external_data=True)
+
+    if format == 'external':
+        print("Converting to external format (model.onnx + model.onnx.data)...")
+        onnx.save(
+            onnx_model,
+            output_path,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location="model.onnx.data",
+            size_threshold=0,
+        )
+    else:  # embedded
+        print("Converting to embedded format (single file)...")
+        # 关键：必须显式清除所有 tensor 的 ExternalDataDescriptor，
+        # 否则 onnx.save 可能保留外部数据引用而非内联数据
+        for init in onnx_model.graph.initializer:
+            if init.HasField('data_location') or len(init.external_data) > 0:
+                # 将外部数据内联为 raw_data
+                # numpy_helper.to_array 返回的 ndarray 已保持正确的 dtype
+                np_array = numpy_helper.to_array(init)
+                init.ClearField('external_data')
+                init.ClearField('data_location')
+                init.raw_data = np_array.tobytes()
+        onnx.save(onnx_model, output_path)
+        # 清理可能残留的 .data 文件
+        data_file = output_path + ".data"
+        if os.path.exists(data_file):
+            print(f"Removing residual external data file after embedded conversion: {data_file}")
+            os.remove(data_file)
+
+    return True
+
 def export_with_optimum(model_dir, output_path, format):
     # Use optimum library for ONNX export (most reliable for embedded format)
     try:
@@ -378,8 +1085,17 @@ def export_with_optimum(model_dir, output_path, format):
             # If optimum also produced a .data file in temp, merge it
             if os.path.exists(src_data):
                 import onnx
+                from onnx import numpy_helper
                 merged = onnx.load(output_path, load_external_data=True)
+                # 清除外部数据引用，强制内联
+                for init in merged.graph.initializer:
+                    if init.HasField('data_location') or len(init.external_data) > 0:
+                        np_array = numpy_helper.to_array(init)
+                        init.ClearField('external_data')
+                        init.ClearField('data_location')
+                        init.raw_data = np_array.tobytes()
                 onnx.save(merged, output_path)
+                os.remove(src_data)
                 print("Merged external data into embedded ONNX file")
         else:
             shutil.move(src_onnx, output_path)
@@ -428,9 +1144,21 @@ def export_with_torch(model_dir, output_path, format):
     if format == 'embedded' and os.path.exists(data_file):
         print("Merging external data into single embedded file...")
         import onnx
+        from onnx import numpy_helper
         merged = onnx.load(output_path, load_external_data=True)
+        # 清除外部数据引用，强制内联
+        for init in merged.graph.initializer:
+            if init.HasField('data_location') or len(init.external_data) > 0:
+                np_array = numpy_helper.to_array(init)
+                init.ClearField('external_data')
+                init.ClearField('data_location')
+                init.raw_data = np_array.tobytes()
         onnx.save(merged, output_path)
         os.remove(data_file)
+        # 检查是否还有残留的 .data 文件
+        if os.path.exists(data_file):
+            print(f"Warning: .data file still exists after embedded save, removing: {data_file}")
+            os.remove(data_file)
         print("Merged external data into embedded format successfully")
     elif format == 'external' and not os.path.exists(data_file):
         # Already embedded, force external by saving with external_data_to
@@ -458,27 +1186,29 @@ def main():
     parser.add_argument('--format', default='embedded', choices=['embedded', 'external'], help='ONNX format')
     args = parser.parse_args()
 
-    try:
-        import torch
-        from transformers import AutoModel
-    except ImportError as e:
-        print(f"Error: Missing dependencies. Please install: pip install torch transformers optimum")
-        print(f"Details: {e}")
-        sys.exit(1)
+    # Check if model is already ONNX (no PyTorch weights) - use direct format conversion
+    has_pytorch = os.path.exists(os.path.join(args.model_dir, "pytorch_model.bin")) or \
+                  os.path.exists(os.path.join(args.model_dir, "model.safetensors"))
+    has_onnx = os.path.exists(os.path.join(args.model_dir, "model.onnx"))
 
-    # Strategy 1: Try optimum (most reliable for embedded format)
-    print(f"Attempting ONNX export with optimum...")
-    if export_with_optimum(args.model_dir, args.output, args.format):
-        # Verify export
-        try:
-            import onnx
-            onnx_model = onnx.load(args.output, load_external_data=False)
-            onnx.checker.check_model(onnx_model)
-        except Exception as e:
-            print(f"Warning: ONNX verification failed: {e}")
+    if not has_pytorch and has_onnx:
+        # Already ONNX, just convert between embedded/external formats
+        print("Model is already ONNX (no PyTorch weights), converting format directly...")
+        convert_onnx_format(args.model_dir, args.output, args.format)
     else:
-        print("optimum not available, falling back to torch.onnx.export...")
-        export_with_torch(args.model_dir, args.output, args.format)
+        # Strategy 1: Try optimum (most reliable for embedded format)
+        print(f"Attempting ONNX export with optimum...")
+        if export_with_optimum(args.model_dir, args.output, args.format):
+            # Verify export
+            try:
+                import onnx
+                onnx_model = onnx.load(args.output, load_external_data=False)
+                onnx.checker.check_model(onnx_model)
+            except Exception as e:
+                print(f"Warning: ONNX verification failed: {e}")
+        else:
+            print("optimum not available, falling back to torch.onnx.export...")
+            export_with_torch(args.model_dir, args.output, args.format)
 
     # Report results
     file_size = os.path.getsize(args.output) / (1024 * 1024)

@@ -12,13 +12,13 @@ public class TokenizeSingleDebugTests
     [Fact]
     public void Debug_EnglishWordPiece_Positions()
     {
-        var tokenizerPath = "E:/LinuxWork/Obsidian/resource/models/bge-small-zh-v1.5/tokenizer.json";
+        var tokenizerPath = "E:/LinuxWork/Obsidian/resource/data/models/bge-small-zh-v1.5/tokenizer.json";
         if (!File.Exists(tokenizerPath))
         {
             // 尝试相对路径
             tokenizerPath = Path.Combine(
                 Environment.CurrentDirectory, "..", "..", "..", "..",
-                "resource", "models", "bge-small-zh-v1.5", "tokenizer.json");
+                "resource", "data", "models", "bge-small-zh-v1.5", "tokenizer.json");
         }
 
         var tokenizer = new BertTokenizer(tokenizerPath);
@@ -54,9 +54,9 @@ public class TokenizeSingleDebugTests
     [Fact]
     public void Debug_SingleWord_Skills()
     {
-        var tokenizerPath = "E:/LinuxWork/Obsidian/resource/models/bge-small-zh-v1.5/tokenizer.json";
+        var tokenizerPath = "E:/LinuxWork/Obsidian/resource/data/models/bge-small-zh-v1.5/tokenizer.json";
         if (!File.Exists(tokenizerPath))
-            tokenizerPath = Path.Combine(Environment.CurrentDirectory, "..", "..", "..", "..", "resource", "models", "bge-small-zh-v1.5", "tokenizer.json");
+            tokenizerPath = Path.Combine(Environment.CurrentDirectory, "..", "..", "..", "..", "resource", "data", "models", "bge-small-zh-v1.5", "tokenizer.json");
 
         var tokenizer = new BertTokenizer(tokenizerPath);
 

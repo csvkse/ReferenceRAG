@@ -147,6 +147,11 @@ public interface IVectorStore
     /// 删除无关联模型的向量（孤立项清理）
     /// </summary>
     Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 根据源路径匹配回填文件的 source 字段（修复旧数据 source 为空的记录）
+    /// </summary>
+    Task<int> BackfillSourceAsync(IDictionary<string, string> sourceNameToPath, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

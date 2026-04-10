@@ -50,6 +50,10 @@
             <n-alert v-if="download.status === 'failed' && download.errorMessage" type="error" style="margin-top: 8px">
               <template #header>操作失败</template>
               <n-text>{{ download.errorMessage }}</n-text>
+              <n-text v-if="getErrorHelp(download.errorCode)" depth="3" style="display: block; margin-top: 8px; font-size: 12px">
+                <n-icon :component="InformationCircleOutline" style="vertical-align: middle; margin-right: 4px" />
+                {{ getErrorHelp(download.errorCode) }}
+              </n-text>
             </n-alert>
           </n-thing>
         </n-list-item>
@@ -120,43 +124,112 @@
     </n-modal>
 
     <!-- Download Confirm Dialog -->
-    <n-modal v-model:show="showDownloadDialog" preset="dialog" title="下载模型">
-      <n-space vertical>
-        <n-text>即将下载模型 <strong>{{ selectedModel?.displayName }}</strong></n-text>
-        <n-descriptions :column="1" label-placement="left">
-          <n-descriptions-item label="维度">{{ selectedModel?.dimension }}</n-descriptions-item>
-          <n-descriptions-item label="大小">{{ formatBytes(selectedModel?.modelSizeBytes || 0) }}</n-descriptions-item>
-          <n-descriptions-item label="语言">{{ selectedModel?.languages?.join(', ') || '-' }}</n-descriptions-item>
-        </n-descriptions>
-        <n-alert v-if="selectedModel && !selectedModel.hasOnnx" type="warning" title="需要转换">
-          <n-text>
-            此模型为 PyTorch 格式，需要转换为 ONNX。<br>
-            请确保已安装 Python 和相关依赖：<br>
-            <n-code code="pip install torch transformers onnx" language="bash" style="margin-top: 8px" />
-          </n-text>
-        </n-alert>
-        <n-form-item v-if="selectedModel && !selectedModel.hasOnnx" label="ONNX 格式">
-          <n-radio-group v-model:value="downloadFormat">
-            <n-space>
-              <n-radio value="embedded">
-                <n-space align="center">
-                  <span>嵌入式</span>
-                  <n-text depth="3" style="font-size: 12px">(CUDA 兼容性好)</n-text>
-                </n-space>
-              </n-radio>
-              <n-radio value="external">
-                <n-space align="center">
-                  <span>外部数据</span>
-                  <n-text depth="3" style="font-size: 12px">(支持大模型)</n-text>
-                </n-space>
-              </n-radio>
-            </n-space>
-          </n-radio-group>
-        </n-form-item>
-      </n-space>
+    <n-modal v-model:show="showDownloadDialog" preset="dialog" title="下载模型" style="width: 600px">
+      <n-spin :show="loadingOptions">
+        <n-space vertical>
+          <n-text>即将下载模型 <strong>{{ selectedModel?.displayName }}</strong></n-text>
+
+          <!-- 显示下载选项 -->
+          <template v-if="downloadOptions">
+            <!-- 需要 PyTorch 转换 -->
+            <n-alert v-if="downloadOptions.needsConversion" type="warning" title="需要转换">
+              <n-text>
+                此模型没有预转换的 ONNX 文件，需要从 PyTorch 转换。<br>
+                请确保已安装 Python 和相关依赖：<br>
+                <n-code code="pip install torch transformers onnx" language="bash" style="margin-top: 8px" />
+              </n-text>
+            </n-alert>
+
+            <!-- 有多个选项需要用户选择 -->
+            <template v-else-if="downloadOptions.needsUserSelection">
+              <n-form-item label="选择要下载的版本">
+                <n-radio-group v-model:value="selectedFile" style="width: 100%">
+                  <n-space vertical style="width: 100%">
+
+                    <!-- 根目录选项 -->
+                    <template v-if="downloadOptions.rootOptions.length > 0">
+                      <n-text depth="3" style="font-size: 12px; margin-top: 8px">根目录</n-text>
+                      <n-radio
+                        v-for="option in downloadOptions.rootOptions"
+                        :key="option.path"
+                        :value="option.path"
+                        style="width: 100%"
+                      >
+                        <n-space align="center" justify="space-between" style="width: 100%">
+                          <n-space align="center">
+                            <span>{{ option.displayName }}</span>
+                            <n-tag v-if="option.isRecommended" type="success" size="small">推荐</n-tag>
+                            <n-tag v-if="option.hasExternalData" type="warning" size="small">外部格式</n-tag>
+                            <n-tag v-else type="info" size="small">嵌入式</n-tag>
+                            <n-tag v-if="option.isQuantized" type="warning" size="small">量化</n-tag>
+                            <n-tag v-if="option.targetPlatform" type="default" size="small">{{ option.targetPlatform }}</n-tag>
+                          </n-space>
+                        </n-space>
+                      </n-radio>
+                    </template>
+
+                    <!-- 子目录选项 -->
+                    <template v-if="downloadOptions.subfolderOptions.length > 0">
+                      <n-text depth="3" style="font-size: 12px; margin-top: 12px">onnx/ 子目录</n-text>
+                      <n-radio
+                        v-for="option in downloadOptions.subfolderOptions"
+                        :key="option.path"
+                        :value="option.path"
+                        style="width: 100%"
+                      >
+                        <n-space align="center" justify="space-between" style="width: 100%">
+                          <n-space align="center">
+                            <span>{{ option.displayName }}</span>
+                            <n-tag v-if="option.isRecommended" type="success" size="small">推荐</n-tag>
+                            <n-tag v-if="option.hasExternalData" type="warning" size="small">外部格式</n-tag>
+                            <n-tag v-else type="info" size="small">嵌入式</n-tag>
+                            <n-tag v-if="option.isQuantized" type="warning" size="small">量化</n-tag>
+                            <n-tag v-if="option.targetPlatform" type="default" size="small">{{ option.targetPlatform }}</n-tag>
+                          </n-space>
+                        </n-space>
+                      </n-radio>
+                    </template>
+
+                  </n-space>
+                </n-radio-group>
+              </n-form-item>
+
+              <!-- 选中项的描述 -->
+              <n-alert v-if="selectedFileDescription" type="info" style="margin-top: 8px">
+                {{ selectedFileDescription }}
+              </n-alert>
+            </template>
+
+            <!-- 只有一个选项，无需选择 -->
+            <template v-else>
+              <n-descriptions :column="1" label-placement="left">
+                <n-descriptions-item label="版本">
+                  <n-space align="center">
+                    <span>{{ downloadOptions.recommendedOption?.displayName }}</span>
+                    <n-tag v-if="downloadOptions.recommendedOption?.hasExternalData" type="warning" size="small">外部格式</n-tag>
+                    <n-tag v-else type="info" size="small">嵌入式</n-tag>
+                  </n-space>
+                </n-descriptions-item>
+                <n-descriptions-item label="维度">{{ selectedModel?.dimension }}</n-descriptions-item>
+                <n-descriptions-item label="大小">{{ formatBytes(selectedModel?.modelSizeBytes || 0) }}</n-descriptions-item>
+              </n-descriptions>
+            </template>
+          </template>
+
+          <!-- 格式说明 -->
+          <n-alert type="info" style="margin-top: 8px">
+            <template #header>格式说明</template>
+            <n-text style="font-size: 13px">
+              <strong>嵌入式</strong>：单个 ONNX 文件，兼容性好，有 2GB 限制。<br>
+              <strong>外部格式</strong>：分离的权重文件，支持大模型，下载后可转换为嵌入式。
+            </n-text>
+          </n-alert>
+        </n-space>
+      </n-spin>
+
       <template #action>
         <n-button @click="showDownloadDialog = false">取消</n-button>
-        <n-button type="primary" @click="confirmDownload">开始下载</n-button>
+        <n-button type="primary" @click="confirmDownload" :disabled="!selectedFile && !downloadOptions?.needsConversion">开始下载</n-button>
       </template>
     </n-modal>
 
@@ -259,22 +332,11 @@
 
 <script setup lang="ts">
 import { ref, h, onMounted, onUnmounted, computed } from 'vue'
-import { NTag, NButton, NSpace, NProgress, NAlert, NCode, NIcon, NPopconfirm, NRadioGroup, NRadio, NFormItem, useMessage } from 'naive-ui'
+import { NTag, NButton, NSpace, NProgress, NAlert, NCode, NIcon, NPopconfirm, NRadioGroup, NRadio, NFormItem, NSpin, useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { RefreshOutline, AddOutline } from '@vicons/ionicons5'
+import { RefreshOutline, AddOutline, InformationCircleOutline } from '@vicons/ionicons5'
 import { modelsApi } from '@/api'
-import type { ModelInfo } from '@/types/api'
-
-interface DownloadProgress {
-  modelName: string
-  status: string
-  progress: number
-  bytesReceived: number
-  totalBytes: number
-  speedBytesPerSecond: number
-  estimatedSecondsRemaining: number | null
-  errorMessage?: string
-}
+import type { ModelInfo, DownloadProgress, ModelDownloadOptions } from '@/types/api'
 
 const message = useMessage()
 const models = ref<ModelInfo[]>([])
@@ -292,9 +354,11 @@ const converting = ref(false)
 const deleting = ref(false)
 const addingCustom = ref(false)
 const targetFormat = ref<'embedded' | 'external'>('embedded')
-const downloadFormat = ref<'embedded' | 'external'>('embedded')
 const deleteOldVectors = ref(false)
 const downloadProgress = ref<Map<string, DownloadProgress>>(new Map())
+const downloadOptions = ref<ModelDownloadOptions | null>(null)
+const selectedFile = ref<string | null>(null)
+const loadingOptions = ref(false)
 const customModelForm = ref({
   huggingFaceId: '',
   displayName: ''
@@ -305,6 +369,12 @@ const activeDownloads = computed(() => {
   return Array.from(downloadProgress.value.values()).filter(
     d => d.status === 'downloading' || d.status === 'completed' || d.status === 'failed'
   )
+})
+
+const selectedFileDescription = computed(() => {
+  if (!selectedFile.value || !downloadOptions.value) return null
+  const option = downloadOptions.value.allOptions.find(o => o.path === selectedFile.value)
+  return option?.description || null
 })
 
 const getFormatTagType = (format?: string) => {
@@ -472,6 +542,20 @@ const getProgressStatus = (status: string): 'default' | 'error' | 'success' | 'w
   }
 }
 
+// 错误码对应的帮助信息
+const getErrorHelp = (errorCode?: number) => {
+  switch (errorCode) {
+    case 3: return '文件下载不完整，请检查网络连接后重试。'
+    case 4: return 'ONNX转换失败，请确保Python环境已正确配置。'
+    case 5: return 'Python环境不可用，请安装Python 3.8+。'
+    case 6: return 'Python依赖缺失，请运行: pip install torch transformers optimum onnx'
+    case 7: return '模型过大不适合嵌入式格式，请使用"外部数据"格式重试。'
+    case 8: return '网络错误，请检查网络连接后重试。'
+    case 9: return '存储空间不足，请清理磁盘空间后重试。'
+    default: return null
+  }
+}
+
 const formatBytes = (bytes: number) => {
   if (bytes === 0) return '0 B'
   const k = 1024
@@ -505,21 +589,44 @@ const loadCurrentModel = async () => {
   }
 }
 
-const handleDownload = (model: ModelInfo) => {
+const handleDownload = async (model: ModelInfo) => {
   selectedModel.value = model
-  downloadFormat.value = 'embedded'
+  selectedFile.value = null
+  downloadOptions.value = null
+
+  // 获取下载选项
+  loadingOptions.value = true
+  try {
+    const response = await modelsApi.getDownloadOptions(model.name || '')
+    downloadOptions.value = response.data
+
+    // 如果只有一个选项或不需要用户选择，自动选择推荐选项
+    if (downloadOptions.value && !downloadOptions.value.needsUserSelection && downloadOptions.value.recommendedOption) {
+      selectedFile.value = downloadOptions.value.recommendedOption.path
+    } else if (downloadOptions.value && downloadOptions.value.allOptions.length > 0) {
+      // 有多个选项，选择推荐项
+      const recommended = downloadOptions.value.allOptions.find(o => o.isRecommended)
+      selectedFile.value = recommended?.path || downloadOptions.value.allOptions[0].path
+    }
+  } catch (error) {
+    console.error('Failed to get download options:', error)
+    downloadOptions.value = null
+  } finally {
+    loadingOptions.value = false
+  }
+
   showDownloadDialog.value = true
 }
 
 const confirmDownload = async () => {
   if (!selectedModel.value || !selectedModel.value.name) return
-  
+
   showDownloadDialog.value = false
   message.info(`开始下载模型: ${selectedModel.value.displayName}`)
-  
+
   try {
-    await modelsApi.download(selectedModel.value.name, !selectedModel.value.hasOnnx ? downloadFormat.value : undefined)
-    
+    await modelsApi.download(selectedModel.value.name, selectedFile.value || undefined)
+
     downloadProgress.value.set(selectedModel.value.name, {
       modelName: selectedModel.value.name,
       status: 'downloading',
@@ -529,7 +636,7 @@ const confirmDownload = async () => {
       speedBytesPerSecond: 0,
       estimatedSecondsRemaining: null
     })
-    
+
     startProgressPolling()
   } catch (error: any) {
     console.error('Failed to start download:', error)
@@ -633,6 +740,12 @@ const handleDelete = async (model: ModelInfo) => {
   } finally {
     deleting.value = false
   }
+}
+
+const confirmDelete = async () => {
+  if (!selectedModel.value) return
+  await handleDelete(selectedModel.value)
+  showDeleteDialog.value = false
 }
 
 const confirmAddCustom = async () => {

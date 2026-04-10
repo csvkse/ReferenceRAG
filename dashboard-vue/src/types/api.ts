@@ -351,6 +351,48 @@ export interface ModelInfo {
   hasAsymmetricEncoding?: boolean
 }
 
+// --- Model Download ---
+
+export interface DownloadProgress {
+  modelName: string
+  status: string  // "idle" | "downloading" | "completed" | "failed" | "cancelled"
+  progress: number  // 0-100
+  bytesReceived: number
+  totalBytes: number
+  speedBytesPerSecond: number
+  estimatedSecondsRemaining: number | null
+  errorMessage?: string
+  errorCode?: number
+  startTime?: string
+  endTime?: string
+  downloadOptions?: ModelDownloadOptions
+}
+
+export interface OnnxFileOption {
+  path: string
+  displayName: string
+  description?: string
+  size: number
+  isQuantized: boolean
+  targetPlatform?: string
+  hasExternalData: boolean
+  externalDataPath?: string
+  isInSubfolder: boolean
+  isRecommended: boolean
+}
+
+export interface ModelDownloadOptions {
+  modelName: string
+  hasOnnx: boolean
+  needsConversion: boolean
+  rootOptions: OnnxFileOption[]
+  subfolderOptions: OnnxFileOption[]
+  allOptions: OnnxFileOption[]
+  needsUserSelection: boolean
+  recommendedOption?: OnnxFileOption
+  estimatedSize: number
+}
+
 export interface ConvertFormatRequest {
   targetFormat: 'embedded' | 'external'
 }

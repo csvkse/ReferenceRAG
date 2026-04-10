@@ -21,8 +21,7 @@ import type {
   LongTextTestRequest,
   LongTextTestResult,
   ModelInfo,
-  ConvertFormatRequest,
-  AddCustomModelRequest,
+  ModelDownloadOptions,
   VectorStats,
   SystemStatus,
   SystemMetrics,
@@ -151,15 +150,16 @@ export const modelsApi = {
   getAll: () => api.get<ModelInfo[]>('/Models'),
   getCurrent: () => api.get<ModelInfo>('/Models/current'),
   switch: (modelName: string, deleteOldVectors = false) => api.post(`/Models/switch`, { modelName, deleteOldVectors }),
-  download: (modelName: string, targetFormat?: 'embedded' | 'external') =>
-    api.post(`/Models/download/${modelName}`, targetFormat ? { targetFormat } : undefined),
+  download: (modelName: string, onnxFilePath?: string) =>
+    api.post(`/Models/download/${modelName}`, onnxFilePath ? { onnxFilePath } : {}),
   getDownloadProgress: (modelName: string) => api.get(`/Models/download/${modelName}/progress`),
   convert: (modelName: string, targetFormat: 'embedded' | 'external') =>
     api.post(`/Models/${modelName}/convert`, { targetFormat }),
   getConvertProgress: (modelName: string) => api.get(`/Models/${modelName}/convert/progress`),
   addCustom: (huggingFaceId: string, displayName?: string) =>
     api.post('/Models/custom', { huggingFaceId, displayName }),
-  delete: (modelName: string) => api.delete(`/Models/${modelName}`)
+  delete: (modelName: string) => api.delete(`/Models/${modelName}`),
+  getDownloadOptions: (modelName: string) => api.get<ModelDownloadOptions>(`/Models/download-options/${modelName}`)
 }
 
 // Vectors

@@ -50,7 +50,7 @@ public interface IModelManager
     List<ModelInfo> GetDownloadedModels();
     ModelInfo? GetCurrentModel();
     Task<bool> SwitchModelAsync(string modelName);
-    Task<(bool Success, string? Error)> DownloadModelAsync(string modelName, IProgress<float>? progress = null, string? targetFormat = null);
+    Task<(bool Success, string? Error)> DownloadModelAsync(string modelName, IProgress<float>? progress = null, string? targetFormat = null, string? onnxVariantPath = null);
     Task<bool> DeleteModelAsync(string modelName);
     Task<List<ModelInfo>> GetRecommendedModelsAsync(string? language = null, bool preferGpu = true);
     void RefreshLocalModels();
@@ -80,6 +80,17 @@ public interface IModelManager
     /// </summary>
     Task<(bool Success, string? Error, List<string> Migrated)> SetModelsPathAsync(
         string newPath, bool migrateExisting = false, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 获取模型可用的 ONNX 变体列表
+    /// </summary>
+    [Obsolete("Use GetDownloadOptionsAsync instead")]
+    Task<List<OnnxVariant>> GetOnnxVariantsAsync(string modelName);
+
+    /// <summary>
+    /// 获取模型的下载选项
+    /// </summary>
+    Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName);
 }
 
 /// <summary>
@@ -332,7 +343,7 @@ public class ModelManager : IModelManager, IDisposable
         {
             var modelName = Path.GetFileName(dir);
             var onnxPath = Path.Combine(dir, "model.onnx");
-            
+
             if (File.Exists(onnxPath))
             {
                 var fileInfo = new FileInfo(onnxPath);
@@ -340,33 +351,44 @@ public class ModelManager : IModelManager, IDisposable
                     .Sum(f => new FileInfo(f).Length);
                 var onnxFormat = DetectOnnxFormat(dir);
                 var canConvert = directorySize < 2L * 1024 * 1024 * 1024; // < 2GB
-                
+
+                // 如果检测到残缺的 ONNX 文件，标记为未下载（需要重新转换）
+                var hasValidOnnx = onnxFormat != "invalid";
+
                 if (_modelRegistry.TryGetValue(modelName, out var model))
                 {
-                    model.IsDownloaded = true;
+                    model.IsDownloaded = hasValidOnnx; // 残缺文件视为未下载
                     model.LocalPath = dir;
                     model.ModelSizeBytes = directorySize;
                     model.OnnxFormat = onnxFormat;
+                    model.HasOnnx = hasValidOnnx;
                     model.CanConvertFormat = canConvert;
                 }
                 else
                 {
                     // 发现未注册的本地模型，尝试从配置推断维度
                     var dimension = DetectModelDimension(dir);
-                    
+
                     _modelRegistry[modelName] = new ModelInfo
                     {
                         Name = modelName,
                         DisplayName = modelName,
                         Description = "本地模型",
                         Dimension = dimension,
-                        IsDownloaded = true,
+                        IsDownloaded = hasValidOnnx, // 残缺文件视为未下载
                         LocalPath = dir,
                         ModelSizeBytes = directorySize,
-                        HasOnnx = true,
+                        HasOnnx = hasValidOnnx,
                         OnnxFormat = onnxFormat,
                         CanConvertFormat = canConvert
                     };
+                }
+
+                // 如果是残缺文件，尝试自动重新转换
+                if (onnxFormat == "invalid")
+                {
+                    Console.WriteLine($"[ModelManager] 检测到残缺 ONNX 文件，建议重新转换: {modelName}");
+                    // 可以在这里触发自动重新转换，但目前先标记状态让用户手动处理
                 }
             }
         }
@@ -443,7 +465,7 @@ public class ModelManager : IModelManager, IDisposable
         }
     }
 
-    public async Task<(bool Success, string? Error)> DownloadModelAsync(string modelName, IProgress<float>? progress = null, string? targetFormat = null)
+    public async Task<(bool Success, string? Error)> DownloadModelAsync(string modelName, IProgress<float>? progress = null, string? targetFormat = null, string? onnxVariantPath = null)
     {
         if (!_modelRegistry.TryGetValue(modelName, out var model))
         {
@@ -479,7 +501,8 @@ public class ModelManager : IModelManager, IDisposable
                 modelDir,
                 new Progress<float>(p => progress?.Report(p)),
                 default,
-                targetFormat
+                targetFormat,
+                onnxVariantPath
             );
 
             // 验证 ONNX 文件
@@ -525,6 +548,9 @@ public class ModelManager : IModelManager, IDisposable
             model.LocalPath = modelDir;
             model.ModelSizeBytes = new FileInfo(onnxPath).Length;
             model.Dimension = DetectModelDimension(modelDir);
+            model.OnnxFormat = DetectOnnxFormat(modelDir);
+            model.HasOnnx = model.OnnxFormat != "invalid";
+            model.CanConvertFormat = model.ModelSizeBytes < 2L * 1024 * 1024 * 1024;
 
             progress?.Report(100);
             Console.WriteLine($"[ModelManager] 模型下载完成: {model.DisplayName}");
@@ -617,7 +643,69 @@ public class ModelManager : IModelManager, IDisposable
         if (onnxFileInfo.Length > 2L * 1024 * 1024 * 1024)
             return "external"; // 大文件也可能是嵌入式，但概率较低
 
+        // 检测 ONNX 文件内部是否引用了外部数据
+        if (HasExternalDataReferences(onnxPath))
+        {
+            // ONNX 文件引用了外部数据，但 .data 文件不存在
+            Console.WriteLine($"[ModelManager] ONNX 文件引用外部数据但 .data 文件缺失: {onnxPath}");
+            return "invalid";
+        }
+
+        // 检测残缺的 ONNX 文件：如果存在 PyTorch 模型但 ONNX 文件很小，说明转换失败
+        var pytorchPath = Path.Combine(modelDir, "pytorch_model.bin");
+        var safetensorsPath = Path.Combine(modelDir, "model.safetensors");
+
+        var pytorchExists = File.Exists(pytorchPath) || File.Exists(safetensorsPath);
+        if (pytorchExists && onnxFileInfo.Length < 10 * 1024 * 1024) // < 10MB
+        {
+            // PyTorch 模型存在但 ONNX 文件很小，可能是残缺文件
+            Console.WriteLine($"[ModelManager] 检测到残缺的 ONNX 文件: {onnxPath} ({onnxFileInfo.Length / 1024.0 / 1024.0:F2} MB)");
+            return "invalid";
+        }
+
         return "embedded";
+    }
+
+    /// <summary>
+    /// 检查 ONNX 文件是否引用了外部数据
+    /// 通过扫描整个文件查找 protobuf 中的 ExternalDataDescriptor 关键标识
+    /// </summary>
+    private static bool HasExternalDataReferences(string onnxPath)
+    {
+        try
+        {
+            // ONNX protobuf 中外部数据引用的特征：
+            // 1. "model.onnx.data" — 外部数据文件名（最可靠）
+            // 2. ".onnx.data" — 通用的外部数据文件扩展名
+            // 3. "external_data" — ONNX ExternalDataDescriptor 中的字段名
+            // 注意：不能使用 "location" 作为检测条件，该词在 protobuf 中太常见，会误判
+
+            using var fs = new FileStream(onnxPath, FileMode.Open, FileAccess.Read);
+            using var reader = new BinaryReader(fs);
+
+            // 扫描整个文件而非仅前 8KB，因为外部数据引用可能在文件任何位置
+            var bufferSize = Math.Min(1024 * 1024, (int)fs.Length); // 最多扫描 1MB
+            var buffer = reader.ReadBytes(bufferSize);
+            var content = System.Text.Encoding.UTF8.GetString(buffer);
+
+            if (content.Contains("model.onnx.data"))
+            {
+                return true;
+            }
+
+            // 检查 .onnx.data 通配模式（如 all-MiniLM-L6-v2.onnx.data）
+            if (content.Contains(".onnx.data"))
+            {
+                return true;
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 检查 ONNX 外部数据引用失败: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>
@@ -654,6 +742,7 @@ public class ModelManager : IModelManager, IDisposable
             var onnxPath = Path.Combine(model.LocalPath, "model.onnx");
             var onnxDataPath = Path.Combine(model.LocalPath, "model.onnx.data");
             var backupPath = Path.Combine(model.LocalPath, "model.onnx.bak");
+            var backupDataPath = Path.Combine(model.LocalPath, "model.onnx.data.bak");
 
             // 备份原始文件
             progress?.Report(5);
@@ -661,6 +750,11 @@ public class ModelManager : IModelManager, IDisposable
             {
                 File.Copy(onnxPath, backupPath, true);
                 Console.WriteLine($"[ModelManager] 已备份原始模型: {backupPath}");
+            }
+            if (File.Exists(onnxDataPath))
+            {
+                File.Copy(onnxDataPath, backupDataPath, true);
+                Console.WriteLine($"[ModelManager] 已备份外部数据文件: {backupDataPath}");
             }
 
             progress?.Report(10);
@@ -685,6 +779,16 @@ public class ModelManager : IModelManager, IDisposable
                         File.Copy(backupPath, onnxPath, true);
                         File.Delete(backupPath);
                     }
+                    if (File.Exists(backupDataPath))
+                    {
+                        File.Copy(backupDataPath, onnxDataPath, true);
+                        File.Delete(backupDataPath);
+                    }
+                    else if (File.Exists(onnxDataPath) && actualFormat != "external")
+                    {
+                        // 转换产生了不应该存在的 .data 文件，删除
+                        File.Delete(onnxDataPath);
+                    }
                     // 如果实际是 external 格式但目标是 embedded，保留 .data 文件
                     if (actualFormat == "external" && File.Exists(onnxDataPath))
                     {
@@ -699,6 +803,16 @@ public class ModelManager : IModelManager, IDisposable
                 {
                     File.Delete(onnxDataPath);
                     Console.WriteLine($"[ModelManager] 已删除外部数据文件: {onnxDataPath}");
+                }
+
+                // 清理备份文件
+                if (File.Exists(backupPath))
+                {
+                    File.Delete(backupPath);
+                }
+                if (File.Exists(backupDataPath))
+                {
+                    File.Delete(backupDataPath);
                 }
 
                 // 更新模型信息
@@ -717,8 +831,18 @@ public class ModelManager : IModelManager, IDisposable
                 {
                     File.Copy(backupPath, onnxPath, true);
                     File.Delete(backupPath);
-                    Console.WriteLine($"[ModelManager] 已恢复原始模型");
                 }
+                if (File.Exists(backupDataPath))
+                {
+                    File.Copy(backupDataPath, onnxDataPath, true);
+                    File.Delete(backupDataPath);
+                }
+                else if (File.Exists(onnxDataPath))
+                {
+                    // 转换失败但产生了 .data 文件，原模型可能没有，需要清理
+                    // 但无法确定原模型是否有 .data，保守起见不删除
+                }
+                Console.WriteLine($"[ModelManager] 已恢复原始模型");
                 return (false, "模型转换失败，已恢复原始模型");
             }
         }
@@ -799,6 +923,57 @@ public class ModelManager : IModelManager, IDisposable
         catch (Exception ex)
         {
             return (false, $"添加模型失败: {ex.Message}", null);
+        }
+    }
+
+    /// <summary>
+    /// 获取模型可用的 ONNX 变体列表
+    /// </summary>
+    [Obsolete("Use GetDownloadOptionsAsync instead")]
+    public async Task<List<OnnxVariant>> GetOnnxVariantsAsync(string modelName)
+    {
+        if (!_modelRegistry.TryGetValue(modelName, out var model))
+        {
+            Console.WriteLine($"[ModelManager] 模型不存在: {modelName}");
+            return new List<OnnxVariant>();
+        }
+
+        try
+        {
+            var downloader = new HuggingFaceModelDownloader();
+            var variants = await downloader.GetOnnxVariantsAsync(model.DownloadUrl ?? $"BAAI/{modelName}");
+            Console.WriteLine($"[ModelManager] 获取到 {variants.Count} 个 ONNX 变体: {modelName}");
+            return variants;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 获取 ONNX 变体失败: {ex.Message}");
+            return new List<OnnxVariant>();
+        }
+    }
+
+    /// <summary>
+    /// 获取模型的下载选项
+    /// </summary>
+    public async Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName)
+    {
+        if (!_modelRegistry.TryGetValue(modelName, out var model))
+        {
+            Console.WriteLine($"[ModelManager] 模型不存在: {modelName}");
+            return new ModelDownloadOptions { ModelName = modelName };
+        }
+
+        try
+        {
+            var downloader = new HuggingFaceModelDownloader();
+            var options = await downloader.GetDownloadOptionsAsync(model.DownloadUrl ?? $"BAAI/{modelName}");
+            Console.WriteLine($"[ModelManager] 获取下载选项: {modelName}, HasOnnx={options.HasOnnx}, Options={options.AllOptions.Count}");
+            return options;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 获取下载选项失败: {ex.Message}");
+            return new ModelDownloadOptions { ModelName = modelName };
         }
     }
 

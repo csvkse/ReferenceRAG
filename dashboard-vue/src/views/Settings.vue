@@ -137,7 +137,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useMessage } from 'naive-ui'
-import { settingsApi, sourcesApi, modelsApi } from '@/api'
+import { settingsApi, sourcesApi } from '@/api'
 import type { ObsidianRagConfig, SourceDetail } from '@/types/api'
 
 const message = useMessage()

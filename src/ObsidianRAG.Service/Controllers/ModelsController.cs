@@ -164,6 +164,27 @@ public class ModelsController : ControllerBase
     }
 
     /// <summary>
+    /// 获取模型的下载选项
+    /// </summary>
+    [HttpGet("download-options/{modelName}")]
+    public async Task<ActionResult<ModelDownloadOptions>> GetDownloadOptions(string modelName)
+    {
+        var options = await _modelManager.GetDownloadOptionsAsync(modelName);
+        return Ok(options);
+    }
+
+    /// <summary>
+    /// 获取模型的可用 ONNX 变体列表（已废弃，请使用 download-options）
+    /// </summary>
+    [Obsolete("Use GetDownloadOptions instead")]
+    [HttpGet("variants/{modelName}")]
+    public async Task<ActionResult<List<OnnxVariant>>> GetOnnxVariants(string modelName)
+    {
+        var variants = await _modelManager.GetOnnxVariantsAsync(modelName);
+        return Ok(variants);
+    }
+
+    /// <summary>
     /// 开始下载模型
     /// </summary>
     [HttpPost("download/{modelName}")]
@@ -225,7 +246,7 @@ public class ModelsController : ControllerBase
                             }
                         }
                     }
-                }), request?.TargetFormat);
+                }), null, request?.OnnxFilePath);
 
                 if (_downloadProgress.TryGetValue(modelName, out var pg2))
                 {
@@ -240,6 +261,7 @@ public class ModelsController : ControllerBase
                     {
                         pg2.Status = "failed";
                         pg2.ErrorMessage = error ?? "未知错误";
+                        pg2.ErrorCode = ParseErrorCode(error ?? "");
                         pg2.EndTime = DateTime.UtcNow;
                         _logger.LogError("[ModelManager] 模型下载失败: {ModelName} - {Error}", modelName, error);
                     }
@@ -252,6 +274,7 @@ public class ModelsController : ControllerBase
                 {
                     pg3.Status = "failed";
                     pg3.ErrorMessage = ex.Message;
+                    pg3.ErrorCode = DownloadErrorCode.Unknown;
                     pg3.EndTime = DateTime.UtcNow;
                 }
             }
@@ -484,6 +507,40 @@ public class ModelsController : ControllerBase
             _ => modelName
         };
     }
+
+    /// <summary>
+    /// 从错误消息中解析错误码
+    /// </summary>
+    private static DownloadErrorCode ParseErrorCode(string errorMessage)
+    {
+        if (string.IsNullOrEmpty(errorMessage))
+            return DownloadErrorCode.Unknown;
+
+        var lowerMessage = errorMessage.ToLowerInvariant();
+
+        if (lowerMessage.Contains("model.onnx") && lowerMessage.Contains("不完整"))
+            return DownloadErrorCode.FileIncomplete;
+
+        if (lowerMessage.Contains("转换失败") || lowerMessage.Contains("转换异常"))
+        {
+            if (lowerMessage.Contains("python") || lowerMessage.Contains("optimum"))
+                return DownloadErrorCode.DependenciesMissing;
+            if (lowerMessage.Contains("过大") || lowerMessage.Contains("限制"))
+                return DownloadErrorCode.ModelTooLargeForEmbedded;
+            return DownloadErrorCode.ConversionFailed;
+        }
+
+        if (lowerMessage.Contains("python") && lowerMessage.Contains("不可用"))
+            return DownloadErrorCode.PythonNotFound;
+
+        if (lowerMessage.Contains("网络") || lowerMessage.Contains("timeout") || lowerMessage.Contains("connection"))
+            return DownloadErrorCode.NetworkError;
+
+        if (lowerMessage.Contains("存储") || lowerMessage.Contains("磁盘") || lowerMessage.Contains("空间"))
+            return DownloadErrorCode.StorageError;
+
+        return DownloadErrorCode.Unknown;
+    }
 }
 
 /// <summary>
@@ -505,9 +562,10 @@ public class SwitchModelRequest
 public class DownloadModelRequest
 {
     /// <summary>
-    /// 目标 ONNX 格式: "embedded" 或 "external"（默认 embedded）
+    /// 指定要下载的 ONNX 文件路径（如: model.onnx, onnx/model_qint8_avx512.onnx）
+    /// 如果不指定，将自动选择最佳选项
     /// </summary>
-    public string TargetFormat { get; set; } = "embedded";
+    public string? OnnxFilePath { get; set; }
 }
 
 /// <summary>

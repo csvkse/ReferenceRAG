@@ -3,6 +3,7 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
 using ObsidianRAG.Core.Services.Tokenizers;
+using System.Diagnostics;
 
 namespace ObsidianRAG.Core.Services;
 
@@ -170,34 +171,49 @@ public class EmbeddingService : IEmbeddingService, IDisposable
     }
 
     /// <summary>
-    /// 加载分词器（优先级：自定义 BertTokenizer > Microsoft.ML.Tokenizers > BERTTokenizers）
+    /// 加载分词器（优先级：HuggingFace 完整管线 > 自定义 BertTokenizer > Microsoft.ML.Tokenizers > 回退分词器）
     /// </summary>
     private static ITextTokenizer LoadTokenizer(string modelPath)
     {
         var modelDir = Path.GetDirectoryName(modelPath) ?? "";
-
-        // 1. 优先使用自定义 BertTokenizer（基于 tokenizer.json）
         var tokenizerPath = Path.Combine(modelDir, "tokenizer.json");
+
+        // 1. 优先使用 HuggingFace 完整分词器（tokenizers-rust 原生库，加载完整管线）
         if (File.Exists(tokenizerPath))
         {
-            Console.WriteLine("[EmbeddingService] 使用自定义 BertTokenizer（tokenizer.json）");
-            return new BertTokenizer(tokenizerPath);
+            try
+            {
+                var hfTokenizer = new HuggingFaceTokenizer(tokenizerPath);
+                Console.WriteLine("[EmbeddingService] 使用 HuggingFace 完整分词器（tokenizer.json 全管线）");
+                return hfTokenizer;
+            }
+            catch (DllNotFoundException ex)
+            {
+                Console.WriteLine($"[EmbeddingService] HuggingFace 原生库加载失败，降级到自定义分词器: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[EmbeddingService] HuggingFace 分词器初始化失败，降级到自定义分词器: {ex.Message}");
+            }
+
+            // 2. HuggingFace 失败时，降级到自定义 BertTokenizer（仅读取 vocab）
+            try
+            {
+                Console.WriteLine("[EmbeddingService] 降级使用自定义 BertTokenizer（tokenizer.json 仅 vocab）");
+                return new BertTokenizer(tokenizerPath);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[EmbeddingService] 自定义 BertTokenizer 初始化失败: {ex.Message}");
+            }
         }
 
-        // 2. 回退到 Microsoft.ML.Tokenizers
+        // 3. 回退到 Microsoft.ML.Tokenizers（基于 vocab.txt）
         var mlTokenizer = MLBertTokenizer.CreateFromDirectory(modelDir);
         if (mlTokenizer != null)
         {
             Console.WriteLine("[EmbeddingService] 使用 Microsoft.ML.Tokenizers");
             return mlTokenizer;
-        }
-
-        // 3. 回退到 BERTTokenizers（第三方库，对中文模型可能卡住）
-        var bertTokenizer = BertTokenizerWrapper.CreateFromDirectory(modelDir);
-        if (bertTokenizer != null)
-        {
-            Console.WriteLine("[EmbeddingService] 使用 BERTTokenizers");
-            return bertTokenizer;
         }
 
         // 4. 最后回退到简单分词器
@@ -231,22 +247,25 @@ public class EmbeddingService : IEmbeddingService, IDisposable
         var textList = texts.ToList();
         if (textList.Count == 0) return Array.Empty<float[]>();
 
-        // CUDA 模式下：外部格式模型逐条推理（ORT CUDA EP 已知限制），
-        // 嵌入式格式模型使用动态 batch 推理
+        // 嵌入式格式模型使用动态 batch 推理（走下方通用路径）
         if (_options.UseCuda && !_isEmbeddedFormat)
         {
             return await Task.Run(() =>
             {
-                lock (_lock)
+                // CUDA 路径同样需要 null guard
+                if (_session == null)
                 {
-                    return textList.Select(text => EncodeSingleInternal(text)).ToArray();
+                    Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
+                    return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
                 }
+
+                return textList.Select(text => EncodeSingleInternal(text)).ToArray();
             }, cancellationToken);
         }
 
-        lock (_lock)
+        // 非 CUDA 外部格式 路径：包在 Task.Run 中避免阻塞 async 调用方
+        return await Task.Run(() =>
         {
-            // 如果模型未加载，返回模拟向量
             if (_session == null)
             {
                 Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
@@ -282,15 +301,15 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             var inferenceMs = sw.ElapsedMilliseconds;
             sw.Restart();
 
-            // ONNX 输出可能是:
-            //   2D [batch, dim] — 模型已内置 pooling（如 sentence-transformers 导出）
-            //   3D [batch, seq_len, dim] — 原始 last_hidden_state，需要 mean pooling
-            var batchEmbeddings = new float[textList.Count][];
             var batchSize = textList.Count;
+            var batchEmbeddings = new float[batchSize][];
 
             if (outputShape.Length == 2)
             {
                 // 模型已内置 pooling，直接按 batch 维度切片
+                Debug.Assert(outputShape[1] == Dimension,
+                    $"输出维度不匹配：期望 {Dimension}，实际 {outputShape[1]}");
+
                 for (int i = 0; i < batchSize; i++)
                 {
                     batchEmbeddings[i] = new float[Dimension];
@@ -305,7 +324,9 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             {
                 // 原始 last_hidden_state [batch, seq_len, dim] — 需要 mean pooling
                 var seqLen = outputShape[1];
-                // 获取 attention_mask 用于 mean pooling
+                Debug.Assert(outputShape[2] == Dimension,
+                    $"隐藏层维度不匹配：期望 {Dimension}，实际 {outputShape[2]}");
+
                 var attentionMask = tokens.AttentionMask;
 
                 for (int i = 0; i < batchSize; i++)
@@ -315,7 +336,8 @@ public class EmbeddingService : IEmbeddingService, IDisposable
 
                     for (int s = 0; s < seqLen; s++)
                     {
-                        var maskVal = attentionMask[i, s];
+                        // AttentionMask 通常是 DenseTensor<long>，显式转换为 float
+                        var maskVal = (float)attentionMask[i, s];
                         if (maskVal == 0) continue;
                         maskSum += maskVal;
 
@@ -325,7 +347,6 @@ public class EmbeddingService : IEmbeddingService, IDisposable
                         }
                     }
 
-                    // 平均 + 归一化
                     if (maskSum > 0)
                     {
                         for (int d = 0; d < Dimension; d++)
@@ -352,7 +373,8 @@ public class EmbeddingService : IEmbeddingService, IDisposable
 #endif
 
             return batchEmbeddings;
-        }
+
+        }, cancellationToken);
     }
 
     /// <summary>
@@ -515,6 +537,8 @@ public class EmbeddingService : IEmbeddingService, IDisposable
         if (!_disposed)
         {
             _session?.Dispose();
+            if (_tokenizer is IDisposable disposable)
+                disposable.Dispose();
             _disposed = true;
         }
     }

@@ -17,10 +17,10 @@ public class TokenizerAlignmentTests
     {
         var tokenizerPath = Path.Combine(
             Environment.CurrentDirectory, "..", "..", "..", "..",
-            "resource", "models", "bge-small-zh-v1.5", "tokenizer.json");
+            "resource", "data", "models", "bge-small-zh-v1.5", "tokenizer.json");
 
         if (!File.Exists(tokenizerPath))
-            tokenizerPath = "E:/LinuxWork/Obsidian/resource/models/bge-small-zh-v1.5/tokenizer.json";
+            tokenizerPath = "E:/LinuxWork/Obsidian/resource/data/models/bge-small-zh-v1.5/tokenizer.json";
 
         _tokenizer = new BertTokenizer(tokenizerPath);
 

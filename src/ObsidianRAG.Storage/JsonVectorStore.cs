@@ -381,4 +381,22 @@ public class JsonVectorStore : IVectorStore, IDisposable
             _disposed = true;
         }
     }
+
+    public Task<int> BackfillSourceAsync(IDictionary<string, string> sourceNameToPath, CancellationToken cancellationToken = default)
+    {
+        var orphaned = _files.Values.Where(f => string.IsNullOrEmpty(f.Source)).ToList();
+        var updated = 0;
+        foreach (var file in orphaned)
+        {
+            var normalizedPath = file.Path.Replace('\\', '/');
+            var match = sourceNameToPath.FirstOrDefault(kvp =>
+                normalizedPath.StartsWith(kvp.Value.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase));
+            if (match.Key != null)
+            {
+                file.Source = match.Key;
+                updated++;
+            }
+        }
+        return Task.FromResult(updated);
+    }
 }
