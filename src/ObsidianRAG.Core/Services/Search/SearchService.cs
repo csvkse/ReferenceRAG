@@ -15,6 +15,7 @@ public class SearchService : ISearchService
     private readonly IEmbeddingService _embeddingService;
     private readonly ITextEnhancer _textEnhancer;
     private readonly HybridSearchService? _hybridSearchService;
+    private readonly IRerankService? _rerankService;
     private readonly ConfigManager _configManager;
     private readonly ILogger<SearchService> _logger;
 
@@ -24,7 +25,8 @@ public class SearchService : ISearchService
         ITextEnhancer textEnhancer,
         ConfigManager configManager,
         ILogger<SearchService> logger,
-        HybridSearchService? hybridSearchService = null)
+        HybridSearchService? hybridSearchService = null,
+        IRerankService? rerankService = null)
     {
         _vectorStore = vectorStore;
         _embeddingService = embeddingService;
@@ -32,6 +34,7 @@ public class SearchService : ISearchService
         _configManager = configManager;
         _logger = logger;
         _hybridSearchService = hybridSearchService;
+        _rerankService = rerankService;
     }
 
     /// <summary>
@@ -81,16 +84,30 @@ public class SearchService : ISearchService
     public async Task<AIQueryResponse> SearchAsync(AIQueryRequest request, CancellationToken cancellationToken = default)
     {
         var sw = Stopwatch.StartNew();
+        var config = _configManager.Load();
+        var rerankConfig = config.Rerank;
+
+        // 判断是否需要执行两阶段搜索
+        bool shouldRerank = DetermineRerankExecution(request, rerankConfig);
 
         // 获取启用的源列表
         var enabledSources = await GetEnabledSourceNamesAsync();
 
         List<SearchResult> topResults;
+        RerankStats? rerankStats = null;
 
-        // 混合搜索模式
-        if (request.Mode == QueryMode.Hybrid && _hybridSearchService != null)
+        // ========== 第一阶段：召回 ==========
+        if ((request.Mode == QueryMode.Hybrid || request.Mode == QueryMode.HybridRerank) && _hybridSearchService != null)
         {
-            var hybridResults = await _hybridSearchService.SearchAsync(request.Query, request.TopK, cancellationToken);
+            // 计算召回数量
+            int recallTopK = shouldRerank
+                ? request.TopK * rerankConfig.RecallFactor
+                : request.TopK;
+
+            _logger.LogDebug("混合搜索召回: TopK={TopK}, RecallFactor={Factor}, RecallTopK={RecallTopK}",
+                request.TopK, rerankConfig.RecallFactor, recallTopK);
+
+            var hybridResults = await _hybridSearchService.SearchAsync(request.Query, recallTopK, request.K1, request.B, cancellationToken);
 
             // 过滤禁用源
             var filteredHybridResults = hybridResults.Where(r => enabledSources.Contains(r.Source));
@@ -103,6 +120,8 @@ public class SearchService : ISearchService
                 Title = h.Title,
                 Content = h.Content,
                 Score = h.Score,
+                BM25Score = h.BM25Score,
+                EmbeddingScore = h.EmbeddingScore,
                 StartLine = h.StartLine,
                 EndLine = h.EndLine,
                 HeadingPath = h.HeadingPath,
@@ -111,30 +130,69 @@ public class SearchService : ISearchService
         }
         else
         {
-            // 标准向量搜索（使用当前模型）
-            var queryVector = await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
-            var modelName = _embeddingService.ModelName;
-            var results = await _vectorStore.SearchAsync(queryVector, modelName, request.TopK * 2, cancellationToken);
+            // 标准向量搜索
+            topResults = await ExecuteStandardSearchAsync(request, enabledSources, cancellationToken);
+        }
 
-            // 首先过滤禁用源
-            results = results.Where(r => enabledSources.Contains(r.Source));
+        // ========== 第二阶段：精排 ==========
+        if (shouldRerank && _rerankService != null && topResults.Count > 0)
+        {
+            var rerankSw = Stopwatch.StartNew();
 
-            // 应用源过滤（用户指定的源）
-            if (request.Sources?.Count > 0)
+            _logger.LogInformation("开始重排: 候选数={Count}, Query={Query}", topResults.Count, request.Query);
+
+            // 批量重排
+            var documents = topResults.Select(r => r.Content).ToList();
+            var rerankResult = await _rerankService.RerankBatchAsync(
+                request.Query,
+                documents,
+                cancellationToken);
+
+            // 获取 TopN
+            int topN = request.RerankTopN ?? rerankConfig.TopN;
+
+            // 构建重排后的结果
+            var rerankedResults = new List<SearchResult>();
+            foreach (var doc in rerankResult.Documents.Take(topN))
             {
-                results = results.Where(r => request.Sources.Contains(r.Source));
+                var originalResult = topResults[doc.Index];
+                originalResult.RerankScore = doc.RelevanceScore;
+                originalResult.Score = (float)doc.RelevanceScore; // 更新主分数
+                rerankedResults.Add(originalResult);
             }
 
-            // 应用其他过滤条件
-            var filteredResults = ApplyFilters(results, request.Filters);
-
-            // 流行度去偏
-            if (request.Options?.DebiasPopularity ?? true)
+            // 应用分数阈值过滤
+            if (rerankConfig.ScoreThreshold > 0)
             {
-                filteredResults = DebiasByPopularity(filteredResults);
+                var beforeCount = rerankedResults.Count;
+                rerankedResults = rerankedResults
+                    .Where(r => r.RerankScore >= rerankConfig.ScoreThreshold)
+                    .ToList();
+                _logger.LogDebug("分数阈值过滤: {Before} -> {After}", beforeCount, rerankedResults.Count);
             }
 
-            topResults = filteredResults.Take(request.TopK).ToList();
+            rerankSw.Stop();
+
+            // 记录重排统计
+            rerankStats = new RerankStats
+            {
+                CandidatesCount = topResults.Count,
+                RerankDurationMs = rerankSw.ElapsedMilliseconds,
+                ModelName = _rerankService.ModelName,
+                AverageScore = rerankedResults.Count > 0
+                    ? rerankedResults.Average(r => r.RerankScore ?? 0)
+                    : 0
+            };
+
+            topResults = rerankedResults;
+
+            _logger.LogInformation(
+                "两阶段搜索完成: 召回 {Candidates} 个候选, 重排耗时 {Ms}ms, 返回 {Count} 个结果, 平均分数={AvgScore:F4}",
+                rerankStats.CandidatesCount, rerankStats.RerankDurationMs, topResults.Count, rerankStats.AverageScore);
+        }
+        else if (shouldRerank && _rerankService == null)
+        {
+            _logger.LogWarning("重排服务不可用，跳过第二阶段精排");
         }
 
         // 构建响应
@@ -159,11 +217,65 @@ public class SearchService : ISearchService
                 DurationMs = sw.ElapsedMilliseconds,
                 EstimatedTokens = TokenEstimator.EstimateTokens(context)
             },
-            HasMore = topResults.Count >= request.TopK,
-            Suggestion = topResults.Count >= request.TopK
-                ? "如需更多结果，可使用 drill-down 接口深入查询"
-                : null
+            HasMore = false, // 重排后不再有分页
+            Suggestion = null,
+            RerankApplied = shouldRerank && _rerankService != null && topResults.Count > 0,
+            RerankStats = rerankStats
         };
+    }
+
+    /// <summary>
+    /// 判断是否需要执行重排
+    /// </summary>
+    private bool DetermineRerankExecution(AIQueryRequest request, RerankConfig config)
+    {
+        // 请求参数优先级最高
+        if (request.EnableRerank.HasValue)
+            return request.EnableRerank.Value;
+
+        // HybridRerank 模式强制启用
+        if (request.Mode == QueryMode.HybridRerank)
+            return true;
+
+        // Hybrid 模式根据配置决定
+        if (request.Mode == QueryMode.Hybrid && config.AutoRerankInHybrid)
+            return config.Enabled;
+
+        // 其他模式不启用
+        return false;
+    }
+
+    /// <summary>
+    /// 执行标准向量搜索
+    /// </summary>
+    private async Task<List<SearchResult>> ExecuteStandardSearchAsync(
+        AIQueryRequest request,
+        HashSet<string> enabledSources,
+        CancellationToken cancellationToken)
+    {
+        var queryVector = await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
+        var modelName = _embeddingService.ModelName;
+        var results = await _vectorStore.SearchAsync(queryVector, modelName, request.TopK * 2, cancellationToken);
+
+        // 首先过滤禁用源
+        results = results.Where(r => enabledSources.Contains(r.Source));
+
+        // 应用源过滤（用户指定的源）
+        if (request.Sources?.Count > 0)
+        {
+            results = results.Where(r => request.Sources.Contains(r.Source));
+        }
+
+        // 应用其他过滤条件
+        var filteredResults = ApplyFilters(results, request.Filters);
+
+        // 流行度去偏
+        if (request.Options?.DebiasPopularity ?? true)
+        {
+            filteredResults = DebiasByPopularity(filteredResults);
+        }
+
+        return filteredResults.Take(request.TopK).ToList();
     }
 
     /// <summary>
@@ -245,6 +357,9 @@ public class SearchService : ISearchService
             Title = r.Title,
             Content = r.Content,
             Score = r.Score,
+            BM25Score = r.BM25Score > 0 ? r.BM25Score : null,
+            EmbeddingScore = r.EmbeddingScore > 0 ? r.EmbeddingScore : null,
+            RerankScore = r.RerankScore,
             StartLine = r.StartLine,
             EndLine = r.EndLine,
             HeadingPath = r.HeadingPath,

@@ -91,6 +91,28 @@ public interface IModelManager
     /// 获取模型的下载选项
     /// </summary>
     Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName);
+
+    // ========== 重排模型管理 ==========
+
+    /// <summary>
+    /// 获取当前重排模型
+    /// </summary>
+    ModelInfo? GetCurrentRerankModel();
+
+    /// <summary>
+    /// 切换重排模型
+    /// </summary>
+    Task<bool> SwitchRerankModelAsync(string modelName);
+
+    /// <summary>
+    /// 获取所有重排模型列表
+    /// </summary>
+    List<ModelInfo> GetRerankModels();
+
+    /// <summary>
+    /// 获取已下载的重排模型列表
+    /// </summary>
+    List<ModelInfo> GetDownloadedRerankModels();
 }
 
 /// <summary>
@@ -102,6 +124,7 @@ public class ModelManager : IModelManager, IDisposable
     private readonly ConfigManager _configManager;
     private readonly Dictionary<string, ModelInfo> _modelRegistry;
     private ModelInfo? _currentModel;
+    private ModelInfo? _currentRerankModel;
     private bool _disposed;
 
     // 预定义模型库 - 包含 ONNX 和 PyTorch 版本信息
@@ -1308,6 +1331,82 @@ public class ModelManager : IModelManager, IDisposable
         // 使用 ConfigManager 保存配置，确保缓存同步
         _configManager.Save(config);
         await Task.CompletedTask;
+    }
+
+    // ========== 重排模型管理实现 ==========
+
+    /// <summary>
+    /// 获取当前重排模型
+    /// </summary>
+    public ModelInfo? GetCurrentRerankModel()
+    {
+        return _currentRerankModel;
+    }
+
+    /// <summary>
+    /// 切换重排模型
+    /// </summary>
+    public async Task<bool> SwitchRerankModelAsync(string modelName)
+    {
+        if (!_modelRegistry.TryGetValue(modelName, out var model))
+        {
+            Console.WriteLine($"[ModelManager] 重排模型不存在: {modelName}");
+            return false;
+        }
+
+        if (model.ModelType != "reranker")
+        {
+            Console.WriteLine($"[ModelManager] 模型 {modelName} 不是重排模型 (ModelType: {model.ModelType})");
+            return false;
+        }
+
+        if (!model.IsDownloaded)
+        {
+            Console.WriteLine($"[ModelManager] 重排模型未下载: {modelName}");
+            return false;
+        }
+
+        try
+        {
+            _currentRerankModel = model;
+
+            // 保存到配置
+            var config = await LoadConfigAsync();
+            if (config.Rerank == null)
+            {
+                config.Rerank = new RerankConfig();
+            }
+            config.Rerank.CurrentModel = modelName;
+            await SaveConfigAsync(config);
+
+            Console.WriteLine($"[ModelManager] 已切换重排模型: {model.DisplayName}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 切换重排模型失败: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 获取所有重排模型列表
+    /// </summary>
+    public List<ModelInfo> GetRerankModels()
+    {
+        return _modelRegistry.Values
+            .Where(m => m.ModelType == "reranker")
+            .ToList();
+    }
+
+    /// <summary>
+    /// 获取已下载的重排模型列表
+    /// </summary>
+    public List<ModelInfo> GetDownloadedRerankModels()
+    {
+        return _modelRegistry.Values
+            .Where(m => m.ModelType == "reranker" && m.IsDownloaded)
+            .ToList();
     }
 
     public void Dispose()

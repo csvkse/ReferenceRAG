@@ -44,7 +44,16 @@ public class FileLoggerWriter : IDisposable
         _writer?.Dispose();
         _currentDate = date;
         var filePath = Path.Combine(_logDir, $"obsidian-rag-{date}.log");
-        _writer = new StreamWriter(filePath, append: true) { AutoFlush = true };
+
+        // 使用 FileShare.ReadWrite 允许多个进程同时访问日志文件
+        var fileStream = new FileStream(
+            filePath,
+            FileMode.Append,
+            FileAccess.Write,
+            FileShare.ReadWrite,
+            bufferSize: 4096,
+            FileOptions.SequentialScan);
+        _writer = new StreamWriter(fileStream, encoding: System.Text.Encoding.UTF8) { AutoFlush = true };
     }
 
     public void Dispose()

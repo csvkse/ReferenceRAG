@@ -6,7 +6,7 @@ namespace ObsidianRAG.Core.Services;
 
 /// <summary>
 /// 混合搜索服务 - 结合 BM25 关键词搜索和 Embedding 语义搜索
-/// 使用 RRF (Reciprocal Rank Fusion) 算法融合结果
+/// 使用分数级加权融合 (Score-level Weighted Fusion) 算法
 /// </summary>
 public class HybridSearchService
 {
@@ -35,6 +35,7 @@ public class HybridSearchService
 
     /// <summary>
     /// 异步初始化 BM25 索引 - 确保默认模型存在并加载所有 chunks
+    /// 如果索引已存在则跳过索引步骤，实现快速启动
     /// </summary>
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -47,6 +48,9 @@ public class HybridSearchService
             {
                 await _bm25Store.CreateModelAsync(DefaultBM25Model, _options.BM25Options.K1, _options.BM25Options.B);
                 _logger?.LogInformation("创建默认 BM25 模型: {ModelName}", DefaultBM25Model);
+
+                // 新创建的模型需要索引所有文档
+                await IndexAllDocumentsAsync(cancellationToken);
             }
             else
             {
@@ -56,45 +60,60 @@ public class HybridSearchService
                     await _bm25Store.EnableModelAsync(DefaultBM25Model);
                     _logger?.LogInformation("启用已存在的 BM25 模型: {ModelName}", DefaultBM25Model);
                 }
-            }
 
-            // 获取所有文件
-            var files = await _vectorStore.GetAllFilesAsync();
-            var fileList = files.ToList();
-
-            var documentsToIndex = new List<(string ChunkId, string Content)>();
-
-            foreach (var file in fileList)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                // 获取该文件的所有 chunks
-                var chunks = await _vectorStore.GetChunksByFileAsync(file.Id);
-
-                foreach (var chunk in chunks)
+                // 检查索引是否已存在（TotalDocuments > 0 表示已有索引）
+                var modelInfo = await _bm25Store.GetModelInfoAsync(DefaultBM25Model);
+                if (modelInfo != null && modelInfo.TotalDocuments > 0)
                 {
-                    if (!string.IsNullOrEmpty(chunk.Content))
-                    {
-                        documentsToIndex.Add((chunk.Id, chunk.Content));
-                    }
+                    _logger?.LogInformation("BM25 索引已存在 ({TotalDocs} 个文档)，跳过索引步骤", modelInfo.TotalDocuments);
                 }
-            }
-
-            // 批量索引
-            if (documentsToIndex.Count > 0)
-            {
-                await _bm25Store.IndexBatchAsync(DefaultBM25Model, documentsToIndex);
-                _logger?.LogInformation("BM25 索引初始化完成，共索引 {Count} 个文档", documentsToIndex.Count);
-            }
-            else
-            {
-                _logger?.LogWarning("BM25 索引初始化完成，但没有找到任何文档");
+                else
+                {
+                    // 索引为空，跳过自动索引（由用户手动触发索引）
+                    _logger?.LogInformation("BM25 索引为空，请手动触发索引任务");
+                }
             }
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "BM25 索引初始化失败");
             throw;
+        }
+    }
+
+    /// <summary>
+    /// 索引所有文档到 BM25
+    /// </summary>
+    private async Task IndexAllDocumentsAsync(CancellationToken cancellationToken)
+    {
+        var files = await _vectorStore.GetAllFilesAsync();
+        var fileList = files.ToList();
+
+        var documentsToIndex = new List<(string ChunkId, string Content)>();
+
+        foreach (var file in fileList)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var chunks = await _vectorStore.GetChunksByFileAsync(file.Id);
+
+            foreach (var chunk in chunks)
+            {
+                if (!string.IsNullOrEmpty(chunk.Content))
+                {
+                    documentsToIndex.Add((chunk.Id, chunk.Content));
+                }
+            }
+        }
+
+        if (documentsToIndex.Count > 0)
+        {
+            await _bm25Store.IndexBatchAsync(DefaultBM25Model, documentsToIndex);
+            _logger?.LogInformation("BM25 索引初始化完成，共索引 {Count} 个文档", documentsToIndex.Count);
+        }
+        else
+        {
+            _logger?.LogWarning("BM25 索引初始化完成，但没有找到任何文档");
         }
     }
 
@@ -124,10 +143,13 @@ public class HybridSearchService
 
     /// <summary>
     /// 混合搜索 - 结合 BM25 和 Embedding 结果
+    /// 使用分数级加权融合 (Score-level Weighted Fusion)，而非 RRF 排名融合
     /// </summary>
     public async Task<List<HybridSearchResult>> SearchAsync(
         string query,
         int topK = 10,
+        float k1 = 1.5f,
+        float b = 0.75f,
         CancellationToken cancellationToken = default)
     {
         var results = new List<HybridSearchResult>();
@@ -139,9 +161,14 @@ public class HybridSearchService
             return await VectorOnlySearchAsync(query, topK, cancellationToken);
         }
 
-        // 1. BM25 关键词搜索
-        var bm25Results = await _bm25Store.SearchAsync(DefaultBM25Model, query, topK * 2);
+        // 1. BM25 关键词搜索（传入 k1, b 参数）
+        var bm25Results = await _bm25Store.SearchAsync(DefaultBM25Model, query, topK * 2, k1, b);
         var bm25RankMap = CreateRankMap(bm25Results.Select(r => r.ChunkId).ToList());
+        var bm25Dict = bm25Results.ToDictionary(r => r.ChunkId, r => r);
+
+        // 获取 BM25 最大分数用于归一化
+        var maxBm25Score = bm25Results.Count > 0 ? bm25Results.Max(r => r.Score) : 1.0;
+        if (maxBm25Score <= 0) maxBm25Score = 1.0;
 
         // 2. Embedding 语义搜索（使用当前模型）
         var queryVector = await _embeddingService.EncodeAsync(query, EmbeddingMode.Query, cancellationToken);
@@ -150,50 +177,41 @@ public class HybridSearchService
         var embeddingDict = embeddingResults.ToDictionary(r => r.ChunkId, r => r);
         var embeddingRankMap = CreateRankMap(embeddingResults.Select(r => r.ChunkId).ToList());
 
+        // 获取 Embedding 最大分数用于归一化
+        var maxEmbeddingScore = embeddingResults.Any() ? embeddingResults.Max(r => r.Score) : 1.0;
+        if (maxEmbeddingScore <= 0) maxEmbeddingScore = 1.0;
+
         // 3. 收集所有候选文档ID
         var allDocIds = bm25RankMap.Keys.Union(embeddingRankMap.Keys).ToHashSet();
 
-        // 4. RRF 融合
-        var rrfScores = new Dictionary<string, float>();
-        var k = _options.RRFK; // RRF 参数
+        // 4. 分数级加权融合
+        // 公式: finalScore = w1 * norm(BM25) + w2 * norm(Embedding)
+        // 其中 norm(x) = x / maxX，将分数归一化到 [0, 1] 范围
+        var fusedScores = new Dictionary<string, float>();
 
         foreach (var docId in allDocIds)
         {
-            var bm25Rank = bm25RankMap.GetValueOrDefault(docId, int.MaxValue);
-            var embeddingRank = embeddingRankMap.GetValueOrDefault(docId, int.MaxValue);
+            var bm25Score = bm25Dict.TryGetValue(docId, out var bm25Result) ? bm25Result.Score : 0;
+            var embeddingScore = embeddingDict.TryGetValue(docId, out var embeddingResult) ? embeddingResult.Score : 0;
 
-            // 对于只在 BM25 中的文档（embeddingRank = int.MaxValue），使用 BM25 排名作为虚拟 embedding 排名
-            // 这意味着：如果 BM25 说某文档是 #1，则在 embedding 排名中也视为 #1
-            var effectiveEmbeddingRank = embeddingRank;
-            if (embeddingRank == int.MaxValue && bm25Rank < int.MaxValue)
-            {
-                effectiveEmbeddingRank = bm25Rank;
-            }
+            // 归一化分数
+            var normalizedBm25 = (float)(bm25Score / maxBm25Score);
+            var normalizedEmbedding = (float)(embeddingScore / maxEmbeddingScore);
 
-            // RRF 分数 = 1/(k + rank_bm25) + 1/(k + rank_embedding)
-            var rrfScore = 0f;
-            if (bm25Rank < int.MaxValue)
-            {
-                rrfScore += _options.BM25Weight / (k + bm25Rank + 1);
-            }
-            if (effectiveEmbeddingRank < int.MaxValue)
-            {
-                rrfScore += _options.EmbeddingWeight / (k + effectiveEmbeddingRank + 1);
-            }
+            // 加权融合
+            var fusedScore = _options.BM25Weight * normalizedBm25 + _options.EmbeddingWeight * normalizedEmbedding;
 
-            rrfScores[docId] = rrfScore;
+            fusedScores[docId] = fusedScore;
         }
 
         // 5. 排序并取 Top-K
-        var topResults = rrfScores
+        var topResults = fusedScores
             .OrderByDescending(s => s.Value)
             .Take(topK)
             .ToList();
 
         // 6. 构建最终结果
-        var bm25Dict = bm25Results.ToDictionary(r => r.ChunkId, r => r);
-
-        foreach (var (docId, rrfScore) in topResults)
+        foreach (var (docId, fusedScore) in topResults)
         {
             bm25Dict.TryGetValue(docId, out var bm25Result);
             embeddingDict.TryGetValue(docId, out var embeddingResult);
@@ -205,7 +223,7 @@ public class HybridSearchService
                 FilePath = embeddingResult?.FilePath ?? string.Empty,
                 Title = embeddingResult?.Title ?? string.Empty,
                 Content = embeddingResult?.Content ?? bm25Result?.Content ?? string.Empty,
-                Score = rrfScore,
+                Score = fusedScore,
                 BM25Score = (float)(bm25Result?.Score ?? 0),
                 EmbeddingScore = (float)(embeddingResult?.Score ?? 0),
                 BM25Rank = bm25RankMap.GetValueOrDefault(docId, -1),

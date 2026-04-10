@@ -80,7 +80,12 @@ public enum QueryMode
     /// <summary>
     /// 混合模式：BM25 + Embedding 混合搜索
     /// </summary>
-    Hybrid = 3
+    Hybrid = 3,
+
+    /// <summary>
+    /// 两阶段搜索：召回（BM25+Embedding）+ 精排（Rerank）
+    /// </summary>
+    HybridRerank = 4
 }
 
 /// <summary>

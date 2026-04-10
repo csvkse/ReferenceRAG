@@ -55,6 +55,8 @@ export interface ChunkResult {
   title?: string
   content?: string
   score: number
+  bm25Score?: number
+  embeddingScore?: number
   startLine: number
   endLine: number
   headingPath?: string
@@ -554,4 +556,34 @@ export interface IndexJobResponse {
   endTime?: string
   duration?: string
   errorMessage?: string
+}
+
+// --- Rerank Test ---
+
+export interface RerankTestRequest {
+  query: string
+  documents: { id?: string; text: string; expectedRelevance?: number }[]
+  modelName?: string
+}
+
+export interface RerankTestResult {
+  testType: 'rerank'
+  modelName: string
+  timestamp: string
+  queryMs: number
+  documents: RerankDocumentResult[]
+  ndcg: number
+  mrr: number
+  map: number
+  rankingAccuracy: number
+  meanAbsoluteError: number
+}
+
+export interface RerankDocumentResult {
+  id?: string
+  text: string
+  relevanceScore: number
+  expectedRelevance?: number
+  deviation?: number
+  rank: number
 }

@@ -111,39 +111,66 @@ public class IndexService : IHostedService
 
                 var sw = Stopwatch.StartNew();
                 var errors = new List<string>();
+                var processedCount = 0;
+                var errorsCount = 0;
+                var currentFileLock = new object();
+                string currentFile = "";
 
-                foreach (var file in allFiles)
+                // 使用 SemaphoreSlim 限制并发文件处理数量 (避免同时打开过多文件/连接)
+                const int maxDegreeOfParallelism = 4;
+                using var semaphore = new SemaphoreSlim(maxDegreeOfParallelism);
+
+                // 并行处理文件
+                var tasks = allFiles.Select(async file =>
                 {
                     if (cancellationToken.IsCancellationRequested)
                     {
-                        job.Status = IndexStatus.Cancelled;
-                        break;
+                        return;
                     }
 
-                    job.CurrentFile = Path.GetFileName(file);
-
+                    await semaphore.WaitAsync(cancellationToken);
                     try
                     {
+                        var fileName = Path.GetFileName(file);
+
+                        // 线程安全地更新当前文件
+                        lock (currentFileLock)
+                        {
+                            currentFile = fileName;
+                        }
+
                         await ProcessFileAsync(file, embeddingService, chunker, vectorStore, sources);
-                        job.ProcessedFiles++;
+
+                        // 线程安全地递增计数器
+                        var count = Interlocked.Increment(ref processedCount);
 
                         // 广播进度
                         await IndexHub.BroadcastIndexProgress(_hubContext, new IndexProgressEvent
                         {
                             IndexId = indexId,
-                            ProcessedFiles = job.ProcessedFiles,
+                            ProcessedFiles = count,
                             TotalFiles = job.TotalFiles,
-                            CurrentFile = job.CurrentFile,
+                            CurrentFile = fileName,
                             Timestamp = DateTime.UtcNow
                         });
                     }
                     catch (Exception ex)
                     {
                         errors.Add($"{file}: {ex.Message}");
-                        job.Errors++;
+                        Interlocked.Increment(ref errorsCount);
                         _logger.LogWarning(ex, "Failed to index file: {File}", file);
                     }
-                }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }).ToList();
+
+                await Task.WhenAll(tasks);
+
+                // 更新最终状态
+                job.ProcessedFiles = processedCount;
+                job.Errors = errorsCount;
 
                 sw.Stop();
 

@@ -227,18 +227,17 @@ export const bm25IndexApi = {
   disableModel: (name: string) => api.post(`/bm25index/models/${name}/disable`),
   rebuildIndex: (name: string) => api.post(`/bm25index/models/${name}/rebuild`),
   incrementalIndex: (name: string, chunks: string[]) => api.post(`/bm25index/models/${name}/index`, chunks),
-  clearModel: (name: string) => api.post(`/bm25index/models/${name}/clear`),
+  clearModel: (name: string) => api.delete(`/bm25index/models/${name}/index`),
   search: (name: string, query: string, topK?: number) =>
     api.get<BM25SearchResult>(`/bm25index/models/${name}/search`, { params: { query, topK } }),
-  getConfig: () => api.get<BM25Config>('/bm25index/config'),
-  saveConfig: (config: BM25Config) => api.post('/bm25index/config', config)
+  // Provider 管理
+  getProvider: () => api.get<BM25ProviderInfo>('/bm25index/provider'),
+  setProvider: (provider: string) => api.post('/bm25index/provider', { provider })
 }
 
 // BM25 Types
 export interface BM25Model {
   name: string
-  k1: number
-  b: number
   averageDocLength: number
   totalDocuments: number
   vocabularySize: number
@@ -263,6 +262,22 @@ export interface BM25SearchResult {
 export interface BM25Config {
   k1: number
   b: number
+}
+
+export interface BM25ProviderInfo {
+  configuredProvider: string
+  activeProvider: string
+  isMatch: boolean
+  description: string
+}
+
+// Rerank Test
+export const rerankTestApi = {
+  test: (data: import('@/types/api').RerankTestRequest) => api.post<import('@/types/api').RerankTestResult>('/RerankTest/test', data),
+  getRecords: (params?: { limit?: number; offset?: number }) => api.get('/RerankTest/records', { params }),
+  getPresets: () => api.get('/RerankTest/presets'),
+  runPreset: (suiteName: string) => api.post(`/RerankTest/preset/${suiteName}`),
+  clearRecords: (params?: { before?: string }) => api.delete('/RerankTest/records', { params })
 }
 
 export default api

@@ -25,6 +25,9 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     // 缓存已创建的向量表维度
     private readonly Dictionary<string, int> _modelDimensions = new();
 
+    // 用于序列化写事务的锁 (SQLite不支持同一连接的并行事务)
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+
     public SqliteVectorStore(string dbPath)
     {
         _dbPath = dbPath;
@@ -37,6 +40,9 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
         _connection = new SqliteConnection(builder.ConnectionString);
         _connection.Open();
+
+        // SQLite 性能优化
+        OptimizeSqlitePerformance();
 
         // 加载 sqlite-vec 扩展
         LoadVectorExtension();
@@ -61,6 +67,40 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
         // 加载扩展
         _connection.LoadExtension(extensionPath);
+    }
+
+    /// <summary>
+    /// SQLite 性能优化配置
+    /// </summary>
+    private void OptimizeSqlitePerformance()
+    {
+        // WAL 模式：允许并发读，写操作更高效
+        ExecutePragma("PRAGMA journal_mode = WAL;");
+
+        // 关闭同步：提高写入性能（牺牲一定数据安全性，但 WAL 模式下仍可靠）
+        ExecutePragma("PRAGMA synchronous = NORMAL;");
+
+        // 增大缓存：使用更多内存提升性能
+        ExecutePragma("PRAGMA cache_size = -64000;"); // 64MB
+
+        // 临时表使用内存
+        ExecutePragma("PRAGMA temp_store = MEMORY;");
+
+        // 启用内存映射，减少 I/O
+        ExecutePragma("PRAGMA mmap_size = 268435456;"); // 256MB
+
+        // 增大页面大小
+        ExecutePragma("PRAGMA page_size = 4096;");
+
+        // 启用 WAL 自动检查点
+        ExecutePragma("PRAGMA wal_autocheckpoint = 1000;");
+    }
+
+    private void ExecutePragma(string sql)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
     }
 
     /// <summary>
@@ -458,31 +498,39 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
     public async Task UpsertFileAsync(FileRecord file, CancellationToken cancellationToken = default)
     {
-        var sql = @"
-            INSERT OR REPLACE INTO files
-            (id, path, file_name, title, content_hash, content_length, tags, parent_folder, source, chunk_count, total_tokens, created_at, updated_at, indexed_at)
-            VALUES
-            (@id, @path, @fileName, @title, @contentHash, @contentLength, @tags, @parentFolder, @source, @chunkCount, @totalTokens, @createdAt, @updatedAt, @indexedAt)
-        ";
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var sql = @"
+                INSERT OR REPLACE INTO files
+                (id, path, file_name, title, content_hash, content_length, tags, parent_folder, source, chunk_count, total_tokens, created_at, updated_at, indexed_at)
+                VALUES
+                (@id, @path, @fileName, @title, @contentHash, @contentLength, @tags, @parentFolder, @source, @chunkCount, @totalTokens, @createdAt, @updatedAt, @indexedAt)
+            ";
 
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@id", file.Id);
-        AddParameter(command, "@path", file.Path);
-        AddParameter(command, "@fileName", file.FileName ?? "");
-        AddParameter(command, "@title", file.Title ?? "");
-        AddParameter(command, "@contentHash", file.ContentHash ?? "");
-        AddParameter(command, "@contentLength", file.ContentLength);
-        AddParameter(command, "@tags", file.Tags != null ? JsonSerializer.Serialize(file.Tags) : "[]");
-        AddParameter(command, "@parentFolder", file.ParentFolder ?? "");
-        AddParameter(command, "@source", file.Source ?? "");
-        AddParameter(command, "@chunkCount", file.ChunkCount);
-        AddParameter(command, "@totalTokens", file.TotalTokens);
-        AddParameter(command, "@createdAt", file.CreatedAt?.ToString("O") ?? "");
-        AddParameter(command, "@updatedAt", file.ModifiedAt?.ToString("O") ?? "");
-        AddParameter(command, "@indexedAt", file.IndexedAt.ToString("O"));
+            using var command = _connection.CreateCommand();
+            command.CommandText = sql;
+            AddParameter(command, "@id", file.Id);
+            AddParameter(command, "@path", file.Path);
+            AddParameter(command, "@fileName", file.FileName ?? "");
+            AddParameter(command, "@title", file.Title ?? "");
+            AddParameter(command, "@contentHash", file.ContentHash ?? "");
+            AddParameter(command, "@contentLength", file.ContentLength);
+            AddParameter(command, "@tags", file.Tags != null ? JsonSerializer.Serialize(file.Tags) : "[]");
+            AddParameter(command, "@parentFolder", file.ParentFolder ?? "");
+            AddParameter(command, "@source", file.Source ?? "");
+            AddParameter(command, "@chunkCount", file.ChunkCount);
+            AddParameter(command, "@totalTokens", file.TotalTokens);
+            AddParameter(command, "@createdAt", file.CreatedAt?.ToString("O") ?? "");
+            AddParameter(command, "@updatedAt", file.ModifiedAt?.ToString("O") ?? "");
+            AddParameter(command, "@indexedAt", file.IndexedAt.ToString("O"));
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
     }
 
     public async Task<FileRecord?> GetFileAsync(string id, CancellationToken cancellationToken = default)
@@ -608,44 +656,37 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         var chunkList = chunks.ToList();
         if (chunkList.Count == 0) return;
 
-        using var transaction = _connection.BeginTransaction();
-
-        foreach (var chunk in chunkList)
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
+            using var transaction = _connection.BeginTransaction();
+
+            // 批量构建 SQL - 一次插入所有 chunks
             var sql = @"
                 INSERT OR REPLACE INTO chunks
                 (id, file_id, chunk_index, content, token_count, start_line, end_line,
                  start_column, end_column, heading_path, level, weight, chunk_type,
                  aggregate_type, child_chunk_count)
                 VALUES
-                (@id, @fileId, @chunkIndex, @content, @tokenCount, @startLine, @endLine,
-                 @startColumn, @endColumn, @headingPath, @level, @weight, @chunkType,
-                 @aggregateType, @childChunkCount)
             ";
+
+            var valueClauses = chunkList.Select(chunk =>
+                $"( {FormatString(chunk.Id)}, {FormatString(chunk.FileId)}, {chunk.ChunkIndex}, {FormatString(chunk.Content)}, {chunk.TokenCount}, {chunk.StartLine}, {chunk.EndLine}, {chunk.StartColumn}, {chunk.EndColumn}, {FormatString(chunk.HeadingPath ?? "")}, {chunk.Level}, {chunk.Weight}, {(int)chunk.ChunkType}, {(int)chunk.AggregateType}, {chunk.ChildChunkCount})"
+            );
+
+            sql += string.Join(",\n", valueClauses);
 
             using var command = _connection.CreateCommand();
             command.CommandText = sql;
             command.Transaction = transaction;
-            AddParameter(command, "@id", chunk.Id);
-            AddParameter(command, "@fileId", chunk.FileId);
-            AddParameter(command, "@chunkIndex", chunk.ChunkIndex);
-            AddParameter(command, "@content", chunk.Content);
-            AddParameter(command, "@tokenCount", chunk.TokenCount);
-            AddParameter(command, "@startLine", chunk.StartLine);
-            AddParameter(command, "@endLine", chunk.EndLine);
-            AddParameter(command, "@startColumn", chunk.StartColumn);
-            AddParameter(command, "@endColumn", chunk.EndColumn);
-            AddParameter(command, "@headingPath", chunk.HeadingPath ?? "");
-            AddParameter(command, "@level", chunk.Level);
-            AddParameter(command, "@weight", chunk.Weight);
-            AddParameter(command, "@chunkType", (int)chunk.ChunkType);
-            AddParameter(command, "@aggregateType", (int)chunk.AggregateType);
-            AddParameter(command, "@childChunkCount", chunk.ChildChunkCount);
-
             await command.ExecuteNonQueryAsync(cancellationToken);
-        }
 
-        transaction.Commit();
+            transaction.Commit();
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
     }
 
     public async Task<ChunkRecord?> GetChunkAsync(string id, CancellationToken cancellationToken = default)
@@ -775,45 +816,55 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         var vectorList = vectors.ToList();
         if (vectorList.Count == 0) return;
 
-        // 按模型分组
-        var byModel = vectorList.GroupBy(v => v.ModelName ?? "default");
-
-        foreach (var group in byModel)
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            var modelName = group.Key;
-            var firstVector = group.First();
-            var dimension = firstVector.Vector.Length;
+            // 按模型分组
+            var byModel = vectorList.GroupBy(v => v.ModelName ?? "default");
 
-            EnsureModelTableExists(modelName, dimension);
-
-            var tableName = ModelToTableName(modelName);
-
-            using var transaction = _connection.BeginTransaction();
-
-            foreach (var vector in group)
+            foreach (var group in byModel)
             {
-                var embeddingJson = VectorToJson(vector.Vector);
-                var sql = $@"
-                    INSERT OR REPLACE INTO {tableName} (chunk_id, embedding)
-                    VALUES (@chunkId, @embedding)
-                ";
+                var modelName = group.Key;
+                var firstVector = group.First();
+                var dimension = firstVector.Vector.Length;
 
-                using var command = _connection.CreateCommand();
-                command.CommandText = sql;
-                command.Transaction = transaction;
-                AddParameter(command, "@chunkId", vector.ChunkId);
-                AddParameter(command, "@embedding", embeddingJson);
+                EnsureModelTableExists(modelName, dimension);
 
-                await command.ExecuteNonQueryAsync(cancellationToken);
+                var tableName = ModelToTableName(modelName);
+
+                // 批量构建 SQL - 多行 VALUES 语法
+                var valuesClauses = group.Select((vector, index) =>
+                {
+                    var json = VectorToJson(vector.Vector);
+                    return $"({FormatString(vector.ChunkId)}, {FormatString(json)})";
+                });
+
+                // 分批执行，每批 500 条
+                const int batchSize = 500;
+                var batches = valuesClauses.Chunk(batchSize).ToList();
+
+                foreach (var batch in batches)
+                {
+                    var sql = $@"
+                        INSERT OR REPLACE INTO {tableName} (chunk_id, embedding)
+                        VALUES {string.Join(",\n", batch)}
+                    ";
+
+                    using var command = _connection.CreateCommand();
+                    command.CommandText = sql;
+                    await command.ExecuteNonQueryAsync(cancellationToken);
+                }
             }
 
-            transaction.Commit();
+            // 更新所有模型的统计
+            foreach (var modelName in byModel.Select(g => g.Key))
+            {
+                await UpdateModelStatsAsync(modelName, cancellationToken);
+            }
         }
-
-        // 更新所有模型的统计
-        foreach (var modelName in byModel.Select(g => g.Key))
+        finally
         {
-            await UpdateModelStatsAsync(modelName, cancellationToken);
+            _writeLock.Release();
         }
     }
 
@@ -1454,6 +1505,14 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     }
 
     /// <summary>
+    /// 格式化字符串用于SQL (防止注入)
+    /// </summary>
+    private static string FormatString(string value)
+    {
+        return "'" + value.Replace("'", "''") + "'";
+    }
+
+    /// <summary>
     /// 向量转 JSON 格式（sqlite-vec 接受 JSON 数组格式）
     /// </summary>
     private static string VectorToJson(float[] vector)
@@ -1489,6 +1548,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         {
             _connection.Close();
             _connection.Dispose();
+            _writeLock.Dispose();
             _disposed = true;
         }
     }

@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using ObsidianRAG.Core.Interfaces;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -59,8 +60,6 @@ public class SqliteBM25Store : IBM25Store, IDisposable
         var createModelsTable = @"
             CREATE TABLE IF NOT EXISTS bm25_models (
                 name TEXT PRIMARY KEY,
-                k1 REAL DEFAULT 1.5,
-                b REAL DEFAULT 0.75,
                 avg_doc_length REAL DEFAULT 0,
                 total_docs INTEGER DEFAULT 0,
                 vocab_size INTEGER DEFAULT 0,
@@ -121,7 +120,7 @@ public class SqliteBM25Store : IBM25Store, IDisposable
     /// </summary>
     private void LoadModelCache()
     {
-        var sql = "SELECT name, k1, b, avg_doc_length, total_docs, vocab_size, is_enabled, created_at FROM bm25_models";
+        var sql = "SELECT name, avg_doc_length, total_docs, vocab_size, is_enabled, created_at FROM bm25_models";
         using var command = _connection.CreateCommand();
         command.CommandText = sql;
 
@@ -131,13 +130,11 @@ public class SqliteBM25Store : IBM25Store, IDisposable
             var info = new BM25ModelInfo
             {
                 Name = reader.GetString(0),
-                K1 = reader.GetFloat(1),
-                B = reader.GetFloat(2),
-                AverageDocLength = reader.GetFloat(3),
-                TotalDocuments = reader.GetInt32(4),
-                VocabularySize = reader.GetInt32(5),
-                IsEnabled = reader.GetInt32(6) == 1,
-                CreatedAt = DateTime.Parse(reader.GetString(7))
+                AverageDocLength = reader.GetFloat(1),
+                TotalDocuments = reader.GetInt32(2),
+                VocabularySize = reader.GetInt32(3),
+                IsEnabled = reader.GetInt32(4) == 1,
+                CreatedAt = DateTime.Parse(reader.GetString(5))
             };
             _modelInfoCache[info.Name] = info;
             _modelEnabledCache[info.Name] = info.IsEnabled;
@@ -217,6 +214,14 @@ public class SqliteBM25Store : IBM25Store, IDisposable
         };
     }
 
+    /// <summary>
+    /// 格式化字符串用于SQL (防止注入)
+    /// </summary>
+    private static string FormatString(string value)
+    {
+        return "'" + value.Replace("'", "''") + "'";
+    }
+
     // ==================== 模型管理 ====================
 
     public async Task<BM25ModelInfo> CreateModelAsync(string name, float k1 = 1.5f, float b = 0.75f)
@@ -228,23 +233,19 @@ public class SqliteBM25Store : IBM25Store, IDisposable
 
         var createdAt = DateTime.UtcNow;
         var sql = @"
-            INSERT INTO bm25_models (name, k1, b, avg_doc_length, total_docs, vocab_size, is_enabled, created_at)
-            VALUES (@name, @k1, @b, 0, 0, 0, 1, @createdAt)
+            INSERT INTO bm25_models (name, avg_doc_length, total_docs, vocab_size, is_enabled, created_at)
+            VALUES (@name, 0, 0, 0, 1, @createdAt)
         ";
 
         using var command = _connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("@name", name);
-        command.Parameters.AddWithValue("@k1", k1);
-        command.Parameters.AddWithValue("@b", b);
         command.Parameters.AddWithValue("@createdAt", createdAt.ToString("O"));
         await command.ExecuteNonQueryAsync();
 
         var info = new BM25ModelInfo
         {
             Name = name,
-            K1 = k1,
-            B = b,
             AverageDocLength = 0,
             TotalDocuments = 0,
             VocabularySize = 0,
@@ -260,7 +261,7 @@ public class SqliteBM25Store : IBM25Store, IDisposable
 
     public async Task<List<BM25ModelInfo>> GetAllModelsAsync()
     {
-        var sql = "SELECT name, k1, b, avg_doc_length, total_docs, vocab_size, is_enabled, created_at FROM bm25_models";
+        var sql = "SELECT name, avg_doc_length, total_docs, vocab_size, is_enabled, created_at FROM bm25_models";
         var models = new List<BM25ModelInfo>();
 
         using var command = _connection.CreateCommand();
@@ -272,13 +273,11 @@ public class SqliteBM25Store : IBM25Store, IDisposable
             models.Add(new BM25ModelInfo
             {
                 Name = reader.GetString(0),
-                K1 = reader.GetFloat(1),
-                B = reader.GetFloat(2),
-                AverageDocLength = reader.GetFloat(3),
-                TotalDocuments = reader.GetInt32(4),
-                VocabularySize = reader.GetInt32(5),
-                IsEnabled = reader.GetInt32(6) == 1,
-                CreatedAt = DateTime.Parse(reader.GetString(7))
+                AverageDocLength = reader.GetFloat(1),
+                TotalDocuments = reader.GetInt32(2),
+                VocabularySize = reader.GetInt32(3),
+                IsEnabled = reader.GetInt32(4) == 1,
+                CreatedAt = DateTime.Parse(reader.GetString(5))
             });
         }
 
@@ -292,7 +291,7 @@ public class SqliteBM25Store : IBM25Store, IDisposable
             return cached;
         }
 
-        var sql = "SELECT name, k1, b, avg_doc_length, total_docs, vocab_size, is_enabled, created_at FROM bm25_models WHERE name = @name";
+        var sql = "SELECT name, avg_doc_length, total_docs, vocab_size, is_enabled, created_at FROM bm25_models WHERE name = @name";
         using var command = _connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("@name", name);
@@ -303,13 +302,11 @@ public class SqliteBM25Store : IBM25Store, IDisposable
             var info = new BM25ModelInfo
             {
                 Name = reader.GetString(0),
-                K1 = reader.GetFloat(1),
-                B = reader.GetFloat(2),
-                AverageDocLength = reader.GetFloat(3),
-                TotalDocuments = reader.GetInt32(4),
-                VocabularySize = reader.GetInt32(5),
-                IsEnabled = reader.GetInt32(6) == 1,
-                CreatedAt = DateTime.Parse(reader.GetString(7))
+                AverageDocLength = reader.GetFloat(1),
+                TotalDocuments = reader.GetInt32(2),
+                VocabularySize = reader.GetInt32(3),
+                IsEnabled = reader.GetInt32(4) == 1,
+                CreatedAt = DateTime.Parse(reader.GetString(5))
             };
             _modelInfoCache[name] = info;
             return info;
@@ -511,105 +508,103 @@ public class SqliteBM25Store : IBM25Store, IDisposable
         }
 
         var docList = documents.ToList();
-        var total = docList.Count;
-        var processed = 0;
-        const int batchSize = 100;
+        if (docList.Count == 0) return;
 
-        for (int i = 0; i < docList.Count; i += batchSize)
+        // 阶段0：清空旧数据
+        await ClearModelAsync(modelName);
+
+        // 阶段1：分词和收集数据
+        var docLengths = new List<(string ChunkId, int DocLength)>();
+        var invertedIndex = new List<(string ChunkId, string Term, int Freq, int DocLength)>();
+        var termDocCounts = new Dictionary<string, int>();
+
+        foreach (var (chunkId, content) in docList)
         {
-            var batch = docList.Skip(i).Take(batchSize).ToList();
-
-            using var transaction = _connection.BeginTransaction();
-
-            try
+            var tokens = Tokenize(content);
+            var termFreq = new Dictionary<string, int>();
+            foreach (var token in tokens)
             {
-                foreach (var (chunkId, content) in batch)
-                {
-                    var tokens = Tokenize(content);
-                    var docLength = tokens.Count;
-
-                    var termFreq = new Dictionary<string, int>();
-                    foreach (var token in tokens)
-                    {
-                        termFreq.TryGetValue(token, out var count);
-                        termFreq[token] = count + 1;
-                    }
-
-                    // 更新文档长度
-                    var upsertDocLength = @"
-                        INSERT OR REPLACE INTO bm25_doc_length (model_name, chunk_id, doc_length)
-                        VALUES (@modelName, @chunkId, @docLength)
-                    ";
-                    using (var cmd = _connection.CreateCommand())
-                    {
-                        cmd.CommandText = upsertDocLength;
-                        cmd.Parameters.AddWithValue("@modelName", modelName);
-                        cmd.Parameters.AddWithValue("@chunkId", chunkId);
-                        cmd.Parameters.AddWithValue("@docLength", docLength);
-                        cmd.Transaction = transaction;
-                        await cmd.ExecuteNonQueryAsync();
-                    }
-
-                    // 先删除旧term记录
-                    var deleteOldTerms = "DELETE FROM bm25_inverted_index WHERE model_name = @modelName AND chunk_id = @chunkId";
-                    using (var cmd = _connection.CreateCommand())
-                    {
-                        cmd.CommandText = deleteOldTerms;
-                        cmd.Parameters.AddWithValue("@modelName", modelName);
-                        cmd.Parameters.AddWithValue("@chunkId", chunkId);
-                        cmd.Transaction = transaction;
-                        await cmd.ExecuteNonQueryAsync();
-                    }
-
-                    // 插入新的term记录
-                    foreach (var (term, freq) in termFreq)
-                    {
-                        var insertTerm = @"
-                            INSERT OR REPLACE INTO bm25_inverted_index (model_name, term, chunk_id, term_freq, doc_length)
-                            VALUES (@modelName, @term, @chunkId, @termFreq, @docLength)
-                        ";
-                        using (var cmd = _connection.CreateCommand())
-                        {
-                            cmd.CommandText = insertTerm;
-                            cmd.Parameters.AddWithValue("@modelName", modelName);
-                            cmd.Parameters.AddWithValue("@term", term);
-                            cmd.Parameters.AddWithValue("@chunkId", chunkId);
-                            cmd.Parameters.AddWithValue("@termFreq", freq);
-                            cmd.Parameters.AddWithValue("@docLength", docLength);
-                            cmd.Transaction = transaction;
-                            await cmd.ExecuteNonQueryAsync();
-                        }
-
-                        var updateDocFreq = @"
-                            INSERT INTO bm25_doc_freq (model_name, term, doc_freq)
-                            VALUES (@modelName, @term, 1)
-                            ON CONFLICT(model_name, term) DO UPDATE SET doc_freq = doc_freq + 1
-                        ";
-                        using (var cmd = _connection.CreateCommand())
-                        {
-                            cmd.CommandText = updateDocFreq;
-                            cmd.Parameters.AddWithValue("@modelName", modelName);
-                            cmd.Parameters.AddWithValue("@term", term);
-                            cmd.Transaction = transaction;
-                            await cmd.ExecuteNonQueryAsync();
-                        }
-                    }
-
-                    processed++;
-                }
-
-                transaction.Commit();
-
-                progress?.Report((int)(processed * 100.0 / total));
-
-                // 每批后更新统计
-                await UpdateModelStatsAsync(modelName);
+                termFreq.TryGetValue(token, out var count);
+                termFreq[token] = count + 1;
             }
-            catch
+
+            var docLength = tokens.Count;
+            docLengths.Add((chunkId, docLength));
+
+            foreach (var (term, freq) in termFreq)
             {
-                transaction.Rollback();
-                throw;
+                invertedIndex.Add((chunkId, term, freq, docLength));
+                termDocCounts.TryGetValue(term, out var docCount);
+                termDocCounts[term] = docCount + 1;
             }
+        }
+
+        progress?.Report(20);
+
+        // 阶段2：批量写入（使用事务）
+        using var transaction = _connection.BeginTransaction();
+
+        try
+        {
+            // 批量写入文档长度（直接全部写入一张表）
+            var sqlLength = new StringBuilder();
+            sqlLength.AppendLine("INSERT INTO bm25_doc_length (model_name, chunk_id, doc_length) VALUES");
+            sqlLength.Append(string.Join(",\n", docLengths.Select(b =>
+                $"({FormatString(modelName)}, {FormatString(b.ChunkId)}, {b.DocLength})")));
+
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = sqlLength.ToString();
+                cmd.Transaction = transaction;
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            progress?.Report(40);
+
+            // 批量写入倒排索引
+            const int indexBatchSize = 100000;
+            for (int i = 0; i < invertedIndex.Count; i += indexBatchSize)
+            {
+                var batch = invertedIndex.Skip(i).Take(indexBatchSize);
+                var sql = new StringBuilder();
+                sql.AppendLine("INSERT INTO bm25_inverted_index (model_name, term, chunk_id, term_freq, doc_length) VALUES");
+                sql.Append(string.Join(",\n", batch.Select(b =>
+                    $"({FormatString(modelName)}, {FormatString(b.Term)}, {FormatString(b.ChunkId)}, {b.Freq}, {b.DocLength})")));
+
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = sql.ToString();
+                cmd.Transaction = transaction;
+                await cmd.ExecuteNonQueryAsync();
+
+                progress?.Report(40 + (int)((i + indexBatchSize) * 40.0 / invertedIndex.Count));
+            }
+
+            progress?.Report(85);
+
+            // 批量写入文档频率（单次写入）
+            var freqList = termDocCounts.ToList();
+            var sqlFreq = new StringBuilder();
+            sqlFreq.AppendLine("INSERT INTO bm25_doc_freq (model_name, term, doc_freq) VALUES");
+            sqlFreq.Append(string.Join(",\n", freqList.Select(b =>
+                $"({FormatString(modelName)}, {FormatString(b.Key)}, {b.Value})")));
+
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = sqlFreq.ToString();
+                cmd.Transaction = transaction;
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            transaction.Commit();
+            progress?.Report(95);
+
+            await UpdateModelStatsAsync(modelName);
+            progress?.Report(100);
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
         }
     }
 
@@ -690,7 +685,7 @@ public class SqliteBM25Store : IBM25Store, IDisposable
 
     // ==================== 搜索操作 ====================
 
-    public async Task<List<BM25SearchResult>> SearchAsync(string modelName, string query, int topK = 10)
+    public async Task<List<BM25SearchResult>> SearchAsync(string modelName, string query, int topK = 10, float k1 = 1.5f, float b = 0.75f)
     {
         if (!ModelExists(modelName))
         {
@@ -714,8 +709,6 @@ public class SqliteBM25Store : IBM25Store, IDisposable
             return new List<BM25SearchResult>();
         }
 
-        var k1 = modelInfo.K1;
-        var b = modelInfo.B;
         var avgDocLength = modelInfo.AverageDocLength;
         var totalDocs = modelInfo.TotalDocuments;
 

@@ -36,6 +36,11 @@ public class ObsidianRagConfig
     public ServiceConfig Service { get; set; } = new();
 
     /// <summary>
+    /// 重排模型配置
+    /// </summary>
+    public RerankConfig Rerank { get; set; } = new();
+
+    /// <summary>
     /// 获取所有源路径（兼容旧配置）
     /// </summary>
     [Obsolete("Use Sources instead")]
@@ -264,6 +269,13 @@ public class SearchConfig
     /// 默认搜索的源（空=全部）
     /// </summary>
     public List<string> DefaultSources { get; set; } = new();
+
+    /// <summary>
+    /// BM25 提供者类型：fts5 或 legacy
+    /// fts5: 使用 SQLite FTS5 内置 BM25（推荐，性能更好）
+    /// legacy: 使用手动倒排索引实现（备用）
+    /// </summary>
+    public string BM25Provider { get; set; } = "fts5";
 }
 
 /// <summary>
@@ -295,4 +307,64 @@ public class ServiceConfig
     /// 日志级别
     /// </summary>
     public string LogLevel { get; set; } = "Information";
+}
+
+/// <summary>
+/// 重排模型配置
+/// </summary>
+public class RerankConfig
+{
+    /// <summary>
+    /// 是否启用重排功能
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// 模型名称
+    /// </summary>
+    public string ModelName { get; set; } = "bge-reranker-base";
+
+    /// <summary>
+    /// 当前使用的重排模型
+    /// </summary>
+    public string? CurrentModel { get; set; }
+
+    /// <summary>
+    /// 模型路径（相对于 ModelsPath）
+    /// </summary>
+    public string? ModelPath { get; set; }
+
+    /// <summary>
+    /// 是否使用 CUDA
+    /// </summary>
+    public bool UseCuda { get; set; } = false;
+
+    /// <summary>
+    /// CUDA 设备 ID
+    /// </summary>
+    public int CudaDeviceId { get; set; } = 0;
+
+    /// <summary>
+    /// 重排后返回的最大文档数
+    /// </summary>
+    public int TopN { get; set; } = 10;
+
+    /// <summary>
+    /// 召回倍数（候选文档数 = TopN * RecallFactor）
+    /// 推荐 3-5 倍，确保召回足够的候选
+    /// </summary>
+    public int RecallFactor { get; set; } = 3;
+
+    /// <summary>
+    /// 是否在 Hybrid 模式下自动启用重排
+    /// true: Hybrid 模式自动进行两阶段搜索
+    /// false: 仅当 QueryMode.HybridRerank 时才重排
+    /// </summary>
+    public bool AutoRerankInHybrid { get; set; } = true;
+
+    /// <summary>
+    /// 重排分数阈值（低于此阈值的文档将被过滤）
+    /// 0 表示不过滤
+    /// </summary>
+    public float ScoreThreshold { get; set; } = 0.0f;
 }

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using ObsidianRAG.Core.Interfaces;
+using ObsidianRAG.Core.Services;
 
 namespace ObsidianRAG.Service.Controllers;
 
@@ -12,16 +13,83 @@ public class BM25IndexController : ControllerBase
 {
     private readonly IBM25Store _bm25Store;
     private readonly IVectorStore _vectorStore;
+    private readonly ConfigManager _configManager;
     private readonly ILogger<BM25IndexController> _logger;
 
     public BM25IndexController(
         IBM25Store bm25Store,
         IVectorStore vectorStore,
+        ConfigManager configManager,
         ILogger<BM25IndexController> logger)
     {
         _bm25Store = bm25Store;
         _vectorStore = vectorStore;
+        _configManager = configManager;
         _logger = logger;
+    }
+
+    // ==================== Provider 管理 ====================
+
+    /// <summary>
+    /// 获取当前 BM25 Provider
+    /// </summary>
+    [HttpGet("provider")]
+    public ActionResult<BM25ProviderInfo> GetProvider()
+    {
+        var config = _configManager.Load();
+        var currentProvider = config.Search?.BM25Provider ?? "fts5";
+
+        // 判断实际运行的 provider 类型
+        var actualProvider = _bm25Store.GetType().Name.Contains("Fts5") ? "fts5" : "legacy";
+
+        return Ok(new BM25ProviderInfo
+        {
+            ConfiguredProvider = currentProvider,
+            ActiveProvider = actualProvider,
+            IsMatch = currentProvider.Equals(actualProvider, StringComparison.OrdinalIgnoreCase),
+            Description = currentProvider == "fts5"
+                ? "FTS5: 使用 SQLite FTS5 内置 BM25（推荐，性能更好）"
+                : "Legacy: 使用手动倒排索引实现（备用）"
+        });
+    }
+
+    /// <summary>
+    /// 设置 BM25 Provider（仅修改配置，需重启服务生效）
+    /// </summary>
+    [HttpPost("provider")]
+    public ActionResult SetProvider([FromBody] SetProviderRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Provider))
+        {
+            return BadRequest(new { error = "Provider 不能为空" });
+        }
+
+        var provider = request.Provider.ToLowerInvariant();
+        if (provider != "fts5" && provider != "legacy")
+        {
+            return BadRequest(new { error = "Provider 必须是 'fts5' 或 'legacy'" });
+        }
+
+        var config = _configManager.Load();
+
+        if (config.Search == null)
+        {
+            config.Search = new ObsidianRAG.Core.Models.SearchConfig();
+        }
+
+        var oldProvider = config.Search.BM25Provider ?? "fts5";
+        config.Search.BM25Provider = provider;
+
+        _configManager.Save(config);
+
+        _logger.LogInformation("BM25 Provider 已修改: {OldProvider} -> {NewProvider}，请重启服务使更改生效", oldProvider, provider);
+
+        return Ok(new
+        {
+            message = $"Provider 已修改为 '{provider}'，请重启服务使更改生效",
+            provider = provider,
+            requiresRestart = true
+        });
     }
 
     // ==================== 模型管理 ====================
@@ -42,16 +110,13 @@ public class BM25IndexController : ControllerBase
             return Conflict(new { error = $"模型 '{request.Name}' 已存在" });
         }
 
-        _logger.LogInformation("创建 BM25 模型: {ModelName}, k1={K1}, b={B}",
-            request.Name, request.K1, request.B);
+        _logger.LogInformation("创建 BM25 模型: {ModelName}", request.Name);
 
-        var model = await _bm25Store.CreateModelAsync(request.Name, request.K1, request.B);
+        var model = await _bm25Store.CreateModelAsync(request.Name);
 
         return Created($"/api/bm25index/models/{model.Name}", new BM25ModelResponse
         {
             Name = model.Name,
-            K1 = model.K1,
-            B = model.B,
             AverageDocLength = model.AverageDocLength,
             TotalDocuments = model.TotalDocuments,
             VocabularySize = model.VocabularySize,
@@ -72,8 +137,6 @@ public class BM25IndexController : ControllerBase
         return Ok(models.Select(m => new BM25ModelResponse
         {
             Name = m.Name,
-            K1 = m.K1,
-            B = m.B,
             AverageDocLength = m.AverageDocLength,
             TotalDocuments = m.TotalDocuments,
             VocabularySize = m.VocabularySize,
@@ -97,8 +160,6 @@ public class BM25IndexController : ControllerBase
         return Ok(new BM25ModelResponse
         {
             Name = model.Name,
-            K1 = model.K1,
-            B = model.B,
             AverageDocLength = model.AverageDocLength,
             TotalDocuments = model.TotalDocuments,
             VocabularySize = model.VocabularySize,
@@ -285,6 +346,75 @@ public class BM25IndexController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// 测试端点：从向量库获取所有文档并索引到 BM25（用于性能测试）
+    /// </summary>
+    [HttpPost("models/{modelName}/reindex-all")]
+    public async Task<ActionResult<IndexProgressResponse>> ReindexAllDocuments(string modelName)
+    {
+        if (!_bm25Store.ModelExists(modelName))
+        {
+            return NotFound(new { error = $"模型 '{modelName}' 不存在" });
+        }
+
+        _logger.LogInformation("开始全量索引 BM25 模型 {ModelName} 的所有文档", modelName);
+
+        // 获取所有文件
+        var files = await _vectorStore.GetAllFilesAsync();
+        var fileList = files.ToList();
+
+        _logger.LogInformation("找到 {FileCount} 个文件", fileList.Count);
+
+        var documentsToIndex = new List<(string ChunkId, string Content)>();
+
+        foreach (var file in fileList)
+        {
+            var chunks = await _vectorStore.GetChunksByFileAsync(file.Id);
+            foreach (var chunk in chunks)
+            {
+                if (!string.IsNullOrEmpty(chunk.Content))
+                {
+                    documentsToIndex.Add((chunk.Id, chunk.Content));
+                }
+            }
+        }
+
+        _logger.LogInformation("准备索引 {DocCount} 个文档", documentsToIndex.Count);
+
+        if (documentsToIndex.Count == 0)
+        {
+            return Ok(new IndexProgressResponse
+            {
+                ModelName = modelName,
+                TotalDocuments = 0,
+                ProcessedDocuments = 0,
+                ProgressPercent = 100,
+                Message = "没有文档需要索引"
+            });
+        }
+
+        var progress = new Progress<int>();
+        var startTime = DateTime.UtcNow;
+
+        await _bm25Store.IndexBatchAsync(modelName, documentsToIndex, progress);
+
+        var duration = DateTime.UtcNow - startTime;
+        var modelInfo = await _bm25Store.GetModelInfoAsync(modelName);
+
+        _logger.LogInformation("BM25 全量索引完成，{DocCount} 个文档，耗时 {Duration}ms",
+            documentsToIndex.Count, duration.TotalMilliseconds);
+
+        return Ok(new IndexProgressResponse
+        {
+            ModelName = modelName,
+            TotalDocuments = documentsToIndex.Count,
+            ProcessedDocuments = documentsToIndex.Count,
+            ProgressPercent = 100,
+            TotalTerms = modelInfo?.VocabularySize ?? 0,
+            Message = $"索引完成，{documentsToIndex.Count} 个文档，耗时 {duration.TotalMilliseconds:F0}ms"
+        });
+    }
+
     // ==================== 搜索操作 ====================
 
     /// <summary>
@@ -378,8 +508,6 @@ public class BM25IndexController : ControllerBase
 public class CreateBM25ModelRequest
 {
     public string Name { get; set; } = string.Empty;
-    public float K1 { get; set; } = 1.5f;
-    public float B { get; set; } = 0.75f;
 }
 
 public class IndexModelRequest
@@ -398,8 +526,6 @@ public class IndexDocumentRequest
 public class BM25ModelResponse
 {
     public string Name { get; set; } = string.Empty;
-    public float K1 { get; set; }
-    public float B { get; set; }
     public double AverageDocLength { get; set; }
     public int TotalDocuments { get; set; }
     public int VocabularySize { get; set; }
@@ -452,4 +578,17 @@ public class BM25ModelStat
     public int TotalDocuments { get; set; }
     public int VocabularySize { get; set; }
     public bool IsEnabled { get; set; }
+}
+
+public class BM25ProviderInfo
+{
+    public string ConfiguredProvider { get; set; } = "fts5";
+    public string ActiveProvider { get; set; } = "fts5";
+    public bool IsMatch { get; set; }
+    public string Description { get; set; } = "";
+}
+
+public class SetProviderRequest
+{
+    public string Provider { get; set; } = "fts5";
 }

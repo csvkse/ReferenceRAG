@@ -185,10 +185,17 @@ public class SearchResult
     public string? Title { get; set; }
     public string Content { get; set; } = string.Empty;
     public float Score { get; set; }
+    public float BM25Score { get; set; }
+    public float EmbeddingScore { get; set; }
     public int StartLine { get; set; }
     public int EndLine { get; set; }
     public string? HeadingPath { get; set; }
     public int Level { get; set; }
     public int ChildChunkCount { get; set; }
     public AggregateType AggregateType { get; set; }
+
+    /// <summary>
+    /// 重排分数（启用重排时有效）
+    /// </summary>
+    public double? RerankScore { get; set; }
 }

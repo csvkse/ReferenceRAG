@@ -3,6 +3,60 @@
     <!-- BM25 Index Management -->
     <n-card title="BM25索引管理">
       <n-tabs type="line" animated>
+        <!-- Provider Settings Tab -->
+        <n-tab-pane name="provider" tab="Provider设置">
+          <n-space vertical :size="16">
+            <n-alert :type="providerInfo.isMatch ? 'success' : 'warning'">
+              <template #header>当前状态</template>
+              <n-space vertical>
+                <n-text>配置 Provider: <n-tag type="info">{{ providerInfo.configuredProvider }}</n-tag></n-text>
+                <n-text>运行 Provider: <n-tag :type="providerInfo.activeProvider === 'fts5' ? 'success' : 'warning'">{{ providerInfo.activeProvider }}</n-tag></n-text>
+                <n-text v-if="!providerInfo.isMatch" type="warning">配置与运行中 Provider 不匹配，需要重启服务</n-text>
+              </n-space>
+            </n-alert>
+
+            <n-card title="切换 BM25 Provider" style="max-width: 600px">
+              <n-form :model="providerForm" label-placement="left" label-width="120">
+                <n-form-item label="Provider 类型">
+                  <n-radio-group v-model:value="providerForm.provider" name="providerGroup">
+                    <n-space>
+                      <n-radio value="fts5">
+                        <n-space vertical :size="4">
+                          <n-text strong>FTS5（推荐）</n-text>
+                          <n-text depth="3" style="font-size: 12px">使用 SQLite FTS5 内置 BM25，性能更好</n-text>
+                        </n-space>
+                      </n-radio>
+                      <n-radio value="legacy">
+                        <n-space vertical :size="4">
+                          <n-text strong>Legacy</n-text>
+                          <n-text depth="3" style="font-size: 12px">手动倒排索引实现，作为备用</n-text>
+                        </n-space>
+                      </n-radio>
+                    </n-space>
+                  </n-radio-group>
+                </n-form-item>
+                <n-form-item>
+                  <n-button
+                    type="primary"
+                    :loading="savingProvider"
+                    :disabled="providerForm.provider === providerInfo.configuredProvider"
+                    @click="handleSaveProvider"
+                  >
+                    保存配置（需重启服务生效）
+                  </n-button>
+                </n-form-item>
+              </n-form>
+
+              <n-alert type="info" style="margin-top: 16px">
+                <template #header>说明</template>
+                <n-text depth="3">
+                  修改 Provider 配置后需要重启服务才能生效。重启后系统将使用新的 Provider 进行 BM25 索引和搜索。
+                </n-text>
+              </n-alert>
+            </n-card>
+          </n-space>
+        </n-tab-pane>
+
         <!-- Model List Tab -->
         <n-tab-pane name="models" tab="模型列表">
           <n-space vertical :size="16">
@@ -132,47 +186,6 @@
           </n-space>
         </n-tab-pane>
 
-        <!-- Configuration Tab -->
-        <n-tab-pane name="config" tab="模型配置">
-          <n-card title="BM25参数配置" style="max-width: 500px">
-            <n-form :model="configForm" label-placement="left" label-width="120">
-              <n-form-item label="K1参数">
-                <n-input-number
-                  v-model:value="configForm.k1"
-                  :min="0"
-                  :max="10"
-                  :step="0.1"
-                  style="width: 200px"
-                />
-              </n-form-item>
-              <n-form-item label="B参数">
-                <n-input-number
-                  v-model:value="configForm.b"
-                  :min="0"
-                  :max="1"
-                  :step="0.05"
-                  style="width: 200px"
-                />
-              </n-form-item>
-              <n-form-item>
-                <n-button type="primary" :loading="savingConfig" @click="handleSaveConfig">
-                  保存配置
-                </n-button>
-                <n-button style="margin-left: 12px" @click="loadConfig">
-                  重置
-                </n-button>
-              </n-form-item>
-            </n-form>
-
-            <n-alert type="info" style="margin-top: 16px">
-              <template #header>参数说明</template>
-              <n-text>
-                <strong>K1</strong>: 词频饱和度参数，控制词频对相关性得分的影响程度。<br>
-                <strong>B</strong>: 文档长度归一化参数，控制文档长度对得分的影响程度。
-              </n-text>
-            </n-alert>
-          </n-card>
-        </n-tab-pane>
       </n-tabs>
     </n-card>
 
@@ -234,11 +247,13 @@ import {
   NThing,
   NProgress,
   NModal,
+  NRadio,
+  NRadioGroup,
   useMessage
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { RefreshOutline, AddOutline } from '@vicons/ionicons5'
-import { bm25IndexApi, type BM25Model, type BM25SearchResult } from '@/api'
+import { bm25IndexApi, type BM25Model, type BM25SearchResult, type BM25ProviderInfo } from '@/api'
 
 const message = useMessage()
 
@@ -251,7 +266,6 @@ const creating = ref(false)
 const clearing = ref(false)
 const rebuilding = ref(false)
 const searching = ref(false)
-const savingConfig = ref(false)
 const selectedModelName = ref<string | null>(null)
 const rebuildProgress = ref<{ percent: number; status: 'default' | 'success' | 'error'; message: string } | null>(null)
 
@@ -269,9 +283,16 @@ const searchForm = ref({
   topK: 10
 })
 
-const configForm = ref({
-  k1: 1.5,
-  b: 0.75
+// Provider state
+const providerInfo = ref<BM25ProviderInfo>({
+  configuredProvider: 'fts5',
+  activeProvider: 'fts5',
+  isMatch: true,
+  description: ''
+})
+const savingProvider = ref(false)
+const providerForm = ref({
+  provider: 'fts5'
 })
 
 // Computed
@@ -351,6 +372,30 @@ const modelColumns: DataTableColumns<BM25Model> = [
 ]
 
 // Methods
+const loadProvider = async () => {
+  try {
+    const response = await bm25IndexApi.getProvider()
+    providerInfo.value = response.data
+    providerForm.value.provider = response.data.configuredProvider
+  } catch (error) {
+    console.error('Failed to load provider:', error)
+  }
+}
+
+const handleSaveProvider = async () => {
+  savingProvider.value = true
+  try {
+    await bm25IndexApi.setProvider(providerForm.value.provider)
+    message.success('Provider 配置已保存，请重启服务使更改生效')
+    await loadProvider()
+  } catch (error: any) {
+    console.error('Failed to save provider:', error)
+    message.error(`保存失败: ${error.response?.data?.error || error.message}`)
+  } finally {
+    savingProvider.value = false
+  }
+}
+
 const loadModels = async () => {
   loading.value = true
   try {
@@ -361,15 +406,6 @@ const loadModels = async () => {
     message.error('加载模型列表失败')
   } finally {
     loading.value = false
-  }
-}
-
-const loadConfig = async () => {
-  try {
-    const response = await bm25IndexApi.getConfig()
-    configForm.value = response.data
-  } catch (error) {
-    console.error('Failed to load config:', error)
   }
 }
 
@@ -504,22 +540,9 @@ const handleSearch = async () => {
   }
 }
 
-const handleSaveConfig = async () => {
-  savingConfig.value = true
-  try {
-    await bm25IndexApi.saveConfig(configForm.value)
-    message.success('配置保存成功')
-  } catch (error: any) {
-    console.error('Failed to save config:', error)
-    message.error(`保存失败: ${error.response?.data?.error || error.message}`)
-  } finally {
-    savingConfig.value = false
-  }
-}
-
 // Lifecycle
 onMounted(() => {
   loadModels()
-  loadConfig()
+  loadProvider()
 })
 </script>

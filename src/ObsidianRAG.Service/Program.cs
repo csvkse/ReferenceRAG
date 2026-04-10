@@ -1,5 +1,6 @@
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Services;
+using ObsidianRAG.Core.Services.Rerank;
 using ObsidianRAG.Storage;
 using ObsidianRAG.Service.Hubs;
 using ObsidianRAG.Service.Services;
@@ -63,13 +64,25 @@ builder.Services.AddSingleton<IVectorStore>(sp =>
     return new SqliteVectorStore(dbPath);
 });
 // 注册 BM25 存储（与向量存储共用同一个数据库）
+// 根据配置选择 fts5（推荐）或 legacy（备用）实现
 builder.Services.AddSingleton<IBM25Store>(sp =>
 {
     var config = sp.GetRequiredService<ConfigManager>();
     var cfg = config.Load();
     var dataPath = cfg.DataPath ?? "data";
     var dbPath = Path.Combine(dataPath, "vectors.db");
-    return new SqliteBM25Store(dbPath);
+
+    var bm25Provider = cfg.Search?.BM25Provider?.ToLowerInvariant() ?? "fts5";
+
+    // 记录选择的 BM25 provider
+    Console.WriteLine($"[BM25 Provider] Config bm25Provider='{bm25Provider}', selecting implementation...");
+
+    return bm25Provider switch
+    {
+        "fts5" => new Fts5BM25Store(dbPath),
+        "legacy" => new SqliteBM25Store(dbPath),
+        _ => new Fts5BM25Store(dbPath) // 默认使用 FTS5
+    };
 });
 builder.Services.AddSingleton<IEmbeddingService>(sp =>
 {
@@ -83,6 +96,34 @@ builder.Services.AddSingleton<IEmbeddingService>(sp =>
         BatchSize = cfg.Embedding.BatchSize,
         UseCuda = cfg.Embedding.UseCuda,
         CudaDeviceId = cfg.Embedding.CudaDeviceId,
+        CudaLibraryPath = cfg.Embedding.CudaLibraryPath
+    });
+});
+
+// 注册重排服务
+builder.Services.AddSingleton<IRerankService>(sp =>
+{
+    var config = sp.GetRequiredService<ConfigManager>();
+    var cfg = config.Load();
+
+    // 获取重排模型路径
+    var rerankConfig = cfg.Rerank;
+    string modelPath = rerankConfig.ModelPath ?? string.Empty;
+
+    if (string.IsNullOrEmpty(modelPath))
+    {
+        // 如果没有指定路径，从模型管理器获取
+        var dataPath = cfg.DataPath ?? "data";
+        var modelsPath = Path.Combine(dataPath, "models");
+        modelPath = Path.Combine(modelsPath, rerankConfig.ModelName, "model.onnx");
+    }
+
+    return new OnnxRerankService(new RerankOptions
+    {
+        ModelPath = modelPath,
+        ModelName = rerankConfig.ModelName,
+        UseCuda = rerankConfig.UseCuda,
+        CudaDeviceId = rerankConfig.CudaDeviceId,
         CudaLibraryPath = cfg.Embedding.CudaLibraryPath
     });
 });
@@ -112,7 +153,25 @@ builder.Services.AddSingleton<IFileChangeDetector>(sp =>
     var firstSource = config.Sources.FirstOrDefault();
     return new FileChangeDetector(firstSource?.Path ?? Directory.GetCurrentDirectory());
 });
-builder.Services.AddScoped<ISearchService, SearchService>();
+builder.Services.AddScoped<ISearchService>(sp =>
+{
+    var vectorStore = sp.GetRequiredService<IVectorStore>();
+    var embeddingService = sp.GetRequiredService<IEmbeddingService>();
+    var textEnhancer = sp.GetRequiredService<ITextEnhancer>();
+    var configManager = sp.GetRequiredService<ConfigManager>();
+    var logger = sp.GetRequiredService<ILogger<SearchService>>();
+    var hybridSearchService = sp.GetRequiredService<HybridSearchService>();
+    var rerankService = sp.GetRequiredService<IRerankService>();
+
+    return new SearchService(
+        vectorStore,
+        embeddingService,
+        textEnhancer,
+        configManager,
+        logger,
+        hybridSearchService,
+        rerankService);
+});
 builder.Services.AddScoped<HierarchicalSearchService>();
 builder.Services.AddSingleton<HybridSearchService>();
 

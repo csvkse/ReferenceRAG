@@ -83,9 +83,14 @@
               </n-space>
             </template>
             <template #header-extra>
-              <n-tag :type="getScoreType(chunk.score)" size="small">
-                {{ (chunk.score * 100).toFixed(1) }}%
-              </n-tag>
+              <n-space size="small">
+                <n-tag v-if="chunk.bm25Score !== undefined" :type="getScoreType(chunk.bm25Score / 15)" size="small" title="BM25关键词分数">
+                  BM25: {{ chunk.bm25Score.toFixed(1) }}
+                </n-tag>
+                <n-tag :type="getScoreType(chunk.score)" size="small" title="融合分数">
+                  {{ (chunk.score * 100).toFixed(1) }}%
+                </n-tag>
+              </n-space>
             </template>
             <template #description>
               <n-text depth="3" style="white-space: pre-wrap; line-height: 1.6; font-size: 13px">

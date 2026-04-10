@@ -86,7 +86,9 @@ public class AIQueryController : ControllerBase
             Mode = request.Mode,
             Sources = request.Sources,
             Filters = request.Filters,
-            Options = request.Options
+            Options = request.Options,
+            K1 = request.K1,
+            B = request.B
         };
 
         return request.Mode switch
@@ -100,7 +102,9 @@ public class AIQueryController : ControllerBase
                 MaxTokens = 1000,
                 Sources = request.Sources,
                 Filters = request.Filters,
-                Options = request.Options
+                Options = request.Options,
+                K1 = request.K1,
+                B = request.B
             },
             QueryMode.Standard => new AIQueryRequest
             {
@@ -111,7 +115,9 @@ public class AIQueryController : ControllerBase
                 MaxTokens = 3000,
                 Sources = request.Sources,
                 Filters = request.Filters,
-                Options = request.Options
+                Options = request.Options,
+                K1 = request.K1,
+                B = request.B
             },
             QueryMode.Hybrid => new AIQueryRequest
             {
@@ -122,7 +128,9 @@ public class AIQueryController : ControllerBase
                 MaxTokens = 4000,
                 Sources = request.Sources,
                 Filters = request.Filters,
-                Options = request.Options
+                Options = request.Options,
+                K1 = request.K1,
+                B = request.B
             },
             QueryMode.Deep => new AIQueryRequest
             {
@@ -133,7 +141,23 @@ public class AIQueryController : ControllerBase
                 MaxTokens = 6000,
                 Sources = request.Sources,
                 Filters = request.Filters,
-                Options = request.Options
+                Options = request.Options,
+                K1 = request.K1,
+                B = request.B
+            },
+            QueryMode.HybridRerank => new AIQueryRequest
+            {
+                Query = request.Query,
+                Mode = request.Mode,
+                TopK = 10,  // 最终返回数量
+                ContextWindow = 1,
+                MaxTokens = 4000,
+                Sources = request.Sources,
+                Filters = request.Filters,
+                Options = request.Options,
+                K1 = request.K1,
+                B = request.B,
+                EnableRerank = true  // 强制启用重排
             },
             _ => adjusted
         };

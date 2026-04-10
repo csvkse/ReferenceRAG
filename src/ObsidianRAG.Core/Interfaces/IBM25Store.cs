@@ -64,7 +64,7 @@ public interface IBM25Store
     /// <summary>
     /// BM25 搜索
     /// </summary>
-    Task<List<BM25SearchResult>> SearchAsync(string modelName, string query, int topK = 10);
+    Task<List<BM25SearchResult>> SearchAsync(string modelName, string query, int topK = 10, float k1 = 1.5f, float b = 0.75f);
 
     // ==================== 状态查询 ====================
 
@@ -85,8 +85,6 @@ public interface IBM25Store
 public class BM25ModelInfo
 {
     public string Name { get; set; } = string.Empty;
-    public float K1 { get; set; } = 1.5f;
-    public float B { get; set; } = 0.75f;
     public double AverageDocLength { get; set; }
     public int TotalDocuments { get; set; }
     public int VocabularySize { get; set; }

@@ -570,6 +570,103 @@
           <n-data-table :columns="apiHistoryColumns" :data="apiHistory" :bordered="false" size="small" :max-height="200" />
         </n-card>
       </n-tab-pane>
+
+      <!-- Rerank Model Test -->
+      <n-tab-pane name="rerank" tab="重排模型测试">
+        <n-card>
+          <n-space vertical>
+            <n-text depth="3">测试重排模型的文档排序能力：给定查询和文档列表，模型返回按相关性排序的结果。支持 NDCG、MRR、MAP 等评估指标。</n-text>
+            <n-grid :cols="3" :x-gap="20">
+              <n-gi :span="2">
+                <n-form-item label="查询文本">
+                  <n-input v-model:value="rerankQuery" placeholder="输入查询文本" />
+                </n-form-item>
+              </n-gi>
+              <n-gi>
+                <n-form-item label="模型名称">
+                  <n-input v-model:value="rerankModelName" placeholder="留空使用默认" />
+                </n-form-item>
+              </n-gi>
+            </n-grid>
+            <n-form-item label="文档列表 (JSON)">
+              <n-button size="small" @click="showRerankDocEditor = true">编辑文档</n-button>
+              <n-text depth="3" style="margin-left: 12px">
+                {{ rerankDocuments.length }} 个文档
+              </n-text>
+            </n-form-item>
+            <n-space>
+              <n-button type="primary" :loading="rerankLoading" @click="runRerankTest">
+                运行重排测试
+              </n-button>
+              <n-button @click="loadSampleRerankDocuments">
+                加载示例数据
+              </n-button>
+              <n-divider vertical />
+              <n-checkbox v-model:checked="useRemoteForRerank" :disabled="!remoteApi.baseUrl">
+                使用 OpenAI 兼容 API
+              </n-checkbox>
+              <n-tag v-if="useRemoteForRerank && remoteApi.model" type="info" size="small">
+                {{ remoteApi.model }}
+              </n-tag>
+            </n-space>
+          </n-space>
+        </n-card>
+
+        <n-modal v-model:show="showRerankDocEditor" preset="dialog" title="编辑文档列表 (JSON)" style="width: 60vw">
+          <n-text depth="3" style="margin-bottom: 8px; display: block">
+            格式: [{"id": "1", "text": "文档内容", "expectedRelevance": 0.9}]，expectedRelevance 为 0-1 的期望相关性分数
+          </n-text>
+          <n-input
+            v-model:value="rerankDocumentsJson"
+            type="textarea"
+            :rows="12"
+            placeholder='[{"id":"1","text":"文档内容","expectedRelevance":0.9}]'
+            style="font-family: monospace"
+          />
+          <n-space style="margin-top: 12px">
+            <n-button @click="parseRerankDocuments">解析文档</n-button>
+          </n-space>
+        </n-modal>
+
+        <n-card v-if="rerankResult" title="重排结果" style="margin-top: 16px">
+          <!-- Metrics -->
+          <n-grid :cols="5" :x-gap="16" style="margin-bottom: 16px">
+            <n-gi>
+              <n-statistic label="NDCG" :value="(rerankResult.ndcg || 0).toFixed(3)" />
+            </n-gi>
+            <n-gi>
+              <n-statistic label="MRR" :value="(rerankResult.mrr || 0).toFixed(3)" />
+            </n-gi>
+            <n-gi>
+              <n-statistic label="MAP" :value="(rerankResult.map || 0).toFixed(3)" />
+            </n-gi>
+            <n-gi>
+              <n-statistic label="排序准确度" :value="(rerankResult.rankingAccuracy || 0).toFixed(3)" />
+            </n-gi>
+            <n-gi>
+              <n-statistic label="MAE" :value="(rerankResult.meanAbsoluteError || 0).toFixed(3)" />
+            </n-gi>
+          </n-grid>
+          <n-grid :cols="2" :x-gap="16">
+            <n-gi>
+              <n-statistic label="查询耗时" :value="rerankResult.queryMs || 0" />
+              <n-text depth="3">ms</n-text>
+            </n-gi>
+            <n-gi>
+              <n-statistic label="模型" :value="rerankResult.modelName || '-'" />
+            </n-gi>
+          </n-grid>
+
+          <!-- Document Ranking -->
+          <n-divider>文档排序</n-divider>
+          <n-data-table
+            :columns="rerankDocColumns"
+            :data="rerankResult.documents || []"
+            :bordered="false"
+            size="small"
+          />
+        </n-card>
+      </n-tab-pane>
     </n-tabs>
   </n-space>
 </template>
@@ -577,14 +674,16 @@
 <script setup lang="ts">
 import { ref, h, computed } from 'vue'
 import { NTag, NCode, NDivider, type DataTableColumns } from 'naive-ui'
-import { performanceApi, semanticTestApi } from '@/api'
+import { performanceApi, semanticTestApi, rerankTestApi } from '@/api'
 import type {
   SemanticTestResult,
   LongTextTestResult,
   BenchmarkResult,
   BatchOptimizationResult,
   BatchSizeResult,
-  MemoryTestResult
+  MemoryTestResult,
+  RerankTestResult,
+  RerankDocumentResult
 } from '@/types/api'
 
 // ==================== Semantic Test ====================
@@ -2045,4 +2144,203 @@ const runApiBatchTest = async () => {
     apiFuncTesting.value = false
   }
 }
+
+// ==================== Rerank Test ====================
+
+const rerankQuery = ref('如何学习Python编程')
+const rerankModelName = ref('')
+const rerankLoading = ref(false)
+const showRerankDocEditor = ref(false)
+const rerankDocumentsJson = ref('')
+const rerankDocuments = ref<{ id?: string; text: string; expectedRelevance?: number }[]>([])
+const rerankResult = ref<RerankTestResult | null>(null)
+const useRemoteForRerank = ref(false)
+
+const sampleRerankDocuments = JSON.stringify([
+  { id: '1', text: 'Python是一门简单易学的编程语言，适合初学者入门', expectedRelevance: 0.95 },
+  { id: '2', text: 'Java是一种面向对象的编程语言，广泛应用于企业开发', expectedRelevance: 0.3 },
+  { id: '3', text: 'Python数据分析教程：从入门到精通', expectedRelevance: 0.85 },
+  { id: '4', text: '机器学习算法原理与实现', expectedRelevance: 0.4 },
+  { id: '5', text: 'JavaScript前端开发实战指南', expectedRelevance: 0.2 },
+  { id: '6', text: 'Python编程从零开始学习指南', expectedRelevance: 0.9 },
+  { id: '7', text: '深度学习框架TensorFlow实战', expectedRelevance: 0.35 }
+], null, 2)
+
+const loadSampleRerankDocuments = () => {
+  rerankDocumentsJson.value = sampleRerankDocuments
+  rerankQuery.value = '如何学习Python编程'
+  parseRerankDocuments()
+}
+
+const parseRerankDocuments = () => {
+  try {
+    rerankDocuments.value = JSON.parse(rerankDocumentsJson.value)
+  } catch {
+    // 解析失败，使用默认值
+  }
+}
+
+const runRerankTest = async () => {
+  if (!rerankQuery.value || rerankDocuments.value.length === 0) {
+    parseRerankDocuments()
+    if (rerankDocuments.value.length === 0) return
+  }
+
+  rerankLoading.value = true
+  rerankResult.value = null
+
+  try {
+    if (useRemoteForRerank.value && remoteApi.value.baseUrl) {
+      // 使用远程 OpenAI 兼容 API 模拟重排
+      const result = await runRerankWithRemoteApi()
+      rerankResult.value = result
+    } else {
+      // 使用本地 API
+      const res = await rerankTestApi.test({
+        query: rerankQuery.value,
+        documents: rerankDocuments.value,
+        modelName: rerankModelName.value || undefined
+      })
+      rerankResult.value = res.data
+    }
+  } catch (e) {
+    console.error(e)
+  } finally {
+    rerankLoading.value = false
+  }
+}
+
+// 使用远程 API 模拟重排测试（基于 embedding 相似度）
+const runRerankWithRemoteApi = async (): Promise<RerankTestResult> => {
+  const startTime = performance.now()
+
+  // 获取 query embedding
+  const queryEmbeddings = await callEmbeddingApi([rerankQuery.value])
+  const queryEmbedding = queryEmbeddings[0]
+  const queryMs = performance.now() - startTime
+
+  // 获取所有文档的 embeddings
+  const docTexts = rerankDocuments.value.map(d => d.text)
+  const docEmbeddings = await callEmbeddingApi(docTexts)
+
+  // 计算相似度并排序
+  const results = rerankDocuments.value.map((d, i) => ({
+    id: d.id,
+    text: d.text,
+    expectedRelevance: d.expectedRelevance,
+    relevanceScore: cosineSimilarity(queryEmbedding, docEmbeddings[i])
+  })).sort((a, b) => b.relevanceScore - a.relevanceScore)
+
+  // 添加排名
+  const rankedDocs: RerankDocumentResult[] = results.map((r, i) => ({
+    id: r.id,
+    text: r.text,
+    relevanceScore: r.relevanceScore,
+    expectedRelevance: r.expectedRelevance,
+    deviation: r.expectedRelevance !== undefined ? Math.abs(r.relevanceScore - r.expectedRelevance) : undefined,
+    rank: i + 1
+  }))
+
+  // 计算 NDCG
+  let dcg = 0
+  let idcg = 0
+
+  rankedDocs.forEach((d, i) => {
+    const rel = d.expectedRelevance ?? 0
+    dcg += (Math.pow(2, rel) - 1) / Math.log2(i + 2)
+  })
+
+  // Ideal DCG: 按 expectedRelevance 降序排列
+  const idealOrder = [...rerankDocuments.value]
+    .filter(d => d.expectedRelevance !== undefined)
+    .sort((a, b) => (b.expectedRelevance ?? 0) - (a.expectedRelevance ?? 0))
+
+  idealOrder.forEach((d, i) => {
+    idcg += (Math.pow(2, d.expectedRelevance ?? 0) - 1) / Math.log2(i + 2)
+  })
+
+  const ndcg = idcg > 0 ? dcg / idcg : 0
+
+  // 计算 MRR (Mean Reciprocal Rank)
+  let mrr = 0
+  for (let i = 0; i < rankedDocs.length; i++) {
+    if ((rankedDocs[i].expectedRelevance ?? 0) >= 0.5) {
+      mrr = 1 / (i + 1)
+      break
+    }
+  }
+
+  // 计算 MAP (Mean Average Precision)
+  let relevantCount = 0
+  let precisionSum = 0
+  for (let i = 0; i < rankedDocs.length; i++) {
+    if ((rankedDocs[i].expectedRelevance ?? 0) >= 0.5) {
+      relevantCount++
+      precisionSum += relevantCount / (i + 1)
+    }
+  }
+  const totalRelevant = rerankDocuments.value.filter(d => (d.expectedRelevance ?? 0) >= 0.5).length
+  const map = totalRelevant > 0 ? precisionSum / totalRelevant : 0
+
+  // 计算 Ranking Accuracy (Spearman correlation)
+  const expectedRanks = new Map<string, number>()
+  const sortedByExpected = [...rerankDocuments.value]
+    .filter(d => d.expectedRelevance !== undefined)
+    .sort((a, b) => (b.expectedRelevance ?? 0) - (a.expectedRelevance ?? 0))
+
+  sortedByExpected.forEach((d, i) => {
+    if (d.id) expectedRanks.set(d.id, i + 1)
+  })
+
+  let rankingAccuracy = 0
+  const docsWithExpected = rankedDocs.filter(d => d.expectedRelevance !== undefined)
+  if (docsWithExpected.length >= 2) {
+    const n = docsWithExpected.length
+    let sumDiffSq = 0
+    docsWithExpected.forEach((d) => {
+      const expectedRank = n - docsWithExpected.findIndex(doc => doc.id === d.id)
+      sumDiffSq += Math.pow(d.rank - expectedRank, 2)
+    })
+    rankingAccuracy = 1 - (6 * sumDiffSq) / (n * (n * n - 1))
+  }
+
+  // 计算 MAE
+  const docsDeviation = rankedDocs.filter(d => d.deviation !== undefined)
+  const meanAbsoluteError = docsDeviation.length > 0
+    ? docsDeviation.reduce((sum, d) => sum + (d.deviation ?? 0), 0) / docsDeviation.length
+    : 0
+
+  return {
+    testType: 'rerank',
+    modelName: remoteApi.value.model || 'remote-embedding',
+    timestamp: new Date().toISOString(),
+    queryMs,
+    documents: rankedDocs,
+    ndcg,
+    mrr,
+    map,
+    rankingAccuracy,
+    meanAbsoluteError
+  }
+}
+
+type RerankDoc = NonNullableObject<RerankDocumentResult>
+
+const rerankDocColumns: DataTableColumns<RerankDoc> = [
+  { title: '排名', key: 'rank', width: 60 },
+  {
+    title: '相关性', key: 'relevanceScore', width: 100,
+    render: (row) => {
+      const score = row.relevanceScore || 0
+      return h(NTag, {
+        type: score >= 0.7 ? 'success' : score >= 0.4 ? 'warning' : 'default',
+        size: 'small'
+      }, { default: () => score.toFixed(3) })
+    }
+  },
+  { title: '期望', key: 'expectedRelevance', width: 80, render: (row) => row.expectedRelevance !== undefined ? (row.expectedRelevance).toFixed(2) : '-' },
+  { title: '偏差', key: 'deviation', width: 80, render: (row) => row.deviation !== undefined ? row.deviation.toFixed(3) : '-' },
+  { title: '文档', key: 'text', ellipsis: { tooltip: true } },
+  { title: 'ID', key: 'id', width: 80 }
+]
 </script>
