@@ -218,4 +218,46 @@ export const systemApi = {
   getAlertRules: () => api.get<AlertRule[]>('/system/alerts/rules')
 }
 
+// BM25 Index
+export const bm25IndexApi = {
+  getModels: () => api.get<BM25Model[]>('/bm25index/models'),
+  createModel: (data: { name: string; description?: string }) => api.post('/bm25index/models', data),
+  deleteModel: (name: string) => api.delete(`/bm25index/models/${name}`),
+  enableModel: (name: string) => api.post(`/bm25index/models/${name}/enable`),
+  disableModel: (name: string) => api.post(`/bm25index/models/${name}/disable`),
+  rebuildIndex: (name: string) => api.post(`/bm25index/models/${name}/rebuild`),
+  incrementalIndex: (name: string, chunks: string[]) => api.post(`/bm25index/models/${name}/index`, chunks),
+  clearModel: (name: string) => api.post(`/bm25index/models/${name}/clear`),
+  search: (name: string, query: string, topK?: number) =>
+    api.get<BM25SearchResult>(`/bm25index/models/${name}/search`, { params: { query, topK } }),
+  getConfig: () => api.get<BM25Config>('/bm25index/config'),
+  saveConfig: (config: BM25Config) => api.post('/bm25index/config', config)
+}
+
+// BM25 Types
+export interface BM25Model {
+  name: string
+  description?: string
+  enabled: boolean
+  documentCount: number
+  vocabularySize: number
+  averageDocumentLength: number
+  lastUpdated: string | null
+}
+
+export interface BM25SearchResult {
+  query: string
+  results: {
+    document: string
+    score: number
+    snippet?: string
+  }[]
+  durationMs: number
+}
+
+export interface BM25Config {
+  k1: number
+  b: number
+}
+
 export default api

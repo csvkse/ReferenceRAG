@@ -120,6 +120,11 @@ const menuOptions: MenuOption[] = [
     label: 'API 文档',
     key: 'ApiHelp',
     icon: renderIcon(CodeSlashOutline)
+  },
+  {
+    label: 'BM25索引',
+    key: 'BM25Index',
+    icon: renderIcon(BookOutline)
   }
 ]
 

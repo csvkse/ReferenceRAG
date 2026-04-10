@@ -62,6 +62,15 @@ builder.Services.AddSingleton<IVectorStore>(sp =>
     var dbPath = Path.Combine(dataPath, "vectors.db");
     return new SqliteVectorStore(dbPath);
 });
+// 注册 BM25 存储（与向量存储共用同一个数据库）
+builder.Services.AddSingleton<IBM25Store>(sp =>
+{
+    var config = sp.GetRequiredService<ConfigManager>();
+    var cfg = config.Load();
+    var dataPath = cfg.DataPath ?? "data";
+    var dbPath = Path.Combine(dataPath, "vectors.db");
+    return new SqliteBM25Store(dbPath);
+});
 builder.Services.AddSingleton<IEmbeddingService>(sp =>
 {
     var config = sp.GetRequiredService<ConfigManager>();

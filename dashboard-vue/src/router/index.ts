@@ -55,6 +55,12 @@ const routes: RouteRecordRaw[] = [
         name: 'System',
         component: () => import('@/views/System.vue'),
         meta: { title: '系统监控' }
+      },
+      {
+        path: 'bm25-index',
+        name: 'BM25Index',
+        component: () => import('@/views/BM25Index.vue'),
+        meta: { title: 'BM25索引' }
       }
     ]
   }
