@@ -759,7 +759,16 @@ public class Fts5BM25Store : IBM25Store, IDisposable
 
         // 对查询进行分词，与索引时分词方式一致
         var queryTokens = Tokenize(query);
-        var tokenizedQuery = string.Join(" ", queryTokens);
+
+        // 如果没有有效的 token，返回空结果
+        if (queryTokens.Count == 0)
+        {
+            return new List<BM25SearchResult>();
+        }
+
+        // 用双引号包裹每个 token，使其作为字面字符串搜索
+        // 避免 FTS5 特殊字符（如 . / ? 等）被解释为语法
+        var tokenizedQuery = string.Join(" OR ", queryTokens.Select(t => $"\"{t}\""));
 
         var sql = $@"
             SELECT
