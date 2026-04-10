@@ -28,7 +28,17 @@ import type {
   IndexMetrics,
   MetricsSummary,
   Alert,
-  AlertRule
+  AlertRule,
+  VectorModelIndex,
+  DeleteResult,
+  BulkDeleteResult,
+  CleanupResult,
+  RebuildJob,
+  RebuildRequest,
+  MigrateResult,
+  IndexSummary,
+  IndexJobRequest,
+  IndexJobResponse
 } from '@/types/api'
 
 // PascalCase ↔ camelCase conversion utilities
@@ -168,6 +178,32 @@ export const vectorsApi = {
   getStatsByModel: (modelName: string) => api.get<VectorStats>(`/Vectors/stats/${modelName}`),
   deleteByModel: (modelName: string) => api.delete(`/Vectors/model/${modelName}`),
   deleteOrphaned: () => api.delete('/Vectors/orphaned')
+}
+
+// Vector Index
+export const vectorIndexApi = {
+  // 索引任务管理
+  startIndex: (request?: IndexJobRequest) => api.post<IndexJobResponse>('/VectorIndex/index', request || {}),
+  getJobs: () => api.get<IndexJobResponse[]>('/VectorIndex/jobs'),
+  getJob: (jobId: string) => api.get<IndexJobResponse>(`/VectorIndex/jobs/${jobId}`),
+  stopJob: (jobId: string) => api.post(`/VectorIndex/jobs/${jobId}/stop`),
+
+  // 向量索引重建
+  rebuild: (request?: RebuildRequest) => api.post<RebuildJob>('/VectorIndex/rebuild', request || {}),
+  rebuildSource: (sourceName: string) => api.post<RebuildJob>(`/VectorIndex/rebuild/${sourceName}`),
+
+  // 向量状态查询
+  getModels: () => api.get<VectorModelIndex[]>('/VectorIndex/models'),
+  getCurrent: () => api.get<VectorModelIndex>('/VectorIndex/current'),
+  getSummary: () => api.get<IndexSummary>('/VectorIndex/summary'),
+
+  // 向量索引删除
+  deleteByModel: (modelName: string) => api.delete<DeleteResult>(`/VectorIndex/models/${modelName}`),
+  deleteAll: () => api.delete<BulkDeleteResult>('/VectorIndex/all'),
+  cleanup: () => api.post<CleanupResult>('/VectorIndex/cleanup'),
+
+  // 数据迁移
+  migrate: () => api.post<MigrateResult>('/VectorIndex/migrate')
 }
 
 // System

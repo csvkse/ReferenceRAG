@@ -65,6 +65,11 @@ public interface IVectorStore
     /// 删除文件的所有分段
     /// </summary>
     Task DeleteChunksByFileAsync(string fileId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 删除单个分段
+    /// </summary>
+    Task DeleteChunkAsync(string id, CancellationToken cancellationToken = default);
     
     // ==================== 向量操作 ====================
     
@@ -94,13 +99,22 @@ public interface IVectorStore
     Task DeleteVectorAsync(string id, CancellationToken cancellationToken = default);
     
     // ==================== 检索操作 ====================
-    
+
     /// <summary>
-    /// 向量相似检索
+    /// 向量相似检索（使用第一个可用模型）
     /// </summary>
     Task<IEnumerable<SearchResult>> SearchAsync(
-        float[] queryVector, 
-        int topK, 
+        float[] queryVector,
+        int topK,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 指定模型的向量相似检索
+    /// </summary>
+    Task<IEnumerable<SearchResult>> SearchAsync(
+        float[] queryVector,
+        string modelName,
+        int topK,
         CancellationToken cancellationToken = default);
     
     /// <summary>
@@ -152,6 +166,11 @@ public interface IVectorStore
     /// 根据源路径匹配回填文件的 source 字段（修复旧数据 source 为空的记录）
     /// </summary>
     Task<int> BackfillSourceAsync(IDictionary<string, string> sourceNameToPath, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 更新源名称（同步更新 files 表中的 source 字段）
+    /// </summary>
+    Task<int> UpdateSourceNameAsync(string oldName, string newName, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

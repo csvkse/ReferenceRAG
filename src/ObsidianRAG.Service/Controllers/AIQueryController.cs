@@ -84,6 +84,7 @@ public class AIQueryController : ControllerBase
         {
             Query = request.Query,
             Mode = request.Mode,
+            Sources = request.Sources,
             Filters = request.Filters,
             Options = request.Options
         };
@@ -97,6 +98,7 @@ public class AIQueryController : ControllerBase
                 TopK = 3,
                 ContextWindow = 0,
                 MaxTokens = 1000,
+                Sources = request.Sources,
                 Filters = request.Filters,
                 Options = request.Options
             },
@@ -107,6 +109,7 @@ public class AIQueryController : ControllerBase
                 TopK = 10,
                 ContextWindow = 1,
                 MaxTokens = 3000,
+                Sources = request.Sources,
                 Filters = request.Filters,
                 Options = request.Options
             },
@@ -117,6 +120,7 @@ public class AIQueryController : ControllerBase
                 TopK = 15,
                 ContextWindow = 1,
                 MaxTokens = 4000,
+                Sources = request.Sources,
                 Filters = request.Filters,
                 Options = request.Options
             },
@@ -127,6 +131,7 @@ public class AIQueryController : ControllerBase
                 TopK = 20,
                 ContextWindow = 2,
                 MaxTokens = 6000,
+                Sources = request.Sources,
                 Filters = request.Filters,
                 Options = request.Options
             },

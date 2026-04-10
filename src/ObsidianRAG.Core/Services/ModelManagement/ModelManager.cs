@@ -238,6 +238,221 @@ public class ModelManager : IModelManager, IDisposable
             DownloadUrl = "sentence-transformers/all-MiniLM-L6-v2",
             ModelSizeBytes = 90 * 1024 * 1024,
             HasOnnx = false
+        },
+        // ========== GTE 系列（阿里达摩院）==========
+        new ModelInfo
+        {
+            Name = "gte-small-zh",
+            DisplayName = "GTE Small Chinese",
+            Description = "阿里GTE中文向量模型，轻量高效，适合中文语义搜索",
+            Dimension = 512,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh" },
+            BenchmarkScore = 0.84f,
+            DownloadUrl = "thenlper/gte-small-zh",
+            ModelSizeBytes = 130 * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "gte-base-zh",
+            DisplayName = "GTE Base Chinese",
+            Description = "阿里GTE中文向量模型 Base 版本，更高精度",
+            Dimension = 768,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh" },
+            BenchmarkScore = 0.88f,
+            DownloadUrl = "thenlper/gte-base-zh",
+            ModelSizeBytes = 410 * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "gte-large-zh",
+            DisplayName = "GTE Large Chinese",
+            Description = "阿里GTE中文向量模型 Large 版本，最高精度",
+            Dimension = 1024,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh" },
+            BenchmarkScore = 0.91f,
+            DownloadUrl = "thenlper/gte-large-zh",
+            ModelSizeBytes = 650 * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "gte-small",
+            DisplayName = "GTE Small Multilingual",
+            Description = "阿里GTE多语言向量模型，支持中英日韩等语言",
+            Dimension = 384,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "ja", "ko" },
+            BenchmarkScore = 0.83f,
+            DownloadUrl = "thenlper/gte-small",
+            ModelSizeBytes = 130 * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "gte-base",
+            DisplayName = "GTE Base Multilingual",
+            Description = "阿里GTE多语言向量模型 Base 版本",
+            Dimension = 768,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "ja", "ko" },
+            BenchmarkScore = 0.87f,
+            DownloadUrl = "thenlper/gte-base",
+            ModelSizeBytes = 410 * 1024 * 1024,
+            HasOnnx = false
+        },
+        // ========== E5 系列（微软）==========
+        new ModelInfo
+        {
+            Name = "e5-small-v2",
+            DisplayName = "E5 Small v2",
+            Description = "微软E5英文向量模型，高效检索",
+            Dimension = 384,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "en" },
+            BenchmarkScore = 0.81f,
+            DownloadUrl = "intfloat/e5-small-v2",
+            ModelSizeBytes = 130 * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "e5-base-v2",
+            DisplayName = "E5 Base v2",
+            Description = "微软E5英文向量模型 Base 版本，更高精度",
+            Dimension = 768,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "en" },
+            BenchmarkScore = 0.86f,
+            DownloadUrl = "intfloat/e5-base-v2",
+            ModelSizeBytes = 438 * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "multilingual-e5-small",
+            DisplayName = "Multilingual E5 Small",
+            Description = "微软多语言E5向量模型，支持100+语言",
+            Dimension = 384,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "ja", "ko", "fr", "de", "es" },
+            BenchmarkScore = 0.82f,
+            DownloadUrl = "intfloat/multilingual-e5-small",
+            ModelSizeBytes = 470 * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "multilingual-e5-base",
+            DisplayName = "Multilingual E5 Base",
+            Description = "微软多语言E5向量模型 Base 版本，更高精度",
+            Dimension = 768,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "ja", "ko", "fr", "de", "es" },
+            BenchmarkScore = 0.87f,
+            DownloadUrl = "intfloat/multilingual-e5-base",
+            ModelSizeBytes = (long)(1.1 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        // ========== text2vec 系列（shibing624）==========
+        new ModelInfo
+        {
+            Name = "text2vec-base-chinese",
+            DisplayName = "Text2Vec Base Chinese",
+            Description = "中文文本向量模型，适合中文语义相似度计算",
+            Dimension = 768,
+            MaxSequenceLength = 256,
+            ModelType = "embedding",
+            Languages = new[] { "zh" },
+            BenchmarkScore = 0.80f,
+            DownloadUrl = "shibing624/text2vec-base-chinese",
+            ModelSizeBytes = 406 * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "text2vec-large-chinese",
+            DisplayName = "Text2Vec Large Chinese",
+            Description = "中文文本向量模型 Large 版本，更高精度",
+            Dimension = 1024,
+            MaxSequenceLength = 256,
+            ModelType = "embedding",
+            Languages = new[] { "zh" },
+            BenchmarkScore = 0.84f,
+            DownloadUrl = "shibing624/text2vec-large-chinese",
+            ModelSizeBytes = (long)(1.3 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        // ========== paraphrase 系列 ==========
+        new ModelInfo
+        {
+            Name = "paraphrase-multilingual-MiniLM-L12-v2",
+            DisplayName = "Paraphrase Multilingual MiniLM L12",
+            Description = "多语言语义相似度模型，支持50+语言，轻量高效",
+            Dimension = 384,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "ja", "ko", "fr", "de", "es" },
+            BenchmarkScore = 0.80f,
+            DownloadUrl = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            ModelSizeBytes = 470 * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "paraphrase-multilingual-mpnet-base-v2",
+            DisplayName = "Paraphrase Multilingual MPNet Base",
+            Description = "多语言语义相似度模型，更高精度",
+            Dimension = 768,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "ja", "ko", "fr", "de", "es" },
+            BenchmarkScore = 0.85f,
+            DownloadUrl = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+            ModelSizeBytes = (long)(1.0 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        // ========== MTEB 榜单高分模型 ==========
+        new ModelInfo
+        {
+            Name = "bge-reranker-base",
+            DisplayName = "BGE Reranker Base",
+            Description = "BAAI重排序模型，用于二次精排提升检索质量",
+            Dimension = 768,
+            MaxSequenceLength = 512,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en" },
+            BenchmarkScore = 0.90f,
+            DownloadUrl = "BAAI/bge-reranker-base",
+            ModelSizeBytes = (long)(1.1 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "stella-base-zh-v3-1792",
+            DisplayName = "Stella Base Chinese v3",
+            Description = "中文向量模型，MTEB中文榜单高分模型",
+            Dimension = 768,
+            MaxSequenceLength = 512,
+            ModelType = "embedding",
+            Languages = new[] { "zh" },
+            BenchmarkScore = 0.88f,
+            DownloadUrl = "infgrad/stella-base-zh-v3-1792",
+            ModelSizeBytes = 406 * 1024 * 1024,
+            HasOnnx = false
         }
     };
 

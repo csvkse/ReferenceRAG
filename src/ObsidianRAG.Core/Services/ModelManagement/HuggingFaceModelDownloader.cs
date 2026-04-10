@@ -901,6 +901,21 @@ internal class HuggingFaceModelDownloader : IDisposable
             await File.WriteAllTextAsync(scriptPath, scriptContent, cancellationToken);
             progress?.Report(10);
 
+            // Validate format parameter against whitelist to prevent command injection
+            var allowedFormats = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "embedded", "external" };
+            if (!allowedFormats.Contains(format))
+            {
+                Console.WriteLine($"[Downloader] Invalid format '{format}', must be 'embedded' or 'external'");
+                return false;
+            }
+
+            // Sanitize path parameters: reject paths containing characters that could escape quotes
+            if (modelDir.Contains('"') || outputPath.Contains('"') || modelDir.Contains('\0') || outputPath.Contains('\0'))
+            {
+                Console.WriteLine("[Downloader] Invalid path characters detected");
+                return false;
+            }
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = "python",

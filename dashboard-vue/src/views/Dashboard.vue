@@ -123,7 +123,7 @@ import {
   SearchOutline,
   PlayOutline
 } from '@vicons/ionicons5'
-import { dashboardApi, sourcesApi, indexApi } from '@/api'
+import { dashboardApi, sourcesApi, vectorIndexApi } from '@/api'
 import { useIndexStore } from '@/stores/index'
 import type { DashboardStats, SourceDetail } from '@/types/api'
 
@@ -174,7 +174,7 @@ const loadSources = async () => {
 const handleStartIndex = async () => {
   isIndexing.value = true
   try {
-    await indexApi.start({})
+    await vectorIndexApi.startIndex()
   } catch (error) {
     console.error('Failed to start index:', error)
   } finally {

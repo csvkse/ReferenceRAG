@@ -73,8 +73,30 @@ public class IndexingPipeline : IDisposable
             var embedTask = RunEmbedStageAsync(combinedCts.Token);
             var writeTask = RunWriteStageAsync(result, combinedCts.Token);
 
-            // 等待所有阶段完成
-            await Task.WhenAll(tokenizeTask, embedTask, writeTask);
+            // 等待所有阶段完成，任何一个阶段异常都应取消其他阶段
+            var allTasks = new[] { tokenizeTask, embedTask, writeTask };
+            while (allTasks.Any(t => !t.IsCompleted))
+            {
+                var completedTask = await Task.WhenAny(allTasks.Where(t => !t.IsCompleted));
+                if (completedTask.IsFaulted)
+                {
+                    // Cancel remaining stages when one fails
+                    combinedCts.Cancel();
+                    Console.WriteLine($"Pipeline stage failed: {completedTask.Exception?.GetBaseException().Message}");
+                    try { await completedTask; } catch { } // Observe the exception
+                    break;
+                }
+            }
+
+            // Await all tasks to propagate exceptions
+            try
+            {
+                await Task.WhenAll(tokenizeTask, embedTask, writeTask);
+            }
+            catch (AggregateException ae)
+            {
+                throw ae.InnerException ?? ae;
+            }
 
             result.EndTime = DateTime.UtcNow;
             result.Duration = result.EndTime.Value - result.StartTime;
@@ -181,7 +203,13 @@ public class IndexingPipeline : IDisposable
             BatchIndex = batchIndex
         };
 
-        _tokenizeChannel.Writer.TryWrite(chunkBatch);
+        // Use Wait with cancellation instead of TryWrite to ensure data is not silently lost
+        // when the bounded channel is full
+        while (!_tokenizeChannel.Writer.TryWrite(chunkBatch))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Thread.Sleep(10);
+        }
     }
 
     /// <summary>

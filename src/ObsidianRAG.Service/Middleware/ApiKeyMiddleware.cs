@@ -35,13 +35,6 @@ public class ApiKeyMiddleware
             return;
         }
 
-        // Swagger 端点无需认证
-        if (context.Request.Path.StartsWithSegments("/swagger"))
-        {
-            await _next(context);
-            return;
-        }
-
         var expectedApiKey = context.Items["ApiKeyValue"] as string;
         if (string.IsNullOrEmpty(expectedApiKey))
         {
@@ -49,10 +42,21 @@ public class ApiKeyMiddleware
             return;
         }
 
-        if (!context.Request.Headers.TryGetValue(ApiKeyHeaderName, out var providedKey))
+        // 支持 Header 和 QueryString 传递 API Key (QueryString 方便 SignalR 连接)
+        string? providedKey = null;
+        if (context.Request.Headers.TryGetValue(ApiKeyHeaderName, out var headerKey))
+        {
+            providedKey = headerKey;
+        }
+        else if (context.Request.Query.TryGetValue("api_key", out var queryKey))
+        {
+            providedKey = queryKey;
+        }
+
+        if (string.IsNullOrEmpty(providedKey))
         {
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsJsonAsync(new { error = "缺少 API Key。请在请求头中添加 X-API-Key" });
+            await context.Response.WriteAsJsonAsync(new { error = "缺少 API Key。请在请求头中添加 X-API-Key 或在查询参数中添加 api_key" });
             return;
         }
 

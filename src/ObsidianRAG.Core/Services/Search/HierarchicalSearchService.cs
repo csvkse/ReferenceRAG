@@ -94,6 +94,7 @@ public class HierarchicalSearchService
         CancellationToken cancellationToken)
     {
         var results = new List<SearchResult>();
+        var modelName = _embeddingService.ModelName;
 
         // 第一层：文档级检索
         var docResults = await _vectorStore.SearchByAggregateTypeAsync(
@@ -112,7 +113,7 @@ public class HierarchicalSearchService
 
         // 第三层：分段级检索
         var chunkResults = await _vectorStore.SearchAsync(
-            queryVector, request.TopK * 2, cancellationToken);
+            queryVector, modelName, request.TopK * 2, cancellationToken);
 
         var chunkList = chunkResults.ToList();
 

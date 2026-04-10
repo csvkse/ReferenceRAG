@@ -29,8 +29,79 @@
       </n-space>
     </n-card>
 
+    <!-- Vector Index Management -->
+    <n-card title="向量索引管理">
+      <template #header-extra>
+        <n-space>
+          <n-button size="small" :loading="loadingIndex" @click="loadVectorIndex">
+            刷新
+          </n-button>
+        </n-space>
+      </template>
+      <n-spin :show="loadingIndex">
+        <n-space vertical :size="16">
+          <!-- Current Model Info -->
+          <n-descriptions label-placement="left" :column="3" bordered size="small">
+            <n-descriptions-item label="当前模型">
+              <n-tag type="primary">{{ indexSummary?.currentModel || '-' }}</n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item label="向量维度">
+              {{ indexSummary?.currentDimension || '-' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="总文件数">
+              {{ indexSummary?.totalFiles || 0 }}
+            </n-descriptions-item>
+            <n-descriptions-item label="总分块数">
+              {{ indexSummary?.totalChunks || 0 }}
+            </n-descriptions-item>
+          </n-descriptions>
+
+          <!-- Model Stats Table -->
+          <n-data-table
+            :columns="indexColumns"
+            :data="indexSummary?.modelStats || []"
+            :bordered="false"
+            size="small"
+          />
+
+          <!-- Actions -->
+          <n-space>
+            <n-popconfirm @positive-click="handleRebuildAll">
+              <template #trigger>
+                <n-button type="primary" :loading="rebuilding">
+                  重建全部向量索引
+                </n-button>
+              </template>
+              确定要使用当前模型重建所有向量索引吗？这将删除现有向量并重新生成。
+            </n-popconfirm>
+            <n-popconfirm @positive-click="handleCleanup">
+              <template #trigger>
+                <n-button type="warning" :loading="cleaning">
+                  清理孤立索引
+                </n-button>
+              </template>
+              确定要清理孤立向量索引（模型已不存在的向量数据）吗？
+            </n-popconfirm>
+            <n-popconfirm @positive-click="handleDeleteAllIndex">
+              <template #trigger>
+                <n-button type="error" :loading="deletingAll">
+                  删除所有向量索引
+                </n-button>
+              </template>
+              确定要删除所有向量索引吗？此操作不可恢复！
+            </n-popconfirm>
+          </n-space>
+        </n-space>
+      </n-spin>
+    </n-card>
+
     <!-- Sources Table -->
     <n-card title="源列表">
+      <template #header-extra>
+        <n-button size="small" :loading="loading" @click="loadSources">
+          刷新
+        </n-button>
+      </template>
       <n-data-table
         :columns="columns"
         :data="sources"
@@ -44,9 +115,9 @@
 
 <script setup lang="ts">
 import { ref, h, onMounted } from 'vue'
-import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, type FormInst, type FormRules } from 'naive-ui'
-import { sourcesApi } from '@/api'
-import type { SourceDetail } from '@/types/api'
+import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput, type FormInst, type FormRules } from 'naive-ui'
+import { sourcesApi, vectorIndexApi } from '@/api'
+import type { SourceDetail, IndexSummary, ModelStat } from '@/types/api'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -54,6 +125,17 @@ const formRef = ref<FormInst | null>(null)
 const loading = ref(false)
 const creating = ref(false)
 const sources = ref<SourceDetail[]>([])
+
+// Edit state
+const editingSource = ref<SourceDetail | null>(null)
+const editingName = ref('')
+
+// Vector index state
+const loadingIndex = ref(false)
+const rebuilding = ref(false)
+const cleaning = ref(false)
+const deletingAll = ref(false)
+const indexSummary = ref<IndexSummary | null>(null)
 
 const newSource = ref({
   path: '',
@@ -106,10 +188,16 @@ const columns = [
   {
     title: '操作',
     key: 'actions',
-    width: 260,
+    width: 320,
     render: (row: SourceDetail) =>
       h(NSpace, { size: 'small' }, {
         default: () => [
+          h(NButton, {
+            size: 'small',
+            onClick: () => handleEdit(row)
+          }, {
+            default: () => '编辑'
+          }),
           h(NButton, {
             size: 'small',
             type: row.enabled ? 'warning' : 'primary',
@@ -134,6 +222,53 @@ const columns = [
   }
 ]
 
+const indexColumns = [
+  {
+    title: '模型',
+    key: 'modelName',
+    render: (row: ModelStat) =>
+      h(NSpace, { align: 'center', size: 'small' }, {
+        default: () => [
+          row.isCurrentModel ? h(NTag, { type: 'success', size: 'small' }, { default: () => '当前' }) : null,
+          row.modelName
+        ]
+      })
+  },
+  {
+    title: '维度',
+    key: 'dimension',
+    width: 80
+  },
+  {
+    title: '向量数',
+    key: 'vectorCount',
+    width: 100,
+    render: (row: ModelStat) => row.vectorCount.toLocaleString()
+  },
+  {
+    title: '存储大小',
+    key: 'storageMB',
+    width: 100,
+    render: (row: ModelStat) => `${row.storageMB.toFixed(2)} MB`
+  },
+  {
+    title: '操作',
+    key: 'actions',
+    width: 120,
+    render: (row: ModelStat) =>
+      h(NSpace, { size: 'small' }, {
+        default: () => [
+          h(NPopconfirm, {
+            onPositiveClick: () => handleDeleteModelIndex(row.modelName)
+          }, {
+            trigger: () => h(NButton, { size: 'small', type: 'error', disabled: row.isCurrentModel }, { default: () => '删除' }),
+            default: () => `确定要删除模型 "${row.modelName}" 的向量索引吗？`
+          })
+        ]
+      })
+  }
+]
+
 const loadSources = async () => {
   loading.value = true
   try {
@@ -143,6 +278,18 @@ const loadSources = async () => {
     message.error('加载源列表失败')
   } finally {
     loading.value = false
+  }
+}
+
+const loadVectorIndex = async () => {
+  loadingIndex.value = true
+  try {
+    const response = await vectorIndexApi.getSummary()
+    indexSummary.value = response.data
+  } catch (error) {
+    message.error('加载向量索引信息失败')
+  } finally {
+    loadingIndex.value = false
   }
 }
 
@@ -186,6 +333,38 @@ const handleToggle = async (source: SourceDetail) => {
   }
 }
 
+const handleEdit = (source: SourceDetail) => {
+  editingSource.value = source
+  editingName.value = source.name
+  dialog.create({
+    title: '编辑源名称',
+    content: () => h(NInput, {
+      value: editingName.value,
+      onUpdateValue: (val: string) => { editingName.value = val },
+      placeholder: '请输入新的源名称'
+    }),
+    positiveText: '保存',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      if (!editingName.value.trim()) {
+        message.error('源名称不能为空')
+        return false
+      }
+      if (editingName.value === source.name) {
+        return
+      }
+      try {
+        await sourcesApi.update(source.name, { name: editingName.value })
+        message.success('源名称已更新')
+        await loadSources()
+      } catch (error) {
+        message.error('更新失败')
+        return false
+      }
+    }
+  })
+}
+
 const handleReindex = (source: SourceDetail) => {
   dialog.warning({
     title: '确认开始索引',
@@ -194,7 +373,7 @@ const handleReindex = (source: SourceDetail) => {
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
-        await sourcesApi.startIndex(source.name)
+        await vectorIndexApi.startIndex({ sources: [source.name] })
         message.success('索引已启动')
       } catch (error) {
         message.error('启动索引失败')
@@ -213,7 +392,57 @@ const handleDelete = async (source: SourceDetail) => {
   }
 }
 
+const handleRebuildAll = async () => {
+  rebuilding.value = true
+  try {
+    const response = await vectorIndexApi.rebuild()
+    message.success(response.data.message || '向量索引重建任务已启动')
+    await loadVectorIndex()
+  } catch (error) {
+    message.error('启动重建失败')
+  } finally {
+    rebuilding.value = false
+  }
+}
+
+const handleCleanup = async () => {
+  cleaning.value = true
+  try {
+    const response = await vectorIndexApi.cleanup()
+    message.success(response.data.message)
+    await loadVectorIndex()
+  } catch (error) {
+    message.error('清理失败')
+  } finally {
+    cleaning.value = false
+  }
+}
+
+const handleDeleteAllIndex = async () => {
+  deletingAll.value = true
+  try {
+    const response = await vectorIndexApi.deleteAll()
+    message.success(`已删除 ${response.data.totalDeleted} 条向量`)
+    await loadVectorIndex()
+  } catch (error) {
+    message.error('删除失败')
+  } finally {
+    deletingAll.value = false
+  }
+}
+
+const handleDeleteModelIndex = async (modelName: string) => {
+  try {
+    const response = await vectorIndexApi.deleteByModel(modelName)
+    message.success(response.data.message)
+    await loadVectorIndex()
+  } catch (error) {
+    message.error('删除失败')
+  }
+}
+
 onMounted(() => {
   loadSources()
+  loadVectorIndex()
 })
 </script>

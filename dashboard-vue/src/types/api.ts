@@ -468,3 +468,90 @@ export interface VectorStats {
   modelExists: boolean
   lastUpdated: string | null
 }
+
+// --- Vector Index ---
+
+export interface VectorModelIndex {
+  modelName: string
+  dimension: number
+  vectorCount: number
+  storageBytes: number
+  lastUpdated: string | null
+  isCurrentModel: boolean
+  dimensionMatch: boolean
+}
+
+export interface DeleteResult {
+  modelName: string
+  deletedCount: number
+  message: string
+}
+
+export interface BulkDeleteResult {
+  results: DeleteResult[]
+  totalDeleted: number
+}
+
+export interface CleanupResult {
+  deletedCount: number
+  message: string
+}
+
+export interface RebuildJob {
+  jobId: string
+  status: string
+  modelName: string
+  dimension: number
+  sources: string[]
+  message: string
+}
+
+export interface RebuildRequest {
+  sources?: string[]
+  deleteExisting?: boolean
+}
+
+export interface MigrateResult {
+  success: boolean
+  message: string
+}
+
+export interface IndexSummary {
+  currentModel: string
+  currentDimension: number
+  totalFiles: number
+  totalChunks: number
+  modelStats: ModelStat[]
+}
+
+export interface ModelStat {
+  modelName: string
+  dimension: number
+  vectorCount: number
+  storageMB: number
+  isCurrentModel: boolean
+}
+
+// --- Index Job ---
+
+export interface IndexJobRequest {
+  sources?: string[]
+  force?: boolean
+}
+
+export interface IndexJobResponse {
+  jobId: string
+  status: string
+  sources: string[]
+  force: boolean
+  message: string
+  totalFiles: number
+  processedFiles: number
+  progressPercent: number
+  currentFile?: string
+  errors: number
+  startTime?: string
+  endTime?: string
+  duration?: string
+  errorMessage?: string
+}

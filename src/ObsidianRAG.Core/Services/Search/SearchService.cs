@@ -15,20 +15,52 @@ public class SearchService : ISearchService
     private readonly IEmbeddingService _embeddingService;
     private readonly ITextEnhancer _textEnhancer;
     private readonly HybridSearchService? _hybridSearchService;
+    private readonly ConfigManager _configManager;
     private readonly ILogger<SearchService> _logger;
 
     public SearchService(
         IVectorStore vectorStore,
         IEmbeddingService embeddingService,
         ITextEnhancer textEnhancer,
+        ConfigManager configManager,
         ILogger<SearchService> logger,
         HybridSearchService? hybridSearchService = null)
     {
         _vectorStore = vectorStore;
         _embeddingService = embeddingService;
         _textEnhancer = textEnhancer;
+        _configManager = configManager;
         _logger = logger;
         _hybridSearchService = hybridSearchService;
+    }
+
+    /// <summary>
+    /// 获取启用的源名称列表
+    /// 如果配置中没有源，则从数据库获取所有存在的源
+    /// </summary>
+    private async Task<HashSet<string>> GetEnabledSourceNamesAsync()
+    {
+        var config = _configManager.Load();
+        var enabledSources = config.Sources
+            .Where(s => s.Enabled)
+            .Select(s => s.Name)
+            .ToHashSet();
+
+        // 如果配置中没有源，从数据库获取所有存在的源作为回退
+        if (enabledSources.Count == 0)
+        {
+            var allFiles = await _vectorStore.GetAllFilesAsync();
+            enabledSources = allFiles
+                .Select(f => f.Source)
+                .Where(s => !string.IsNullOrEmpty(s))
+                .Distinct()
+                .ToHashSet();
+
+            _logger.LogDebug("配置中没有源，从数据库获取 {Count} 个源: {Sources}",
+                enabledSources.Count, string.Join(", ", enabledSources));
+        }
+
+        return enabledSources;
     }
 
     /// <summary>
@@ -38,13 +70,20 @@ public class SearchService : ISearchService
     {
         var sw = Stopwatch.StartNew();
 
+        // 获取启用的源列表
+        var enabledSources = await GetEnabledSourceNamesAsync();
+
         List<SearchResult> topResults;
 
         // 混合搜索模式
         if (request.Mode == QueryMode.Hybrid && _hybridSearchService != null)
         {
             var hybridResults = await _hybridSearchService.SearchAsync(request.Query, request.TopK, cancellationToken);
-            topResults = hybridResults.Select(h => new SearchResult
+
+            // 过滤禁用源
+            var filteredHybridResults = hybridResults.Where(r => enabledSources.Contains(r.Source));
+
+            topResults = filteredHybridResults.Select(h => new SearchResult
             {
                 ChunkId = h.ChunkId,
                 FileId = h.FileId,
@@ -54,21 +93,24 @@ public class SearchService : ISearchService
                 Score = h.Score,
                 StartLine = h.StartLine,
                 EndLine = h.EndLine,
-                HeadingPath = h.HeadingPath
+                HeadingPath = h.HeadingPath,
+                Source = h.Source
             }).ToList();
         }
         else
         {
-            // 标准向量搜索
+            // 标准向量搜索（使用当前模型）
             var queryVector = await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
-            var results = await _vectorStore.SearchAsync(queryVector, request.TopK * 2, cancellationToken);
+            var modelName = _embeddingService.ModelName;
+            var results = await _vectorStore.SearchAsync(queryVector, modelName, request.TopK * 2, cancellationToken);
 
-            // 应用源过滤
+            // 首先过滤禁用源
+            results = results.Where(r => enabledSources.Contains(r.Source));
+
+            // 应用源过滤（用户指定的源）
             if (request.Sources?.Count > 0)
             {
-                results = results.Where(r =>
-                    request.Sources.Contains(r.Source) ||
-                    request.Sources.Any(s => r.FilePath.Contains(s)));
+                results = results.Where(r => request.Sources.Contains(r.Source));
             }
 
             // 应用其他过滤条件

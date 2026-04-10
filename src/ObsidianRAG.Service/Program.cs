@@ -53,12 +53,14 @@ builder.Services.AddSingleton<IModelManager>(sp =>
 builder.Services.AddSingleton<ITokenizer, SimpleTokenizer>();
 builder.Services.AddSingleton<ITextEnhancer, TextEnhancer>();
 builder.Services.AddSingleton<IMarkdownChunker, MarkdownChunker>();
-builder.Services.AddSingleton<IVectorStore>(sp => 
+// 注册向量存储（支持多模型维度兼容）
+builder.Services.AddSingleton<IVectorStore>(sp =>
 {
     var config = sp.GetRequiredService<ConfigManager>();
     var cfg = config.Load();
     var dataPath = cfg.DataPath ?? "data";
-    return new JsonVectorStore(dataPath);
+    var dbPath = Path.Combine(dataPath, "vectors.db");
+    return new SqliteVectorStore(dbPath);
 });
 builder.Services.AddSingleton<IEmbeddingService>(sp =>
 {
@@ -125,18 +127,20 @@ builder.Services.AddCors(options =>
     {
         if (builder.Environment.IsDevelopment())
         {
-            policy.AllowAnyOrigin()
-                  .AllowAnyMethod()
-                  .AllowAnyHeader();
+            // 开发环境：仅允许 localhost 来源
+            policy.WithOrigins("http://localhost:5000", "http://localhost:5001", "http://localhost:3000")
+                  .WithMethods("GET", "POST", "PUT", "DELETE", "PATCH")
+                  .WithHeaders("Content-Type", "Authorization", "X-API-Key")
+                  .AllowCredentials();
         }
         else
         {
-            // Production: restrict to configured origins
+            // Production: restrict to configured origins and methods
             var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
                 ?? new[] { "http://localhost:5000", "http://localhost:5001" };
             policy.WithOrigins(allowedOrigins)
-                  .AllowAnyMethod()
-                  .AllowAnyHeader()
+                  .WithMethods("GET", "POST", "PUT", "DELETE", "PATCH")
+                  .WithHeaders("Content-Type", "Authorization", "X-API-Key")
                   .AllowCredentials();
         }
     });
@@ -152,6 +156,20 @@ if (app.Environment.IsDevelopment())
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "Obsidian RAG API v1");
     });
+}
+else
+{
+    // Production: Swagger disabled by default for security
+    // Can be enabled via SWAGGER_ENABLED=true environment variable
+    var swaggerEnabled = builder.Configuration.GetValue<bool>("SwaggerEnabled", false);
+    if (swaggerEnabled)
+    {
+        app.UseSwagger();
+        app.UseSwaggerUI(c =>
+        {
+            c.SwaggerEndpoint("/swagger/v1/swagger.json", "Obsidian RAG API v1");
+        });
+    }
 }
 
 app.UseCors();

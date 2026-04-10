@@ -62,6 +62,56 @@ public class HybridSearchService
     }
 
     /// <summary>
+    /// 异步初始化 BM25 索引 - 从向量存储加载所有 chunks
+    /// </summary>
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        _logger?.LogInformation("开始初始化 BM25 索引...");
+
+        try
+        {
+            // 获取所有文件
+            var files = await _vectorStore.GetAllFilesAsync();
+            var fileList = files.ToList();
+
+            var documentsToIndex = new List<(string DocId, string Content)>();
+
+            foreach (var file in fileList)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // 获取该文件的所有 chunks
+                var chunks = await _vectorStore.GetChunksByFileAsync(file.Id);
+
+                foreach (var chunk in chunks)
+                {
+                    if (!string.IsNullOrEmpty(chunk.Content))
+                    {
+                        // 使用 chunk ID 作为文档 ID
+                        documentsToIndex.Add((chunk.Id, chunk.Content));
+                    }
+                }
+            }
+
+            // 批量索引
+            if (documentsToIndex.Count > 0)
+            {
+                IndexDocuments(documentsToIndex);
+                _logger?.LogInformation("BM25 索引初始化完成，共索引 {Count} 个文档", documentsToIndex.Count);
+            }
+            else
+            {
+                _logger?.LogWarning("BM25 索引初始化完成，但没有找到任何文档");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "BM25 索引初始化失败");
+            throw;
+        }
+    }
+
+    /// <summary>
     /// 混合搜索 - 结合 BM25 和 Embedding 结果
     /// </summary>
     public async Task<List<HybridSearchResult>> SearchAsync(
@@ -75,9 +125,10 @@ public class HybridSearchService
         var bm25Results = _bm25Searcher.Search(query, topK * 2);
         var bm25RankMap = CreateRankMap(bm25Results.Select(r => r.DocId).ToList());
 
-        // 2. Embedding 语义搜索
+        // 2. Embedding 语义搜索（使用当前模型）
         var queryVector = await _embeddingService.EncodeAsync(query, EmbeddingMode.Query, cancellationToken);
-        var embeddingResults = await _vectorStore.SearchAsync(queryVector, topK * 2, cancellationToken);
+        var modelName = _embeddingService.ModelName;
+        var embeddingResults = await _vectorStore.SearchAsync(queryVector, modelName, topK * 2, cancellationToken);
         var embeddingRankMap = CreateRankMap(embeddingResults.Select(r => r.ChunkId).ToList());
 
         // 3. 收集所有候选文档ID
@@ -133,6 +184,7 @@ public class HybridSearchService
                 EmbeddingScore = embeddingResult?.Score ?? 0,
                 BM25Rank = bm25RankMap.GetValueOrDefault(docId, -1),
                 EmbeddingRank = embeddingRankMap.GetValueOrDefault(docId, -1),
+                Source = embeddingResult?.Source ?? string.Empty,
                 StartLine = embeddingResult?.StartLine ?? 0,
                 EndLine = embeddingResult?.EndLine ?? 0,
                 HeadingPath = embeddingResult?.HeadingPath
@@ -195,6 +247,11 @@ public class HybridSearchResult
     /// Embedding 排名 (-1 表示未出现在结果中)
     /// </summary>
     public int EmbeddingRank { get; set; }
+
+    /// <summary>
+    /// 源名称
+    /// </summary>
+    public string Source { get; set; } = string.Empty;
 
     public int StartLine { get; set; }
     public int EndLine { get; set; }

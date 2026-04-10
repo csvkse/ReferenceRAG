@@ -5,6 +5,7 @@ obj/
 *.exe
 *.pdb
 dist/
+resource/
 
 # IDE
 .vs/
@@ -29,6 +30,15 @@ CODEBUDDY.md
 
 # Model files (large binary)
 models/
+
+# Frontend build outputs
+dist/
+build/
+.output/
+.nuxt/
+.next/
+out/
+.vite/
 
 # Node.js
 node_modules/

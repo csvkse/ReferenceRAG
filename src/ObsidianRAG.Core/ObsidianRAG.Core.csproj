@@ -4,6 +4,7 @@
     <PackageReference Include="Markdig" Version="1.1.2" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.VectorData.Abstractions" Version="10.1.0" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.24.4" />
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="1.0.1" />
     <PackageReference Include="BERTTokenizers" Version="1.2.0" />

@@ -1,10 +1,10 @@
 # Obsidian RAG Service
-FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS base
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
 WORKDIR /app
 EXPOSE 5000
 EXPOSE 5001
 
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Copy solution and project files
@@ -12,7 +12,6 @@ COPY ["ObsidianRAG.sln", "./"]
 COPY ["src/ObsidianRAG.Service/ObsidianRAG.Service.csproj", "src/ObsidianRAG.Service/"]
 COPY ["src/ObsidianRAG.Core/ObsidianRAG.Core.csproj", "src/ObsidianRAG.Core/"]
 COPY ["src/ObsidianRAG.Storage/ObsidianRAG.Storage.csproj", "src/ObsidianRAG.Storage/"]
-COPY ["src/ObsidianRAG.CLI/ObsidianRAG.CLI.csproj", "src/ObsidianRAG.CLI/"]
 COPY ["tests/ObsidianRAG.Tests/ObsidianRAG.Tests.csproj", "tests/ObsidianRAG.Tests/"]
 
 # Restore dependencies
@@ -46,8 +45,13 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 ENV DataPath=/app/data
 ENV ModelPath=/app/models/bge-small-zh-v1.5.onnx
 
-# Health check
+# Health check (using wget as curl may not be available in aspnet base image)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:5000/api/system/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
+
+# Create non-root user and set permissions
+RUN adduser --disabled-password --gecko '' appuser \
+    && chown -R appuser:appuser /app
+USER appuser
 
 ENTRYPOINT ["dotnet", "ObsidianRAG.Service.dll"]

@@ -212,10 +212,18 @@ public class IndexService : IHostedService
     {
         var content = await File.ReadAllTextAsync(filePath);
 
-        // 尝试用原始路径和标准化路径匹配 source
-        var source = sources.FirstOrDefault(s =>
-            filePath.StartsWith(s.Path) ||
-            filePath.StartsWith(PathUtility.NormalizePath(s.Path)));
+        // 按路径长度降序排序，确保更长的路径（更精确的匹配）优先匹配
+        // 这样 test-vault-english 会先于 test-vault 匹配
+        var sortedSources = sources
+            .OrderByDescending(s => s.Path.Length)
+            .ToList();
+
+        // 尝试用原始路径和标准化路径匹配 source，确保匹配的是完整目录
+        var source = sortedSources.FirstOrDefault(s =>
+            filePath.StartsWith(s.Path + Path.DirectorySeparatorChar) ||
+            filePath.Equals(s.Path) ||
+            filePath.StartsWith(PathUtility.NormalizePath(s.Path) + Path.DirectorySeparatorChar) ||
+            filePath.Equals(PathUtility.NormalizePath(s.Path)));
 
         // 使用标准化路径计算相对路径
         var sourcePathForRelative = source != null

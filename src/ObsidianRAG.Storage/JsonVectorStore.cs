@@ -115,6 +115,13 @@ public class JsonVectorStore : IVectorStore, IDisposable
         await SaveDataAsync(cancellationToken);
     }
 
+    public async Task DeleteChunkAsync(string id, CancellationToken cancellationToken = default)
+    {
+        _chunks.Remove(id);
+        _vectors.Remove(id);
+        await SaveDataAsync(cancellationToken);
+    }
+
     // ==================== 向量操作 ====================
 
     public async Task UpsertVectorAsync(VectorRecord vector, CancellationToken cancellationToken = default)
@@ -157,8 +164,18 @@ public class JsonVectorStore : IVectorStore, IDisposable
     // ==================== 检索操作 ====================
 
     public Task<IEnumerable<SearchResult>> SearchAsync(
-        float[] queryVector, 
-        int topK, 
+        float[] queryVector,
+        int topK,
+        CancellationToken cancellationToken = default)
+    {
+        // JsonVectorStore 不区分模型，使用默认实现
+        return SearchAsync(queryVector, "default", topK, cancellationToken);
+    }
+
+    public Task<IEnumerable<SearchResult>> SearchAsync(
+        float[] queryVector,
+        string modelName,
+        int topK,
         CancellationToken cancellationToken = default)
     {
         var results = new List<(string ChunkId, float Score)>();
@@ -398,5 +415,15 @@ public class JsonVectorStore : IVectorStore, IDisposable
             }
         }
         return Task.FromResult(updated);
+    }
+
+    public Task<int> UpdateSourceNameAsync(string oldName, string newName, CancellationToken cancellationToken = default)
+    {
+        var files = _files.Values.Where(f => f.Source == oldName).ToList();
+        foreach (var file in files)
+        {
+            file.Source = newName;
+        }
+        return Task.FromResult(files.Count);
     }
 }

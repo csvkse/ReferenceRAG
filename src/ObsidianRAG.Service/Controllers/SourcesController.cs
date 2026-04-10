@@ -15,18 +15,15 @@ public class SourcesController : ControllerBase
 {
     private readonly ConfigManager _configManager;
     private readonly IVectorStore _vectorStore;
-    private readonly IndexService _indexService;
     private readonly ILogger<SourcesController> _logger;
 
     public SourcesController(
         ConfigManager configManager,
         IVectorStore vectorStore,
-        IndexService indexService,
         ILogger<SourcesController> logger)
     {
         _configManager = configManager;
         _vectorStore = vectorStore;
-        _indexService = indexService;
         _logger = logger;
     }
 
@@ -200,7 +197,7 @@ public class SourcesController : ControllerBase
     /// 更新源
     /// </summary>
     [HttpPut("{name}")]
-    public ActionResult Update(string name, [FromBody] UpdateSourceRequest request)
+    public async Task<ActionResult> Update(string name, [FromBody] UpdateSourceRequest request)
     {
         var config = _configManager.Load();
         var source = config.Sources.FirstOrDefault(s => s.Name == name);
@@ -210,9 +207,21 @@ public class SourcesController : ControllerBase
             return NotFound(new { error = $"源 '{name}' 不存在" });
         }
 
+        // 如果要修改名称，需要同步更新数据库中的 source 字段
         if (request.Name != null && request.Name != name)
         {
+            // 检查新名称是否已存在
+            if (config.Sources.Any(s => s.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase)))
+            {
+                return Conflict(new { error = $"源名称 '{request.Name}' 已存在" });
+            }
+
+            var oldName = source.Name;
             source.Name = request.Name;
+
+            // 更新数据库中的 source 字段
+            await _vectorStore.UpdateSourceNameAsync(oldName, request.Name);
+            _logger.LogInformation("源名称已更新: {OldName} -> {NewName}", oldName, request.Name);
         }
 
         if (request.Enabled.HasValue)
@@ -268,29 +277,6 @@ public class SourcesController : ControllerBase
     {
         _configManager.ToggleSource(name, request.Enabled);
         return Ok();
-    }
-
-    /// <summary>
-    /// 启动索引
-    /// </summary>
-    [HttpPost("{name}/index")]
-    public async Task<ActionResult<IndexJob>> StartIndex(string name, [FromBody] IndexOptions? options = null)
-    {
-        var config = _configManager.Load();
-        var source = config.Sources.FirstOrDefault(s => s.Name == name);
-
-        if (source == null)
-        {
-            return NotFound(new { error = $"源 '{name}' 不存在" });
-        }
-
-        var job = await _indexService.StartIndexAsync(new IndexRequest
-        {
-            Sources = new List<string> { name },
-            Force = options?.Force ?? false
-        });
-
-        return AcceptedAtAction(nameof(IndexController.GetStatus), "Index", new { indexId = job.Id }, job);
     }
 
     /// <summary>
@@ -403,14 +389,6 @@ public class UpdateSourceRequest
 public class ToggleRequest
 {
     public bool Enabled { get; set; }
-}
-
-/// <summary>
-/// 索引选项
-/// </summary>
-public class IndexOptions
-{
-    public bool Force { get; set; }
 }
 
 /// <summary>

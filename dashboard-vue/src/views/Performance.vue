@@ -63,10 +63,10 @@
       <n-tab-pane name="semantic" tab="语义相似度测试">
         <n-card>
           <n-space vertical>
-            <n-text depth="3">测试模型的语义理解能力：同义词、反义词、多义词、跨语言、小数、特殊符号、非中英文等，共 64 个测试用例，14 大分类。</n-text>
+            <n-text depth="3">测试模型的语义理解能力：同义词、反义词、多义词、跨语言、小数、特殊符号、非中英文等。中文测试 64 个用例（14 分类），英文测试 36 个用例（8 分类）。</n-text>
             <n-space align="center">
               <n-button type="primary" :loading="semanticLoading" @click="runSemanticTest">
-                运行全部测试（64 项）
+                运行全部测试（100 项）
               </n-button>
               <n-button @click="showCustomSemantic = true">
                 自定义测试
@@ -431,7 +431,7 @@
             </n-space>
             <n-space>
               <n-button type="primary" :loading="remoteLoading" :disabled="!remoteApi.baseUrl" @click="runRemoteTest">
-                运行全部测试（64 项）
+                运行全部测试（100 项）
               </n-button>
               <n-button :loading="remoteLoading && remoteActiveCategory !== null" :disabled="!remoteApi.baseUrl" @click="runRemoteAllCategories">
                 按分类依次测试
@@ -682,7 +682,7 @@ const evaluatePassByCategory = (category: string, actual: number, expected: numb
   return (categoryPassCriteria[category] || defaultPassCriteria)(actual, expected)
 }
 
-// 完整语义测试数据集（39 个测试用例，来自 EmbeddingQueryTest.cs SemanticTestData）
+// 完整语义测试数据集（100 个测试用例：64 中文 + 36 英文，22 分类）
 const semanticCategories: SemanticCategory[] = [
   {
     label: '同义词与同义表达',
@@ -830,10 +830,82 @@ const semanticCategories: SemanticCategory[] = [
       { query: 'Bonjour le monde', text: '世界你好', expectedSimilarity: 0.80, category: '法文翻译' },
       { query: '日本語で挨拶します', text: '用日语打招呼', expectedSimilarity: 0.88, category: '日文语义' },
     ]
+  },
+  // ========== 英文测试分类（用于测试英文模型如 all-MiniLM-L6-v2）==========
+  {
+    label: '英文同义词与同义表达',
+    description: 'English synonyms and paraphrases - test synonym recognition',
+    cases: [
+      { query: 'I enjoy eating apples', text: 'I love eating apples', expectedSimilarity: 0.85, category: 'EN-Synonym' },
+      { query: 'This product works great', text: 'This product is very useful', expectedSimilarity: 0.85, category: 'EN-Synonym' },
+      { query: 'The weather is hot today', text: 'It is very warm today', expectedSimilarity: 0.80, category: 'EN-Paraphrase' },
+      { query: 'Machine learning is a branch of AI', text: 'ML is a subfield of artificial intelligence', expectedSimilarity: 0.85, category: 'EN-Tech synonym' },
+      { query: 'How do I learn programming?', text: 'What is the best way to study coding?', expectedSimilarity: 0.80, category: 'EN-Question paraphrase' },
+    ]
+  },
+  {
+    label: '英文反义词与对立语义',
+    description: 'English antonyms and opposing meanings - test contrast detection',
+    cases: [
+      { query: 'This product is excellent', text: 'This product is terrible', expectedSimilarity: 0.15, category: 'EN-Antonym' },
+      { query: 'The weather is hot today', text: 'The weather is cold today', expectedSimilarity: 0.15, category: 'EN-Antonym' },
+      { query: 'Prices increased significantly', text: 'Prices dropped sharply', expectedSimilarity: 0.20, category: 'EN-Opposite' },
+      { query: 'I love this movie', text: 'I hate this movie', expectedSimilarity: 0.15, category: 'EN-Sentiment opposite' },
+      { query: 'The project succeeded', text: 'The project failed', expectedSimilarity: 0.20, category: 'EN-Status opposite' },
+    ]
+  },
+  {
+    label: '英文无关主题',
+    description: 'English unrelated topics - test ability to identify irrelevant content',
+    cases: [
+      { query: 'How to cook steak', text: 'Python programming tutorial', expectedSimilarity: 0.10, category: 'EN-Unrelated' },
+      { query: 'Stock investment strategies', text: 'What to eat for dinner', expectedSimilarity: 0.10, category: 'EN-Unrelated' },
+      { query: 'Football match results', text: 'Machine learning algorithms', expectedSimilarity: 0.10, category: 'EN-Unrelated' },
+      { query: 'How to bake a cake', text: 'Rocket propulsion principles', expectedSimilarity: 0.05, category: 'EN-Completely unrelated' },
+      { query: 'Investment tips for stocks', text: 'Cat care guide', expectedSimilarity: 0.05, category: 'EN-Completely unrelated' },
+    ]
+  },
+  {
+    label: '英文相关但不同主题',
+    description: 'English related but different topics - test fine-grained distinction',
+    cases: [
+      { query: 'Apple released a new product', text: 'Samsung launched a new phone', expectedSimilarity: 0.50, category: 'EN-Competing products' },
+      { query: 'Python programming basics', text: 'Java programming tutorial', expectedSimilarity: 0.55, category: 'EN-Similar tech' },
+      { query: 'New York weather forecast', text: 'Los Angeles weather forecast', expectedSimilarity: 0.60, category: 'EN-Same info type' },
+      { query: 'Python is a programming language', text: 'Java is widely used in enterprise', expectedSimilarity: 0.55, category: 'EN-Related tech' },
+    ]
+  },
+  {
+    label: '英文因果关系',
+    description: 'English causal relationships - test cause-effect understanding',
+    cases: [
+      { query: 'It rained heavily all night', text: 'The roads are slippery today', expectedSimilarity: 0.60, category: 'EN-Causal' },
+      { query: 'He exercises for an hour every day', text: 'His physical fitness has improved significantly', expectedSimilarity: 0.55, category: 'EN-Causal' },
+      { query: 'Project requirements change frequently', text: 'Development progress is seriously delayed', expectedSimilarity: 0.50, category: 'EN-Causal' },
+    ]
+  },
+  {
+    label: '英文情感与程度',
+    description: 'English sentiment and degree expressions - test intensity detection',
+    cases: [
+      { query: 'I like this book', text: 'I absolutely love this book', expectedSimilarity: 0.80, category: 'EN-Sentiment intensity' },
+      { query: 'This project is somewhat difficult', text: 'This project is extremely challenging', expectedSimilarity: 0.75, category: 'EN-Degree' },
+      { query: 'He is satisfied with the service', text: 'He is extremely satisfied with the service', expectedSimilarity: 0.75, category: 'EN-Intensity' },
+      { query: 'This product has minor issues', text: 'This product has serious defects', expectedSimilarity: 0.60, category: 'EN-Negative degree' },
+    ]
+  },
+  {
+    label: '英文多义词歧义',
+    description: 'English polysemy disambiguation - test context understanding',
+    cases: [
+      { query: 'I went to the bank to deposit money', text: 'The river bank was muddy', expectedSimilarity: 0.20, category: 'EN-Polysemy-bank' },
+      { query: 'The bat flew through the cave', text: 'He hit the ball with a bat', expectedSimilarity: 0.15, category: 'EN-Polysemy-bat' },
+      { query: 'She parked the car on the street', text: 'The park is beautiful in autumn', expectedSimilarity: 0.15, category: 'EN-Polysemy-park' },
+    ]
   }
 ]
 
-// 运行全部测试（所有 64 个用例）
+// 运行全部测试（所有 100 个用例）
 const runSemanticTest = async () => {
   semanticLoading.value = true
   semanticResult.value = null
