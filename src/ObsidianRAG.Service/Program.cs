@@ -196,4 +196,19 @@ if (!string.IsNullOrEmpty(modelDir) && !Directory.Exists(modelDir))
     Directory.CreateDirectory(modelDir);
 }
 
+// 初始化混合搜索服务的 BM25 索引
+using (var scope = app.Services.CreateScope())
+{
+    var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
+    try
+    {
+        await searchService.InitializeAsync();
+        app.Logger.LogInformation("搜索服务 BM25 索引初始化完成");
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "BM25 索引初始化失败，混合搜索可能退化为纯向量搜索");
+    }
+}
+
 app.Run();

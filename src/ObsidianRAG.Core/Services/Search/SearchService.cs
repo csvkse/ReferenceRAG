@@ -35,6 +35,18 @@ public class SearchService : ISearchService
     }
 
     /// <summary>
+    /// 初始化搜索服务 - 预热 BM25 索引
+    /// </summary>
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        if (_hybridSearchService != null)
+        {
+            _logger.LogInformation("初始化混合搜索服务 BM25 索引...");
+            await _hybridSearchService.InitializeAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>
     /// 获取启用的源名称列表
     /// 如果配置中没有源，则从数据库获取所有存在的源
     /// </summary>
