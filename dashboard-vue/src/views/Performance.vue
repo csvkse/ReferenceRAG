@@ -576,30 +576,12 @@
         <n-card>
           <n-space vertical>
             <n-text depth="3">测试重排模型的文档排序能力：给定查询和文档列表，模型返回按相关性排序的结果。支持 NDCG、MRR、MAP 等评估指标。</n-text>
-            <n-grid :cols="3" :x-gap="20">
-              <n-gi :span="2">
-                <n-form-item label="查询文本">
-                  <n-input v-model:value="rerankQuery" placeholder="输入查询文本" />
-                </n-form-item>
-              </n-gi>
-              <n-gi>
-                <n-form-item label="模型名称">
-                  <n-input v-model:value="rerankModelName" placeholder="留空使用默认" />
-                </n-form-item>
-              </n-gi>
-            </n-grid>
-            <n-form-item label="文档列表 (JSON)">
-              <n-button size="small" @click="showRerankDocEditor = true">编辑文档</n-button>
-              <n-text depth="3" style="margin-left: 12px">
-                {{ rerankDocuments.length }} 个文档
-              </n-text>
-            </n-form-item>
             <n-space>
-              <n-button type="primary" :loading="rerankLoading" @click="runRerankTest">
-                运行重排测试
+              <n-button type="primary" :loading="rerankLoading" @click="runAllRerankPresets">
+                运行全部预设测试
               </n-button>
-              <n-button @click="loadSampleRerankDocuments">
-                加载示例数据
+              <n-button @click="showCustomRerank = true">
+                自定义测试
               </n-button>
               <n-divider vertical />
               <n-checkbox v-model:checked="useRemoteForRerank" :disabled="!remoteApi.baseUrl">
@@ -612,21 +594,79 @@
           </n-space>
         </n-card>
 
-        <n-modal v-model:show="showRerankDocEditor" preset="dialog" title="编辑文档列表 (JSON)" style="width: 60vw">
-          <n-text depth="3" style="margin-bottom: 8px; display: block">
-            格式: [{"id": "1", "text": "文档内容", "expectedRelevance": 0.9}]，expectedRelevance 为 0-1 的期望相关性分数
-          </n-text>
-          <n-input
-            v-model:value="rerankDocumentsJson"
-            type="textarea"
-            :rows="12"
-            placeholder='[{"id":"1","text":"文档内容","expectedRelevance":0.9}]'
-            style="font-family: monospace"
-          />
-          <n-space style="margin-top: 12px">
-            <n-button @click="parseRerankDocuments">解析文档</n-button>
+        <!-- Preset Test Buttons -->
+        <n-card title="预设测试套件" size="small" style="margin-top: 12px">
+          <n-space>
+            <n-button
+              v-for="preset in rerankPresets"
+              :key="preset.name"
+              :loading="rerankLoading && activeRerankPreset === preset.name"
+              size="small"
+              :type="activeRerankPreset === preset.name ? 'primary' : 'default'"
+              @click="runRerankPreset(preset.name)"
+            >
+              {{ preset.description }}（{{ preset.documentCount }} 文档）
+            </n-button>
+          </n-space>
+        </n-card>
+
+        <!-- Custom Rerank Test Dialog -->
+        <n-modal v-model:show="showCustomRerank" preset="dialog" title="自定义重排测试" style="width: 60vw">
+          <n-space vertical>
+            <n-form-item label="查询文本">
+              <n-input v-model:value="rerankQuery" placeholder="输入查询文本" />
+            </n-form-item>
+            <n-form-item label="模型名称">
+              <n-input v-model:value="rerankModelName" placeholder="留空使用默认" />
+            </n-form-item>
+            <n-form-item label="文档列表 (JSON)">
+              <n-input
+                v-model:value="rerankDocumentsJson"
+                type="textarea"
+                :rows="10"
+                placeholder='[{"id":"1","text":"文档内容","expectedRelevance":0.9}]'
+                style="font-family: monospace"
+              />
+            </n-form-item>
+            <n-text depth="3" style="font-size: 12px">
+              格式: [{"id": "1", "text": "文档内容", "expectedRelevance": 0.9}]，expectedRelevance 为 0-1 的期望相关性分数
+            </n-text>
+            <n-space>
+              <n-button type="primary" :loading="rerankLoading" @click="runCustomRerankTest">
+                运行测试
+              </n-button>
+              <n-button @click="loadSampleRerankDocuments">
+                加载示例数据
+              </n-button>
+            </n-space>
           </n-space>
         </n-modal>
+
+        <!-- Rerank Statistics -->
+        <n-card v-if="rerankStatistics" title="测试统计" style="margin-top: 16px">
+          <n-grid :cols="6" :x-gap="16">
+            <n-gi>
+              <n-statistic label="总测试数" :value="rerankStatistics.totalTests" />
+            </n-gi>
+            <n-gi v-if="rerankStatistics.byModel.length > 0">
+              <n-statistic label="平均 NDCG" :value="rerankStatistics.byModel[0].avgNdcg.toFixed(3)" />
+            </n-gi>
+            <n-gi v-if="rerankStatistics.byModel.length > 0">
+              <n-statistic label="平均 MRR" :value="rerankStatistics.byModel[0].avgMrr.toFixed(3)" />
+            </n-gi>
+            <n-gi v-if="rerankStatistics.byModel.length > 0">
+              <n-statistic label="平均 MAP" :value="rerankStatistics.byModel[0].avgMap.toFixed(3)" />
+            </n-gi>
+            <n-gi v-if="rerankStatistics.byModel.length > 0">
+              <n-statistic label="平均耗时" :value="rerankStatistics.byModel[0].avgQueryMs.toFixed(0)">
+                <template #suffix>ms</template>
+              </n-statistic>
+            </n-gi>
+            <n-gi v-if="rerankStatistics.byModel.length > 0">
+              <n-statistic label="平均 MAE" :value="rerankStatistics.byModel[0].avgMae.toFixed(3)" />
+            </n-gi>
+          </n-grid>
+        </n-card>
 
         <n-card v-if="rerankResult" title="重排结果" style="margin-top: 16px">
           <!-- Metrics -->
@@ -666,6 +706,92 @@
             size="small"
           />
         </n-card>
+
+        <!-- Performance Benchmark -->
+        <n-card title="性能基准测试" size="small" style="margin-top: 16px">
+          <n-space vertical>
+            <n-text depth="3">测试重排模型的吞吐量和延迟分布</n-text>
+            <n-grid :cols="4" :x-gap="16">
+              <n-gi>
+                <n-form-item label="并发数">
+                  <n-input-number v-model:value="benchmarkConcurrency" :min="1" :max="32" style="width: 100%" />
+                </n-form-item>
+              </n-gi>
+              <n-gi>
+                <n-form-item label="总请求数">
+                  <n-input-number v-model:value="benchmarkTotalRequests" :min="10" :max="1000" :step="10" style="width: 100%" />
+                </n-form-item>
+              </n-gi>
+              <n-gi>
+                <n-form-item label="每请求文档数">
+                  <n-input-number v-model:value="benchmarkDocCount" :min="1" :max="20" style="width: 100%" />
+                </n-form-item>
+              </n-gi>
+              <n-gi>
+                <n-form-item label="操作">
+                  <n-button type="primary" :loading="rerankBenchmarkLoading" @click="runRerankBenchmark">
+                    开始测试
+                  </n-button>
+                </n-form-item>
+              </n-gi>
+            </n-grid>
+          </n-space>
+        </n-card>
+
+        <n-card v-if="rerankBenchmarkResult" title="性能测试结果" style="margin-top: 12px">
+          <n-grid :cols="5" :x-gap="16">
+            <n-gi>
+              <n-statistic label="QPS" :value="rerankBenchmarkResult.qps.toFixed(2)">
+                <template #suffix>req/s</template>
+              </n-statistic>
+            </n-gi>
+            <n-gi>
+              <n-statistic label="平均延迟" :value="rerankBenchmarkResult.avgLatencyMs.toFixed(1)">
+                <template #suffix>ms</template>
+              </n-statistic>
+            </n-gi>
+            <n-gi>
+              <n-statistic label="P50 延迟" :value="rerankBenchmarkResult.p50LatencyMs">
+                <template #suffix>ms</template>
+              </n-statistic>
+            </n-gi>
+            <n-gi>
+              <n-statistic label="P95 延迟" :value="rerankBenchmarkResult.p95LatencyMs">
+                <template #suffix>ms</template>
+              </n-statistic>
+            </n-gi>
+            <n-gi>
+              <n-statistic label="P99 延迟" :value="rerankBenchmarkResult.p99LatencyMs">
+                <template #suffix>ms</template>
+              </n-statistic>
+            </n-gi>
+          </n-grid>
+          <n-grid :cols="4" :x-gap="16" style="margin-top: 12px">
+            <n-gi>
+              <n-statistic label="总耗时" :value="rerankBenchmarkResult.totalMs">
+                <template #suffix>ms</template>
+              </n-statistic>
+            </n-gi>
+            <n-gi>
+              <n-statistic label="成功/失败" :value="`${rerankBenchmarkResult.successCount}/${rerankBenchmarkResult.failCount}`" />
+            </n-gi>
+            <n-gi>
+              <n-statistic label="最小延迟" :value="rerankBenchmarkResult.minLatencyMs">
+                <template #suffix>ms</template>
+              </n-statistic>
+            </n-gi>
+            <n-gi>
+              <n-statistic label="最大延迟" :value="rerankBenchmarkResult.maxLatencyMs">
+                <template #suffix>ms</template>
+              </n-statistic>
+            </n-gi>
+          </n-grid>
+          <n-alert v-if="rerankBenchmarkResult.errors.length > 0" type="warning" style="margin-top: 12px" title="错误信息">
+            <ul style="margin: 0; padding-left: 20px">
+              <li v-for="(err, i) in rerankBenchmarkResult.errors" :key="i">{{ err }}</li>
+            </ul>
+          </n-alert>
+        </n-card>
       </n-tab-pane>
     </n-tabs>
   </n-space>
@@ -683,7 +809,8 @@ import type {
   BatchSizeResult,
   MemoryTestResult,
   RerankTestResult,
-  RerankDocumentResult
+  RerankDocumentResult,
+  RerankBenchmarkResult
 } from '@/types/api'
 
 // ==================== Semantic Test ====================
@@ -2150,11 +2277,23 @@ const runApiBatchTest = async () => {
 const rerankQuery = ref('如何学习Python编程')
 const rerankModelName = ref('')
 const rerankLoading = ref(false)
-const showRerankDocEditor = ref(false)
+const showCustomRerank = ref(false)
 const rerankDocumentsJson = ref('')
 const rerankDocuments = ref<{ id?: string; text: string; expectedRelevance?: number }[]>([])
 const rerankResult = ref<RerankTestResult | null>(null)
 const useRemoteForRerank = ref(false)
+
+// 预设测试套件
+const rerankPresets = ref<{ name: string; description: string; documentCount: number }[]>([])
+const activeRerankPreset = ref<string | null>(null)
+const rerankStatistics = ref<{ totalTests: number; byModel: { modelName: string; totalTests: number; avgNdcg: number; avgMrr: number; avgMap: number; avgRankingAccuracy: number; avgMae: number; avgQueryMs: number }[] } | null>(null)
+
+// 性能基准测试
+const rerankBenchmarkLoading = ref(false)
+const benchmarkConcurrency = ref(4)
+const benchmarkTotalRequests = ref(100)
+const benchmarkDocCount = ref(5)
+const rerankBenchmarkResult = ref<RerankBenchmarkResult | null>(null)
 
 const sampleRerankDocuments = JSON.stringify([
   { id: '1', text: 'Python是一门简单易学的编程语言，适合初学者入门', expectedRelevance: 0.95 },
@@ -2180,22 +2319,77 @@ const parseRerankDocuments = () => {
   }
 }
 
-const runRerankTest = async () => {
-  if (!rerankQuery.value || rerankDocuments.value.length === 0) {
-    parseRerankDocuments()
-    if (rerankDocuments.value.length === 0) return
+// 加载预设测试套件
+const loadRerankPresets = async () => {
+  try {
+    const res = await rerankTestApi.getPresets()
+    rerankPresets.value = res.data
+  } catch (e) {
+    console.error('Failed to load rerank presets:', e)
+  }
+}
+
+// 运行单个预设测试
+const runRerankPreset = async (presetName: string) => {
+  rerankLoading.value = true
+  activeRerankPreset.value = presetName
+  rerankResult.value = null
+
+  try {
+    const res = await rerankTestApi.runPreset(presetName)
+    rerankResult.value = res.data
+  } catch (e) {
+    console.error(e)
+  } finally {
+    rerankLoading.value = false
+    activeRerankPreset.value = null
+  }
+}
+
+// 运行所有预设测试
+const runAllRerankPresets = async () => {
+  if (rerankPresets.value.length === 0) {
+    await loadRerankPresets()
   }
 
   rerankLoading.value = true
   rerankResult.value = null
 
   try {
+    // 依次运行所有预设
+    for (const preset of rerankPresets.value) {
+      activeRerankPreset.value = preset.name
+      await rerankTestApi.runPreset(preset.name)
+    }
+
+    // 最后运行一个作为展示
+    const lastPreset = rerankPresets.value[rerankPresets.value.length - 1]
+    const res = await rerankTestApi.runPreset(lastPreset.name)
+    rerankResult.value = res.data
+
+    // 刷新统计
+    await loadRerankStatistics()
+  } catch (e) {
+    console.error(e)
+  } finally {
+    rerankLoading.value = false
+    activeRerankPreset.value = null
+  }
+}
+
+// 自定义重排测试
+const runCustomRerankTest = async () => {
+  parseRerankDocuments()
+  if (!rerankQuery.value || rerankDocuments.value.length === 0) return
+
+  rerankLoading.value = true
+  rerankResult.value = null
+
+  try {
     if (useRemoteForRerank.value && remoteApi.value.baseUrl) {
-      // 使用远程 OpenAI 兼容 API 模拟重排
       const result = await runRerankWithRemoteApi()
       rerankResult.value = result
     } else {
-      // 使用本地 API
       const res = await rerankTestApi.test({
         query: rerankQuery.value,
         documents: rerankDocuments.value,
@@ -2209,6 +2403,39 @@ const runRerankTest = async () => {
     rerankLoading.value = false
   }
 }
+
+// 加载测试统计
+const loadRerankStatistics = async () => {
+  try {
+    const res = await rerankTestApi.getStatistics()
+    rerankStatistics.value = res.data
+  } catch (e) {
+    console.error('Failed to load rerank statistics:', e)
+  }
+}
+
+// 运行性能基准测试
+const runRerankBenchmark = async () => {
+  rerankBenchmarkLoading.value = true
+  rerankBenchmarkResult.value = null
+
+  try {
+    const res = await rerankTestApi.benchmark({
+      concurrency: benchmarkConcurrency.value,
+      totalRequests: benchmarkTotalRequests.value,
+      documentCount: benchmarkDocCount.value
+    })
+    rerankBenchmarkResult.value = res.data
+  } catch (e) {
+    console.error(e)
+  } finally {
+    rerankBenchmarkLoading.value = false
+  }
+}
+
+// 初始化加载预设
+loadRerankPresets()
+loadRerankStatistics()
 
 // 使用远程 API 模拟重排测试（基于 embedding 相似度）
 const runRerankWithRemoteApi = async (): Promise<RerankTestResult> => {

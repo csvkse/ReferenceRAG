@@ -165,6 +165,7 @@ export interface ObsidianRagConfig {
   chunking: ChunkingConfig
   search: SearchConfig
   service: ServiceConfig
+  rerank?: RerankConfig
   vaultPath?: string
 }
 
@@ -201,6 +202,17 @@ export interface ServiceConfig {
   enableCors: boolean
   enableSwagger: boolean
   logLevel: string
+}
+
+export interface RerankConfig {
+  enabled: boolean
+  modelName?: string
+  currentModel?: string
+  modelPath?: string
+  useCuda: boolean
+  cudaDeviceId: number
+  topN: number
+  recallFactor: number
 }
 
 // --- Performance ---
@@ -586,4 +598,50 @@ export interface RerankDocumentResult {
   expectedRelevance?: number
   deviation?: number
   rank: number
+}
+
+export interface RerankPresetInfo {
+  name: string
+  description: string
+  documentCount: number
+}
+
+export interface RerankTestStatistics {
+  totalTests: number
+  byModel: RerankModelStatistics[]
+}
+
+export interface RerankModelStatistics {
+  modelName: string
+  totalTests: number
+  avgNdcg: number
+  avgMrr: number
+  avgMap: number
+  avgRankingAccuracy: number
+  avgMae: number
+  avgQueryMs: number
+}
+
+export interface RerankBenchmarkRequest {
+  concurrency: number
+  totalRequests: number
+  documentCount: number
+}
+
+export interface RerankBenchmarkResult {
+  timestamp: string
+  concurrency: number
+  totalRequests: number
+  documentCount: number
+  successCount: number
+  failCount: number
+  totalMs: number
+  qps: number
+  avgLatencyMs: number
+  minLatencyMs: number
+  maxLatencyMs: number
+  p50LatencyMs: number
+  p95LatencyMs: number
+  p99LatencyMs: number
+  errors: string[]
 }

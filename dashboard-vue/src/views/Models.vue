@@ -23,6 +23,50 @@
       </n-spin>
     </n-card>
 
+    <!-- Current Rerank Model -->
+    <n-card title="当前重排模型">
+      <n-spin :show="rerankCurrentLoading">
+        <n-descriptions v-if="currentRerankModel" :column="4" label-placement="left">
+          <n-descriptions-item label="模型名称">
+            <n-tag type="info">{{ currentRerankModel.displayName || currentRerankModel.name }}</n-tag>
+          </n-descriptions-item>
+          <n-descriptions-item label="维度">{{ currentRerankModel.dimension }}</n-descriptions-item>
+          <n-descriptions-item label="最大序列长度">{{ currentRerankModel.maxSequenceLength }}</n-descriptions-item>
+          <n-descriptions-item label="状态">
+            <n-tag :type="currentRerankModel.isDownloaded ? 'success' : 'warning'">
+              {{ currentRerankModel.isDownloaded ? '已下载' : '未下载' }}
+            </n-tag>
+          </n-descriptions-item>
+        </n-descriptions>
+        <n-text v-else depth="3">未配置重排模型</n-text>
+      </n-spin>
+    </n-card>
+
+    <!-- Rerank Models -->
+    <n-card title="重排模型管理">
+      <template #header-extra>
+        <n-button text @click="loadRerankModels">
+          <template #icon><n-icon :component="RefreshOutline" /></template>
+          刷新
+        </n-button>
+      </template>
+      
+      <n-alert type="info" style="margin-bottom: 16px">
+        <template #header>说明</template>
+        <n-text>
+          重排模型（Reranker）用于对检索结果进行二次排序，提升检索精度。<br>
+          基于 Cross-Encoder 架构，能够更精确地计算 Query-Document 相关性。
+        </n-text>
+      </n-alert>
+      
+      <n-data-table
+        :columns="rerankModelColumns"
+        :data="rerankModels"
+        :loading="rerankModelsLoading"
+        :row-key="(row: ModelInfo) => row.name || ''"
+      />
+    </n-card>
+
     <!-- Download/Convert Progress -->
     <n-card v-if="activeDownloads.length > 0" title="任务进度">
       <n-list>
@@ -363,6 +407,13 @@ const customModelForm = ref({
   huggingFaceId: '',
   displayName: ''
 })
+
+// Rerank model state
+const rerankModels = ref<ModelInfo[]>([])
+const currentRerankModel = ref<ModelInfo | null>(null)
+const rerankModelsLoading = ref(false)
+const rerankCurrentLoading = ref(false)
+
 let progressInterval: number | null = null
 
 const activeDownloads = computed(() => {
@@ -392,6 +443,90 @@ const getFormatText = (format?: string) => {
     default: return '未知'
   }
 }
+
+// Rerank model table columns
+const rerankModelColumns: DataTableColumns<ModelInfo> = [
+  {
+    title: '模型名称',
+    key: 'displayName',
+    render(row) {
+      return h(NSpace, { align: 'center' }, {
+        default: () => [
+          h('span', row.displayName || row.name),
+          row.name === currentRerankModel.value?.name ? h(NTag, { type: 'success', size: 'small' }, { default: () => '当前' }) : null
+        ]
+      })
+    }
+  },
+  {
+    title: '描述',
+    key: 'description',
+    ellipsis: { tooltip: true }
+  },
+  {
+    title: '维度',
+    key: 'dimension',
+    width: 70
+  },
+  {
+    title: '大小',
+    key: 'modelSizeBytes',
+    width: 100,
+    render(row) {
+      return row.modelSizeBytes ? formatBytes(row.modelSizeBytes) : '-'
+    }
+  },
+  {
+    title: '状态',
+    key: 'isDownloaded',
+    width: 90,
+    render(row) {
+      return h(NTag, { type: row.isDownloaded ? 'success' : 'warning', size: 'small' }, {
+        default: () => row.isDownloaded ? '已下载' : '未下载'
+      })
+    }
+  },
+  {
+    title: '操作',
+    key: 'actions',
+    width: 200,
+    render(row) {
+      if (row.name === currentRerankModel.value?.name) {
+        return h(NTag, { type: 'default', size: 'small' }, { default: () => '使用中' })
+      }
+      
+      const buttons: ReturnType<typeof h>[] = []
+      
+      if (!row.isDownloaded) {
+        buttons.push(h(NButton, {
+          type: 'primary',
+          size: 'small',
+          onClick: () => handleRerankDownload(row)
+        }, { default: () => '下载' }))
+      }
+      
+      if (row.isDownloaded) {
+        if (row.name !== currentRerankModel.value?.name) {
+          buttons.push(h(NButton, {
+            type: 'primary',
+            size: 'small',
+            onClick: () => handleRerankSwitch(row)
+          }, { default: () => '切换' }))
+        }
+        
+        // 删除按钮
+        buttons.push(h(NPopconfirm, {
+          onPositiveClick: () => handleRerankDelete(row)
+        }, {
+          trigger: () => h(NButton, { size: 'small', type: 'error' }, { default: () => '删除' }),
+          default: () => `确定删除重排模型 "${row.displayName || row.name}"？此操作不可恢复。`
+        }))
+      }
+      
+      return h(NSpace, { size: 'small' }, { default: () => buttons })
+    }
+  }
+]
 
 const modelColumns: DataTableColumns<ModelInfo> = [
   {
@@ -772,6 +907,87 @@ const confirmAddCustom = async () => {
   }
 }
 
+// ============== Rerank Model Functions ==============
+
+const loadRerankModels = async () => {
+  rerankModelsLoading.value = true
+  try {
+    const response = await modelsApi.getRerankModels()
+    rerankModels.value = response.data
+  } catch (error) {
+    console.error('Failed to load rerank models:', error)
+    message.error('加载重排模型列表失败')
+  } finally {
+    rerankModelsLoading.value = false
+  }
+}
+
+const loadCurrentRerankModel = async () => {
+  rerankCurrentLoading.value = true
+  try {
+    const response = await modelsApi.getCurrentRerankModel()
+    currentRerankModel.value = response.data
+  } catch (error) {
+    console.error('Failed to load current rerank model:', error)
+  } finally {
+    rerankCurrentLoading.value = false
+  }
+}
+
+const handleRerankDownload = async (model: ModelInfo) => {
+  if (!model.name) return
+  
+  message.info(`开始下载重排模型: ${model.displayName || model.name}`)
+  
+  try {
+    await modelsApi.downloadRerankModel(model.name)
+    
+    downloadProgress.value.set(`rerank_${model.name}`, {
+      modelName: model.name,
+      status: 'downloading',
+      progress: 0,
+      bytesReceived: 0,
+      totalBytes: model.modelSizeBytes || 0,
+      speedBytesPerSecond: 0,
+      estimatedSecondsRemaining: null
+    })
+    
+    startProgressPolling()
+  } catch (error: any) {
+    console.error('Failed to start rerank model download:', error)
+    message.error(`下载失败: ${error.response?.data?.error || error.message}`)
+  }
+}
+
+const handleRerankSwitch = async (model: ModelInfo) => {
+  if (!model.name) return
+  
+  try {
+    const response = await modelsApi.switchRerankModel(model.name)
+    message.success(response.data.message || `已切换到重排模型: ${model.displayName || model.name}`)
+    await loadCurrentRerankModel()
+    await loadRerankModels()
+  } catch (error: any) {
+    console.error('Failed to switch rerank model:', error)
+    message.error(`切换失败: ${error.response?.data?.error || error.message}`)
+  }
+}
+
+const handleRerankDelete = async (model: ModelInfo) => {
+  if (!model.name) return
+  
+  try {
+    await modelsApi.deleteRerankModel(model.name)
+    message.success(`已删除重排模型: ${model.displayName || model.name}`)
+    await loadRerankModels()
+  } catch (error: any) {
+    console.error('Failed to delete rerank model:', error)
+    message.error(`删除失败: ${error.response?.data?.error || error.message}`)
+  }
+}
+
+// ============== Progress Polling ==============
+
 const startProgressPolling = () => {
   if (progressInterval) return
   
@@ -787,17 +1003,35 @@ const startProgressPolling = () => {
       return
     }
     
-    for (const modelName of downloadingModels) {
+    for (const progressKey of downloadingModels) {
       try {
-        const response = await modelsApi.getDownloadProgress(modelName)
-        downloadProgress.value.set(modelName, response.data)
+        // 判断是重排模型还是嵌入模型
+        const isRerank = progressKey.startsWith('rerank_')
+        const modelName = isRerank ? progressKey.replace('rerank_', '') : progressKey
+        
+        // 使用正确的 API 获取进度
+        const response = isRerank 
+          ? await modelsApi.getRerankDownloadProgress(modelName)
+          : await modelsApi.getDownloadProgress(modelName)
+        
+        downloadProgress.value.set(progressKey, response.data)
         
         if (response.data.status === 'completed') {
           message.success(`模型 ${getModelDisplayName(modelName)} 下载完成`)
-          await loadModels()
+          // 刷新对应的模型列表
+          if (isRerank) {
+            await loadRerankModels()
+            await loadCurrentRerankModel()
+          } else {
+            await loadModels()
+          }
         } else if (response.data.status === 'failed') {
           message.error(`模型 ${getModelDisplayName(modelName)} 下载失败`)
-          await loadModels()
+          if (isRerank) {
+            await loadRerankModels()
+          } else {
+            await loadModels()
+          }
         }
       } catch (error) {
         console.error('Failed to get progress:', error)
@@ -816,6 +1050,8 @@ const stopProgressPolling = () => {
 onMounted(() => {
   loadModels()
   loadCurrentModel()
+  loadRerankModels()
+  loadCurrentRerankModel()
 })
 
 onUnmounted(() => {

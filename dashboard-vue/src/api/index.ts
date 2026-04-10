@@ -169,7 +169,18 @@ export const modelsApi = {
   addCustom: (huggingFaceId: string, displayName?: string) =>
     api.post('/Models/custom', { huggingFaceId, displayName }),
   delete: (modelName: string) => api.delete(`/Models/${modelName}`),
-  getDownloadOptions: (modelName: string) => api.get<ModelDownloadOptions>(`/Models/download-options/${modelName}`)
+  getDownloadOptions: (modelName: string) => api.get<ModelDownloadOptions>(`/Models/download-options/${modelName}`),
+
+  // Rerank Models
+  getRerankModels: () => api.get<ModelInfo[]>('/Models/rerank'),
+  getDownloadedRerankModels: () => api.get<ModelInfo[]>('/Models/rerank/downloaded'),
+  getCurrentRerankModel: () => api.get<ModelInfo>('/Models/rerank/current'),
+  switchRerankModel: (modelName: string) => api.post(`/Models/rerank/switch`, { modelName }),
+  downloadRerankModel: (modelName: string, onnxFilePath?: string) =>
+    api.post(`/Models/rerank/download/${modelName}`, onnxFilePath ? { onnxFilePath } : {}),
+  getRerankDownloadProgress: (modelName: string) => api.get(`/Models/rerank/download/${modelName}/progress`),
+  deleteRerankModel: (modelName: string) => api.delete(`/Models/rerank/${modelName}`),
+  getRerankDownloadOptions: (modelName: string) => api.get<ModelDownloadOptions>(`/Models/rerank/download-options/${modelName}`)
 }
 
 // Vectors
@@ -275,9 +286,11 @@ export interface BM25ProviderInfo {
 export const rerankTestApi = {
   test: (data: import('@/types/api').RerankTestRequest) => api.post<import('@/types/api').RerankTestResult>('/RerankTest/test', data),
   getRecords: (params?: { limit?: number; offset?: number }) => api.get('/RerankTest/records', { params }),
-  getPresets: () => api.get('/RerankTest/presets'),
-  runPreset: (suiteName: string) => api.post(`/RerankTest/preset/${suiteName}`),
-  clearRecords: (params?: { before?: string }) => api.delete('/RerankTest/records', { params })
+  getPresets: () => api.get<import('@/types/api').RerankPresetInfo[]>('/RerankTest/presets'),
+  runPreset: (suiteName: string) => api.post<import('@/types/api').RerankTestResult>(`/RerankTest/preset/${suiteName}`),
+  clearRecords: (params?: { before?: string }) => api.delete('/RerankTest/records', { params }),
+  getStatistics: (params?: { modelName?: string }) => api.get<import('@/types/api').RerankTestStatistics>('/RerankTest/statistics', { params }),
+  benchmark: (data: import('@/types/api').RerankBenchmarkRequest) => api.post<import('@/types/api').RerankBenchmarkResult>('/RerankTest/benchmark', data)
 }
 
 export default api

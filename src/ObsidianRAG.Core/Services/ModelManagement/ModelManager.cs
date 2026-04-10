@@ -463,6 +463,120 @@ public class ModelManager : IModelManager, IDisposable
             ModelSizeBytes = (long)(1.1 * 1024 * 1024 * 1024),
             HasOnnx = false
         },
+        // ========== 重排模型 ==========
+        new ModelInfo
+        {
+            Name = "bge-reranker-large",
+            DisplayName = "BGE Reranker Large",
+            Description = "BAAI大参数重排序模型，更高精度但需要更多资源",
+            Dimension = 1024,
+            MaxSequenceLength = 512,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en" },
+            BenchmarkScore = 0.92f,
+            DownloadUrl = "BAAI/bge-reranker-large",
+            ModelSizeBytes = (long)(1.3 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "bge-reranker-v2-m3",
+            DisplayName = "BGE Reranker v2 M3",
+            Description = "BAAI多语言重排序模型v2，支持100+语言，MTEB高分",
+            Dimension = 1024,
+            MaxSequenceLength = 8192,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en", "multilingual" },
+            BenchmarkScore = 0.93f,
+            DownloadUrl = "BAAI/bge-reranker-v2-m3",
+            ModelSizeBytes = (long)(2.2 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "bge-reranker-v2-gemma",
+            DisplayName = "BGE Reranker v2 Gemma",
+            Description = "基于Gemma的重排序模型，最高精度但需要大量资源",
+            Dimension = 2560,
+            MaxSequenceLength = 8192,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en", "multilingual" },
+            BenchmarkScore = 0.95f,
+            DownloadUrl = "BAAI/bge-reranker-v2-gemma",
+            ModelSizeBytes = (long)(8.5 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "bge-reranker-v2-minicpm-layerwise",
+            DisplayName = "BGE Reranker v2 MiniCPM",
+            Description = "轻量级重排序模型，支持层级压缩，适合低资源环境",
+            Dimension = 768,
+            MaxSequenceLength = 2048,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en" },
+            BenchmarkScore = 0.88f,
+            DownloadUrl = "BAAI/bge-reranker-v2-minicpm-layerwise",
+            ModelSizeBytes = (long)(1.8 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        // ========== 中英双语超轻量重排模型 ==========
+        new ModelInfo
+        {
+            Name = "bce-reranker-base_v1",
+            DisplayName = "BCE Reranker Base v1",
+            Description = "网易有道中英日韩四语重排模型，MTEB得分超越bge-reranker，支持跨语言检索",
+            Dimension = 768,
+            MaxSequenceLength = 512,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en", "ja", "ko" },
+            BenchmarkScore = 0.91f,
+            DownloadUrl = "maidalun1020/bce-reranker-base_v1",
+            ModelSizeBytes = (long)(0.56 * 1024 * 1024 * 1024), // ~560MB
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "gte-multilingual-reranker-base",
+            DisplayName = "GTE Multilingual Reranker Base",
+            Description = "阿里GTE多语言重排模型，支持75+语言，SOTA性能，推理速度比LLM快10倍",
+            Dimension = 768,
+            MaxSequenceLength = 8192,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en", "multilingual" },
+            BenchmarkScore = 0.90f,
+            DownloadUrl = "Alibaba-NLP/gte-multilingual-reranker-base",
+            ModelSizeBytes = (long)(0.6 * 1024 * 1024 * 1024), // ~600MB (306M params)
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "ms-marco-MiniLM-L-6-v2",
+            DisplayName = "MS MARCO MiniLM L6 v2",
+            Description = "微软轻量级英文重排序模型，速度快资源占用低",
+            Dimension = 384,
+            MaxSequenceLength = 512,
+            ModelType = "reranker",
+            Languages = new[] { "en" },
+            BenchmarkScore = 0.85f,
+            DownloadUrl = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            ModelSizeBytes = (long)(0.08 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "ms-marco-MiniLM-L-12-v2",
+            DisplayName = "MS MARCO MiniLM L12 v2",
+            Description = "微软中等规模英文重排序模型，平衡精度和速度",
+            Dimension = 384,
+            MaxSequenceLength = 512,
+            ModelType = "reranker",
+            Languages = new[] { "en" },
+            BenchmarkScore = 0.88f,
+            DownloadUrl = "cross-encoder/ms-marco-MiniLM-L-12-v2",
+            ModelSizeBytes = (long)(0.12 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
         new ModelInfo
         {
             Name = "stella-base-zh-v3-1792",

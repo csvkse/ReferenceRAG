@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using ObsidianRAG.Core.Interfaces;
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace ObsidianRAG.Service.Controllers;
 
@@ -181,6 +182,22 @@ public class RerankTestController : ControllerBase
         var records = await _recordStore.GetAsync(null, "rerank", 1000);
         var filtered = modelName != null ? records.Where(r => r.ModelName == modelName).ToList() : records;
 
+        // Helper function to safely extract double from object (handles JsonElement)
+        static double ExtractDouble(object? value)
+        {
+            if (value == null) return 0;
+            if (value is JsonElement jsonElement)
+            {
+                return jsonElement.ValueKind switch
+                {
+                    JsonValueKind.Number => jsonElement.GetDouble(),
+                    JsonValueKind.String => double.TryParse(jsonElement.GetString(), out var d) ? d : 0,
+                    _ => 0
+                };
+            }
+            return Convert.ToDouble(value);
+        }
+
         var stats = new RerankTestStatistics
         {
             TotalTests = filtered.Count,
@@ -191,27 +208,27 @@ public class RerankTestController : ControllerBase
                     ModelName = g.Key,
                     TotalTests = g.Count(),
                     AvgNdcg = g.Where(r => r.Results.ContainsKey("ndcg"))
-                        .Select(r => Convert.ToDouble(r.Results["ndcg"]))
+                        .Select(r => ExtractDouble(r.Results["ndcg"]))
                         .DefaultIfEmpty(0)
                         .Average(),
                     AvgMrr = g.Where(r => r.Results.ContainsKey("mrr"))
-                        .Select(r => Convert.ToDouble(r.Results["mrr"]))
+                        .Select(r => ExtractDouble(r.Results["mrr"]))
                         .DefaultIfEmpty(0)
                         .Average(),
                     AvgMap = g.Where(r => r.Results.ContainsKey("map"))
-                        .Select(r => Convert.ToDouble(r.Results["map"]))
+                        .Select(r => ExtractDouble(r.Results["map"]))
                         .DefaultIfEmpty(0)
                         .Average(),
                     AvgRankingAccuracy = g.Where(r => r.Results.ContainsKey("rankingAccuracy"))
-                        .Select(r => Convert.ToDouble(r.Results["rankingAccuracy"]))
+                        .Select(r => ExtractDouble(r.Results["rankingAccuracy"]))
                         .DefaultIfEmpty(0)
                         .Average(),
                     AvgMae = g.Where(r => r.Results.ContainsKey("meanAbsoluteError"))
-                        .Select(r => Convert.ToDouble(r.Results["meanAbsoluteError"]))
+                        .Select(r => ExtractDouble(r.Results["meanAbsoluteError"]))
                         .DefaultIfEmpty(0)
                         .Average(),
                     AvgQueryMs = g.Where(r => r.Results.ContainsKey("queryMs"))
-                        .Select(r => Convert.ToDouble(r.Results["queryMs"]))
+                        .Select(r => ExtractDouble(r.Results["queryMs"]))
                         .DefaultIfEmpty(0)
                         .Average()
                 })
@@ -219,6 +236,158 @@ public class RerankTestController : ControllerBase
         };
 
         return Ok(stats);
+    }
+
+    /// <summary>
+    /// 性能基准测试
+    /// </summary>
+    [HttpPost("benchmark")]
+    public async Task<ActionResult<RerankBenchmarkResult>> RunBenchmark([FromBody] RerankBenchmarkRequest request)
+    {
+        var result = new RerankBenchmarkResult
+        {
+            Concurrency = request.Concurrency,
+            TotalRequests = request.TotalRequests,
+            DocumentCount = request.DocumentCount,
+            Timestamp = DateTime.UtcNow
+        };
+
+        try
+        {
+            // 生成测试数据
+            var testQueries = GenerateBenchmarkQueries(request.TotalRequests, request.DocumentCount);
+
+            var latencies = new List<long>();
+            var successCount = 0;
+            var failCount = 0;
+            var errors = new List<string>();
+
+            var totalSw = Stopwatch.StartNew();
+
+            // 使用信号量控制并发
+            var semaphore = new SemaphoreSlim(request.Concurrency);
+            var tasks = new List<Task>();
+
+            foreach (var testQuery in testQueries)
+            {
+                var task = Task.Run(async () =>
+                {
+                    await semaphore.WaitAsync();
+                    try
+                    {
+                        var sw = Stopwatch.StartNew();
+                        var rerankResult = await _rerankService.RerankBatchAsync(testQuery.Query, testQuery.Documents);
+                        sw.Stop();
+
+                        lock (latencies)
+                        {
+                            latencies.Add(sw.ElapsedMilliseconds);
+                            Interlocked.Increment(ref successCount);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.Increment(ref failCount);
+                        lock (errors)
+                        {
+                            if (errors.Count < 5) // 只保留前5个错误
+                            {
+                                errors.Add(ex.Message);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                });
+                tasks.Add(task);
+            }
+
+            await Task.WhenAll(tasks);
+            totalSw.Stop();
+
+            // 计算统计数据
+            latencies.Sort();
+            result.SuccessCount = successCount;
+            result.FailCount = failCount;
+            result.Errors = errors;
+            result.TotalMs = totalSw.ElapsedMilliseconds;
+
+            if (latencies.Count > 0)
+            {
+                result.Qps = (double)successCount / (totalSw.ElapsedMilliseconds / 1000.0);
+                result.AvgLatencyMs = latencies.Average();
+                result.MinLatencyMs = latencies.First();
+                result.MaxLatencyMs = latencies.Last();
+                result.P50LatencyMs = GetPercentile(latencies, 50);
+                result.P95LatencyMs = GetPercentile(latencies, 95);
+                result.P99LatencyMs = GetPercentile(latencies, 99);
+            }
+
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Rerank benchmark test failed");
+            return StatusCode(500, new { error = "性能基准测试执行失败", details = ex.Message });
+        }
+    }
+
+    private long GetPercentile(List<long> sortedLatencies, int percentile)
+    {
+        if (sortedLatencies.Count == 0) return 0;
+        var index = (int)Math.Ceiling(sortedLatencies.Count * percentile / 100.0) - 1;
+        return sortedLatencies[Math.Max(0, Math.Min(index, sortedLatencies.Count - 1))];
+    }
+
+    private List<BenchmarkTestQuery> GenerateBenchmarkQueries(int count, int docCount)
+    {
+        var queries = new List<BenchmarkTestQuery>();
+        var random = new Random();
+
+        var sampleQueries = new[]
+        {
+            "如何学习编程",
+            "机器学习算法原理",
+            "数据库优化方法",
+            "前端开发技术",
+            "后端架构设计",
+            "Python 编程入门",
+            "深度学习模型训练",
+            "API 接口设计",
+            "代码重构技巧",
+            "软件测试方法"
+        };
+
+        var sampleDocs = new[]
+        {
+            "编程是一种创造性的活动，需要不断学习和实践来提高技能水平",
+            "机器学习是人工智能的重要分支，通过算法让计算机从数据中学习",
+            "数据库优化涉及索引设计、查询优化和存储配置等多个方面",
+            "前端开发包括HTML、CSS、JavaScript等技术，用于构建用户界面",
+            "后端架构需要考虑可扩展性、可靠性和性能等因素",
+            "Python是一种简洁易学的编程语言，适合初学者入门",
+            "深度学习使用神经网络处理复杂模式识别任务",
+            "API设计应遵循RESTful原则，保证接口的一致性和可用性",
+            "代码重构是改善代码结构而不改变其功能的技术",
+            "软件测试包括单元测试、集成测试和端到端测试等多个层次"
+        };
+
+        for (int i = 0; i < count; i++)
+        {
+            var query = sampleQueries[random.Next(sampleQueries.Length)];
+            var docs = new List<string>();
+
+            for (int j = 0; j < docCount; j++)
+            {
+                docs.Add(sampleDocs[random.Next(sampleDocs.Length)]);
+            }
+
+            queries.Add(new BenchmarkTestQuery { Query = query, Documents = docs });
+        }
+
+        return queries;
     }
 
     // ==================== 辅助方法 ====================
@@ -471,4 +640,79 @@ public class RerankModelStatistics
     public double AvgRankingAccuracy { get; set; }
     public double AvgMae { get; set; }
     public double AvgQueryMs { get; set; }
+}
+
+public class RerankBenchmarkRequest
+{
+    /// <summary>
+    /// 并发数
+    /// </summary>
+    public int Concurrency { get; set; } = 1;
+
+    /// <summary>
+    /// 总请求数
+    /// </summary>
+    public int TotalRequests { get; set; } = 100;
+
+    /// <summary>
+    /// 每个请求的文档数
+    /// </summary>
+    public int DocumentCount { get; set; } = 5;
+}
+
+public class RerankBenchmarkResult
+{
+    public DateTime Timestamp { get; set; }
+    public int Concurrency { get; set; }
+    public int TotalRequests { get; set; }
+    public int DocumentCount { get; set; }
+    public int SuccessCount { get; set; }
+    public int FailCount { get; set; }
+    public long TotalMs { get; set; }
+
+    /// <summary>
+    /// 每秒请求数 (QPS)
+    /// </summary>
+    public double Qps { get; set; }
+
+    /// <summary>
+    /// 平均延迟 (毫秒)
+    /// </summary>
+    public double AvgLatencyMs { get; set; }
+
+    /// <summary>
+    /// 最小延迟 (毫秒)
+    /// </summary>
+    public long MinLatencyMs { get; set; }
+
+    /// <summary>
+    /// 最大延迟 (毫秒)
+    /// </summary>
+    public long MaxLatencyMs { get; set; }
+
+    /// <summary>
+    /// P50 延迟 (毫秒)
+    /// </summary>
+    public long P50LatencyMs { get; set; }
+
+    /// <summary>
+    /// P95 延迟 (毫秒)
+    /// </summary>
+    public long P95LatencyMs { get; set; }
+
+    /// <summary>
+    /// P99 延迟 (毫秒)
+    /// </summary>
+    public long P99LatencyMs { get; set; }
+
+    /// <summary>
+    /// 错误信息 (最多5条)
+    /// </summary>
+    public List<string> Errors { get; set; } = new();
+}
+
+internal class BenchmarkTestQuery
+{
+    public string Query { get; set; } = "";
+    public List<string> Documents { get; set; } = new();
 }

@@ -71,9 +71,12 @@ public class OnnxRerankService : IRerankService, IDisposable
             {
                 try
                 {
+                    // 设置确定性推理模式，避免 CUDA 非确定性操作
+                    sessionOptions.EnableMemoryPattern = false;
+
                     sessionOptions.AppendExecutionProvider_CUDA(_options.CudaDeviceId);
                     sessionOptions.AppendExecutionProvider_CPU();
-                    Console.WriteLine($"[OnnxRerankService] 使用 CUDA GPU: {_options.CudaDeviceId}");
+                    Console.WriteLine($"[OnnxRerankService] 使用 CUDA GPU: {_options.CudaDeviceId} (确定性模式)");
                 }
                 catch (Exception ex)
                 {

@@ -15,6 +15,7 @@ public class ModelsController : ControllerBase
     private readonly ConfigManager _configManager;
     private readonly IModelManager _modelManager;
     private readonly IEmbeddingService _embeddingService;
+    private readonly IRerankService? _rerankService;
     private readonly IVectorStore _vectorStore;
     private readonly ILogger<ModelsController> _logger;
     private static readonly Dictionary<string, DownloadProgress> _downloadProgress = new();
@@ -25,13 +26,15 @@ public class ModelsController : ControllerBase
         IModelManager modelManager,
         IEmbeddingService embeddingService,
         IVectorStore vectorStore,
-        ILogger<ModelsController> logger)
+        ILogger<ModelsController> logger,
+        IRerankService? rerankService = null)
     {
         _configManager = configManager;
         _modelManager = modelManager;
         _embeddingService = embeddingService;
         _vectorStore = vectorStore;
         _logger = logger;
+        _rerankService = rerankService;
     }
 
     /// <summary>
@@ -541,6 +544,262 @@ public class ModelsController : ControllerBase
 
         return DownloadErrorCode.Unknown;
     }
+
+    // ==================== 重排模型管理 API ====================
+
+    /// <summary>
+    /// 获取所有重排模型列表
+    /// </summary>
+    [HttpGet("rerank")]
+    public async Task<ActionResult<List<ModelInfo>>> GetRerankModels()
+    {
+        var models = _modelManager.GetRerankModels();
+
+        // 更新下载状态 - 使用配置中的模型路径或 dataPath + modelsPath
+        var config = _configManager.Load();
+
+        // 构建模型根目录路径
+        string modelsPath;
+        if (Path.IsPathRooted(config.Embedding.ModelsPath))
+        {
+            modelsPath = config.Embedding.ModelsPath;
+        }
+        else
+        {
+            // 相对路径，基于 dataPath
+            modelsPath = Path.Combine(config.DataPath, config.Embedding.ModelsPath);
+        }
+
+        foreach (var model in models)
+        {
+            var modelPath = Path.Combine(modelsPath, model.Name);
+            model.IsDownloaded = Directory.Exists(modelPath) &&
+                (System.IO.File.Exists(Path.Combine(modelPath, "model.onnx")) ||
+                 System.IO.File.Exists(Path.Combine(modelPath, "onnx", "model.onnx")));
+        }
+
+        return Ok(models);
+    }
+
+/// <summary>
+/// 获取已下载的重排模型列表
+/// </summary>
+[HttpGet("rerank/downloaded")]
+public ActionResult<List<ModelInfo>> GetDownloadedRerankModels()
+{
+    var models = _modelManager.GetDownloadedRerankModels();
+    return Ok(models);
+}
+
+/// <summary>
+/// 获取当前重排模型
+/// </summary>
+[HttpGet("rerank/current")]
+public ActionResult<ModelInfo?> GetCurrentRerankModel()
+{
+    var model = _modelManager.GetCurrentRerankModel();
+    return Ok(model);
+}
+
+/// <summary>
+/// 切换重排模型
+/// </summary>
+[HttpPost("rerank/switch")]
+public async Task<ActionResult> SwitchRerankModel([FromBody] SwitchModelRequest request)
+{
+    if (string.IsNullOrEmpty(request.ModelName))
+    {
+        return BadRequest(new { error = "模型名称不能为空" });
+    }
+
+    var models = _modelManager.GetRerankModels();
+    var model = models.FirstOrDefault(m => m.Name == request.ModelName);
+
+    if (model == null)
+    {
+        return NotFound(new { error = $"重排模型不存在: {request.ModelName}" });
+    }
+
+    if (!model.IsDownloaded)
+    {
+        return BadRequest(new { error = $"重排模型尚未下载: {request.ModelName}", needDownload = true });
+    }
+
+    _logger.LogInformation("开始切换重排模型: {ModelName}", request.ModelName);
+
+    var success = await _modelManager.SwitchRerankModelAsync(request.ModelName);
+
+    if (!success)
+    {
+        _logger.LogError("重排模型切换失败: {ModelName}", request.ModelName);
+        return StatusCode(500, new { error = "重排模型切换失败" });
+    }
+
+    // 重新加载 Rerank 服务的模型
+    if (_rerankService != null)
+    {
+        var config = _configManager.Load();
+        var modelsPath = config.Embedding.ModelsPath;
+        var onnxPath = Path.Combine(modelsPath, request.ModelName, "model.onnx");
+        if (!System.IO.File.Exists(onnxPath))
+        {
+            onnxPath = Path.Combine(modelsPath, request.ModelName, "onnx", "model.onnx");
+        }
+        
+        var reloadSuccess = await _rerankService.ReloadModelAsync(onnxPath, request.ModelName);
+        if (!reloadSuccess)
+        {
+            _logger.LogWarning("Rerank 服务重新加载模型失败: {ModelName}", request.ModelName);
+        }
+    }
+
+    _logger.LogInformation("重排模型切换成功: {ModelName}", request.ModelName);
+    return Ok(new
+    {
+        message = $"已切换到重排模型: {model.DisplayName}",
+        model
+    });
+}
+
+/// <summary>
+/// 下载重排模型
+/// </summary>
+[HttpPost("rerank/download/{modelName}")]
+public async Task<ActionResult> DownloadRerankModel(string modelName, [FromBody] DownloadModelRequest? request = null)
+{
+    var models = _modelManager.GetRerankModels();
+    var model = models.FirstOrDefault(m => m.Name == modelName);
+    
+    if (model == null)
+    {
+        return NotFound(new { error = $"重排模型不存在: {modelName}" });
+    }
+
+    if (model.IsDownloaded)
+    {
+        return Ok(new { message = "重排模型已下载", model });
+    }
+
+    // 检查是否已在下载中
+    var progressKey = $"rerank_{modelName}";
+    if (_downloadProgress.TryGetValue(progressKey, out var existing) && 
+        existing.Status == "downloading")
+    {
+        return Ok(new { message = "重排模型正在下载中", progress = existing });
+    }
+
+    // 初始化进度
+    var progress = new DownloadProgress
+    {
+        ModelName = modelName,
+        Status = "downloading",
+        Progress = 0,
+        StartTime = DateTime.UtcNow,
+        TotalBytes = model.ModelSizeBytes
+    };
+    _downloadProgress[progressKey] = progress;
+
+    // 异步启动下载
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            _logger.LogInformation("[RerankModel] 开始下载重排模型: {ModelName}", modelName);
+            
+            var (success, error) = await _modelManager.DownloadModelAsync(modelName, new Progress<float>(p =>
+            {
+                if (_downloadProgress.TryGetValue(progressKey, out var pg))
+                {
+                    pg.Progress = p;
+                    pg.BytesReceived = (long)(p * model.ModelSizeBytes / 100);
+                }
+            }), null, request?.OnnxFilePath);
+
+            if (_downloadProgress.TryGetValue(progressKey, out var pg2))
+            {
+                if (success)
+                {
+                    pg2.Status = "completed";
+                    pg2.Progress = 100;
+                    pg2.EndTime = DateTime.UtcNow;
+                    _logger.LogInformation("[RerankModel] 重排模型下载完成: {ModelName}", modelName);
+                }
+                else
+                {
+                    pg2.Status = "failed";
+                    pg2.ErrorMessage = error ?? "未知错误";
+                    pg2.EndTime = DateTime.UtcNow;
+                    _logger.LogError("[RerankModel] 重排模型下载失败: {ModelName} - {Error}", modelName, error);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[RerankModel] 重排模型下载异常: {ModelName}", modelName);
+            if (_downloadProgress.TryGetValue(progressKey, out var pg3))
+            {
+                pg3.Status = "failed";
+                pg3.ErrorMessage = ex.Message;
+                pg3.EndTime = DateTime.UtcNow;
+            }
+        }
+    });
+
+    return Accepted(new { message = "开始下载重排模型", progress });
+}
+
+/// <summary>
+/// 获取重排模型下载进度
+/// </summary>
+[HttpGet("rerank/download/{modelName}/progress")]
+public ActionResult<DownloadProgress> GetRerankDownloadProgress(string modelName)
+{
+    var progressKey = $"rerank_{modelName}";
+    if (!_downloadProgress.TryGetValue(progressKey, out var progress))
+    {
+        return Ok(new DownloadProgress
+        {
+            ModelName = modelName,
+            Status = "idle"
+        });
+    }
+
+    return Ok(progress);
+}
+
+/// <summary>
+/// 删除重排模型
+/// </summary>
+[HttpDelete("rerank/{modelName}")]
+public async Task<ActionResult> DeleteRerankModel(string modelName)
+{
+    var config = _configManager.Load();
+    if (config.Rerank?.CurrentModel == modelName)
+    {
+        return BadRequest(new { error = "无法删除当前正在使用的重排模型" });
+    }
+
+    var success = await _modelManager.DeleteModelAsync(modelName);
+    
+    if (success)
+    {
+        var progressKey = $"rerank_{modelName}";
+        _downloadProgress.Remove(progressKey);
+        return Ok(new { message = "重排模型已删除" });
+    }
+    
+    return NotFound(new { error = "重排模型不存在或删除失败" });
+}
+
+/// <summary>
+/// 获取重排模型下载选项
+/// </summary>
+[HttpGet("rerank/download-options/{modelName}")]
+public async Task<ActionResult<ModelDownloadOptions>> GetRerankDownloadOptions(string modelName)
+{
+    var options = await _modelManager.GetDownloadOptionsAsync(modelName);
+    return Ok(options);
+}
 }
 
 /// <summary>

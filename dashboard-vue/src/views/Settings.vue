@@ -115,6 +115,42 @@
             </n-form>
           </n-card>
         </n-tab-pane>
+
+        <!-- Rerank Settings -->
+        <n-tab-pane name="rerank" tab="重排模型">
+          <n-card v-if="config.rerank">
+            <n-form label-placement="left" label-width="140">
+              <n-form-item label="启用重排">
+                <n-switch v-model:value="config.rerank.enabled" />
+              </n-form-item>
+              <n-form-item label="模型名称">
+                <n-input v-model:value="config.rerank.modelName" placeholder="bge-reranker-base" />
+              </n-form-item>
+              <n-form-item label="当前模型">
+                <n-input v-model:value="config.rerank.currentModel" placeholder="当前使用的重排模型" disabled />
+              </n-form-item>
+              <n-form-item label="模型路径">
+                <n-input v-model:value="config.rerank.modelPath" placeholder="重排模型 ONNX 文件路径" />
+              </n-form-item>
+              <n-form-item label="使用 CUDA">
+                <n-switch v-model:value="config.rerank.useCuda" />
+              </n-form-item>
+              <n-form-item v-if="config.rerank.useCuda" label="CUDA 设备 ID">
+                <n-input-number v-model:value="config.rerank.cudaDeviceId" :min="0" :max="7" style="width: 200px" />
+              </n-form-item>
+              <n-form-item label="重排返回数量">
+                <n-input-number v-model:value="config.rerank.topN" :min="1" :max="100" style="width: 100%" />
+              </n-form-item>
+              <n-form-item label="召回倍数">
+                <n-input-number v-model:value="config.rerank.recallFactor" :min="1" :max="10" style="width: 100%" />
+                <n-text depth="3" style="font-size: 12px; margin-left: 8px">候选文档数 = TopN × 召回倍数</n-text>
+              </n-form-item>
+            </n-form>
+          </n-card>
+          <n-card v-else>
+            <n-text depth="3">重排模型配置未加载</n-text>
+          </n-card>
+        </n-tab-pane>
       </n-tabs>
 
       <!-- Data Path -->
@@ -177,6 +213,16 @@ const defaultConfig: ObsidianRagConfig = {
     enableCors: true,
     enableSwagger: true,
     logLevel: 'Information'
+  },
+  rerank: {
+    enabled: false,
+    modelName: 'bge-reranker-base',
+    currentModel: '',
+    modelPath: '',
+    useCuda: false,
+    cudaDeviceId: 0,
+    topN: 10,
+    recallFactor: 3
   }
 }
 
