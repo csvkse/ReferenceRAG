@@ -41,6 +41,11 @@ public class ObsidianRagConfig
     public RerankConfig Rerank { get; set; } = new();
 
     /// <summary>
+    /// 索引配置
+    /// </summary>
+    public IndexingConfig Indexing { get; set; } = new();
+
+    /// <summary>
     /// 获取所有源路径（兼容旧配置）
     /// </summary>
     [Obsolete("Use Sources instead")]
@@ -367,4 +372,36 @@ public class RerankConfig
     /// 0 表示不过滤
     /// </summary>
     public float ScoreThreshold { get; set; } = 0.0f;
+}
+
+/// <summary>
+/// 索引配置
+/// </summary>
+public class IndexingConfig
+{
+    /// <summary>
+    /// 是否启用自动索引
+    /// </summary>
+    public bool AutoIndexEnabled { get; set; } = true;
+
+    /// <summary>
+    /// 防抖延迟（毫秒）
+    /// 用于合并短时间内多次文件变动事件
+    /// </summary>
+    public int DebounceMs { get; set; } = 500;
+
+    /// <summary>
+    /// 启动时是否同步索引
+    /// </summary>
+    public bool SyncOnStartup { get; set; } = true;
+
+    /// <summary>
+    /// 文件处理最大重试次数
+    /// </summary>
+    public int MaxFileRetries { get; set; } = 3;
+
+    /// <summary>
+    /// 上下文窗口大小（用于搜索结果的上下文展示）
+    /// </summary>
+    public int ContextWindowSize { get; set; } = 1;
 }

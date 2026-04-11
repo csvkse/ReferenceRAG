@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using ObsidianRAG.Core.Interfaces;
+using ObsidianRAG.Core.Models;
 
 namespace ObsidianRAG.Core.Services;
 
@@ -94,7 +96,7 @@ public class HistogramStatistics
 /// <summary>
 /// 监控指标采集服务
 /// </summary>
-public class MetricsCollector
+public class MetricsCollector : IDisposable
 {
     private readonly IVectorStore _vectorStore;
     private readonly Dictionary<string, MetricValue> _metrics;
@@ -102,12 +104,30 @@ public class MetricsCollector
     private readonly int _maxHistogramSamples;
     private readonly object _lock = new();
 
+    // Token 统计相关字段
+    private readonly ConcurrentBag<TokenMetrics> _tokenBuffer; // Token 使用记录缓冲区
+    private readonly object _tokenStatsLock = new();
+    private long _totalQueryTokens;
+    private long _totalIndexTokens;
+    private DateTime? _lastTokenUpdate;
+    private readonly Timer _flushTimer; // 定时持久化计时器
+    private readonly string _tokenLogPath; // Token 日志文件路径
+
     public MetricsCollector(IVectorStore vectorStore, int maxHistogramSamples = 1000)
     {
         _vectorStore = vectorStore;
         _metrics = new Dictionary<string, MetricValue>();
         _histograms = new Dictionary<string, BoundedHistogram>();
         _maxHistogramSamples = maxHistogramSamples;
+
+        // 初始化 Token 统计
+        _tokenBuffer = new ConcurrentBag<TokenMetrics>();
+        _tokenLogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs", "token_metrics.log");
+        _totalQueryTokens = 0;
+        _totalIndexTokens = 0;
+
+        // 初始化定时器，每 30 秒持久化一次
+        _flushTimer = new Timer(async _ => await FlushTokenMetricsAsync(), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
     }
 
     /// <summary>
@@ -278,6 +298,116 @@ public class MetricsCollector
         }
     }
 
+    #region Token 统计功能
+
+    /// <summary>
+    /// 记录查询操作的 Token 使用量
+    /// </summary>
+    /// <param name="count">Token 数量</param>
+    /// <param name="modelName">模型名称（可选）</param>
+    public void RecordQueryTokens(int count, string? modelName = null)
+    {
+        var metric = new TokenMetrics
+        {
+            Timestamp = DateTime.UtcNow,
+            Operation = "Query",
+            TokenCount = count,
+            ModelName = modelName
+        };
+
+        _tokenBuffer.Add(metric);
+
+        // 更新统计
+        lock (_tokenStatsLock)
+        {
+            _totalQueryTokens += count;
+            _lastTokenUpdate = DateTime.UtcNow;
+        }
+    }
+
+    /// <summary>
+    /// 记录索引操作的 Token 使用量
+    /// </summary>
+    /// <param name="count">Token 数量</param>
+    /// <param name="modelName">模型名称（可选）</param>
+    public void RecordIndexTokens(int count, string? modelName = null)
+    {
+        var metric = new TokenMetrics
+        {
+            Timestamp = DateTime.UtcNow,
+            Operation = "Index",
+            TokenCount = count,
+            ModelName = modelName
+        };
+
+        _tokenBuffer.Add(metric);
+
+        // 更新统计
+        lock (_tokenStatsLock)
+        {
+            _totalIndexTokens += count;
+            _lastTokenUpdate = DateTime.UtcNow;
+        }
+    }
+
+    /// <summary>
+    /// 获取 Token 统计信息
+    /// </summary>
+    /// <returns>Token 统计汇总</returns>
+    public TokenStats GetTokenStats()
+    {
+        lock (_tokenStatsLock)
+        {
+            return new TokenStats
+            {
+                TotalQueryTokens = _totalQueryTokens,
+                TotalIndexTokens = _totalIndexTokens,
+                LastUpdated = _lastTokenUpdate
+            };
+        }
+    }
+
+    /// <summary>
+    /// 后台持久化 Token 指标到日志文件
+    /// 每 30 秒由定时器自动调用
+    /// </summary>
+    public async Task FlushTokenMetricsAsync()
+    {
+        if (_tokenBuffer.IsEmpty) return;
+
+        try
+        {
+            // 尝试清空缓冲区并获取所有待写入的记录
+            var metricsToFlush = new List<TokenMetrics>();
+            while (_tokenBuffer.TryTake(out var metric))
+            {
+                metricsToFlush.Add(metric);
+            }
+
+            if (metricsToFlush.Count == 0) return;
+
+            // 确保日志目录存在
+            var logDir = Path.GetDirectoryName(_tokenLogPath);
+            if (!string.IsNullOrEmpty(logDir) && !Directory.Exists(logDir))
+            {
+                Directory.CreateDirectory(logDir);
+            }
+
+            // 追加写入日志文件
+            var lines = metricsToFlush.Select(m =>
+                $"{m.Timestamp:yyyy-MM-dd HH:mm:ss}|{m.Operation}|{m.TokenCount}|{m.ModelName ?? "N/A"}");
+
+            await File.AppendAllLinesAsync(_tokenLogPath, lines);
+        }
+        catch
+        {
+            // 持久化失败时静默处理，避免影响主业务
+            // 可根据需要添加日志记录
+        }
+    }
+
+    #endregion
+
     /// <summary>
     /// 获取 CPU 使用率
     /// </summary>
@@ -297,6 +427,15 @@ public class MetricsCollector
         var cpuUsageTotal = cpuUsedMs / (Environment.ProcessorCount * totalMsPassed);
 
         return cpuUsageTotal * 100;
+    }
+
+    /// <summary>
+    /// 释放资源
+    /// </summary>
+    public void Dispose()
+    {
+        _flushTimer?.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
 

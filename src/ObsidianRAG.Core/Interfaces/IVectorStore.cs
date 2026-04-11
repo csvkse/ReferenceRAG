@@ -38,6 +38,11 @@ public interface IVectorStore
     /// 获取所有文件
     /// </summary>
     Task<IEnumerable<FileRecord>> GetAllFilesAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 流式获取所有文件记录（用于替代全量加载）
+    /// </summary>
+    Task<IAsyncEnumerable<FileRecord>> StreamAllFilesAsync(CancellationToken cancellationToken = default);
     
     // ==================== 分段操作 ====================
     

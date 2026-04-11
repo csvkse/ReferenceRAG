@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
@@ -70,10 +71,25 @@ internal class PendingChange
 /// </summary>
 public class FileMonitorService : IFileMonitorService, IDisposable
 {
+    // 混合模式常量
+    private const int ActiveThresholdMinutes = 5;
+    private const int IdleScanIntervalSeconds = 30;
+    private const int DefaultInotifyLimit = 8192;
+
+    // 活跃目录追踪（线程安全）
+    private readonly ConcurrentDictionary<string, DateTime> _activeDirectories = new();
+
+    // 非活跃目录轮询扫描器
+    private Timer? _idleScanner;
+
+    // 混合模式状态
+    private bool _hybridModeEnabled;
+    private int _inotifyLimit = DefaultInotifyLimit;
+
     private readonly Dictionary<string, FileSystemWatcher> _watchers;
     private readonly Dictionary<string, string> _sources;
-    private readonly Dictionary<string, PendingChange> _pendingChanges;
-    private readonly Timer _debounceTimer;
+    private readonly ConcurrentDictionary<string, string> _oldPaths;
+    private readonly ConcurrentDictionary<string, Timer> _debounceTimers;
     private readonly Timer _statusTimer;
     private readonly int _debounceMs;
     private readonly ILogger<FileMonitorService>? _logger;
@@ -89,12 +105,96 @@ public class FileMonitorService : IFileMonitorService, IDisposable
     {
         _watchers = new Dictionary<string, FileSystemWatcher>();
         _sources = new Dictionary<string, string>();
-        _pendingChanges = new Dictionary<string, PendingChange>();
+        _oldPaths = new ConcurrentDictionary<string, string>();
+        _debounceTimers = new ConcurrentDictionary<string, Timer>();
         _debounceMs = debounceMs;
         _logger = logger;
 
-        _debounceTimer = new Timer(ProcessPendingChanges, null, debounceMs, debounceMs);
         _statusTimer = new Timer(UpdateStatus, null, 5000, 5000);
+
+        // 初始化非活跃目录扫描器（默认不启用）
+        _idleScanner = new Timer(ScanIdleDirectories, null, Timeout.Infinite, Timeout.Infinite);
+    }
+
+    /// <summary>
+    /// 标记目录为活跃状态
+    /// </summary>
+    public void MarkDirectoryActive(string dirPath)
+    {
+        var normalizedPath = PathUtility.NormalizePath(dirPath);
+        _activeDirectories[normalizedPath] = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// 判断目录是否活跃
+    /// </summary>
+    private bool IsDirectoryActive(string dirPath)
+    {
+        var normalizedPath = PathUtility.NormalizePath(dirPath);
+        if (_activeDirectories.TryGetValue(normalizedPath, out var lastActive))
+        {
+            return DateTime.UtcNow - lastActive < TimeSpan.FromMinutes(ActiveThresholdMinutes);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 非活跃目录轮询扫描回调
+    /// </summary>
+    private void ScanIdleDirectories(object? state)
+    {
+        if (!_hybridModeEnabled || !_isRunning)
+            return;
+
+        try
+        {
+            foreach (var kvp in _activeDirectories.ToList())
+            {
+                var dirPath = kvp.Key;
+                var lastActive = kvp.Value;
+
+                // 如果目录已不活跃且仍在监控列表中，轮询检查变化
+                if (DateTime.UtcNow - lastActive >= TimeSpan.FromMinutes(ActiveThresholdMinutes))
+                {
+                    if (Directory.Exists(dirPath) && !_watchers.Values.Any(w => w.Path == dirPath))
+                    {
+                        // 目录已降级为轮询模式，手动扫描检查变化
+                        ScanDirectoryForChanges(dirPath);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "非活跃目录扫描出错");
+        }
+    }
+
+    /// <summary>
+    /// 扫描目录检查文件变化（轮询模式）
+    /// </summary>
+    private void ScanDirectoryForChanges(string dirPath)
+    {
+        try
+        {
+            if (!Directory.Exists(dirPath))
+                return;
+
+            var mdFiles = Directory.EnumerateFiles(dirPath, "*.md", SearchOption.AllDirectories);
+            foreach (var filePath in mdFiles)
+            {
+                // 为每个文件触发变更事件（带防抖）
+                var source = _sources.FirstOrDefault(s => s.Value == dirPath).Key;
+                if (!string.IsNullOrEmpty(source))
+                {
+                    OnFileChanged(filePath, source, ChangeType.Modified);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "轮询扫描目录失败: {Path}", dirPath);
+        }
     }
 
     public void AddSource(string path, string name)
@@ -151,7 +251,43 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         }
 
         _logger?.LogInformation("监控已启动，监控 {Count} 个目录", _watchers.Count);
+
+        // 检查是否需要启用混合模式
+        if (_sources.Count > _inotifyLimit)
+        {
+            EnableHybridMode();
+        }
+
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 启用混合模式：活跃目录使用FSW，非活跃目录使用轮询
+    /// </summary>
+    private void EnableHybridMode()
+    {
+        if (_hybridModeEnabled)
+            return;
+
+        _hybridModeEnabled = true;
+        _logger?.LogWarning("目录数量({Count})超过系统限制({Limit})，启用混合模式", _sources.Count, _inotifyLimit);
+
+        // 将所有已监控目录标记为活跃
+        foreach (var path in _sources.Values)
+        {
+            MarkDirectoryActive(path);
+        }
+
+        // 启动非活跃目录扫描器
+        _idleScanner?.Change(TimeSpan.FromSeconds(IdleScanIntervalSeconds), TimeSpan.FromSeconds(IdleScanIntervalSeconds));
+    }
+
+    /// <summary>
+    /// 设置 inotify 限制（用于测试或自定义配置）
+    /// </summary>
+    public void SetInotifyLimit(int limit)
+    {
+        _inotifyLimit = limit;
     }
 
     public Task StopAsync()
@@ -191,7 +327,7 @@ public class FileMonitorService : IFileMonitorService, IDisposable
                 TotalFiles = totalFiles,
                 LastChange = _lastChange,
                 ChangesDetected = _changesDetected,
-                IndexingQueueSize = _pendingChanges.Count
+                IndexingQueueSize = _debounceTimers.Count
             };
         }
     }
@@ -223,94 +359,129 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         _logger?.LogInformation("开始监控: {Path}", path);
     }
 
-    private void OnFileChanged(string filePath, string source, ChangeType changeType)
+    /// <summary>
+    /// Per-file 独立防抖：每个文件有独立的定时器，避免全局阻塞
+    /// </summary>
+    private void Debounce(string filePath, string source, ChangeType changeType)
     {
+        _debounceTimers.AddOrUpdate(
+            filePath,
+            _ => new Timer(_ => Flush(filePath, source, changeType), null, _debounceMs, Timeout.Infinite),
+            (_, existingTimer) =>
+            {
+                // 重置定时器
+                existingTimer.Change(_debounceMs, Timeout.Infinite);
+                return existingTimer;
+            }
+        );
+
+        _logger?.LogDebug("防抖触发: {FileName} ({ChangeType})", Path.GetFileName(filePath), changeType);
+    }
+
+    /// <summary>
+    /// 防抖到期后触发实际事件处理
+    /// </summary>
+    private void Flush(string filePath, string source, ChangeType changeType)
+    {
+        // 移除定时器
+        if (_debounceTimers.TryRemove(filePath, out var timer))
+        {
+            timer.Dispose();
+        }
+
+        // 更新统计信息
         lock (_lock)
         {
-            _pendingChanges[filePath] = new PendingChange
-            {
-                FilePath = filePath,
-                ChangeType = changeType,
-                Timestamp = DateTime.UtcNow,
-                Source = source
-            };
             _changesDetected++;
             _lastChange = DateTime.UtcNow;
         }
+
+        // 根据文件存在状态判定最终类型（重命名事件保持原类型）
+        var finalChangeType = changeType == ChangeType.Renamed
+            ? changeType
+            : (File.Exists(filePath) ? ChangeType.Modified : ChangeType.Deleted);
+
+        // 获取旧路径（仅重命名事件）
+        string? oldFilePath = null;
+        if (finalChangeType == ChangeType.Renamed && _oldPaths.TryRemove(filePath, out var oldPath))
+        {
+            oldFilePath = oldPath;
+        }
+
+        FileChanged?.Invoke(this, new FileChangeEventArgs
+        {
+            FilePath = filePath,
+            OldFilePath = oldFilePath,
+            Source = source,
+            ChangeType = finalChangeType,
+            Timestamp = DateTime.UtcNow
+        });
+
+        _logger?.LogDebug("事件触发: {FileName} ({ChangeType})", Path.GetFileName(filePath), finalChangeType);
+    }
+
+    /// <summary>
+    /// 安全读取文件内容：支持重试和共享读取模式，减少文件锁定冲突
+    /// </summary>
+    /// <param name="path">文件路径</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>文件内容，失败返回 null</returns>
+    public async Task<string?> SafeReadFileAsync(string path, CancellationToken ct = default)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            try
+            {
+                // 使用 FileShare.ReadWrite 允许其他进程同时读写，减少锁定冲突
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var sr = new StreamReader(fs);
+                return await sr.ReadToEndAsync(ct);
+            }
+            catch (IOException) when (i < 2)
+            {
+                // 文件被占用，等待后重试
+                _logger?.LogWarning("文件被占用，等待重试 ({Attempt}/3): {FileName}", i + 1, Path.GetFileName(path));
+                await Task.Delay(100 * (i + 1), ct);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "读取文件失败: {FileName}", Path.GetFileName(path));
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private void OnFileChanged(string filePath, string source, ChangeType changeType)
+    {
+        // 标记目录为活跃状态
+        var dir = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(dir))
+        {
+            MarkDirectoryActive(dir);
+        }
+
+        // 使用 per-file 独立防抖
+        Debounce(filePath, source, changeType);
 
         _logger?.LogDebug("文件变动: {FileName} ({ChangeType})", Path.GetFileName(filePath), changeType);
     }
 
     private void OnFileRenamed(string oldPath, string newPath, string source)
     {
-        lock (_lock)
+        // 取消旧路径的防抖定时器
+        if (_debounceTimers.TryRemove(oldPath, out var oldTimer))
         {
-            // 移除旧路径的待处理变更（如果存在）
-            _pendingChanges.Remove(oldPath);
-
-            // 添加重命名事件
-            _pendingChanges[newPath] = new PendingChange
-            {
-                FilePath = newPath,
-                OldFilePath = oldPath,
-                ChangeType = ChangeType.Renamed,
-                Timestamp = DateTime.UtcNow,
-                Source = source
-            };
-            _changesDetected++;
-            _lastChange = DateTime.UtcNow;
+            oldTimer.Dispose();
         }
+
+        // 存储旧路径供重命名事件使用
+        _oldPaths[newPath] = oldPath;
+
+        // 使用 per-file 独立防抖
+        Debounce(newPath, source, ChangeType.Renamed);
 
         _logger?.LogInformation("文件重命名: {OldName} -> {NewName}", Path.GetFileName(oldPath), Path.GetFileName(newPath));
-    }
-
-    private void ProcessPendingChanges(object? state)
-    {
-        List<PendingChange> changesToProcess;
-
-        lock (_lock)
-        {
-            var now = DateTime.UtcNow;
-            changesToProcess = _pendingChanges
-                .Where(kvp => (now - kvp.Value.Timestamp).TotalMilliseconds >= _debounceMs)
-                .Select(kvp => kvp.Value)
-                .ToList();
-
-            foreach (var change in changesToProcess)
-            {
-                _pendingChanges.Remove(change.FilePath);
-            }
-        }
-
-        foreach (var change in changesToProcess)
-        {
-            // 重命名事件：保持原始 ChangeType，不重新判定
-            if (change.ChangeType == ChangeType.Renamed)
-            {
-                FileChanged?.Invoke(this, new FileChangeEventArgs
-                {
-                    FilePath = change.FilePath,
-                    OldFilePath = change.OldFilePath,
-                    Source = change.Source ?? "Unknown",
-                    ChangeType = ChangeType.Renamed,
-                    Timestamp = change.Timestamp
-                });
-                continue;
-            }
-
-            // 其他事件：根据文件存在状态判定最终类型
-            var finalChangeType = File.Exists(change.FilePath)
-                ? ChangeType.Modified
-                : ChangeType.Deleted;
-
-            FileChanged?.Invoke(this, new FileChangeEventArgs
-            {
-                FilePath = change.FilePath,
-                Source = change.Source ?? "Unknown",
-                ChangeType = finalChangeType,
-                Timestamp = change.Timestamp
-            });
-        }
     }
 
     private void UpdateStatus(object? state)
@@ -329,229 +500,43 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         if (!_disposed)
         {
             StopAsync().GetAwaiter().GetResult();
-            _debounceTimer?.Dispose();
+            
+            // 清理所有 per-file 防抖定时器
+            foreach (var timer in _debounceTimers.Values)
+            {
+                timer.Dispose();
+            }
+            _debounceTimers.Clear();
+            
             _statusTimer?.Dispose();
+            _idleScanner?.Dispose();
             _disposed = true;
         }
     }
-}
 
-/// <summary>
-/// 自动索引服务
-/// </summary>
-public class AutoIndexService : IDisposable
-{
-    private readonly IFileMonitorService _fileMonitor;
-    private readonly IIndexingService _indexingService;
-    private readonly IVectorStore _vectorStore;
-    private readonly IEmbeddingService _embeddingService;
-    private readonly MarkdownChunker _chunker;
-    private readonly ContentHashDetector _hashDetector;
-    private readonly ILogger<AutoIndexService>? _logger;
-    private readonly Queue<FileChangeEventArgs> _indexQueue;
-    private readonly Timer _processTimer;
-    private bool _isProcessing;
-    private bool _disposed;
-
-    public event EventHandler<AutoIndexProgressEventArgs>? Progress;
-
-    public AutoIndexService(
-        IFileMonitorService fileMonitor,
-        IIndexingService indexingService,
-        IVectorStore vectorStore,
-        IEmbeddingService embeddingService,
-        MarkdownChunker chunker,
-        ContentHashDetector hashDetector,
-        ILogger<AutoIndexService>? logger = null)
+    /// <summary>
+    /// 并行分区扫描：利用多核加速大目录扫描
+    /// </summary>
+    public static IEnumerable<string> ParallelScanFiles(string root, string pattern = "*.md")
     {
-        _fileMonitor = fileMonitor;
-        _indexingService = indexingService;
-        _vectorStore = vectorStore;
-        _embeddingService = embeddingService;
-        _chunker = chunker;
-        _hashDetector = hashDetector;
-        _logger = logger;
-        _indexQueue = new Queue<FileChangeEventArgs>();
-
-        _processTimer = new Timer(ProcessQueue, null, 1000, 1000);
-
-        _fileMonitor.FileChanged += OnFileChanged;
-    }
-
-    private void OnFileChanged(object? sender, FileChangeEventArgs e)
-    {
-        lock (_indexQueue)
+        if (!Directory.Exists(root))
+            return Enumerable.Empty<string>();
+        
+        var topDirs = Directory.GetDirectories(root);
+        
+        if (topDirs.Length == 0)
         {
-            _indexQueue.Enqueue(e);
+            // 无子目录，直接扫描
+            return Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly);
         }
-
-        _logger?.LogDebug("队列添加: {FileName} ({ChangeType})", Path.GetFileName(e.FilePath), e.ChangeType);
-    }
-
-    private async void ProcessQueue(object? state)
-    {
-        if (_isProcessing) return;
-
-        FileChangeEventArgs? change = null;
-        lock (_indexQueue)
-        {
-            if (_indexQueue.Count > 0)
-            {
-                change = _indexQueue.Dequeue();
-            }
-        }
-
-        if (change == null) return;
-
-        _isProcessing = true;
-        try
-        {
-            await ProcessChangeAsync(change);
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "处理失败");
-        }
-        finally
-        {
-            _isProcessing = false;
-        }
-    }
-
-    private async Task ProcessChangeAsync(FileChangeEventArgs change)
-    {
-        _logger?.LogInformation("开始处理: {FileName}", Path.GetFileName(change.FilePath));
-
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-
-        try
-        {
-            if (change.ChangeType == ChangeType.Deleted)
-            {
-                // 删除索引
-                var file = await _vectorStore.GetFileByPathAsync(change.FilePath);
-                if (file != null)
-                {
-                    await _vectorStore.DeleteFileAsync(file.Id);
-                    _logger?.LogInformation("已删除索引: {FileName}", Path.GetFileName(change.FilePath));
-                }
-            }
-            else
-            {
-                // 检查内容是否变化
-                var newHash = await _hashDetector.ComputeFileFingerprintAsync(change.FilePath);
-                var existingFile = await _vectorStore.GetFileByPathAsync(change.FilePath);
-
-                if (existingFile != null && existingFile.ContentHash == newHash)
-                {
-                    _logger?.LogDebug("内容未变化，跳过: {FileName}", Path.GetFileName(change.FilePath));
-                    return;
-                }
-
-                // 读取文件内容
-                var content = await File.ReadAllTextAsync(change.FilePath);
-
-                // 创建文件记录
-                var fileRecord = new FileRecord
-                {
-                    Id = existingFile?.Id ?? Guid.NewGuid().ToString(),
-                    Path = change.FilePath,
-                    FileName = Path.GetFileName(change.FilePath),
-                    ParentFolder = Path.GetDirectoryName(change.FilePath),
-                    Source = change.Source ?? "Unknown",
-                    ContentHash = newHash,
-                    ContentLength = content.Length,
-                    Title = ExtractTitle(content) ?? Path.GetFileNameWithoutExtension(change.FilePath),
-                    ChunkCount = 0,
-                    TotalTokens = 0,
-                    ModifiedAt = File.GetLastWriteTime(change.FilePath)
-                };
-
-                // 分段
-                var chunks = _chunker.Chunk(content, fileRecord);
-
-                // 设置 chunk 的 FileId 和 Source
-                foreach (var chunk in chunks)
-                {
-                    chunk.FileId = fileRecord.Id;
-                    chunk.Source = fileRecord.Source;
-                }
-
-                fileRecord.ChunkCount = chunks.Count;
-                fileRecord.TotalTokens = chunks.Sum(c => c.TokenCount);
-
-                // 生成向量
-                var vectors = new List<VectorRecord>();
-                var batchSize = 16;
-
-                for (int i = 0; i < chunks.Count; i += batchSize)
-                {
-                    var batch = chunks.Skip(i).Take(batchSize).ToList();
-                    var embeddings = await _embeddingService.EncodeBatchAsync(batch.Select(c => c.Content), EmbeddingMode.Document);
-
-                    for (int j = 0; j < batch.Count; j++)
-                    {
-                        vectors.Add(new VectorRecord
-                        {
-                            Id = Guid.NewGuid().ToString(),
-                            ChunkId = batch[j].Id,
-                            FileId = batch[j].FileId,
-                            Vector = embeddings[j],
-                            Dimension = embeddings[j].Length,
-                            Source = batch[j].Source,
-                            ModelName = _embeddingService.ModelName
-                        });
-                    }
-                }
-
-                // 保存到存储
-                await _vectorStore.UpsertFileAsync(fileRecord);
-                await _vectorStore.UpsertChunksAsync(chunks);
-                await _vectorStore.UpsertVectorsAsync(vectors);
-
-                sw.Stop();
-
-                _logger?.LogInformation("索引完成: {FileName} ({ChunksCount} 分段, {VectorsCount} 向量, {ElapsedMilliseconds}ms)",
-                    Path.GetFileName(change.FilePath), chunks.Count, vectors.Count, sw.ElapsedMilliseconds);
-
-                Progress?.Invoke(this, new AutoIndexProgressEventArgs
-                {
-                    FilePath = change.FilePath,
-                    ChangeType = change.ChangeType,
-                    ChunksIndexed = chunks.Count,
-                    VectorsGenerated = vectors.Count,
-                    DurationMs = sw.ElapsedMilliseconds
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "索引失败: {FileName}", Path.GetFileName(change.FilePath));
-        }
-    }
-
-    private string? ExtractTitle(string content)
-    {
-        var lines = content.Split('\n');
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.StartsWith("# "))
-            {
-                return trimmed[2..].Trim();
-            }
-        }
-        return null;
-    }
-
-    public void Dispose()
-    {
-        if (!_disposed)
-        {
-            _fileMonitor.FileChanged -= OnFileChanged;
-            _processTimer?.Dispose();
-            _disposed = true;
-        }
+        
+        // 并行扫描第一层子目录，限制并发度避免线程爆炸
+        return topDirs
+            .AsParallel()
+            .WithDegreeOfParallelism(Math.Min(Environment.ProcessorCount, 8))
+            .SelectMany(dir => Directory.EnumerateFiles(dir, pattern, SearchOption.AllDirectories))
+            .Concat(Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly).AsParallel())
+            .Distinct();
     }
 }
 
@@ -565,12 +550,4 @@ public class AutoIndexProgressEventArgs : EventArgs
     public int ChunksIndexed { get; set; }
     public int VectorsGenerated { get; set; }
     public long DurationMs { get; set; }
-}
-
-/// <summary>
-/// 索引服务接口
-/// </summary>
-public interface IIndexingService
-{
-    Task<IndexingResult> IndexAsync(string source, bool force = false, CancellationToken cancellationToken = default);
 }

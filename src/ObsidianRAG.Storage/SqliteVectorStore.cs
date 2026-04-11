@@ -272,7 +272,50 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             catch { /* 列已存在，忽略 */ }
         }
 
+        // 向后兼容：为已有 chunks 表添加 chunk_order 和 content_hash 字段
+        var chunkMigrations = new[]
+        {
+            "ALTER TABLE chunks ADD COLUMN chunk_order REAL DEFAULT 1.0",
+            "ALTER TABLE chunks ADD COLUMN content_hash TEXT DEFAULT ''"
+        };
+        foreach (var migration in chunkMigrations)
+        {
+            try { ExecuteNonQuery(migration, transaction); }
+            catch { /* 列已存在，忽略 */ }
+        }
+
         transaction.Commit();
+
+        // 性能优化：WAL模式和数据库索引
+        EnsurePerformanceOptimizations();
+    }
+
+    /// <summary>
+    /// 性能优化：WAL模式和数据库索引
+    /// </summary>
+    private void EnsurePerformanceOptimizations()
+    {
+        // WAL 模式（提升并发读写性能）
+        ExecutePragma("PRAGMA journal_mode=WAL");
+        ExecutePragma("PRAGMA synchronous=NORMAL");
+        ExecutePragma("PRAGMA cache_size=-64000");
+
+        // 索引（如不存在则创建，幂等操作）
+        var indexes = new[]
+        {
+            "CREATE INDEX IF NOT EXISTS idx_chunks_order ON chunks(chunk_order)",
+            "CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(content_hash)",
+            "CREATE INDEX IF NOT EXISTS idx_files_source_time ON files(source, indexed_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash)"
+        };
+        foreach (var idx in indexes)
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = idx;
+                cmd.ExecuteNonQuery();
+            }
+            catch { /* 已存在，忽略 */ }
     }
 
     /// <summary>
@@ -615,6 +658,43 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         return files;
     }
 
+    public async Task<IAsyncEnumerable<FileRecord>> StreamAllFilesAsync(CancellationToken cancellationToken = default)
+    {
+        var sql = "SELECT * FROM files ORDER BY path";
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = sql;
+        var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+        // Return an async enumerable that manages the reader and command lifetime
+        var asyncEnumerable = ReadAllFilesAsync(reader, cmd, cancellationToken);
+        var enumerator = asyncEnumerable.GetAsyncEnumerator(cancellationToken);
+        return new DisposingAsyncEnumerable<FileRecord>(
+            enumerator: enumerator,
+            disposeAction: () =>
+            {
+                reader?.Dispose();
+                cmd?.Dispose();
+            });
+    }
+
+    private async IAsyncEnumerable<FileRecord> ReadAllFilesAsync(
+        SqliteDataReader reader,
+        SqliteCommand cmd,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                yield return ReadFileRecord(reader);
+            }
+        }
+        finally
+        {
+            // Cleanup happens in the DisposingAsyncEnumerable
+        }
+    }
+
     // ==================== 分段操作 ====================
 
     public async Task UpsertChunkAsync(ChunkRecord chunk, CancellationToken cancellationToken = default)
@@ -623,11 +703,11 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             INSERT OR REPLACE INTO chunks
             (id, file_id, chunk_index, content, token_count, start_line, end_line,
              start_column, end_column, heading_path, level, weight, chunk_type,
-             aggregate_type, child_chunk_count)
+             aggregate_type, child_chunk_count, chunk_order, content_hash)
             VALUES
             (@id, @fileId, @chunkIndex, @content, @tokenCount, @startLine, @endLine,
              @startColumn, @endColumn, @headingPath, @level, @weight, @chunkType,
-             @aggregateType, @childChunkCount)
+             @aggregateType, @childChunkCount, @chunkOrder, @contentHash)
         ";
 
         using var command = _connection.CreateCommand();
@@ -647,6 +727,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         AddParameter(command, "@chunkType", (int)chunk.ChunkType);
         AddParameter(command, "@aggregateType", (int)chunk.AggregateType);
         AddParameter(command, "@childChunkCount", chunk.ChildChunkCount);
+        AddParameter(command, "@chunkOrder", chunk.ChunkOrder);
+        AddParameter(command, "@contentHash", chunk.ContentHash ?? "");
 
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -659,33 +741,69 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
-            using var transaction = _connection.BeginTransaction();
-
-            // 批量构建 SQL - 一次插入所有 chunks
-            var sql = @"
-                INSERT OR REPLACE INTO chunks
-                (id, file_id, chunk_index, content, token_count, start_line, end_line,
-                 start_column, end_column, heading_path, level, weight, chunk_type,
-                 aggregate_type, child_chunk_count)
-                VALUES
-            ";
-
-            var valueClauses = chunkList.Select(chunk =>
-                $"( {FormatString(chunk.Id)}, {FormatString(chunk.FileId)}, {chunk.ChunkIndex}, {FormatString(chunk.Content)}, {chunk.TokenCount}, {chunk.StartLine}, {chunk.EndLine}, {chunk.StartColumn}, {chunk.EndColumn}, {FormatString(chunk.HeadingPath ?? "")}, {chunk.Level}, {chunk.Weight}, {(int)chunk.ChunkType}, {(int)chunk.AggregateType}, {chunk.ChildChunkCount})"
-            );
-
-            sql += string.Join(",\n", valueClauses);
-
-            using var command = _connection.CreateCommand();
-            command.CommandText = sql;
-            command.Transaction = transaction;
-            await command.ExecuteNonQueryAsync(cancellationToken);
-
-            transaction.Commit();
+            const int batchSize = 500;  // 每500条一个事务，提高写入吞吐量
+            for (int i = 0; i < chunkList.Count; i += batchSize)
+            {
+                var batch = chunkList.Skip(i).Take(batchSize).ToList();
+                await UpsertChunkBatchAsync(batch, cancellationToken);
+            }
         }
         finally
         {
             _writeLock.Release();
+        }
+    }
+
+    private async Task UpsertChunkBatchAsync(List<ChunkRecord> batch, CancellationToken cancellationToken)
+    {
+        using var transaction = _connection.BeginTransaction();
+        try
+        {
+            // 预处理语句 - SQL只编译一次，复用command对象提高性能
+            var sql = @"
+                INSERT OR REPLACE INTO chunks
+                (id, file_id, chunk_index, content, token_count, start_line, end_line,
+                 start_column, end_column, heading_path, level, weight, chunk_type,
+                 aggregate_type, child_chunk_count, chunk_order, content_hash)
+                VALUES
+                (@id, @fileId, @chunkIndex, @content, @tokenCount, @startLine, @endLine,
+                 @startColumn, @endColumn, @headingPath, @level, @weight, @chunkType,
+                 @aggregateType, @childChunkCount, @chunkOrder, @contentHash)
+            ";
+
+            using var command = _connection.CreateCommand();
+            command.CommandText = sql;
+            command.Transaction = transaction;
+
+            foreach (var chunk in batch)
+            {
+                command.Parameters.Clear();
+                AddParameter(command, "@id", chunk.Id);
+                AddParameter(command, "@fileId", chunk.FileId);
+                AddParameter(command, "@chunkIndex", chunk.ChunkIndex);
+                AddParameter(command, "@content", chunk.Content);
+                AddParameter(command, "@tokenCount", chunk.TokenCount);
+                AddParameter(command, "@startLine", chunk.StartLine);
+                AddParameter(command, "@endLine", chunk.EndLine);
+                AddParameter(command, "@startColumn", chunk.StartColumn);
+                AddParameter(command, "@endColumn", chunk.EndColumn);
+                AddParameter(command, "@headingPath", chunk.HeadingPath ?? "");
+                AddParameter(command, "@level", chunk.Level);
+                AddParameter(command, "@weight", chunk.Weight);
+                AddParameter(command, "@chunkType", (int)chunk.ChunkType);
+                AddParameter(command, "@aggregateType", (int)chunk.AggregateType);
+                AddParameter(command, "@childChunkCount", chunk.ChildChunkCount);
+                AddParameter(command, "@chunkOrder", chunk.ChunkOrder);
+                AddParameter(command, "@contentHash", chunk.ContentHash ?? "");
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            transaction.Commit();
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
         }
     }
 
@@ -832,26 +950,18 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
                 var tableName = ModelToTableName(modelName);
 
-                // 批量构建 SQL - 多行 VALUES 语法
-                var valuesClauses = group.Select((vector, index) =>
-                {
-                    var json = VectorToJson(vector.Vector);
-                    return $"({FormatString(vector.ChunkId)}, {FormatString(json)})";
-                });
-
-                // 分批执行，每批 500 条
-                const int batchSize = 500;
-                var batches = valuesClauses.Chunk(batchSize).ToList();
-
-                foreach (var batch in batches)
+                // 使用参数化查询插入向量
+                foreach (var vector in group)
                 {
                     var sql = $@"
                         INSERT OR REPLACE INTO {tableName} (chunk_id, embedding)
-                        VALUES {string.Join(",\n", batch)}
+                        VALUES (@chunkId, @embedding)
                     ";
 
                     using var command = _connection.CreateCommand();
                     command.CommandText = sql;
+                    AddParameter(command, "@chunkId", vector.ChunkId);
+                    AddParameter(command, "@embedding", VectorToJson(vector.Vector));
                     await command.ExecuteNonQueryAsync(cancellationToken);
                 }
             }
@@ -1482,6 +1592,12 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         catch { return 0; }
     }
 
+    private static double? TryGetDouble(SqliteDataReader reader, string columnName)
+    {
+        try { return reader.GetDouble(reader.GetOrdinal(columnName)); }
+        catch { return null; }
+    }
+
     private ChunkRecord ReadChunkRecord(SqliteDataReader reader)
     {
         return new ChunkRecord
@@ -1500,16 +1616,10 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             Weight = reader.GetFloat(reader.GetOrdinal("weight")),
             ChunkType = (ChunkType)reader.GetInt32(reader.GetOrdinal("chunk_type")),
             AggregateType = (AggregateType)reader.GetInt32(reader.GetOrdinal("aggregate_type")),
-            ChildChunkCount = reader.GetInt32(reader.GetOrdinal("child_chunk_count"))
+            ChildChunkCount = reader.GetInt32(reader.GetOrdinal("child_chunk_count")),
+            ChunkOrder = TryGetDouble(reader, "chunk_order") ?? 1.0,
+            ContentHash = TryGetString(reader, "content_hash")
         };
-    }
-
-    /// <summary>
-    /// 格式化字符串用于SQL (防止注入)
-    /// </summary>
-    private static string FormatString(string value)
-    {
-        return "'" + value.Replace("'", "''") + "'";
     }
 
     /// <summary>
@@ -1550,6 +1660,52 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             _connection.Dispose();
             _writeLock.Dispose();
             _disposed = true;
+        }
+    }
+
+    /// <summary>
+    /// Async enumerable that calls a dispose action when enumeration completes
+    /// </summary>
+    private sealed class DisposingAsyncEnumerable<T> : IAsyncEnumerable<T>, IAsyncEnumerator<T>
+    {
+        private readonly IAsyncEnumerator<T> _enumerator;
+        private readonly Action _disposeAction;
+        private bool _disposed;
+
+        public DisposingAsyncEnumerable(IAsyncEnumerator<T> enumerator, Action disposeAction)
+        {
+            _enumerator = enumerator;
+            _disposeAction = disposeAction;
+        }
+
+        public T Current => _enumerator.Current;
+
+        public IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            return this;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (!_disposed)
+            {
+                _disposed = true;
+                await _enumerator.DisposeAsync();
+                _disposeAction();
+            }
+        }
+
+        public async ValueTask<bool> MoveNextAsync()
+        {
+            try
+            {
+                return await _enumerator.MoveNextAsync();
+            }
+            catch
+            {
+                _disposeAction();
+                throw;
+            }
         }
     }
 }

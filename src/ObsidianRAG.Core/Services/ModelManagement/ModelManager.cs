@@ -610,11 +610,11 @@ public class ModelManager : IModelManager, IDisposable
             _modelRegistry[model.Name] = model;
         }
 
-        // 扫描本地模型目录
-        ScanLocalModels();
-
-        // 从配置文件检查当前模型路径
+        // 从配置文件检查当前模型路径（先执行，确保_currentModel和_currentRerankModel被设置）
         CheckConfiguredModel();
+
+        // 扫描本地模型目录（后执行，更新IsDownloaded等状态）
+        ScanLocalModels();
     }
 
     /// <summary>
@@ -625,6 +625,8 @@ public class ModelManager : IModelManager, IDisposable
         try
         {
             var config = LoadConfigAsync().GetAwaiter().GetResult();
+            
+            // 检查 Embedding 模型
             if (!string.IsNullOrEmpty(config.Embedding?.ModelPath))
             {
                 var modelPath = config.Embedding.ModelPath;
@@ -666,6 +668,19 @@ public class ModelManager : IModelManager, IDisposable
                         _currentModel = newModel;
                         Console.WriteLine($"[ModelManager] 注册新模型: {modelName}, 路径: {modelDir}");
                     }
+                }
+            }
+            
+            // 检查 Rerank 模型
+            if (!string.IsNullOrEmpty(config.Rerank?.CurrentModel))
+            {
+                var rerankModelName = config.Rerank.CurrentModel;
+                if (_modelRegistry.TryGetValue(rerankModelName, out var rerankModel))
+                {
+                    rerankModel.IsDownloaded = true;
+                    rerankModel.LocalPath = Path.Combine(_modelsPath, rerankModelName);
+                    _currentRerankModel = rerankModel;
+                    Console.WriteLine($"[ModelManager] 从配置加载当前重排模型: {rerankModelName}");
                 }
             }
         }

@@ -39,6 +39,17 @@ public class ChunkRecord
     // 权重（用于聚合）
     public float Weight { get; set; } = 1.0f;
     
+    // 排序与去重（小数排序支持）
+    /// <summary>
+    /// 小数排序值，用于支持在任意位置插入新分段
+    /// </summary>
+    public double ChunkOrder { get; set; } = 1.0;
+    
+    /// <summary>
+    /// 内容哈希，用于精确去重和变更检测
+    /// </summary>
+    public string? ContentHash { get; set; }
+    
     // 元数据
     public List<string>? Tags { get; set; }
     public List<string>? Keywords { get; set; }

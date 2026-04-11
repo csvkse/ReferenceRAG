@@ -179,6 +179,20 @@ builder.Services.AddSingleton<HybridSearchService>();
 builder.Services.AddSingleton<IndexService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<IndexService>());
 
+// 注册文件监控和自动索引服务
+builder.Services.AddSingleton<IFileMonitorService>(sp =>
+{
+    var configManager = sp.GetRequiredService<ConfigManager>();
+    var config = configManager.Load();
+    var debounceMs = config.Indexing?.DebounceMs ?? 500;
+    var logger = sp.GetService<ILogger<FileMonitorService>>();
+    return new FileMonitorService(debounceMs, logger);
+});
+builder.Services.AddHostedService<AutoIndexService>();
+
+// 注册启动同步服务
+builder.Services.AddHostedService<StartupSyncService>();
+
 // 注册测试记录存储
 builder.Services.AddSingleton<TestRecordStore>();
 

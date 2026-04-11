@@ -121,6 +121,11 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     /// </summary>
     private string GetFtsTableName(string modelName)
     {
+        // 白名单验证：只允许字母、数字、连字符、下划线
+        if (!Regex.IsMatch(modelName, @"^[a-zA-Z0-9_-]+$"))
+        {
+            throw new ArgumentException($"模型名称 '{modelName}' 包含非法字符，仅允许字母、数字、连字符和下划线", nameof(modelName));
+        }
         return $"{FtsTablePrefix}{modelName}";
     }
 

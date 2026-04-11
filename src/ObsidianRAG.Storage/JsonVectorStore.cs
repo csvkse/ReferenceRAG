@@ -76,6 +76,11 @@ public class JsonVectorStore : IVectorStore, IDisposable
         return Task.FromResult(_files.Values.AsEnumerable());
     }
 
+    public Task<IAsyncEnumerable<FileRecord>> StreamAllFilesAsync(CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult((IAsyncEnumerable<FileRecord>)_files.Values.ToAsyncEnumerable());
+    }
+
     // ==================== 分段操作 ====================
 
     public async Task UpsertChunkAsync(ChunkRecord chunk, CancellationToken cancellationToken = default)

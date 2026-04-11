@@ -42,21 +42,17 @@ public class ApiKeyMiddleware
             return;
         }
 
-        // 支持 Header 和 QueryString 传递 API Key (QueryString 方便 SignalR 连接)
+        // 仅支持 Header 传递 API Key (安全考虑，移除 QueryString 支持)
         string? providedKey = null;
         if (context.Request.Headers.TryGetValue(ApiKeyHeaderName, out var headerKey))
         {
             providedKey = headerKey;
         }
-        else if (context.Request.Query.TryGetValue("api_key", out var queryKey))
-        {
-            providedKey = queryKey;
-        }
 
         if (string.IsNullOrEmpty(providedKey))
         {
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsJsonAsync(new { error = "缺少 API Key。请在请求头中添加 X-API-Key 或在查询参数中添加 api_key" });
+            await context.Response.WriteAsJsonAsync(new { error = "缺少 API Key。请在请求头中添加 X-API-Key" });
             return;
         }
 
