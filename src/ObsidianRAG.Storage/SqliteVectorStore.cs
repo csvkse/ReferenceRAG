@@ -1099,21 +1099,26 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         // 优化前: 1 + 2R 次 DB 往返 (R = 结果数)
         // 优化后: 1 次 DB 往返
         // 使用 LEFT JOIN 避免 NULL 导致的数据丢失，所有列用显式别名避免冲突
+        // 注意: sqlite-vec 要求 LIMIT 在解析时已知，因此直接嵌入整数值而非使用参数
+        // 修改后：LIMIT 在子查询内层，vec0 解析时直接命中
         var sql = $@"
             SELECT
-                v.chunk_id,
+                knn.chunk_id,
                 c.id AS c_id, c.file_id AS c_file_id, c.content, c.token_count,
                 c.start_line, c.end_line, c.start_column, c.end_column,
                 c.heading_path, c.level, c.weight, c.chunk_type,
                 c.aggregate_type, c.child_chunk_count, c.chunk_order, c.content_hash,
                 f.id AS f_id, f.path, f.title, f.source,
-                v.distance
-            FROM {tableName} v
-            LEFT JOIN chunks c ON v.chunk_id = c.id
+                knn.distance
+            FROM (
+                SELECT chunk_id, distance
+                FROM {tableName}
+                WHERE embedding MATCH @query
+                ORDER BY distance
+                LIMIT {topK}                      -- ← vec0 解析时直接可见，KNN 生效
+            ) knn
+            LEFT JOIN chunks c ON knn.chunk_id = c.id
             LEFT JOIN files f ON c.file_id = f.id
-            WHERE v.embedding MATCH @query
-            ORDER BY v.distance
-            LIMIT @topK
         ";
 
         var searchResults = new List<SearchResult>();
@@ -1123,7 +1128,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             using var command = _connection.CreateCommand();
             command.CommandText = sql;
             AddParameter(command, "@query", queryJson);
-            AddParameter(command, "@topK", topK);
 
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -1213,14 +1217,16 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
         var tableName = ModelToTableName(modelName);
         var queryJson = VectorToJson(queryVector);
+        var limitValue = topK * 3; // 多取一些用于过滤
 
         // 向量搜索后过滤ID
+        // 注意: sqlite-vec 要求 LIMIT 在解析时已知，因此直接嵌入整数值而非使用参数
         var sql = $@"
             SELECT v.chunk_id, v.embedding, v.distance
             FROM {tableName} v
             WHERE v.embedding MATCH @query
             ORDER BY v.distance
-            LIMIT @limit
+            LIMIT {limitValue}
         ";
 
         var results = new List<(string ChunkId, float Distance)>();
@@ -1230,7 +1236,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             using var command = _connection.CreateCommand();
             command.CommandText = sql;
             AddParameter(command, "@query", queryJson);
-            AddParameter(command, "@limit", topK * 3); // 多取一些用于过滤
 
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -1358,6 +1363,9 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         var stats = new List<VectorStats>();
 
         // 直接从数据库查询所有模型，而不是依赖内存中的 _modelDimensions
+        // 先清空内存缓存，确保只从数据库获取最新数据
+        _modelDimensions.Clear();
+
         var sql = "SELECT name, dimension, updated_at FROM models";
         using (var cmd = _connection.CreateCommand())
         {
@@ -1371,7 +1379,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 var updatedAtStr = reader.IsDBNull(2) ? null : reader.GetString(2);
                 DateTime? updatedAt = updatedAtStr != null ? DateTime.Parse(updatedAtStr) : null;
 
-                // 同步更新内存缓存
+                // 重建内存缓存
                 _modelDimensions[modelName] = dimension;
 
                 var tableName = ModelToTableName(modelName);
@@ -1386,7 +1394,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 }
                 catch
                 {
-                    // 向量表可能不存在
+                    // 向量表可能不存在，count 保持 0
                 }
 
                 stats.Add(new VectorStats
@@ -1395,7 +1403,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                     Dimension = dimension,
                     VectorCount = (int)count,
                     StorageBytes = count * dimension * sizeof(float),
-                    ModelExists = true,
+                    ModelExists = count > 0,
                     LastUpdated = updatedAt
                 });
             }

@@ -711,7 +711,16 @@ public class ModelManager : IModelManager, IDisposable
             var modelName = Path.GetFileName(dir);
             var onnxPath = Path.Combine(dir, "model.onnx");
 
-            if (File.Exists(onnxPath))
+            // 检查是否有 ONNX 文件（可能在子目录中，如 external 格式的 onnx/model.onnx）
+            var onnxExists = File.Exists(onnxPath);
+            if (!onnxExists)
+            {
+                // 查找子目录中的 ONNX 文件
+                var subOnnxFiles = Directory.GetFiles(dir, "model.onnx", SearchOption.AllDirectories);
+                onnxExists = subOnnxFiles.Length > 0;
+            }
+
+            if (onnxExists)
             {
                 var fileInfo = new FileInfo(onnxPath);
                 var directorySize = Directory.GetFiles(dir, "*", SearchOption.AllDirectories)
@@ -756,6 +765,50 @@ public class ModelManager : IModelManager, IDisposable
                 {
                     Console.WriteLine($"[ModelManager] 检测到残缺 ONNX 文件，建议重新转换: {modelName}");
                     // 可以在这里触发自动重新转换，但目前先标记状态让用户手动处理
+                }
+            }
+            else
+            {
+                // 没有找到 ONNX 文件，尝试检测是否为 external 格式（只有权重文件）
+                var onnxDirPath = Path.Combine(dir, "onnx");
+                if (Directory.Exists(onnxDirPath))
+                {
+                    var onnxFiles = Directory.GetFiles(onnxDirPath, "*.onnx", SearchOption.AllDirectories);
+                    if (onnxFiles.Length > 0)
+                    {
+                        // 这是 external 格式（只有权重文件）
+                        var directorySize = Directory.GetFiles(dir, "*", SearchOption.AllDirectories)
+                            .Sum(f => new FileInfo(f).Length);
+                        var onnxFormat = "external";
+                        var canConvert = directorySize < 2L * 1024 * 1024 * 1024; // < 2GB
+
+                        if (_modelRegistry.TryGetValue(modelName, out var model))
+                        {
+                            model.IsDownloaded = true; // external 格式视为已下载
+                            model.LocalPath = dir;
+                            model.ModelSizeBytes = directorySize;
+                            model.OnnxFormat = onnxFormat;
+                            model.HasOnnx = true;
+                            model.CanConvertFormat = canConvert;
+                        }
+                        else
+                        {
+                            var dimension = DetectModelDimension(dir);
+                            _modelRegistry[modelName] = new ModelInfo
+                            {
+                                Name = modelName,
+                                DisplayName = modelName,
+                                Description = "本地模型",
+                                Dimension = dimension,
+                                IsDownloaded = true,
+                                LocalPath = dir,
+                                ModelSizeBytes = directorySize,
+                                HasOnnx = true,
+                                OnnxFormat = onnxFormat,
+                                CanConvertFormat = canConvert
+                            };
+                        }
+                    }
                 }
             }
         }
@@ -998,8 +1051,22 @@ public class ModelManager : IModelManager, IDisposable
         var onnxPath = Path.Combine(modelDir, "model.onnx");
         var onnxDataPath = Path.Combine(modelDir, "model.onnx.data");
 
+        // 首先检查根目录的 ONNX 文件
         if (!File.Exists(onnxPath))
-            return "unknown";
+        {
+            // 如果根目录没有，搜索子目录（支持 external 格式在 onnx/ 子目录的情况）
+            var subOnnxFiles = Directory.GetFiles(modelDir, "model.onnx", SearchOption.AllDirectories);
+            if (subOnnxFiles.Length > 0)
+            {
+                onnxPath = subOnnxFiles[0];
+                // 对于 subdirectory 的情况，data 文件通常也在同一目录
+                onnxDataPath = Path.Combine(Path.GetDirectoryName(onnxPath)!, "model.onnx.data");
+            }
+            else
+            {
+                return "unknown";
+            }
+        }
 
         // 如果存在 .onnx.data 文件，则为外部数据格式
         if (File.Exists(onnxDataPath))

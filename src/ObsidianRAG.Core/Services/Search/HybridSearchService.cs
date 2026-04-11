@@ -211,27 +211,61 @@ public class HybridSearchService
             .ToList();
 
         // 6. 构建最终结果
+        // 注意：当 embeddingResult 为 null 时，需要从 chunk/file 查找 Source，否则会被源过滤排除
         foreach (var (docId, fusedScore) in topResults)
         {
             bm25Dict.TryGetValue(docId, out var bm25Result);
             embeddingDict.TryGetValue(docId, out var embeddingResult);
 
+            // 当 embeddingResult 为 null 时，从 chunk 元数据获取 Source
+            string source = embeddingResult?.Source ?? string.Empty;
+            string fileId = embeddingResult?.FileId ?? string.Empty;
+            string filePath = embeddingResult?.FilePath ?? string.Empty;
+            string title = embeddingResult?.Title ?? string.Empty;
+            int startLine = embeddingResult?.StartLine ?? 0;
+            int endLine = embeddingResult?.EndLine ?? 0;
+            string? headingPath = embeddingResult?.HeadingPath;
+
+            if (embeddingResult == null && bm25Result != null)
+            {
+                // embedding 无结果但 BM25 有结果时，查找 chunk 元数据获取 Source
+                try
+                {
+                    var chunk = await _vectorStore.GetChunkAsync(docId, cancellationToken);
+                    if (chunk != null)
+                    {
+                        var file = await _vectorStore.GetFileAsync(chunk.FileId, cancellationToken);
+                        if (file != null)
+                        {
+                            source = file.Source ?? string.Empty;
+                            fileId = chunk.FileId;
+                            filePath = file.Path;
+                            title = file.Title ?? string.Empty;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "查找 chunk {ChunkId} 的元数据失败", docId);
+                }
+            }
+
             results.Add(new HybridSearchResult
             {
                 ChunkId = docId,
-                FileId = embeddingResult?.FileId ?? string.Empty,
-                FilePath = embeddingResult?.FilePath ?? string.Empty,
-                Title = embeddingResult?.Title ?? string.Empty,
+                FileId = fileId,
+                FilePath = filePath,
+                Title = title,
                 Content = embeddingResult?.Content ?? bm25Result?.Content ?? string.Empty,
                 Score = fusedScore,
                 BM25Score = (float)(bm25Result?.Score ?? 0),
                 EmbeddingScore = (float)(embeddingResult?.Score ?? 0),
                 BM25Rank = bm25RankMap.GetValueOrDefault(docId, -1),
                 EmbeddingRank = embeddingRankMap.GetValueOrDefault(docId, -1),
-                Source = embeddingResult?.Source ?? string.Empty,
-                StartLine = embeddingResult?.StartLine ?? 0,
-                EndLine = embeddingResult?.EndLine ?? 0,
-                HeadingPath = embeddingResult?.HeadingPath
+                Source = source,
+                StartLine = startLine,
+                EndLine = endLine,
+                HeadingPath = headingPath
             });
         }
 
