@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using ObsidianRAG.Core.Interfaces;
 using System.Collections.Concurrent;
 using System.Text;
@@ -13,6 +14,7 @@ public class SqliteBM25Store : IBM25Store, IDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly string _dbPath;
+    private readonly ILogger<SqliteBM25Store>? _logger;
     private bool _disposed;
 
     // 缓存模型启用状态
@@ -32,9 +34,10 @@ public class SqliteBM25Store : IBM25Store, IDisposable
         "and", "or", "but", "not", "this", "that", "it", "as"
     };
 
-    public SqliteBM25Store(string dbPath)
+    public SqliteBM25Store(string dbPath, ILogger<SqliteBM25Store>? logger = null)
     {
         _dbPath = dbPath;
+        _logger = logger;
 
         var builder = new SqliteConnectionStringBuilder
         {
@@ -366,8 +369,9 @@ public class SqliteBM25Store : IBM25Store, IDisposable
             _modelInfoCache.Remove(name);
             _modelEnabledCache.Remove(name);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "删除模型 {ModelName} 失败", name);
             transaction.Rollback();
             throw;
         }
@@ -493,8 +497,9 @@ public class SqliteBM25Store : IBM25Store, IDisposable
             // 更新模型统计
             await UpdateModelStatsAsync(modelName);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "索引文档失败");
             transaction.Rollback();
             throw;
         }
@@ -601,8 +606,9 @@ public class SqliteBM25Store : IBM25Store, IDisposable
             await UpdateModelStatsAsync(modelName);
             progress?.Report(100);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "批量索引失败");
             transaction.Rollback();
             throw;
         }
@@ -676,8 +682,9 @@ public class SqliteBM25Store : IBM25Store, IDisposable
                 info.VocabularySize = 0;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "清空模型 {ModelName} 失败", modelName);
             transaction.Rollback();
             throw;
         }

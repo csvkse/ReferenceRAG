@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using ObsidianRAG.Core.Interfaces;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -13,6 +14,7 @@ public class Fts5BM25Store : IBM25Store, IDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly string _dbPath;
+    private readonly ILogger<Fts5BM25Store>? _logger;
     private bool _disposed;
 
     // 缓存模型启用状态
@@ -23,9 +25,10 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     private const string FtsTablePrefix = "bm25_fts_";
     private const string ChunkMappingTable = "bm25_chunk_mapping";
 
-    public Fts5BM25Store(string dbPath)
+    public Fts5BM25Store(string dbPath, ILogger<Fts5BM25Store>? logger = null)
     {
         _dbPath = dbPath;
+        _logger = logger;
 
         var builder = new SqliteConnectionStringBuilder
         {
@@ -83,8 +86,9 @@ public class Fts5BM25Store : IBM25Store, IDisposable
 
             transaction.Commit();
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "初始化数据库失败");
             transaction.Rollback();
             throw;
         }
@@ -281,8 +285,9 @@ public class Fts5BM25Store : IBM25Store, IDisposable
 
             return modelInfo;
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "创建模型 {ModelName} 失败", name);
             transaction.Rollback();
             throw;
         }
@@ -384,8 +389,9 @@ public class Fts5BM25Store : IBM25Store, IDisposable
             _modelInfoCache.Remove(name);
             _modelEnabledCache.Remove(name);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "删除模型 {ModelName} 失败", name);
             transaction.Rollback();
             throw;
         }
@@ -496,8 +502,9 @@ public class Fts5BM25Store : IBM25Store, IDisposable
 
             transaction.Commit();
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "索引文档失败");
             transaction.Rollback();
             throw;
         }
@@ -593,8 +600,9 @@ public class Fts5BM25Store : IBM25Store, IDisposable
             transaction.Commit();
             progress?.Report(100);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "批量索引失败");
             transaction.Rollback();
             throw;
         }
@@ -736,8 +744,9 @@ public class Fts5BM25Store : IBM25Store, IDisposable
                 info.VocabularySize = 0;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "清空模型 {ModelName} 失败", modelName);
             transaction.Rollback();
             throw;
         }

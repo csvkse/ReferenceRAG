@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using ObsidianRAG.Core.Helpers;
 using ObsidianRAG.Core.Interfaces;
 using ObsidianRAG.Core.Models;
@@ -20,6 +21,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly string _dbPath;
+    private readonly ILogger<SqliteVectorStore>? _logger;
     private bool _disposed;
 
     // 缓存已创建的向量表维度
@@ -28,9 +30,10 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     // 用于序列化写事务的锁 (SQLite不支持同一连接的并行事务)
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
-    public SqliteVectorStore(string dbPath)
+    public SqliteVectorStore(string dbPath, int dimension = 384, ILogger<SqliteVectorStore>? logger = null)
     {
         _dbPath = dbPath;
+        _logger = logger;
 
         var builder = new SqliteConnectionStringBuilder
         {
@@ -49,7 +52,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
         InitializeDatabase();
         MigrateLegacyData();
-        LoadModelDimensions();
+        LoadModelDimensions(dimension);
     }
 
     /// <summary>
@@ -321,7 +324,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     /// <summary>
     /// 加载已有模型的维度信息
     /// </summary>
-    private void LoadModelDimensions()
+    private void LoadModelDimensions(int defaultDimension = 384)
     {
         var sql = "SELECT name, dimension FROM models";
         using var command = _connection.CreateCommand();
@@ -333,6 +336,12 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             var modelName = reader.GetString(0);
             var dimension = reader.GetInt32(1);
             _modelDimensions[modelName] = dimension;
+        }
+
+        // 如果没有找到任何模型，添加默认模型
+        if (_modelDimensions.Count == 0)
+        {
+            _modelDimensions["default"] = defaultDimension;
         }
     }
 
@@ -350,7 +359,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             if (!exists) return; // 没有旧数据需要迁移
         }
 
-        Console.WriteLine("[SqliteVectorStore] 检测到旧版数据结构，开始迁移...");
+        _logger?.LogInformation("检测到旧版数据结构，开始迁移...");
 
         try
         {
@@ -379,7 +388,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             {
                 cmd.CommandText = migrateChunks;
                 var rows = cmd.ExecuteNonQuery();
-                Console.WriteLine($"[SqliteVectorStore] 迁移了 {rows} 条分段记录");
+                _logger?.LogInformation("迁移了 {Rows} 条分段记录", rows);
             }
 
             // 3. 注册默认模型（使用旧向量表的维度）
@@ -426,7 +435,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 {
                     cmd.CommandText = migrateVectors;
                     var rows = cmd.ExecuteNonQuery();
-                    Console.WriteLine($"[SqliteVectorStore] 迁移了 {rows} 条向量记录");
+                    _logger?.LogInformation("迁移了 {Rows} 条向量记录", rows);
                 }
             }
 
@@ -448,18 +457,18 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                     ExecuteNonQuery("ALTER TABLE vec_document_chunks RENAME TO _legacy_vec_document_chunks", transaction);
                 }
                 transaction.Commit();
-                Console.WriteLine("[SqliteVectorStore] 旧表已重命名为 _legacy_* 前缀保留");
+                _logger?.LogInformation("旧表已重命名为 _legacy_* 前缀保留");
             }
             catch
             {
                 // 忽略重命名错误
             }
 
-            Console.WriteLine("[SqliteVectorStore] 数据迁移完成");
+            _logger?.LogInformation("数据迁移完成");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[SqliteVectorStore] 数据迁移失败: {ex.Message}");
+            _logger?.LogError(ex, "数据迁移失败: {Message}", ex.Message);
             // 不抛出异常，允许继续使用
         }
     }
@@ -1072,14 +1081,14 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         // 检查模型是否存在向量数据
         if (!_modelDimensions.TryGetValue(modelName, out var dimension))
         {
-            Console.WriteLine($"[SqliteVectorStore] 模型 '{modelName}' 无向量数据");
+            _logger?.LogWarning("模型 '{ModelName}' 无向量数据", modelName);
             return Enumerable.Empty<SearchResult>();
         }
 
         // 检查维度是否匹配
         if (queryVector.Length != dimension)
         {
-            Console.WriteLine($"[SqliteVectorStore] 查询向量维度 {queryVector.Length} 与模型 '{modelName}' 维度 {dimension} 不匹配");
+            _logger?.LogWarning("查询向量维度 {QueryLen} 与模型 '{ModelName}' 维度 {Dim} 不匹配", queryVector.Length, modelName, dimension);
             return Enumerable.Empty<SearchResult>();
         }
 
@@ -1116,7 +1125,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[SqliteVectorStore] 向量搜索失败: {ex.Message}");
+            _logger?.LogError(ex, "向量搜索失败: {Message}", ex.Message);
             return Enumerable.Empty<SearchResult>();
         }
 
