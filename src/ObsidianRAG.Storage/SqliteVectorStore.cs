@@ -1095,16 +1095,28 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         var tableName = ModelToTableName(modelName);
         var queryJson = VectorToJson(queryVector);
 
-        // 使用 sqlite-vec 的 MATCH 语法进行向量搜索
+        // 使用单次 JOIN 查询获取所有数据，消除 N+1 问题
+        // 优化前: 1 + 2R 次 DB 往返 (R = 结果数)
+        // 优化后: 1 次 DB 往返
+        // 使用 LEFT JOIN 避免 NULL 导致的数据丢失，所有列用显式别名避免冲突
         var sql = $@"
-            SELECT v.chunk_id, v.embedding, v.distance
+            SELECT
+                v.chunk_id,
+                c.id AS c_id, c.file_id AS c_file_id, c.content, c.token_count,
+                c.start_line, c.end_line, c.start_column, c.end_column,
+                c.heading_path, c.level, c.weight, c.chunk_type,
+                c.aggregate_type, c.child_chunk_count, c.chunk_order, c.content_hash,
+                f.id AS f_id, f.path, f.title, f.source,
+                v.distance
             FROM {tableName} v
+            LEFT JOIN chunks c ON v.chunk_id = c.id
+            LEFT JOIN files f ON c.file_id = f.id
             WHERE v.embedding MATCH @query
             ORDER BY v.distance
             LIMIT @topK
         ";
 
-        var results = new List<(string ChunkId, float[] Vector, float Distance)>();
+        var searchResults = new List<SearchResult>();
 
         try
         {
@@ -1116,48 +1128,40 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var chunkId = reader.GetString(0);
-                var embeddingBytes = reader.GetFieldValue<byte[]>(1);
-                var distance = reader.GetFloat(2);
+                // sqlite-vec 返回的是距离，需要转换为相似度分数
+                var distance = reader.GetFloat(reader.GetOrdinal("distance"));
+                var score = 1f / (1f + distance);
 
-                results.Add((chunkId, BlobToVector(embeddingBytes), distance));
+                // 跳过没有关联 chunk 或 file 的结果
+                var chunkId = reader.GetString(reader.GetOrdinal("c_id"));
+                if (string.IsNullOrEmpty(chunkId)) continue;
+
+                var filePath = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("path"));
+                var fileSource = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("source"));
+                var fileTitle = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("title"));
+
+                searchResults.Add(new SearchResult
+                {
+                    ChunkId = chunkId,
+                    FileId = reader.GetString(reader.GetOrdinal("c_file_id")),
+                    FilePath = filePath,
+                    Source = fileSource,
+                    Title = fileTitle,
+                    Content = reader.GetString(reader.GetOrdinal("content")),
+                    Score = score,
+                    StartLine = reader.GetInt32(reader.GetOrdinal("start_line")),
+                    EndLine = reader.GetInt32(reader.GetOrdinal("end_line")),
+                    HeadingPath = reader.GetString(reader.GetOrdinal("heading_path")),
+                    Level = reader.GetInt32(reader.GetOrdinal("level")),
+                    AggregateType = (AggregateType)reader.GetInt32(reader.GetOrdinal("aggregate_type")),
+                    ChildChunkCount = reader.GetInt32(reader.GetOrdinal("child_chunk_count"))
+                });
             }
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "向量搜索失败: {Message}", ex.Message);
             return Enumerable.Empty<SearchResult>();
-        }
-
-        // 获取分段和文件信息
-        var searchResults = new List<SearchResult>();
-        foreach (var (chunkId, vector, distance) in results)
-        {
-            var chunk = await GetChunkAsync(chunkId, cancellationToken);
-            if (chunk == null) continue;
-
-            var file = await GetFileAsync(chunk.FileId, cancellationToken);
-            if (file == null) continue;
-
-            // sqlite-vec 返回的是距离，需要转换为相似度分数
-            var score = 1f / (1f + distance);
-
-            searchResults.Add(new SearchResult
-            {
-                ChunkId = chunk.Id,
-                FileId = chunk.FileId,
-                FilePath = file.Path,
-                Source = file.Source,
-                Title = file.Title,
-                Content = chunk.Content,
-                Score = score,
-                StartLine = chunk.StartLine,
-                EndLine = chunk.EndLine,
-                HeadingPath = chunk.HeadingPath,
-                Level = chunk.Level,
-                AggregateType = chunk.AggregateType,
-                ChildChunkCount = chunk.ChildChunkCount
-            });
         }
 
         return searchResults;
