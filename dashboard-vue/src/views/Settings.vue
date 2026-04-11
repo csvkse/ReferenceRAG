@@ -13,12 +13,15 @@
                 <n-input v-model:value="config.embedding.modelName" placeholder="bge-small-zh-v1.5" />
               </n-form-item>
               <n-form-item label="使用 CUDA">
-                <n-switch v-model:value="config.embedding.useCuda" />
+                <n-switch v-model:value="config.embedding.useCuda" :disabled="!cudaAvailable" />
               </n-form-item>
-              <n-form-item v-if="config.embedding.useCuda" label="CUDA 设备 ID">
+              <n-form-item v-if="!cudaAvailable" label="">
+                <n-text depth="3" style="font-size: 12px;color: var(--n-warning-color)">系统未检测到 CUDA/GPU 支持，Embedding CUDA 已禁用</n-text>
+              </n-form-item>
+              <n-form-item v-if="config.embedding.useCuda && cudaAvailable" label="CUDA 设备 ID">
                 <n-input-number v-model:value="config.embedding.cudaDeviceId" :min="0" :max="7" style="width: 200px" />
               </n-form-item>
-              <n-form-item v-if="config.embedding.useCuda" label="CUDA 库路径">
+              <n-form-item v-if="config.embedding.useCuda && cudaAvailable" label="CUDA 库路径">
                 <n-input v-model:value="config.embedding.cudaLibraryPath" placeholder="CUDA DLL 所在目录（可选）" />
               </n-form-item>
               <n-form-item label="最大序列长度">
@@ -133,9 +136,12 @@
                 <n-input v-model:value="config.rerank.modelPath" placeholder="重排模型 ONNX 文件路径" />
               </n-form-item>
               <n-form-item label="使用 CUDA">
-                <n-switch v-model:value="config.rerank.useCuda" />
+                <n-switch v-model:value="config.rerank.useCuda" :disabled="!cudaAvailable" />
               </n-form-item>
-              <n-form-item v-if="config.rerank.useCuda" label="CUDA 设备 ID">
+              <n-form-item v-if="!cudaAvailable" label="">
+                <n-text depth="3" style="font-size: 12px;color: var(--n-warning-color)">系统未检测到 CUDA/GPU 支持，重排 CUDA 已禁用</n-text>
+              </n-form-item>
+              <n-form-item v-if="config.rerank.useCuda && cudaAvailable" label="CUDA 设备 ID">
                 <n-input-number v-model:value="config.rerank.cudaDeviceId" :min="0" :max="7" style="width: 200px" />
               </n-form-item>
               <n-form-item label="重排返回数量">
@@ -173,13 +179,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useMessage } from 'naive-ui'
-import { settingsApi, sourcesApi } from '@/api'
+import { settingsApi, sourcesApi, type CudaAvailability } from '@/api'
 import type { ObsidianRagConfig, SourceDetail } from '@/types/api'
 
 const message = useMessage()
 const loading = ref(false)
 const saving = ref(false)
 const sourceNames = ref<string[]>([])
+const cudaAvailable = ref(true)
 
 const defaultConfig: ObsidianRagConfig = {
   dataPath: 'data',
@@ -277,6 +284,16 @@ const loadSourceNames = async () => {
   }
 }
 
+const loadCudaAvailability = async () => {
+  try {
+    const response = await settingsApi.getCudaAvailability()
+    const data = response.data as CudaAvailability
+    cudaAvailable.value = data.isAvailable
+  } catch {
+    cudaAvailable.value = false
+  }
+}
+
 const handleSave = async () => {
   saving.value = true
   try {
@@ -296,5 +313,6 @@ const handleSave = async () => {
 onMounted(() => {
   loadConfig()
   loadSourceNames()
+  loadCudaAvailability()
 })
 </script>

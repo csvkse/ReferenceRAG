@@ -33,7 +33,61 @@ public class SettingsController : ControllerBase
     public ActionResult<ObsidianRagConfig> Get()
     {
         var config = _configManager.Load();
+        
+        // 填充重排模型的完整路径
+        if (!string.IsNullOrEmpty(config.Rerank?.CurrentModel))
+        {
+            var rerankModelPath = Path.Combine(
+                config.DataPath ?? "data",
+                "models",
+                config.Rerank.CurrentModel,
+                "model.onnx");
+            
+            // 如果 ModelPath 为空或不存在，使用计算出的路径
+            if (string.IsNullOrEmpty(config.Rerank.ModelPath) || !System.IO.File.Exists(config.Rerank.ModelPath))
+            {
+                config.Rerank.ModelPath = rerankModelPath;
+            }
+        }
+        
+        // 填充 Embedding 模型的完整路径
+        if (!string.IsNullOrEmpty(config.Embedding?.ModelPath))
+        {
+            var embeddingModelDir = Path.GetDirectoryName(config.Embedding.ModelPath);
+            config.Embedding.ModelsPath = embeddingModelDir;
+        }
+        
         return Ok(config);
+    }
+
+    /// <summary>
+    /// 获取 CUDA/GPU 可用性状态
+    /// </summary>
+    [HttpGet("cuda-availability")]
+    public ActionResult<CudaAvailability> GetCudaAvailability()
+    {
+        var cudaAvailable = CheckCudaAvailability();
+        return Ok(new CudaAvailability
+        {
+            IsAvailable = cudaAvailable,
+            Message = cudaAvailable ? "CUDA 可用" : "未检测到 CUDA/GPU，需要安装 NVIDIA 驱动和 CUDA 运行时"
+        });
+    }
+
+    private static bool CheckCudaAvailability()
+    {
+        try
+        {
+            // 尝试创建 CUDA 执行选项来检测 CUDA 是否可用
+            var sessionOptions = new Microsoft.ML.OnnxRuntime.SessionOptions();
+            sessionOptions.AppendExecutionProvider_CUDA(0);
+            sessionOptions.Dispose();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -90,4 +144,20 @@ public class UpdateModelsPathRequest
     /// 是否迁移已有模型到新路径
     /// </summary>
     public bool MigrateExisting { get; set; } = false;
+}
+
+/// <summary>
+/// CUDA/GPU 可用性状态
+/// </summary>
+public class CudaAvailability
+{
+    /// <summary>
+    /// CUDA 是否可用
+    /// </summary>
+    public bool IsAvailable { get; set; }
+
+    /// <summary>
+    /// 状态消息
+    /// </summary>
+    public string Message { get; set; } = "";
 }

@@ -128,11 +128,17 @@ export const indexApi = {
 }
 
 // Settings
+export interface CudaAvailability {
+  isAvailable: boolean
+  message: string
+}
+
 export const settingsApi = {
   get: () => api.get<ObsidianRagConfig>('/Settings'),
   save: (config: ObsidianRagConfig) => api.post('/Settings', config),
   updateModelsPath: (modelsPath: string, migrateExisting = false) =>
-    api.patch('/Settings/models-path', { modelsPath, migrateExisting })
+    api.patch('/Settings/models-path', { modelsPath, migrateExisting }),
+  getCudaAvailability: () => api.get<CudaAvailability>('/Settings/cuda-availability')
 }
 
 // Performance

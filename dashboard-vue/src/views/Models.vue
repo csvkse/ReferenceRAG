@@ -37,6 +37,9 @@
               {{ currentRerankModel.isDownloaded ? '已下载' : '未下载' }}
             </n-tag>
           </n-descriptions-item>
+          <n-descriptions-item label="路径" :span="4">
+            <n-text depth="3" style="font-size: 12px;">{{ currentRerankModel.localPath || '-' }}</n-text>
+          </n-descriptions-item>
         </n-descriptions>
         <n-text v-else depth="3">未配置重排模型</n-text>
       </n-spin>
@@ -485,6 +488,12 @@ const rerankModelColumns: DataTableColumns<ModelInfo> = [
         default: () => row.isDownloaded ? '已下载' : '未下载'
       })
     }
+  },
+  {
+    title: '路径',
+    key: 'localPath',
+    ellipsis: { tooltip: true },
+    width: 200
   },
   {
     title: '操作',
