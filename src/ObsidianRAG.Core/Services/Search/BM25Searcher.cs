@@ -4,7 +4,9 @@ using System.Text.RegularExpressions;
 namespace ObsidianRAG.Core.Services;
 
 /// <summary>
-/// BM25 关键词搜索器 - 支持精确文本匹配
+/// BM25 关键词搜索器 - 仅用于单元测试
+/// ⚠️ 注意：此类为纯内存实现，不在生产代码中使用
+/// 生产环境请使用 SqliteBM25Store 或 Fts5BM25Store
 /// </summary>
 public class BM25Searcher
 {
