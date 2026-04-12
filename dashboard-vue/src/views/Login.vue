@@ -1,19 +1,19 @@
 <template>
   <div class="login-container">
-    <n-card title="Obsidian RAG 登录" style="width: 400px">
+    <n-card title="Obsidian RAG Login" style="width: 400px">
       <n-form @submit.prevent="handleLogin">
-        <n-form-item label="API Key">
+        <n-form-item label="API Key (optional)">
           <n-input
             v-model:value="apiKey"
             type="password"
             show-password-on="click"
-            placeholder="请输入 API Key"
+            placeholder="Leave empty if API Key is not configured"
             @keyup.enter="handleLogin"
           />
         </n-form-item>
         <n-space vertical>
           <n-button type="primary" block :loading="loading" @click="handleLogin">
-            登录
+            Login
           </n-button>
           <n-text v-if="errorMsg" type="error" style="text-align: center; display: block">
             {{ errorMsg }}
@@ -22,7 +22,7 @@
       </n-form>
       <template #footer>
         <n-text depth="3" style="font-size: 12px">
-          API Key 在服务端配置文件中设置，若未配置则无需登录
+          If API Key is not configured on server, leave empty to login directly
         </n-text>
       </template>
     </n-card>
@@ -44,31 +44,35 @@ const loading = ref(false)
 const errorMsg = ref('')
 
 const handleLogin = async () => {
-  if (!apiKey.value.trim()) {
-    errorMsg.value = '请输入 API Key'
-    return
-  }
-
   loading.value = true
   errorMsg.value = ''
 
   try {
-    // 保存 API Key 到 store
-    authStore.setApiKey(apiKey.value.trim())
+    // If API Key provided, save it
+    if (apiKey.value.trim()) {
+      authStore.setApiKey(apiKey.value.trim())
+    } else {
+      // Clear any existing API Key
+      authStore.clearApiKey()
+    }
 
-    // 验证 API Key 是否有效
+    // Verify if we can access the API
     const valid = await authStore.verifyApiKey()
 
     if (valid) {
-      message.success('登录成功')
+      message.success('Login successful')
       router.push('/')
     } else {
       authStore.clearApiKey()
-      errorMsg.value = 'API Key 无效'
+      errorMsg.value = 'API Key is required. Please enter a valid API Key.'
     }
   } catch (error: any) {
     authStore.clearApiKey()
-    errorMsg.value = error.response?.data?.error || '验证失败'
+    if (error.response?.status === 401) {
+      errorMsg.value = 'API Key is required. Please enter a valid API Key.'
+    } else {
+      errorMsg.value = error.response?.data?.error || 'Verification failed'
+    }
   } finally {
     loading.value = false
   }
