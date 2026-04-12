@@ -299,9 +299,17 @@ else
 }
 
 app.UseCors();
+
+// 静态文件服务（Vue 前端）
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 app.UseApiKeyAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+
+// SPA fallback：非 API 请求返回 index.html
+app.MapFallbackToFile("index.html");
 
 // 映射 SignalR Hub
 app.MapHub<IndexHub>("/hubs/index");
