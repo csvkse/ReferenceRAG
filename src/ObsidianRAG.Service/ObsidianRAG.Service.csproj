@@ -44,6 +44,16 @@
         <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
       </ResolvedFileToPublish>
     </ItemGroup>
+
+    <!-- 复制服务安装脚本到发布输出 -->
+    <ItemGroup>
+      <ScriptFiles Include="scripts\**" />
+      <ResolvedFileToPublish Include="@(ScriptFiles->'%(FullPath)')" Exclude="@(ResolvedFileToPublish)">
+        <RelativePath>scripts\%(RecursiveDir)%(FileName)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
   </Target>
 
 </Project>
