@@ -14,6 +14,9 @@ Console.InputEncoding= System.Text.Encoding.UTF8;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// 支持 Windows 服务运行
+builder.Services.AddWindowsService();
+
 // 文件日志（写入 logs/ 目录，按日期轮转）
 var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
 Directory.CreateDirectory(logDir);
