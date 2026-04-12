@@ -4,7 +4,7 @@ using Microsoft.Extensions.Logging;
 namespace ObsidianRAG.Service.Middleware;
 
 /// <summary>
-/// API Key 认证中间件 - 可通过配置 ApiKey 启用，启用后所有接口都需要认证
+/// API Key 认证中间件 - 仅对 /api/* 路径进行认证
 /// </summary>
 public class ApiKeyMiddleware
 {
@@ -20,6 +20,13 @@ public class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        // 只对 /api/* 路径进行认证，静态文件直接放行
+        if (!context.Request.Path.StartsWithSegments("/api"))
+        {
+            await _next(context);
+            return;
+        }
+
         // 检查是否启用 API Key 认证
         var enabled = context.Items["ApiKeyEnabled"] as bool? ?? false;
         if (!enabled)
@@ -35,7 +42,7 @@ public class ApiKeyMiddleware
             return;
         }
 
-        // 仅支持 Header 传递 API Key (安全考虑，移除 QueryString 支持)
+        // 仅支持 Header 传递 API Key (安全考虑)
         string? providedKey = null;
         if (context.Request.Headers.TryGetValue(ApiKeyHeaderName, out var headerKey))
         {
