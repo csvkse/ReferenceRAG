@@ -3,7 +3,9 @@
 
 param(
     [string]$ServiceName = "ObsidianRAG",
-    [int]$Port = 5000
+    [int]$Port = 5000,
+    [string]$CudaPath = "",
+    [switch]$SkipCuda
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,16 +59,38 @@ $regPath = "HKLM\SYSTEM\CurrentControlSet\Services\$ServiceName"
 Set-ItemProperty -Path "Registry::$regPath" -Name "WorkingDirectory" -Value $ServiceDir -Type ExpandString
 Write-Host "Working directory: $ServiceDir"
 
+# Build environment variables array
+$envArray = @()
+
 # Set ASPNETCORE_URLS
-$envValue = "ASPNETCORE_URLS=http://0.0.0.0:$Port"
-$existingEnv = (Get-ItemProperty -Path "Registry::$regPath" -Name "Environment" -ErrorAction SilentlyContinue).Environment
-if ($existingEnv) {
-    $envArray = @($existingEnv) + $envValue
-} else {
-    $envArray = @($envValue)
-}
-Set-ItemProperty -Path "Registry::$regPath" -Name "Environment" -Value $envArray -Type MultiString
+$envArray += "ASPNETCORE_URLS=http://0.0.0.0:$Port"
 Write-Host "Listening port: $Port"
+
+# Detect and add CUDA path
+if (-not $SkipCuda) {
+    $cudaBinPath = $CudaPath
+
+    # Auto-detect CUDA path if not specified
+    if ([string]::IsNullOrEmpty($cudaBinPath)) {
+        $cudaEnv = [Environment]::GetEnvironmentVariable("CUDA_PATH", "Machine")
+        if (-not [string]::IsNullOrEmpty($cudaEnv)) {
+            $cudaBinPath = Join-Path $cudaEnv "bin"
+        }
+    }
+
+    if (-not [string]::IsNullOrEmpty($cudaBinPath) -and (Test-Path $cudaBinPath)) {
+        # Get current system PATH
+        $systemPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+        $envArray += "PATH=$cudaBinPath;$systemPath"
+        Write-Host "CUDA path: $cudaBinPath" -ForegroundColor Green
+    } else {
+        Write-Host "CUDA not detected, using CPU mode" -ForegroundColor Yellow
+        Write-Host "To enable CUDA, specify -CudaPath parameter or install CUDA Toolkit"
+    }
+}
+
+# Set environment variables
+Set-ItemProperty -Path "Registry::$regPath" -Name "Environment" -Value $envArray -Type MultiString
 
 # Set service description
 sc.exe description $ServiceName "Obsidian RAG Vector Search Service" | Out-Null
@@ -84,6 +108,11 @@ try {
     Write-Host "Status: Get-Service $ServiceName"
     $logPath = Join-Path $ServiceDir "logs"
     Write-Host "Logs: $logPath"
+    Write-Host ""
+    Write-Host "Usage:" -ForegroundColor Cyan
+    Write-Host "  .\servicectl.ps1 status   # Check status"
+    Write-Host "  .\servicectl.ps1 stop     # Stop service"
+    Write-Host "  .\servicectl.ps1 restart  # Restart service"
 } catch {
     Write-Warning "Service created but failed to start: $_"
     Write-Host "Check logs: $ServiceDir\logs\"
