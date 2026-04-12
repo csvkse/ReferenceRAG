@@ -21,7 +21,7 @@
                            │ FileSystemWatcher
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    ObsidianRAG.Service                       │
+│                    ReferenceRAG.Service                       │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
 │  │ AI Query API│  │ Index Hub   │  │ System API  │         │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘         │
@@ -29,7 +29,7 @@
           │                │                │
           ▼                ▼                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                     ObsidianRAG.Core                         │
+│                     ReferenceRAG.Core                         │
 │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐   │
 │  │ MarkdownChunker│  │EmbeddingService│  │SearchService │   │
 │  └───────────────┘  └───────────────┘  └───────────────┘   │
@@ -40,7 +40,7 @@
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    ObsidianRAG.Storage                       │
+│                    ReferenceRAG.Storage                       │
 │  ┌───────────────┐  ┌───────────────┐                      │
 │  │ JsonVectorStore│  │SqliteVectorStore│                    │
 │  └───────────────┘  └───────────────┘                      │
@@ -65,28 +65,28 @@ dotnet restore
 ### 3. 初始化配置
 
 ```bash
-dotnet run --project src/ObsidianRAG.CLI -- config init
+dotnet run --project src/ReferenceRAG.CLI -- config init
 ```
 
 ### 4. 添加源文件夹（支持多个）
 
 ```bash
 # 添加 Obsidian 笔记库
-dotnet run --project src/ObsidianRAG.CLI -- source add /path/to/obsidian/vault --name "我的笔记" --type obsidian
+dotnet run --project src/ReferenceRAG.CLI -- source add /path/to/obsidian/vault --name "我的笔记" --type obsidian
 
 # 添加普通 Markdown 文件夹
-dotnet run --project src/ObsidianRAG.CLI -- source add /path/to/documents --name "文档库" --type markdown
+dotnet run --project src/ReferenceRAG.CLI -- source add /path/to/documents --name "文档库" --type markdown
 
 # 添加代码文档
-dotnet run --project src/ObsidianRAG.CLI -- source add /path/to/project/docs --name "项目文档" --type code
+dotnet run --project src/ReferenceRAG.CLI -- source add /path/to/project/docs --name "项目文档" --type code
 
 # 查看所有源
-dotnet run --project src/ObsidianRAG.CLI -- source list
+dotnet run --project src/ReferenceRAG.CLI -- source list
 ```
 
 **Windows 示例:**
 ```powershell
-dotnet run --project src/ObsidianRAG.CLI -- source add "C:\Users\YourName\Documents\Notes" --name "笔记"
+dotnet run --project src/ReferenceRAG.CLI -- source add "C:\Users\YourName\Documents\Notes" --name "笔记"
 ```
 
 ### 5. 下载向量模型（可选）
@@ -126,7 +126,7 @@ chmod +x scripts/download-model.sh
 
 4. **启用 GPU**：
    
-   编辑 `obsidian-rag.json` 或 `src/ObsidianRAG.Service/obsidian-rag.json`：
+   编辑 `obsidian-rag.json` 或 `src/ReferenceRAG.Service/obsidian-rag.json`：
    ```json
    {
      "embedding": {
@@ -157,19 +157,19 @@ chmod +x scripts/download-model.sh
 
 ```bash
 # 索引所有源
-dotnet run --project src/ObsidianRAG.CLI -- index
+dotnet run --project src/ReferenceRAG.CLI -- index
 
 # 索引指定源
-dotnet run --project src/ObsidianRAG.CLI -- index --source "我的笔记"
+dotnet run --project src/ReferenceRAG.CLI -- index --source "我的笔记"
 
 # 强制重新索引
-dotnet run --project src/ObsidianRAG.CLI -- index --force
+dotnet run --project src/ReferenceRAG.CLI -- index --force
 ```
 
 ### 7. 启动服务
 
 ```bash
-dotnet run --project src/ObsidianRAG.Service
+dotnet run --project src/ReferenceRAG.Service
 ```
 
 服务将在 `http://localhost:5000` 启动。
@@ -450,14 +450,14 @@ dotnet test --filter "FullyQualifiedName~MarkdownChunkerTests"
 ## 📁 项目结构
 
 ```
-ObsidianRAG/
+ReferenceRAG/
 ├── src/
-│   ├── ObsidianRAG.Service/      # ASP.NET Core Web API
-│   ├── ObsidianRAG.Core/         # 核心业务逻辑
-│   ├── ObsidianRAG.Storage/      # 存储层
-│   └── ObsidianRAG.CLI/          # 命令行工具
+│   ├── ReferenceRAG.Service/      # ASP.NET Core Web API
+│   ├── ReferenceRAG.Core/         # 核心业务逻辑
+│   ├── ReferenceRAG.Storage/      # 存储层
+│   └── ReferenceRAG.CLI/          # 命令行工具
 ├── tests/
-│   └── ObsidianRAG.Tests/        # 单元测试
+│   └── ReferenceRAG.Tests/        # 单元测试
 ├── models/                       # ONNX 模型
 ├── docs/                         # 文档
 ├── Dockerfile

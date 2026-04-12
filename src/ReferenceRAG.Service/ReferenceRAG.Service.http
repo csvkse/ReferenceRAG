@@ -1,0 +1,6 @@
+@ReferenceRAG.Service_HostAddress = http://localhost:5294
+
+GET {{ReferenceRAG.Service_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

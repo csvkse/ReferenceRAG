@@ -8,11 +8,11 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Copy solution and project files
-COPY ["ObsidianRAG.sln", "./"]
-COPY ["src/ObsidianRAG.Service/ObsidianRAG.Service.csproj", "src/ObsidianRAG.Service/"]
-COPY ["src/ObsidianRAG.Core/ObsidianRAG.Core.csproj", "src/ObsidianRAG.Core/"]
-COPY ["src/ObsidianRAG.Storage/ObsidianRAG.Storage.csproj", "src/ObsidianRAG.Storage/"]
-COPY ["tests/ObsidianRAG.Tests/ObsidianRAG.Tests.csproj", "tests/ObsidianRAG.Tests/"]
+COPY ["ReferenceRAG.sln", "./"]
+COPY ["src/ReferenceRAG.Service/ReferenceRAG.Service.csproj", "src/ReferenceRAG.Service/"]
+COPY ["src/ReferenceRAG.Core/ReferenceRAG.Core.csproj", "src/ReferenceRAG.Core/"]
+COPY ["src/ReferenceRAG.Storage/ReferenceRAG.Storage.csproj", "src/ReferenceRAG.Storage/"]
+COPY ["tests/ReferenceRAG.Tests/ReferenceRAG.Tests.csproj", "tests/ReferenceRAG.Tests/"]
 
 # Restore dependencies
 RUN dotnet restore
@@ -22,7 +22,7 @@ COPY ["src/", "src/"]
 COPY ["tests/", "tests/"]
 
 # Build
-WORKDIR "/src/src/ObsidianRAG.Service"
+WORKDIR "/src/src/ReferenceRAG.Service"
 RUN dotnet build -c Release -o /app/build
 
 # Publish
@@ -54,4 +54,4 @@ RUN adduser --disabled-password --gecko '' appuser \
     && chown -R appuser:appuser /app
 USER appuser
 
-ENTRYPOINT ["dotnet", "ObsidianRAG.Service.dll"]
+ENTRYPOINT ["dotnet", "ReferenceRAG.Service.dll"]
