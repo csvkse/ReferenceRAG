@@ -38,6 +38,11 @@
               <n-icon><MoonOutline /></n-icon>
             </template>
           </n-button>
+          <n-button v-if="authStore.isAuthenticated" text @click="handleLogout">
+            <template #icon>
+              <n-icon><LogOutOutline /></n-icon>
+            </template>
+          </n-button>
         </n-space>
       </n-layout-header>
       <n-layout-content style="padding: 20px; overflow: auto">
@@ -55,6 +60,7 @@ import type { MenuOption } from 'naive-ui'
 import {
   BookOutline,
   MoonOutline,
+  LogOutOutline,
   HomeOutline,
   SearchOutline,
   FolderOutline,
@@ -65,10 +71,12 @@ import {
   PulseOutline
 } from '@vicons/ionicons5'
 import { useIndexStore } from '@/stores/index'
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
 const route = useRoute()
 const indexStore = useIndexStore()
+const authStore = useAuthStore()
 
 const collapsed = ref(false)
 
@@ -134,6 +142,11 @@ const handleMenuSelect = (key: string) => {
 
 const toggleTheme = () => {
   // Theme toggle placeholder
+}
+
+const handleLogout = () => {
+  authStore.logout()
+  router.push('/login')
 }
 </script>
 

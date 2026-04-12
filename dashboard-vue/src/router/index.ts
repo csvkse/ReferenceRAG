@@ -1,7 +1,14 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 
 const routes: RouteRecordRaw[] = [
+  {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/Login.vue'),
+    meta: { title: '登录', public: true }
+  },
   {
     path: '/',
     name: 'Layout',
@@ -71,9 +78,40 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, _from, next) => {
+router.beforeEach(async (to, _from, next) => {
   document.title = `${to.meta.title || 'Obsidian RAG'} - Obsidian RAG`
-  next()
+
+  // 公开页面直接放行
+  if (to.meta.public) {
+    next()
+    return
+  }
+
+  const authStore = useAuthStore()
+
+  // 尝试验证 API Key 是否有效
+  if (authStore.apiKey) {
+    try {
+      // 静默验证，不显示错误
+      await authStore.verifyApiKey()
+      next()
+    } catch {
+      // 验证失败，跳转登录
+      next('/login')
+    }
+  } else {
+    // 没有 API Key，尝试访问看是否需要认证
+    try {
+      await fetch('/api/system/status')
+      next()
+    } catch (error: any) {
+      if (error.status === 401 || error.status === 403) {
+        next('/login')
+      } else {
+        next()
+      }
+    }
+  }
 })
 
 export default router
