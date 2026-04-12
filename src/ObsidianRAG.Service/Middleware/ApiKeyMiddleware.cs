@@ -23,11 +23,11 @@ public class ApiKeyMiddleware
         // Special endpoint: /api/auth/check - always allowed, returns auth status
         if (context.Request.Path.StartsWithSegments("/api/auth/check"))
         {
-            var enabled = context.Items["ApiKeyEnabled"] as bool? ?? false;
+            var authEnabled = context.Items["ApiKeyEnabled"] as bool? ?? false;
             context.Response.StatusCode = StatusCodes.Status200OK;
             await context.Response.WriteAsJsonAsync(new {
-                authRequired = enabled,
-                message = enabled ? "API Key is required" : "No authentication required"
+                authRequired = authEnabled,
+                message = authEnabled ? "API Key is required" : "No authentication required"
             });
             return;
         }
