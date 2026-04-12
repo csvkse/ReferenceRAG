@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # 检查管理员权限
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -38,7 +39,7 @@ if ($existingService) {
 }
 
 # 创建服务
-$binPath = "`"$Executable`""
+$binPath = '"' + $Executable + '"'
 $result = sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= "ObsidianRAG Service"
 if ($LASTEXITCODE -ne 0) {
     Write-Error "创建服务失败: $result"
@@ -76,8 +77,10 @@ try {
     Write-Host ""
     Write-Host "访问地址: http://localhost:$Port"
     Write-Host "查看状态: Get-Service $ServiceName"
-    Write-Host "查看日志: Get-Content (Join-Path `"$ServiceDir`" 'logs\*.log')"
+    $logPath = Join-Path $ServiceDir "logs"
+    Write-Host "日志目录: $logPath"
 } catch {
     Write-Warning "服务创建成功但启动失败: $_"
-    Write-Host "请检查日志文件: $ServiceDir\logs\"
+    Write-Host "请检查日志目录: $ServiceDir\logs\"
+    exit 1
 }

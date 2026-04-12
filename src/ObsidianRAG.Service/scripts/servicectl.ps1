@@ -18,6 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ServiceName = "ObsidianRAG"
 
 # Check if running as Administrator for start/stop/restart
@@ -25,7 +26,8 @@ $needsAdmin = $Action -in @("start", "stop", "restart")
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if ($needsAdmin -and -not $isAdmin) {
-    Write-Error "This action requires Administrator privileges. Please restart PowerShell as admin."
+    Write-Host "Error: This action requires Administrator privileges." -ForegroundColor Red
+    Write-Host "Please restart PowerShell as admin." -ForegroundColor Yellow
     exit 1
 }
 
