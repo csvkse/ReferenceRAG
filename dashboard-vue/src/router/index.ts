@@ -82,7 +82,7 @@ const router = createRouter({
 let authChecked = false
 
 router.beforeEach(async (to, _from, next) => {
-  document.title = `${to.meta.title || 'Obsidian RAG'} - Obsidian RAG`
+  document.title = `${to.meta.title || 'ReferenceRAG'} - ReferenceRAG`
 
   // 公开页面直接放行
   if (to.meta.public) {

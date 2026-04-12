@@ -204,7 +204,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useMessage } from 'naive-ui'
 import { settingsApi, sourcesApi, type CudaAvailability } from '@/api'
-import type { ObsidianRagConfig, SourceDetail } from '@/types/api'
+import type { ReferenceRAGConfig, SourceDetail } from '@/types/api'
 
 const message = useMessage()
 const loading = ref(false)
@@ -212,7 +212,7 @@ const saving = ref(false)
 const sourceNames = ref<string[]>([])
 const cudaAvailable = ref(true)
 
-const defaultConfig: ObsidianRagConfig = {
+const defaultConfig: ReferenceRAGConfig = {
   dataPath: 'data',
   sources: [],
   embedding: {
@@ -258,7 +258,7 @@ const defaultConfig: ObsidianRagConfig = {
   }
 }
 
-const config = ref<ObsidianRagConfig>(JSON.parse(JSON.stringify(defaultConfig)))
+const config = ref<ReferenceRAGConfig>(JSON.parse(JSON.stringify(defaultConfig)))
 
 const thresholdPercent = computed({
   get: () => Math.round(config.value.search.similarityThreshold * 100),

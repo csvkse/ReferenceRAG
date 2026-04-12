@@ -1,6 +1,6 @@
 <template>
   <div class="login-container">
-    <n-card title="Obsidian RAG Login" style="width: 400px">
+    <n-card title="ReferenceRAG Login" style="width: 400px">
       <n-form @submit.prevent="handleLogin">
         <n-form-item label="API Key (optional)">
           <n-input

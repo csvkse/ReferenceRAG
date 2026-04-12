@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import axios from 'axios'
 
-const API_KEY_STORAGE_KEY = 'obsidian_rag_api_key'
+const API_KEY_STORAGE_KEY = 'reference_rag_api_key'
 
 export const useAuthStore = defineStore('auth', () => {
   const apiKey = ref<string | null>(localStorage.getItem(API_KEY_STORAGE_KEY))

@@ -158,7 +158,7 @@ export interface DashboardStats {
 
 // --- Settings ---
 
-export interface ObsidianRagConfig {
+export interface ReferenceRAGConfig {
   dataPath?: string
   modelsRootPath?: string  // 模型根目录（统一管理嵌入式和重排模型）
   sources?: SourceFolder[]

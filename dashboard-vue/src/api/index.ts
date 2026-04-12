@@ -7,7 +7,7 @@ import type {
   DrilldownRequest,
   DrilldownResponse,
   DashboardStats,
-  ObsidianRagConfig,
+  ReferenceRAGConfig,
   IndexRequest,
   IndexJob,
   BenchmarkRequest,
@@ -90,7 +90,7 @@ api.interceptors.response.use(
     // 401 未授权，跳转登录页
     if (error.response?.status === 401) {
       // 清除本地存储的 API Key
-      localStorage.removeItem('obsidian_rag_api_key')
+      localStorage.removeItem('reference_rag_api_key')
       // 跳转登录页（避免重复跳转）
       if (window.location.pathname !== '/login') {
         window.location.href = '/login'
@@ -144,8 +144,8 @@ export interface CudaAvailability {
 }
 
 export const settingsApi = {
-  get: () => api.get<ObsidianRagConfig>('/Settings'),
-  save: (config: ObsidianRagConfig) => api.post('/Settings', config),
+  get: () => api.get<ReferenceRAGConfig>('/Settings'),
+  save: (config: ReferenceRAGConfig) => api.post('/Settings', config),
   updateModelsPath: (modelsPath: string, migrateExisting = false) =>
     api.patch('/Settings/models-path', { modelsPath, migrateExisting }),
   getCudaAvailability: () => api.get<CudaAvailability>('/Settings/cuda-availability')

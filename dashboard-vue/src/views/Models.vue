@@ -412,7 +412,7 @@ import { NTag, NButton, NSpace, NProgress, NAlert, NCode, NIcon, NPopconfirm, NR
 import type { DataTableColumns } from 'naive-ui'
 import { RefreshOutline, AddOutline, InformationCircleOutline } from '@vicons/ionicons5'
 import { modelsApi, settingsApi } from '@/api'
-import type { ModelInfo, DownloadProgress, ModelDownloadOptions, ObsidianRagConfig } from '@/types/api'
+import type { ModelInfo, DownloadProgress, ModelDownloadOptions, ReferenceRAGConfig } from '@/types/api'
 
 const message = useMessage()
 const modelsPath = ref('')
@@ -443,7 +443,7 @@ const loadModelsPath = async () => {
   modelsPathLoading.value = true
   try {
     const response = await settingsApi.get()
-    const config = response.data as ObsidianRagConfig
+    const config = response.data as ReferenceRAGConfig
     modelsPath.value = (config as any).modelsRootPath || 'models'
   } catch (error) {
     console.error('Failed to load models path:', error)

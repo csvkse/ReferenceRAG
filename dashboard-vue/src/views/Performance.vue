@@ -1808,7 +1808,7 @@ const remoteApi = ref({
 })
 
 // Load saved config from localStorage
-const savedApiConfig = localStorage.getItem('obsidian-rag-remote-api')
+const savedApiConfig = localStorage.getItem('reference-rag-remote-api')
 if (savedApiConfig) {
   try { Object.assign(remoteApi.value, JSON.parse(savedApiConfig)) } catch { /* ignore */ }
 }
@@ -1825,7 +1825,7 @@ const remoteResults = ref<{
 }[]>([])
 
 const saveApiConfig = () => {
-  localStorage.setItem('obsidian-rag-remote-api', JSON.stringify(remoteApi.value))
+  localStorage.setItem('reference-rag-remote-api', JSON.stringify(remoteApi.value))
 }
 
 // 测试 API 连接

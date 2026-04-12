@@ -14,7 +14,7 @@
         <n-icon size="28" color="#63e2b7">
           <BookOutline />
         </n-icon>
-        <span v-show="!collapsed" class="logo-text">Obsidian RAG</span>
+        <span v-show="!collapsed" class="logo-text">ReferenceRAG</span>
       </div>
       <n-menu
         :collapsed="collapsed"
@@ -28,7 +28,7 @@
     <n-layout>
       <n-layout-header bordered style="height: 60px; padding: 0 20px; display: flex; align-items: center; justify-content: space-between">
         <n-breadcrumb>
-          <n-breadcrumb-item>Obsidian RAG</n-breadcrumb-item>
+          <n-breadcrumb-item>ReferenceRAG</n-breadcrumb-item>
           <n-breadcrumb-item>{{ currentTitle }}</n-breadcrumb-item>
         </n-breadcrumb>
         <n-space align="center">
