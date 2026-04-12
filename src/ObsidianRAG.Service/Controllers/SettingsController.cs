@@ -14,15 +14,21 @@ public class SettingsController : ControllerBase
 {
     private readonly ConfigManager _configManager;
     private readonly IModelManager _modelManager;
+    private readonly IEmbeddingService _embeddingService;
+    private readonly IRerankService _rerankService;
     private readonly ILogger<SettingsController> _logger;
 
     public SettingsController(
         ConfigManager configManager,
         IModelManager modelManager,
+        IEmbeddingService embeddingService,
+        IRerankService rerankService,
         ILogger<SettingsController> logger)
     {
         _configManager = configManager;
         _modelManager = modelManager;
+        _embeddingService = embeddingService;
+        _rerankService = rerankService;
         _logger = logger;
     }
 
@@ -33,30 +39,33 @@ public class SettingsController : ControllerBase
     public ActionResult<ObsidianRagConfig> Get()
     {
         var config = _configManager.Load();
-        
+
+        // 获取模型根目录（优先使用顶层配置）
+        var modelsRoot = !string.IsNullOrEmpty(config.ModelsRootPath)
+            ? config.ModelsRootPath
+            : Path.Combine(config.DataPath ?? "data", "models");
+
         // 填充重排模型的完整路径
         if (!string.IsNullOrEmpty(config.Rerank?.CurrentModel))
         {
             var rerankModelPath = Path.Combine(
-                config.DataPath ?? "data",
-                "models",
+                modelsRoot,
                 config.Rerank.CurrentModel,
                 "model.onnx");
-            
+
             // 如果 ModelPath 为空或不存在，使用计算出的路径
             if (string.IsNullOrEmpty(config.Rerank.ModelPath) || !System.IO.File.Exists(config.Rerank.ModelPath))
             {
                 config.Rerank.ModelPath = rerankModelPath;
             }
         }
-        
-        // 填充 Embedding 模型的完整路径
-        if (!string.IsNullOrEmpty(config.Embedding?.ModelPath))
+
+        // 确保 ModelsRootPath 有值
+        if (string.IsNullOrEmpty(config.ModelsRootPath))
         {
-            var embeddingModelDir = Path.GetDirectoryName(config.Embedding.ModelPath);
-            config.Embedding.ModelsPath = embeddingModelDir;
+            config.ModelsRootPath = modelsRoot;
         }
-        
+
         return Ok(config);
     }
 
@@ -113,19 +122,26 @@ public class SettingsController : ControllerBase
 
         _logger.LogInformation("更新模型路径: {Path}, 迁移: {Migrate}", request.ModelsPath, request.MigrateExisting);
 
-        var (success, error, migrated) = await _modelManager.SetModelsPathAsync(
+        var result = await _modelManager.SetModelsPathAsync(
             request.ModelsPath, request.MigrateExisting);
 
-        if (!success)
+        if (!result.Success)
         {
-            return BadRequest(new { error });
+            return BadRequest(new { error = result.Error });
         }
+
+        //// 卸载当前加载的模型，下次使用时将自动加载新路径的模型
+        //_embeddingService.UnloadModel();
+        //_rerankService.UnloadModel();
+        _logger.LogInformation("已卸载嵌入模型和重排模型，新模型将在下次使用时自动加载");
 
         return Ok(new
         {
             message = $"模型路径已更新: {request.ModelsPath}",
-            migratedCount = migrated.Count,
-            migrated
+            migratedCount = result.Migrated.Count,
+            migrated = result.Migrated,
+            embeddingModels = result.EmbeddingModels,
+            rerankModels = result.RerankModels
         });
     }
 }

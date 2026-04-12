@@ -49,6 +49,21 @@
             />
           </n-form-item>
         </n-gi>
+        <n-gi>
+          <n-form-item label="路径过滤">
+            <n-tree
+              v-model:selected-keys="selectedPaths"
+              :data="pathTreeData"
+              :loading="pathsLoading"
+              selectable
+              multiple
+              clearable
+              placeholder="全部路径"
+              style="max-height: 200px; overflow-y: auto"
+              @update:selected-keys="handlePathSelect"
+            />
+          </n-form-item>
+        </n-gi>
       </n-grid>
     </n-card>
 
@@ -179,25 +194,30 @@ import {
   ArrowDownOutline,
   OpenOutline
 } from '@vicons/ionicons5'
-import { aiQueryApi, sourcesApi } from '@/api'
-import type { SourceDetail, AIQueryResponse, ChunkResult, DrilldownResponse, QueryMode } from '@/types/api'
+import { aiQueryApi, sourcesApi, pathsApi } from '@/api'
+import type { SourceDetail, AIQueryResponse, ChunkResult, DrilldownResponse, QueryMode, SourcePathInfo } from '@/types/api'
 
 const searchQuery = ref('')
 const loading = ref(false)
 const searched = ref(false)
 const searchResponse = ref<AIQueryResponse | null>(null)
 const sources = ref<SourceDetail[]>([])
+const paths = ref<SourcePathInfo[]>([])
+const selectedPaths = ref<string[]>([])
+const pathsLoading = ref(false)
 
 const searchOptions = ref<{
   mode: QueryMode
   topK: number
   contextWindow: number
   sources: string[]
+  folders: string[]
 }>({
   mode: 'Standard',
   topK: 10,
   contextWindow: 1,
-  sources: []
+  sources: [],
+  folders: []
 })
 
 const modeOptions = [
@@ -210,6 +230,31 @@ const modeOptions = [
 const sourceOptions = computed(() =>
   sources.value.map(s => ({ label: s.name, value: s.name }))
 )
+
+// 将路径数据转换为树形结构供 n-tree 使用
+const pathTreeData = computed(() => {
+  return paths.value.map(source => ({
+    key: `source:${source.name}`,
+    label: source.name,
+    children: source.folders.map(folder => ({
+      key: `folder:${folder}`,
+      label: folder
+    }))
+  }))
+})
+
+// 将选中的路径 key 转换为 folder 路径（folder:/docs -> /docs）
+const selectedPathFolders = computed(() => {
+  return selectedPaths.value
+    .filter(key => key.startsWith('folder:'))
+    .map(key => key.replace('folder:', ''))
+})
+
+// n-tree 选中变化时处理
+const handlePathSelect = (keys: string[]) => {
+  selectedPaths.value = keys
+  searchOptions.value.folders = selectedPathFolders.value
+}
 
 const showDrilldown = ref(false)
 const drilldownLoading = ref(false)
@@ -236,7 +281,8 @@ const handleSearch = async () => {
       mode: searchOptions.value.mode,
       topK: searchOptions.value.topK,
       contextWindow: searchOptions.value.contextWindow,
-      sources: searchOptions.value.sources.length > 0 ? searchOptions.value.sources : undefined
+      sources: searchOptions.value.sources.length > 0 ? searchOptions.value.sources : undefined,
+      filters: searchOptions.value.folders.length > 0 ? { folders: searchOptions.value.folders } : undefined
     })
     searchResponse.value = response.data
   } catch (error) {
@@ -273,7 +319,20 @@ const loadSources = async () => {
   }
 }
 
+const loadPaths = async () => {
+  pathsLoading.value = true
+  try {
+    const response = await pathsApi.getPaths()
+    paths.value = response.data.sources
+  } catch (error) {
+    console.error('Failed to load paths:', error)
+  } finally {
+    pathsLoading.value = false
+  }
+}
+
 onMounted(() => {
   loadSources()
+  loadPaths()
 })
 </script>

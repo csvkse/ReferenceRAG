@@ -42,11 +42,23 @@ public class ModelInfo
 }
 
 /// <summary>
+/// 模型路径变更结果
+/// </summary>
+public class ModelPathChangeResult
+{
+    public bool Success { get; set; }
+    public string? Error { get; set; }
+    public List<string> Migrated { get; set; } = new();
+    public List<ModelInfo> EmbeddingModels { get; set; } = new();
+    public List<ModelInfo> RerankModels { get; set; } = new();
+}
+
+/// <summary>
 /// 模型管理器接口
 /// </summary>
 public interface IModelManager
 {
-    Task<List<ModelInfo>> GetAvailableModelsAsync();
+    Task<List<ModelInfo>> GetAvailableModelsAsync(string modelType = "");
     List<ModelInfo> GetDownloadedModels();
     ModelInfo? GetCurrentModel();
     Task<bool> SwitchModelAsync(string modelName);
@@ -78,7 +90,7 @@ public interface IModelManager
     /// <summary>
     /// 设置模型保存路径（可选迁移已有模型）
     /// </summary>
-    Task<(bool Success, string? Error, List<string> Migrated)> SetModelsPathAsync(
+    Task<ModelPathChangeResult> SetModelsPathAsync(
         string newPath, bool migrateExisting = false, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -91,6 +103,8 @@ public interface IModelManager
     /// 获取模型的下载选项
     /// </summary>
     Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName);
+
+
 
     // ========== 重排模型管理 ==========
 
@@ -122,7 +136,7 @@ public class ModelManager : IModelManager, IDisposable
 {
     private string _modelsPath;
     private readonly ConfigManager _configManager;
-    private readonly Dictionary<string, ModelInfo> _modelRegistry;
+    private static readonly Dictionary<string, ModelInfo> _modelRegistry = new();
     private ModelInfo? _currentModel;
     private ModelInfo? _currentRerankModel;
     private bool _disposed;
@@ -597,7 +611,6 @@ public class ModelManager : IModelManager, IDisposable
     {
         _modelsPath = Path.GetFullPath(modelsPath);
         _configManager = configManager;
-        _modelRegistry = new Dictionary<string, ModelInfo>();
         
         InitializeRegistry();
     }
@@ -626,15 +639,15 @@ public class ModelManager : IModelManager, IDisposable
         {
             var config = LoadConfigAsync().GetAwaiter().GetResult();
             
-            // 检查 Embedding 模型
-            if (!string.IsNullOrEmpty(config.Embedding?.ModelPath))
+            // 检查 Embedding 模型（使用 ModelName + _modelsPath 拼接，而非完整路径）
+            if (!string.IsNullOrEmpty(config.Embedding?.ModelName))
             {
-                var modelPath = config.Embedding.ModelPath;
-                if (File.Exists(modelPath))
-                {
-                    var modelDir = Path.GetDirectoryName(modelPath);
-                    var modelName = config.Embedding.ModelName ?? Path.GetFileName(modelDir);
+                var modelName = config.Embedding.ModelName;
+                var modelDir = Path.Combine(_modelsPath, modelName);
+                var onnxPath = Path.Combine(modelDir, "model.onnx");
 
+                if (File.Exists(onnxPath))
+                {
                     if (_modelRegistry.TryGetValue(modelName, out var model))
                     {
                         model.IsDownloaded = true;
@@ -642,45 +655,22 @@ public class ModelManager : IModelManager, IDisposable
                         _currentModel = model;
                         Console.WriteLine($"[ModelManager] 从配置加载当前模型: {modelName}, 路径: {modelDir}");
                     }
-                    else
-                    {
-                        // 未注册的模型，添加到注册表
-                        var dimension = DetectModelDimension(modelDir ?? "");
-                        var directorySize = 0L;
-                        if (!string.IsNullOrEmpty(modelDir) && Directory.Exists(modelDir))
-                        {
-                            directorySize = Directory.GetFiles(modelDir, "*", SearchOption.AllDirectories)
-                                .Sum(f => new FileInfo(f).Length);
-                        }
-
-                        var newModel = new ModelInfo
-                        {
-                            Name = modelName,
-                            DisplayName = modelName,
-                            Description = "本地模型",
-                            Dimension = dimension,
-                            IsDownloaded = true,
-                            LocalPath = modelDir,
-                            ModelSizeBytes = directorySize,
-                            HasOnnx = true
-                        };
-                        _modelRegistry[modelName] = newModel;
-                        _currentModel = newModel;
-                        Console.WriteLine($"[ModelManager] 注册新模型: {modelName}, 路径: {modelDir}");
-                    }
                 }
             }
             
-            // 检查 Rerank 模型
+            // 检查 Rerank 模型（使用 CurrentModel + _modelsPath 拼接）
             if (!string.IsNullOrEmpty(config.Rerank?.CurrentModel))
             {
                 var rerankModelName = config.Rerank.CurrentModel;
-                if (_modelRegistry.TryGetValue(rerankModelName, out var rerankModel))
+                var rerankModelDir = Path.Combine(_modelsPath, rerankModelName);
+                var rerankOnnxPath = Path.Combine(rerankModelDir, "model.onnx");
+
+                if (File.Exists(rerankOnnxPath) && _modelRegistry.TryGetValue(rerankModelName, out var rerankModel))
                 {
                     rerankModel.IsDownloaded = true;
-                    rerankModel.LocalPath = Path.Combine(_modelsPath, rerankModelName);
+                    rerankModel.LocalPath = rerankModelDir;
                     _currentRerankModel = rerankModel;
-                    Console.WriteLine($"[ModelManager] 从配置加载当前重排模型: {rerankModelName}");
+                    Console.WriteLine($"[ModelManager] 从配置加载当前重排模型: {rerankModelName}, 路径: {rerankModelDir}");
                 }
             }
         }
@@ -703,9 +693,16 @@ public class ModelManager : IModelManager, IDisposable
         if (!Directory.Exists(_modelsPath))
         {
             Directory.CreateDirectory(_modelsPath);
-            return;
         }
 
+        // 首先将所有模型的 IsDownloaded 重置为 false（路径变更后需要重新检测）
+        foreach (var model in _modelRegistry.Values)
+        {
+            model.IsDownloaded = false;
+            model.LocalPath = null;
+        }
+
+        // 然后扫描新路径，更新实际存在的模型
         foreach (var dir in Directory.GetDirectories(_modelsPath))
         {
             var modelName = Path.GetFileName(dir);
@@ -838,9 +835,14 @@ public class ModelManager : IModelManager, IDisposable
         return 512; // 默认维度
     }
 
-    public Task<List<ModelInfo>> GetAvailableModelsAsync()
+    public Task<List<ModelInfo>> GetAvailableModelsAsync(string modeltype = "")
     {
-        return Task.FromResult(_modelRegistry.Values.ToList());
+        if (string.IsNullOrWhiteSpace(modeltype))
+        {
+            return Task.FromResult(_modelRegistry.Values.ToList());
+        }
+
+        return Task.FromResult(_modelRegistry.Values.Where(m => m.ModelType == modeltype).ToList());
     }
 
     public List<ModelInfo> GetDownloadedModels()
@@ -1414,15 +1416,49 @@ public class ModelManager : IModelManager, IDisposable
     /// <summary>
     /// 设置模型保存路径（可选迁移已有模型）
     /// </summary>
-    public async Task<(bool Success, string? Error, List<string> Migrated)> SetModelsPathAsync(
+    public async Task<ModelPathChangeResult> SetModelsPathAsync(
         string newPath, bool migrateExisting = false, CancellationToken cancellationToken = default)
     {
-        var migrated = new List<string>();
+        var result = new ModelPathChangeResult();
 
         // 1. 验证路径不为空
         if (string.IsNullOrWhiteSpace(newPath))
         {
-            return (false, "路径不能为空", migrated);
+            result.Error = "路径不能为空";
+            return result;
+        }
+
+        // 1b. 检查 Windows 非法字符（注意: : 是盘符分隔符，如 E:\，在路径中间才是非法的）
+        // Windows 合法的路径分隔符: \ 和 /
+        // Windows 非法的文件名字符: < > : " | ? * （但在路径首个盘符后的第二个字符是合法的）
+        var illegalChars = new[] { '<', '>', '"', '|', '?', '*' };
+        foreach (var c in illegalChars)
+        {
+            if (newPath.Contains(c))
+            {
+                result.Error = $"路径不能包含非法字符: {c}";
+                return result;
+            }
+        }
+        // 检查是否有孤立的 :（不在盘符位置，如 E: 或 E:\ 之后的 :）
+        // 盘符格式: X:\ 或 X: 后面跟其他路径
+        if (newPath.Length >= 2 && newPath[1] == ':')
+        {
+            // 这看起来像盘符，检查后面是否有其他 : 出现
+            var afterDrive = newPath.Substring(2);
+            if (afterDrive.Contains(':'))
+            {
+                result.Error = "路径不能包含非法字符: :";
+                return result;
+            }
+        }
+
+        // 1c. 检查相对路径 // OPT-20260412-001: Issue-4 路径格式验证
+        var isAbsolute = Path.IsPathRooted(newPath);
+        if (!isAbsolute)
+        {
+            result.Error = "必须使用绝对路径";
+            return result;
         }
 
         // 2. 规范化路径
@@ -1431,7 +1467,8 @@ public class ModelManager : IModelManager, IDisposable
         // 3. 禁止根目录
         if (normalizedPath == Path.GetPathRoot(normalizedPath))
         {
-            return (false, "不能使用磁盘根目录作为模型路径", migrated);
+            result.Error = "不能使用磁盘根目录作为模型路径";
+            return result;
         }
 
         // 4. 禁止系统目录
@@ -1448,14 +1485,16 @@ public class ModelManager : IModelManager, IDisposable
             if (!string.IsNullOrEmpty(sysDir) &&
                 normalizedPath.StartsWith(sysDir, StringComparison.OrdinalIgnoreCase))
             {
-                return (false, "不能使用系统目录作为模型路径", migrated);
+                result.Error = "不能使用系统目录作为模型路径";
+                return result;
             }
         }
 
         // 5. 禁止路径遍历
         if (newPath.Contains("..") || newPath.Contains('~'))
         {
-            return (false, "路径不能包含 '..' 或 '~'", migrated);
+            result.Error = "路径不能包含 '..' 或 '~'";
+            return result;
         }
 
         try
@@ -1474,7 +1513,7 @@ public class ModelManager : IModelManager, IDisposable
                     {
                         Console.WriteLine($"[ModelManager] 迁移模型: {dirName} -> {normalizedPath}");
                         CopyDirectory(dir, destDir);
-                        migrated.Add(dirName);
+                        result.Migrated.Add(dirName);
                     }
                 }
             }
@@ -1482,22 +1521,46 @@ public class ModelManager : IModelManager, IDisposable
             // 7. 创建新目录
             Directory.CreateDirectory(normalizedPath);
 
-            // 8. 更新配置
+            // 8. 更新配置（更新顶层 ModelsRootPath）
             var config = await LoadConfigAsync();
-            config.Embedding.ModelsPath = normalizedPath;
+            config.ModelsRootPath = normalizedPath;
             await SaveConfigAsync(config);
 
             // 9. 更新内部字段并重新扫描
             _modelsPath = normalizedPath;
             ScanLocalModels();
 
-            Console.WriteLine($"[ModelManager] 模型路径已更新: {normalizedPath} (迁移了 {migrated.Count} 个模型)");
-            return (true, null, migrated);
+            // 9.1 获取扫描到的模型列表（返回全部注册模型，保留预定义元数据）// OPT-20260412-001: Issue-2 模型列表返回
+            result.EmbeddingModels = _modelRegistry.Values
+                .Where(m => m.ModelType == "embedding")
+                .ToList();
+            result.RerankModels = _modelRegistry.Values
+                .Where(m => m.ModelType == "reranker")
+                .ToList();
+
+            // 9.2 清除当前模型引用（路径变更后需要重新选择）// OPT-20260412-001: Issue-1 模型卸载
+            _currentModel = null;
+            _currentRerankModel = null;
+
+            // 9.3 清除配置中的模型名称（避免 GetCurrentModel 仍返回旧模型）
+            config.Embedding.ModelName = null;
+            config.Embedding.ModelPath = null;
+            if (config.Rerank != null)
+            {
+                config.Rerank.CurrentModel = null;
+                config.Rerank.ModelPath = null;
+            }
+            await SaveConfigAsync(config);
+
+            Console.WriteLine($"[ModelManager] 模型路径已更新: {normalizedPath} (迁移了 {result.Migrated.Count} 个模型, 扫描到 {result.EmbeddingModels.Count} 个嵌入模型, {result.RerankModels.Count} 个重排模型)");
+            result.Success = true;
+            return result;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[ModelManager] 设置模型路径失败: {ex.Message}");
-            return (false, $"设置路径失败: {ex.Message}", migrated);
+            result.Error = $"设置路径失败: {ex.Message}";
+            return result;
         }
     }
 
@@ -1527,6 +1590,14 @@ public class ModelManager : IModelManager, IDisposable
         // 使用 ConfigManager 保存配置，确保缓存同步
         _configManager.Save(config);
         await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 获取当前重排模型
+    /// </summary>
+    public ModelInfo? GetCurrenModel()
+    {
+        return _currentModel;
     }
 
     // ========== 重排模型管理实现 ==========

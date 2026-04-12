@@ -1,5 +1,36 @@
 <template>
   <n-space vertical :size="20">
+    <!-- Model Root Directory -->
+    <n-card title="模型根目录">
+      <n-form label-placement="left" label-width="120">
+        <n-form-item label="模型存储路径">
+          <n-space align="center" style="width: 100%">
+            <n-input
+              v-model:value="modelsPath"
+              placeholder="默认: models"
+              style="width: 300px"
+            />
+            <n-button
+              type="primary"
+              :loading="savingModelsPath"
+              @click="handleSaveModelsPath"
+            >
+              保存
+            </n-button>
+            <n-button
+              @click="handleScanModels"
+              :loading="modelsPathLoading"
+            >
+              扫描模型目录
+            </n-button>
+          </n-space>
+        </n-form-item>
+      </n-form>
+      <n-text depth="3" style="font-size: 12px">
+        设置模型文件的存储根路径，修改后需要重新扫描以更新模型列表
+      </n-text>
+    </n-card>
+
     <!-- Current Model -->
     <n-card title="当前模型">
       <n-spin :show="currentLoading">
@@ -20,13 +51,14 @@
             </n-tag>
           </n-descriptions-item>
         </n-descriptions>
+        <n-text v-else depth="3">未配置模型</n-text>
       </n-spin>
     </n-card>
 
     <!-- Current Rerank Model -->
     <n-card title="当前重排模型">
       <n-spin :show="rerankCurrentLoading">
-        <n-descriptions v-if="currentRerankModel" :column="4" label-placement="left">
+        <n-descriptions v-if="currentRerankModel" :column="3" label-placement="left">
           <n-descriptions-item label="模型名称">
             <n-tag type="info">{{ currentRerankModel.displayName || currentRerankModel.name }}</n-tag>
           </n-descriptions-item>
@@ -36,9 +68,6 @@
             <n-tag :type="currentRerankModel.isDownloaded ? 'success' : 'warning'">
               {{ currentRerankModel.isDownloaded ? '已下载' : '未下载' }}
             </n-tag>
-          </n-descriptions-item>
-          <n-descriptions-item label="路径" :span="4">
-            <n-text depth="3" style="font-size: 12px;">{{ currentRerankModel.localPath || '-' }}</n-text>
           </n-descriptions-item>
         </n-descriptions>
         <n-text v-else depth="3">未配置重排模型</n-text>
@@ -382,10 +411,14 @@ import { ref, h, onMounted, onUnmounted, computed } from 'vue'
 import { NTag, NButton, NSpace, NProgress, NAlert, NCode, NIcon, NPopconfirm, NRadioGroup, NRadio, NFormItem, NSpin, useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { RefreshOutline, AddOutline, InformationCircleOutline } from '@vicons/ionicons5'
-import { modelsApi } from '@/api'
-import type { ModelInfo, DownloadProgress, ModelDownloadOptions } from '@/types/api'
+import { modelsApi, settingsApi } from '@/api'
+import type { ModelInfo, DownloadProgress, ModelDownloadOptions, ObsidianRagConfig } from '@/types/api'
 
 const message = useMessage()
+const modelsPath = ref('')
+const modelsPathLoading = ref(false)
+const savingModelsPath = ref(false)
+
 const models = ref<ModelInfo[]>([])
 const currentModel = ref<ModelInfo | null>(null)
 const modelsLoading = ref(false)
@@ -406,6 +439,63 @@ const downloadProgress = ref<Map<string, DownloadProgress>>(new Map())
 const downloadOptions = ref<ModelDownloadOptions | null>(null)
 const selectedFile = ref<string | null>(null)
 const loadingOptions = ref(false)
+const loadModelsPath = async () => {
+  modelsPathLoading.value = true
+  try {
+    const response = await settingsApi.get()
+    const config = response.data as ObsidianRagConfig
+    modelsPath.value = (config as any).modelsRootPath || 'models'
+  } catch (error) {
+    console.error('Failed to load models path:', error)
+    modelsPath.value = 'models'
+  } finally {
+    modelsPathLoading.value = false
+  }
+}
+
+const handleSaveModelsPath = async () => {
+  savingModelsPath.value = true
+  try {
+    const response = await settingsApi.updateModelsPath(modelsPath.value)
+    const data = response.data as any
+    message.success(data.message || '模型路径已保存')
+
+    // 直接使用返回的模型列表，避免额外的 API 调用
+    // 智能合并模型列表：保留本地预定义模型元数据，只更新下载状态 // OPT-20260412-001: Issue-3 前端智能合并
+    if (data.embeddingModels) {
+      const newModels = data.embeddingModels as ModelInfo[]
+      models.value = models.value.map(m => {
+        const updated = newModels.find(n => n.name === m.name)
+        if (updated) {
+          return { ...m, isDownloaded: updated.isDownloaded, localPath: updated.localPath }
+        }
+        return m
+      })
+    }
+    if (data.rerankModels) {
+      const newRerankModels = data.rerankModels as ModelInfo[]
+      rerankModels.value = rerankModels.value.map(m => {
+        const updated = newRerankModels.find(n => n.name === m.name)
+        if (updated) {
+          return { ...m, isDownloaded: updated.isDownloaded, localPath: updated.localPath }
+        }
+        return m
+      })
+    }
+  } catch (error: any) {
+    console.error('Failed to save models path:', error)
+    message.error(`保存失败: ${error.response?.data?.error || error.message}`)
+  } finally {
+    savingModelsPath.value = false
+  }
+}
+
+const handleScanModels = async () => {
+  await loadModels()
+  await loadRerankModels()
+  message.success('模型列表已刷新')
+}
+
 const customModelForm = ref({
   huggingFaceId: '',
   displayName: ''
@@ -1057,10 +1147,21 @@ const stopProgressPolling = () => {
 }
 
 onMounted(() => {
+  loadModelsPath()
   loadModels()
   loadCurrentModel()
   loadRerankModels()
   loadCurrentRerankModel()
+
+  // 监听模型路径变化事件（来自 Settings.vue）
+  const handleStorageChange = (e: StorageEvent) => {
+    if (e.key === 'modelsPathChanged') {
+      loadModels()
+      loadRerankModels()
+      loadModelsPath()
+    }
+  }
+  window.addEventListener('storage', handleStorageChange)
 })
 
 onUnmounted(() => {

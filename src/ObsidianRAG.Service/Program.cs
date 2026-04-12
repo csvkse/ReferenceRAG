@@ -46,7 +46,22 @@ builder.Services.AddSingleton<IModelManager>(sp =>
     var configManager = sp.GetRequiredService<ConfigManager>();
     var cfg = configManager.Load();
     var dataPath = cfg.DataPath ?? "data";
-    var modelsPath = Path.Combine(dataPath, "models");
+
+    // 使用顶层 ModelsRootPath（支持绝对路径和相对路径）
+    string modelsPath;
+    var modelsRootPath = cfg.ModelsRootPath;
+    if (!string.IsNullOrEmpty(modelsRootPath) && Path.IsPathRooted(modelsRootPath))
+    {
+        // 绝对路径直接使用
+        modelsPath = modelsRootPath;
+    }
+    else
+    {
+        // 相对路径：dataPath + modelsRootPath（或默认 "models"）
+        modelsPath = Path.Combine(dataPath, modelsRootPath ?? "models");
+    }
+
+    Console.WriteLine($"[ModelManager] 使用模型路径: {modelsPath}");
     return new ModelManager(modelsPath, configManager);
 });
 
@@ -173,7 +188,35 @@ builder.Services.AddScoped<ISearchService>(sp =>
         rerankService);
 });
 builder.Services.AddScoped<HierarchicalSearchService>();
-builder.Services.AddSingleton<HybridSearchService>();
+// 注册混合搜索服务（从 appsettings.json 读取 HybridSearch 配置）
+builder.Services.AddSingleton<HybridSearchService>(sp =>
+{
+    var hybridSearchConfig = sp.GetRequiredService<IConfiguration>().GetSection("HybridSearch");
+    var options = new HybridSearchOptions();
+
+    if (hybridSearchConfig.Exists())
+    {
+        hybridSearchConfig.Bind(options);
+        // 验证配置有效性
+        try
+        {
+            options.Validate();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[HybridSearch] Configuration validation failed: {ex.Message}, using defaults");
+            options = new HybridSearchOptions();
+        }
+    }
+
+    Console.WriteLine($"[HybridSearch] Config loaded: UseRRF={options.UseRRF}, RRFK={options.RRFK}, BM25Weight={options.BM25Weight}, EmbeddingWeight={options.EmbeddingWeight}");
+    return new HybridSearchService(
+        sp.GetRequiredService<IVectorStore>(),
+        sp.GetRequiredService<IEmbeddingService>(),
+        sp.GetRequiredService<IBM25Store>(),
+        options,
+        sp.GetRequiredService<ILogger<HybridSearchService>>());
+});
 
 // 注册索引服务（后台服务）
 builder.Services.AddSingleton<IndexService>();

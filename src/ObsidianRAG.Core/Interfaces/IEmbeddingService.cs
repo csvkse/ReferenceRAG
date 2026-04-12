@@ -52,6 +52,11 @@ public interface IEmbeddingService
     Task<bool> ReloadModelAsync(string modelPath, string modelName);
 
     /// <summary>
+    /// 卸载模型（释放 ONNX session）
+    /// </summary>
+    void UnloadModel();
+
+    /// <summary>
     /// 编码单个文本
     /// </summary>
     Task<float[]> EncodeAsync(string text, CancellationToken cancellationToken = default);

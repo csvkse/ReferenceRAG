@@ -145,11 +145,19 @@ public class HybridSearchService
     /// 混合搜索 - 结合 BM25 和 Embedding 结果
     /// 使用分数级加权融合 (Score-level Weighted Fusion)，而非 RRF 排名融合
     /// </summary>
+    /// <param name="query">查询文本</param>
+    /// <param name="topK">返回结果数量</param>
+    /// <param name="k1">BM25 K1 参数</param>
+    /// <param name="b">BM25 B 参数</param>
+    /// <param name="folders">可选的文件夹路径过滤列表</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>混合搜索结果列表</returns>
     public async Task<List<HybridSearchResult>> SearchAsync(
         string query,
         int topK = 10,
         float k1 = 1.5f,
         float b = 0.75f,
+        IEnumerable<string>? folders = null,
         CancellationToken cancellationToken = default)
     {
         var results = new List<HybridSearchResult>();
@@ -184,25 +192,10 @@ public class HybridSearchService
         // 3. 收集所有候选文档ID
         var allDocIds = bm25RankMap.Keys.Union(embeddingRankMap.Keys).ToHashSet();
 
-        // 4. 分数级加权融合
-        // 公式: finalScore = w1 * norm(BM25) + w2 * norm(Embedding)
-        // 其中 norm(x) = x / maxX，将分数归一化到 [0, 1] 范围
-        var fusedScores = new Dictionary<string, float>();
-
-        foreach (var docId in allDocIds)
-        {
-            var bm25Score = bm25Dict.TryGetValue(docId, out var bm25Result) ? bm25Result.Score : 0;
-            var embeddingScore = embeddingDict.TryGetValue(docId, out var embeddingResult) ? embeddingResult.Score : 0;
-
-            // 归一化分数
-            var normalizedBm25 = (float)(bm25Score / maxBm25Score);
-            var normalizedEmbedding = (float)(embeddingScore / maxEmbeddingScore);
-
-            // 加权融合
-            var fusedScore = _options.BM25Weight * normalizedBm25 + _options.EmbeddingWeight * normalizedEmbedding;
-
-            fusedScores[docId] = fusedScore;
-        }
+        // 4. 融合 BM25 和 Embedding 结果
+        var fusedScores = _options.UseRRF
+            ? FuseWithRRF(allDocIds, bm25RankMap, embeddingRankMap)
+            : FuseWithWeightedAverage(allDocIds, bm25Dict, embeddingDict, maxBm25Score, maxEmbeddingScore);
 
         // 5. 排序并取 Top-K
         var topResults = fusedScores
@@ -269,6 +262,25 @@ public class HybridSearchService
             });
         }
 
+        // 7. 应用文件夹过滤
+        if (folders?.Any() == true)
+        {
+            var folderList = folders
+                .Select(f => f.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
+                              .TrimEnd(Path.DirectorySeparatorChar)
+                            + Path.DirectorySeparatorChar)
+                .ToList();
+
+            var beforeCount = results.Count;
+            results = results.Where(r =>
+            {
+                var filePath = r.FilePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+                return folderList.Any(f => filePath.StartsWith(f, StringComparison.OrdinalIgnoreCase));
+            }).ToList();
+
+            _logger?.LogDebug("文件夹过滤后: {Before} -> {After}", beforeCount, results.Count);
+        }
+
         _logger?.LogDebug(
             "Hybrid search: query='{Query}', bm25={BM25Count}, embedding={EmbeddingCount}, merged={MergedCount}",
             query, bm25Results.Count, embeddingResults.Count(), results.Count);
@@ -330,6 +342,89 @@ public class HybridSearchService
         }
         return map;
     }
+
+    /// <summary>
+    /// 使用 RRF (Reciprocal Rank Fusion) 融合排名
+    /// RRF 可以更好地平衡不同排名系统的结果，减少单一排名系统的偏差
+    /// 公式: score = 1/(k + rank)
+    /// </summary>
+    private Dictionary<string, float> FuseWithRRF(
+        HashSet<string> allDocIds,
+        Dictionary<string, int> bm25RankMap,
+        Dictionary<string, int> embeddingRankMap)
+    {
+        var fusedScores = new Dictionary<string, float>();
+        var k = _options.RRFK;
+
+        foreach (var docId in allDocIds)
+        {
+            var bm25Rank = bm25RankMap.GetValueOrDefault(docId, -1);
+            var embeddingRank = embeddingRankMap.GetValueOrDefault(docId, -1);
+
+            double fusedScore = 0;
+
+            // 只有在两个排名系统中都出现的文档才计算 RRF
+            // 如果只在一个系统中出现，给予一定的基础分数
+            if (bm25Rank >= 0)
+            {
+                fusedScore += 1.0 / (k + bm25Rank);
+            }
+
+            if (embeddingRank >= 0)
+            {
+                fusedScore += 1.0 / (k + embeddingRank);
+            }
+
+            // 对于只在一个系统中出现的文档，给予额外的基础分
+            if (bm25Rank < 0 && embeddingRank < 0)
+            {
+                fusedScore = 0;
+            }
+            else if (bm25Rank < 0)
+            {
+                fusedScore = 0.5 / (k + embeddingRank);
+            }
+            else if (embeddingRank < 0)
+            {
+                fusedScore = 0.5 / (k + bm25Rank);
+            }
+
+            fusedScores[docId] = (float)fusedScore;
+        }
+
+        return fusedScores;
+    }
+
+    /// <summary>
+    /// 使用分数级加权融合 (Score-level Weighted Fusion)
+    /// 公式: finalScore = w1 * norm(BM25) + w2 * norm(Embedding)
+    /// </summary>
+    private Dictionary<string, float> FuseWithWeightedAverage(
+        HashSet<string> allDocIds,
+        Dictionary<string, BM25SearchResult> bm25Dict,
+        Dictionary<string, SearchResult> embeddingDict,
+        double maxBm25Score,
+        double maxEmbeddingScore)
+    {
+        var fusedScores = new Dictionary<string, float>();
+
+        foreach (var docId in allDocIds)
+        {
+            var bm25Score = bm25Dict.TryGetValue(docId, out var bm25Result) ? bm25Result.Score : 0;
+            var embeddingScore = embeddingDict.TryGetValue(docId, out var embeddingResult) ? embeddingResult.Score : 0;
+
+            // 归一化分数
+            var normalizedBm25 = maxBm25Score > 0 ? (float)(bm25Score / maxBm25Score) : 0;
+            var normalizedEmbedding = maxEmbeddingScore > 0 ? (float)(embeddingScore / maxEmbeddingScore) : 0;
+
+            // 加权融合
+            var fusedScore = _options.BM25Weight * normalizedBm25 + _options.EmbeddingWeight * normalizedEmbedding;
+
+            fusedScores[docId] = fusedScore;
+        }
+
+        return fusedScores;
+    }
 }
 
 /// <summary>
@@ -384,22 +479,61 @@ public class HybridSearchResult
 public class HybridSearchOptions
 {
     /// <summary>
+    /// 是否使用 RRF (Reciprocal Rank Fusion) 融合
+    /// 替代分数级加权融合，可以更好地平衡不同排名系统的结果
+    /// </summary>
+    public bool UseRRF { get; set; } = false;
+
+    /// <summary>
     /// RRF 参数 K (通常 50-100)
     /// </summary>
     public int RRFK { get; set; } = 60;
 
     /// <summary>
     /// BM25 权重（关键词精确匹配权重）
+    /// 当 UseRRF=false 时生效
     /// </summary>
-    public float BM25Weight { get; set; } = 0.6f;
+    public float BM25Weight { get; set; } = 0.35f;
 
     /// <summary>
     /// Embedding 权重（语义相似度权重）
+    /// 当 UseRRF=false 时生效
     /// </summary>
-    public float EmbeddingWeight { get; set; } = 0.4f;
+    public float EmbeddingWeight { get; set; } = 0.65f;
 
     /// <summary>
     /// BM25 配置
     /// </summary>
     public BM25Options BM25Options { get; set; } = new();
+
+    /// <summary>
+    /// 验证配置有效性
+    /// </summary>
+    public void Validate()
+    {
+        if (RRFK <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(RRFK), "RRFK must be positive");
+        }
+
+        if (!UseRRF)
+        {
+            var weightSum = BM25Weight + EmbeddingWeight;
+            if (Math.Abs(weightSum - 1.0f) > 0.001f)
+            {
+                throw new ArgumentException(
+                    $"BM25Weight ({BM25Weight}) + EmbeddingWeight ({EmbeddingWeight}) must equal 1.0 when UseRRF=false. Current sum: {weightSum}");
+            }
+        }
+
+        if (BM25Weight < 0 || BM25Weight > 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(BM25Weight), "BM25Weight must be between 0 and 1");
+        }
+
+        if (EmbeddingWeight < 0 || EmbeddingWeight > 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(EmbeddingWeight), "EmbeddingWeight must be between 0 and 1");
+        }
+    }
 }

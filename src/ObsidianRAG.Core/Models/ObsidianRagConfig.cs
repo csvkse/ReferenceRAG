@@ -11,6 +11,11 @@ public class ObsidianRagConfig
     public string DataPath { get; set; } = "data";
 
     /// <summary>
+    /// 模型根目录（统一管理所有模型：嵌入式和重排）
+    /// </summary>
+    public string ModelsRootPath { get; set; } = "models";
+
+    /// <summary>
     /// 源文件夹列表（支持多个）
     /// </summary>
     public List<SourceFolder> Sources { get; set; } = new();
@@ -204,8 +209,9 @@ public class EmbeddingConfig
     public int BatchSize { get; set; } = 32;
 
     /// <summary>
-    /// 模型保存根目录（所有模型统一存放）
+    /// 模型保存根目录（已废弃，请使用顶层 ModelsRootPath）
     /// </summary>
+    [Obsolete("Use ObsidianRagConfig.ModelsRootPath instead")]
     public string ModelsPath { get; set; } = "models";
 }
 

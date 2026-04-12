@@ -273,6 +273,11 @@ public class MockEmbeddingService : IEmbeddingService
         return Task.FromResult(true);
     }
 
+    public void UnloadModel()
+    {
+        // Mock implementation - nothing to dispose
+    }
+
     public Task<float[]> EncodeAsync(string text, CancellationToken cancellationToken = default)
     {
         if (_cache.TryGetValue(text, out var cached))

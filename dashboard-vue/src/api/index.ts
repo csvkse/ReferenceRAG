@@ -38,7 +38,8 @@ import type {
   MigrateResult,
   IndexSummary,
   IndexJobRequest,
-  IndexJobResponse
+  IndexJobResponse,
+  PathsResponse
 } from '@/types/api'
 
 // PascalCase ↔ camelCase conversion utilities
@@ -297,6 +298,11 @@ export const rerankTestApi = {
   clearRecords: (params?: { before?: string }) => api.delete('/RerankTest/records', { params }),
   getStatistics: (params?: { modelName?: string }) => api.get<import('@/types/api').RerankTestStatistics>('/RerankTest/statistics', { params }),
   benchmark: (data: import('@/types/api').RerankBenchmarkRequest) => api.post<import('@/types/api').RerankBenchmarkResult>('/RerankTest/benchmark', data)
+}
+
+// Paths
+export const pathsApi = {
+  getPaths: () => api.get<PathsResponse>('/paths')
 }
 
 export default api

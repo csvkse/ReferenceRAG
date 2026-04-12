@@ -29,6 +29,11 @@ public interface IRerankService
     /// 重新加载模型
     /// </summary>
     Task<bool> ReloadModelAsync(string modelPath, string modelName);
+
+    /// <summary>
+    /// 卸载模型（释放 ONNX session）
+    /// </summary>
+    void UnloadModel();
 }
 
 /// <summary>

@@ -58,6 +58,50 @@ public class SourcesController : ControllerBase
     }
 
     /// <summary>
+    /// 获取所有路径（源和文件夹）
+    /// </summary>
+    /// <remarks>
+    /// 返回所有已配置的源及其包含的文件夹路径列表
+    /// </remarks>
+    [HttpGet("~/api/paths")]
+    public async Task<ActionResult<PathsResponse>> GetPaths()
+    {
+        var config = _configManager.Load();
+        var files = await _vectorStore.GetAllFilesAsync();
+        var fileList = files.ToList();
+
+        var response = new PathsResponse
+        {
+            Sources = config.Sources.Select(s =>
+            {
+                var sourceFiles = fileList.Where(f => f.Source == s.Name).ToList();
+
+                // 从文件路径中提取唯一的文件夹路径
+                var folders = sourceFiles
+                    .Select(f =>
+                    {
+                        // 获取文件的父文件夹路径
+                        var parentFolder = Path.GetDirectoryName(f.Path);
+                        return parentFolder;
+                    })
+                    .Where(p => !string.IsNullOrEmpty(p))
+                    .Distinct()
+                    .OrderBy(p => p)
+                    .ToList();
+
+                return new SourcePathInfo
+                {
+                    Name = s.Name,
+                    RootPath = s.Path,
+                    Folders = folders
+                };
+            }).ToList()
+        };
+
+        return Ok(response);
+    }
+
+    /// <summary>
     /// 获取单个源详情
     /// </summary>
     [HttpGet("{name}")]
@@ -410,4 +454,36 @@ public class FileItem
     public string Path { get; set; } = "";
     public long Size { get; set; }
     public DateTime Modified { get; set; }
+}
+
+/// <summary>
+/// 路径查询响应
+/// </summary>
+public class PathsResponse
+{
+    /// <summary>
+    /// 源列表
+    /// </summary>
+    public List<SourcePathInfo> Sources { get; set; } = new();
+}
+
+/// <summary>
+/// 源路径信息
+/// </summary>
+public class SourcePathInfo
+{
+    /// <summary>
+    /// 源名称
+    /// </summary>
+    public string Name { get; set; } = "";
+
+    /// <summary>
+    /// 源根路径
+    /// </summary>
+    public string RootPath { get; set; } = "";
+
+    /// <summary>
+    /// 该源下的文件夹路径列表
+    /// </summary>
+    public List<string> Folders { get; set; } = new();
 }

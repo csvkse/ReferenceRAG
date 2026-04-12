@@ -31,7 +31,7 @@
                 <n-input-number v-model:value="config.embedding.batchSize" :min="1" :max="256" style="width: 100%" />
               </n-form-item>
               <n-form-item label="模型存储路径">
-                <n-input v-model:value="config.embedding.modelsPath" placeholder="默认: models" />
+                <n-input v-model:value="config.modelsRootPath" placeholder="默认: models" />
               </n-form-item>
             </n-form>
           </n-card>
@@ -265,8 +265,8 @@ const loadConfig = async () => {
     const response = await settingsApi.get()
     const data = response.data as any
     config.value = { ...JSON.parse(JSON.stringify(defaultConfig)), ...data }
-    if (!config.value.embedding.modelsPath) {
-      config.value.embedding.modelsPath = 'models'
+    if (!config.value.modelsRootPath) {
+      config.value.modelsRootPath = 'models'
     }
   } catch (error) {
     message.error('加载配置失败，使用默认值')
@@ -297,12 +297,14 @@ const loadCudaAvailability = async () => {
 const handleSave = async () => {
   saving.value = true
   try {
-    const modelsPath = config.value.embedding.modelsPath
+    const modelsPath = config.value.modelsRootPath
     if (modelsPath && modelsPath !== 'models') {
       await settingsApi.updateModelsPath(modelsPath)
     }
     await settingsApi.save(config.value)
-    message.success('配置已保存')
+    message.success('配置已保存，模型页面将自动刷新模型列表')
+    // 通知模型页面刷新（通过 localStorage 事件）
+    localStorage.setItem('modelsPathChanged', Date.now().toString())
   } catch (error: any) {
     message.error(error.response?.data?.error || '保存配置失败')
   } finally {

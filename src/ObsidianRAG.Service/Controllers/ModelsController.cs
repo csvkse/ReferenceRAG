@@ -41,26 +41,11 @@ public class ModelsController : ControllerBase
     /// 获取当前模型信息
     /// </summary>
     [HttpGet("current")]
-    public async Task<ActionResult<ModelInfo>> GetCurrentModel()
+    public async Task<ActionResult<ModelInfo?>> GetCurrentModel()
     {
-        var config = _configManager.Load();
-        var allModels = await _modelManager.GetAvailableModelsAsync();
-        var currentModel = allModels.FirstOrDefault(m => m.Name == config.Embedding.ModelName);
-        
-        if (currentModel != null)
-        {
-            return Ok(currentModel);
-        }
-        
-        // 返回基本信息
-        return Ok(new ModelInfo
-        {
-            Name = config.Embedding.ModelName,
-            DisplayName = GetDisplayName(config.Embedding.ModelName),
-            Dimension = 512,
-            MaxSequenceLength = config.Embedding.MaxSequenceLength,
-            IsDownloaded = !string.IsNullOrEmpty(config.Embedding.ModelPath)
-        });
+
+        var model = _modelManager.GetCurrentModel();
+        return Ok(model);
     }
 
     /// <summary>
@@ -69,7 +54,7 @@ public class ModelsController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<List<ModelInfo>>> GetAvailableModels()
     {
-        var models = await _modelManager.GetAvailableModelsAsync();
+        var models = await _modelManager.GetAvailableModelsAsync("embedding");
         return Ok(models);
     }
 
@@ -553,31 +538,7 @@ public class ModelsController : ControllerBase
     [HttpGet("rerank")]
     public async Task<ActionResult<List<ModelInfo>>> GetRerankModels()
     {
-        var models = _modelManager.GetRerankModels();
-
-        // 更新下载状态 - 使用配置中的模型路径或 dataPath + modelsPath
-        var config = _configManager.Load();
-
-        // 构建模型根目录路径
-        string modelsPath;
-        if (Path.IsPathRooted(config.Embedding.ModelsPath))
-        {
-            modelsPath = config.Embedding.ModelsPath;
-        }
-        else
-        {
-            // 相对路径，基于 dataPath
-            modelsPath = Path.Combine(config.DataPath, config.Embedding.ModelsPath);
-        }
-
-        foreach (var model in models)
-        {
-            var modelPath = Path.Combine(modelsPath, model.Name);
-            model.IsDownloaded = Directory.Exists(modelPath) &&
-                (System.IO.File.Exists(Path.Combine(modelPath, "model.onnx")) ||
-                 System.IO.File.Exists(Path.Combine(modelPath, "onnx", "model.onnx")));
-        }
-
+        var models = await _modelManager.GetAvailableModelsAsync("reranker");
         return Ok(models);
     }
 

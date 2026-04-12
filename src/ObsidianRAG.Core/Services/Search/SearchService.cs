@@ -107,7 +107,7 @@ public class SearchService : ISearchService
             _logger.LogDebug("混合搜索召回: TopK={TopK}, RecallFactor={Factor}, RecallTopK={RecallTopK}",
                 request.TopK, rerankConfig.RecallFactor, recallTopK);
 
-            var hybridResults = await _hybridSearchService.SearchAsync(request.Query, recallTopK, request.K1, request.B, cancellationToken);
+            var hybridResults = await _hybridSearchService.SearchAsync(request.Query, recallTopK, request.K1, request.B, request.Filters?.Folders, cancellationToken);
 
             // 过滤禁用源
             var filteredHybridResults = hybridResults.Where(r => enabledSources.Contains(r.Source));
@@ -311,14 +311,22 @@ public class SearchService : ISearchService
     private IEnumerable<SearchResult> ApplyFilters(IEnumerable<SearchResult> results, SearchFilter? filters)
     {
         if (filters == null) return results;
-
         var filtered = results;
 
-        // 文件夹过滤
         if (filters.Folders?.Count > 0)
         {
-            filtered = filtered.Where(r => 
-                filters.Folders.Any(f => r.FilePath.StartsWith(f)));
+            filtered = filtered.Where(r =>
+                filters.Folders.Any(f =>
+                {
+                    // 标准化：统一分隔符，去除尾部斜杠
+                    var folder = f.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    var filePath = r.FilePath;
+
+                    // 必须是完整路径段：后面跟着分隔符，或者就是文件本身在该目录下
+                    return filePath.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                        || filePath.StartsWith(folder + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(filePath, folder, StringComparison.OrdinalIgnoreCase); // 精确匹配自身（如果 FilePath 可能是目录）
+                }));
         }
 
         return filtered;

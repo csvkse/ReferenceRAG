@@ -160,8 +160,9 @@ export interface DashboardStats {
 
 export interface ObsidianRagConfig {
   dataPath?: string
+  modelsRootPath?: string  // 模型根目录（统一管理嵌入式和重排模型）
   sources?: SourceFolder[]
-  embedding: EmbeddingConfig & { modelsPath?: string }
+  embedding: EmbeddingConfig
   chunking: ChunkingConfig
   search: SearchConfig
   service: ServiceConfig
@@ -644,4 +645,16 @@ export interface RerankBenchmarkResult {
   p95LatencyMs: number
   p99LatencyMs: number
   errors: string[]
+}
+
+// --- Path Filter ---
+
+export interface PathsResponse {
+  sources: SourcePathInfo[]
+}
+
+export interface SourcePathInfo {
+  name: string
+  rootPath: string
+  folders: string[]
 }

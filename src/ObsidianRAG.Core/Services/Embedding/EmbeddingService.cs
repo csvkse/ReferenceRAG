@@ -171,6 +171,20 @@ public class EmbeddingService : IEmbeddingService, IDisposable
     }
 
     /// <summary>
+    /// 卸载模型（释放 ONNX session）
+    /// </summary>
+    public void UnloadModel()
+    {
+        lock (_lock)
+        {
+            var oldSession = _session;
+            _session = null;
+            oldSession?.Dispose();
+            Console.WriteLine("[EmbeddingService] 模型已卸载");
+        }
+    }
+
+    /// <summary>
     /// 加载分词器（优先级：HuggingFace 完整管线 > 自定义 BertTokenizer > Microsoft.ML.Tokenizers > 回退分词器）
     /// </summary>
     private static ITextTokenizer LoadTokenizer(string modelPath)

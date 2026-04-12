@@ -171,6 +171,20 @@ public class OnnxRerankService : IRerankService, IDisposable
     }
 
     /// <summary>
+    /// 卸载模型（释放 ONNX session）
+    /// </summary>
+    public void UnloadModel()
+    {
+        lock (_lock)
+        {
+            var oldSession = _session;
+            _session = null;
+            oldSession?.Dispose();
+            Console.WriteLine("[OnnxRerankService] 模型已卸载");
+        }
+    }
+
+    /// <summary>
     /// 对单个查询-文档对进行重排评分
     /// </summary>
     public async Task<double> RerankAsync(string query, string document, CancellationToken cancellationToken = default)
