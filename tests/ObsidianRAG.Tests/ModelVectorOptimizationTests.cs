@@ -30,15 +30,15 @@ public class ModelVectorOptimizationTests : IDisposable
     public void ModelsPath_DefaultValue_IsModels()
     {
         var config = new ObsidianRagConfig();
-        Assert.Equal("models", config.Embedding.ModelsPath);
+        Assert.Equal("models", config.ModelsRootPath);
     }
 
     [Fact]
     public void ModelsPath_CanBeSet()
     {
         var config = new ObsidianRagConfig();
-        config.Embedding.ModelsPath = "D:/AIModels";
-        Assert.Equal("D:/AIModels", config.Embedding.ModelsPath);
+        config.ModelsRootPath = "D:/AIModels";
+        Assert.Equal("D:/AIModels", config.ModelsRootPath);
     }
 
     // ==================== FIX-005: 非对称嵌入 ====================
@@ -336,8 +336,8 @@ public class ModelVectorOptimizationTests : IDisposable
     [Fact]
     public void EmbeddingConfig_ModelsPath_DefaultIsModels()
     {
-        var config = new EmbeddingConfig();
-        Assert.Equal("models", config.ModelsPath);
+        var config = new ObsidianRagConfig();
+        Assert.Equal("models", config.ModelsRootPath);
     }
 
     [Fact]

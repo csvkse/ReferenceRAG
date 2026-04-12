@@ -162,17 +162,6 @@ public class ModelsController : ControllerBase
     }
 
     /// <summary>
-    /// 获取模型的可用 ONNX 变体列表（已废弃，请使用 download-options）
-    /// </summary>
-    [Obsolete("Use GetDownloadOptions instead")]
-    [HttpGet("variants/{modelName}")]
-    public async Task<ActionResult<List<OnnxVariant>>> GetOnnxVariants(string modelName)
-    {
-        var variants = await _modelManager.GetOnnxVariantsAsync(modelName);
-        return Ok(variants);
-    }
-
-    /// <summary>
     /// 开始下载模型
     /// </summary>
     [HttpPost("download/{modelName}")]

@@ -94,17 +94,9 @@ public interface IModelManager
         string newPath, bool migrateExisting = false, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 获取模型可用的 ONNX 变体列表
-    /// </summary>
-    [Obsolete("Use GetDownloadOptionsAsync instead")]
-    Task<List<OnnxVariant>> GetOnnxVariantsAsync(string modelName);
-
-    /// <summary>
     /// 获取模型的下载选项
     /// </summary>
     Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName);
-
-
 
     // ========== 重排模型管理 ==========
 
@@ -1363,32 +1355,6 @@ public class ModelManager : IModelManager, IDisposable
     }
 
     /// <summary>
-    /// 获取模型可用的 ONNX 变体列表
-    /// </summary>
-    [Obsolete("Use GetDownloadOptionsAsync instead")]
-    public async Task<List<OnnxVariant>> GetOnnxVariantsAsync(string modelName)
-    {
-        if (!_modelRegistry.TryGetValue(modelName, out var model))
-        {
-            Console.WriteLine($"[ModelManager] 模型不存在: {modelName}");
-            return new List<OnnxVariant>();
-        }
-
-        try
-        {
-            var downloader = new HuggingFaceModelDownloader();
-            var variants = await downloader.GetOnnxVariantsAsync(model.DownloadUrl ?? $"BAAI/{modelName}");
-            Console.WriteLine($"[ModelManager] 获取到 {variants.Count} 个 ONNX 变体: {modelName}");
-            return variants;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[ModelManager] 获取 ONNX 变体失败: {ex.Message}");
-            return new List<OnnxVariant>();
-        }
-    }
-
-    /// <summary>
     /// 获取模型的下载选项
     /// </summary>
     public async Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName)
@@ -1590,14 +1556,6 @@ public class ModelManager : IModelManager, IDisposable
         // 使用 ConfigManager 保存配置，确保缓存同步
         _configManager.Save(config);
         await Task.CompletedTask;
-    }
-
-    /// <summary>
-    /// 获取当前重排模型
-    /// </summary>
-    public ModelInfo? GetCurrenModel()
-    {
-        return _currentModel;
     }
 
     // ========== 重排模型管理实现 ==========

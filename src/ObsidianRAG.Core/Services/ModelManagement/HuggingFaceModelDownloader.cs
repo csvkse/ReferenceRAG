@@ -67,27 +67,6 @@ internal class HuggingFaceModelDownloader : IDisposable
     }
 
     /// <summary>
-    /// 获取模型可用的 ONNX 变体列表（向后兼容）
-    /// </summary>
-    [Obsolete("Use GetDownloadOptionsAsync instead")]
-    public async Task<List<OnnxVariant>> GetOnnxVariantsAsync(
-        string modelId,
-        CancellationToken cancellationToken = default)
-    {
-        var options = await GetDownloadOptionsAsync(modelId, cancellationToken);
-        return options.AllOptions.Select(o => new OnnxVariant
-        {
-            Path = o.Path,
-            DisplayName = o.DisplayName,
-            Description = o.Description,
-            Size = o.Size,
-            IsQuantized = o.IsQuantized,
-            TargetPlatform = o.TargetPlatform,
-            IsRecommended = o.IsRecommended
-        }).ToList();
-    }
-
-    /// <summary>
     /// 获取模型的下载选项
     /// </summary>
     public async Task<ModelDownloadOptions> GetDownloadOptionsAsync(
@@ -326,111 +305,6 @@ internal class HuggingFaceModelDownloader : IDisposable
             subfolderStandard.IsRecommended = true;
             result.RecommendedOption = subfolderStandard;
         }
-    }
-
-    /// <summary>
-    /// 解析 ONNX 文件变体信息
-    /// </summary>
-    private static OnnxVariant? ParseOnnxVariant(HuggingFaceFile file)
-    {
-        var fileName = System.IO.Path.GetFileName(file.Path);
-        var displayName = "ONNX 模型";
-        var description = "";
-        var isQuantized = false;
-        var targetPlatform = "";
-        var relativeSize = file.Size; // 如果有精确大小则使用，否则为 0
-
-        // 解析文件名推断变体类型
-        var lowerName = fileName.ToLowerInvariant();
-
-        if (fileName == "model.onnx")
-        {
-            displayName = "标准版本";
-            description = "标准 ONNX 模型，兼容性最好";
-        }
-        else if (lowerName.Contains("qint8") || lowerName.Contains("int8") || lowerName.Contains("quantized"))
-        {
-            isQuantized = true;
-            displayName = "INT8 量化";
-            // 量化版本通常是标准版本的 ~1/4 到 ~1/2 大小
-            relativeSize = relativeSize > 0 ? relativeSize : 1; // 标记为较小
-
-            if (lowerName.Contains("arm64"))
-            {
-                targetPlatform = "arm64";
-                displayName += " (ARM64)";
-                description = "针对 ARM64 优化的 INT8 量化模型";
-            }
-            else if (lowerName.Contains("avx512"))
-            {
-                targetPlatform = "avx512";
-                displayName += " (AVX512)";
-                description = "针对 AVX512 优化的 INT8 量化模型";
-            }
-            else if (lowerName.Contains("avx2"))
-            {
-                targetPlatform = "avx2";
-                displayName += " (AVX2)";
-                description = "针对 AVX2 优化的 INT8 量化模型";
-            }
-            else
-            {
-                description = "INT8 量化模型，体积更小，速度更快";
-            }
-        }
-        else if (lowerName.Contains("quint8"))
-        {
-            isQuantized = true;
-            displayName = "UINT8 量化";
-            relativeSize = relativeSize > 0 ? relativeSize : 1;
-
-            if (lowerName.Contains("avx2"))
-            {
-                targetPlatform = "avx2";
-                displayName += " (AVX2)";
-                description = "针对 AVX2 优化的 UINT8 量化模型";
-            }
-            else
-            {
-                description = "UINT8 量化模型";
-            }
-        }
-        else if (lowerName.Contains("_o"))
-        {
-            // 优化级别 O1-O4
-            var match = System.Text.RegularExpressions.Regex.Match(fileName, @"_o(\d)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            if (match.Success)
-            {
-                var level = int.Parse(match.Groups[1].Value);
-                displayName = $"O{level} 优化";
-                description = $"优化级别 {level}，推理速度更快";
-                // O4 通常是最小的（包含更多优化）
-                relativeSize = relativeSize > 0 ? relativeSize : 4 - level;
-            }
-        }
-        else if (lowerName.Contains("fp16") || lowerName.Contains("float16"))
-        {
-            displayName = "FP16 版本";
-            description = "半精度模型，体积约为一半";
-            relativeSize = relativeSize > 0 ? relativeSize : 2;
-        }
-        else
-        {
-            // 其他情况，使用文件名
-            displayName = fileName.Replace(".onnx", "").Replace("_", " ");
-            description = $"变体: {fileName}";
-        }
-
-        return new OnnxVariant
-        {
-            Path = file.Path,
-            DisplayName = displayName,
-            Description = description,
-            Size = relativeSize,
-            IsQuantized = isQuantized,
-            TargetPlatform = string.IsNullOrEmpty(targetPlatform) ? null : targetPlatform,
-            IsRecommended = false
-        };
     }
 
     /// <summary>
