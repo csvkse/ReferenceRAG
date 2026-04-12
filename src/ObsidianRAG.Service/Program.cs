@@ -9,6 +9,9 @@ using ObsidianRAG.Service.Middleware;
 using Microsoft.OpenApi;
 using System.Text.Json.Serialization;
 
+// Set working directory to application directory (important for Windows Service)
+Directory.SetCurrentDirectory(AppContext.BaseDirectory);
+
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.InputEncoding= System.Text.Encoding.UTF8;
 

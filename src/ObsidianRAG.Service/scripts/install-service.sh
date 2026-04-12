@@ -1,6 +1,6 @@
 #!/bin/bash
-# ObsidianRAG 服务安装脚本 (Linux)
-# 用法: sudo ./install-service.sh
+# ObsidianRAG Service Install Script (Linux)
+# Usage: sudo ./install-service.sh
 
 set -e
 
@@ -8,13 +8,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(dirname "$SCRIPT_DIR")"
 SERVICE_NAME="obsidianrag"
 EXECUTABLE="$SERVICE_DIR/ObsidianRAG.Service"
+PORT=${1:-5000}
 
 if [ ! -f "$EXECUTABLE" ]; then
-    echo "错误: 找不到可执行文件 $EXECUTABLE"
+    echo "ERROR: Executable not found: $EXECUTABLE"
     exit 1
 fi
 
 chmod +x "$EXECUTABLE"
+
+echo "Service directory: $SERVICE_DIR"
+echo "Executable: $EXECUTABLE"
+echo "Port: $PORT"
 
 cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
 [Unit]
@@ -28,7 +33,7 @@ ExecStart=$EXECUTABLE
 Restart=always
 RestartSec=10
 User=root
-Environment=ASPNETCORE_URLS=http://0.0.0.0:5000
+Environment=ASPNETCORE_URLS=http://0.0.0.0:$PORT
 
 [Install]
 WantedBy=multi-user.target
@@ -38,5 +43,11 @@ systemctl daemon-reload
 systemctl enable $SERVICE_NAME
 systemctl start $SERVICE_NAME
 
-echo "服务已安装并启动"
-echo "状态: systemctl status $SERVICE_NAME"
+echo ""
+echo "========================================"
+echo "Service installed and started"
+echo "========================================"
+echo ""
+echo "URL: http://localhost:$PORT"
+echo "Status: systemctl status $SERVICE_NAME"
+echo "Logs: journalctl -u $SERVICE_NAME -f"

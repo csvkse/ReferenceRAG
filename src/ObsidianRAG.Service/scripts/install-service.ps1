@@ -52,6 +52,12 @@ sc.exe failure $ServiceName reset= 86400 actions= restart/10000/restart/20000/re
 
 # Set service environment variable via registry
 $regPath = "HKLM\SYSTEM\CurrentControlSet\Services\$ServiceName"
+
+# Set working directory
+Set-ItemProperty -Path "Registry::$regPath" -Name "WorkingDirectory" -Value $ServiceDir -Type ExpandString
+Write-Host "Working directory: $ServiceDir"
+
+# Set ASPNETCORE_URLS
 $envValue = "ASPNETCORE_URLS=http://0.0.0.0:$Port"
 $existingEnv = (Get-ItemProperty -Path "Registry::$regPath" -Name "Environment" -ErrorAction SilentlyContinue).Environment
 if ($existingEnv) {

@@ -1,4 +1,7 @@
 using System.Text.Json;
+
+using Microsoft.Extensions.Logging;
+
 using ObsidianRAG.Core.Models;
 
 namespace ObsidianRAG.Core.Services;
@@ -10,10 +13,13 @@ public class ConfigManager
 {
     private readonly string _configPath;
     private ObsidianRagConfig? _config;
+    private ILogger<SearchService> _logger;
 
-    public ConfigManager(string? configPath = null)
+    public ConfigManager(ILogger<SearchService> _logger,string? configPath = null)
     {
         _configPath = configPath ?? GetConfigPathFromAppSettings() ?? GetDefaultConfigPath();
+        Console.WriteLine($"[ConfigManager] 使用配置文件路径: {_configPath}");
+        _logger.LogInformation("ConfigManager initialized with config path: {ConfigPath}", _configPath);
     }
 
     /// <summary>
