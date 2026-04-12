@@ -2,6 +2,7 @@ using System.Text.Json;
 
 using Microsoft.Extensions.Logging;
 
+using ObsidianRAG.Core.Helpers;
 using ObsidianRAG.Core.Models;
 
 namespace ObsidianRAG.Core.Services;
@@ -13,13 +14,12 @@ public class ConfigManager
 {
     private readonly string _configPath;
     private ObsidianRagConfig? _config;
-    private ILogger<SearchService> _logger;
+    private static readonly ILogger _logger = StaticLogger.GetLogger("ConfigManager");
 
     public ConfigManager(ILogger<SearchService> _logger,string? configPath = null)
     {
         _configPath = configPath ?? GetConfigPathFromAppSettings() ?? GetDefaultConfigPath();
-        Console.WriteLine($"[ConfigManager] 使用配置文件路径: {_configPath}");
-        _logger.LogInformation("ConfigManager initialized with config path: {ConfigPath}", _configPath);
+        _logger.LogInformation($"[ConfigManager] 使用配置文件路径: {_configPath}");
     }
 
     /// <summary>
@@ -57,14 +57,14 @@ public class ConfigManager
                     {
                         configPath = Path.GetFullPath(Path.Combine(currentDir, configPath));
                     }
-                    Console.WriteLine($"[ConfigManager] 从 appsettings.json 读取配置路径: {configPath}");
+                    _logger.LogInformation($"[ConfigManager] 从 appsettings.json 读取配置路径: {configPath}");
                     return configPath;
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[ConfigManager] 读取 appsettings.json 失败: {ex.Message}");
+            _logger.LogInformation($"[ConfigManager] 读取 appsettings.json 失败: {ex.Message}");
         }
 
         return null;
@@ -107,17 +107,17 @@ public class ConfigManager
                     ReadCommentHandling = JsonCommentHandling.Skip
                 });
 
-                Console.WriteLine($"[ConfigManager] 已加载配置文件: {_configPath}");
+                _logger.LogInformation($"[ConfigManager] 已加载配置文件: {_configPath}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[ConfigManager] 配置文件解析失败: {ex.Message}");
+                _logger.LogInformation($"[ConfigManager] 配置文件解析失败: {ex.Message}");
                 _config = new ObsidianRagConfig();
             }
         }
         else
         {
-            Console.WriteLine($"[ConfigManager] 配置文件不存在，使用默认配置");
+            _logger.LogInformation($"[ConfigManager] 配置文件不存在，使用默认配置");
             _config = new ObsidianRagConfig();
         }
 
@@ -143,7 +143,7 @@ public class ConfigManager
                 Name = "Default",
                 Type = SourceType.Markdown
             });
-            Console.WriteLine($"[ConfigManager] 已迁移旧配置 VaultPath -> Sources[0]");
+            _logger.LogInformation($"[ConfigManager] 已迁移旧配置 VaultPath -> Sources[0]");
         }
 #pragma warning restore CS0618
     }
@@ -169,7 +169,7 @@ public class ConfigManager
         File.WriteAllText(_configPath, json);
 
         _config = config;
-        Console.WriteLine($"[ConfigManager] 配置已保存到: {_configPath}");
+        _logger.LogInformation($"[ConfigManager] 配置已保存到: {_configPath}");
     }
 
     /// <summary>
@@ -182,7 +182,7 @@ public class ConfigManager
         // 检查是否已存在（使用不区分大小写的路径比较）
         if (config.Sources.Any(s => s.Path.Equals(source.Path, StringComparison.OrdinalIgnoreCase)))
         {
-            Console.WriteLine($"[ConfigManager] 源路径已存在: {source.Path}");
+            _logger.LogInformation($"[ConfigManager] 源路径已存在: {source.Path}");
             return false;
         }
 
@@ -195,7 +195,7 @@ public class ConfigManager
         config.Sources.Add(source);
         Save(config);
 
-        Console.WriteLine($"[ConfigManager] 已添加源: {source.Name} ({source.Path})");
+        _logger.LogInformation($"[ConfigManager] 已添加源: {source.Name} ({source.Path})");
         return true;
     }
 
@@ -212,14 +212,14 @@ public class ConfigManager
 
         if (source == null)
         {
-            Console.WriteLine($"[ConfigManager] 未找到源: {pathOrName}");
+            _logger.LogInformation($"[ConfigManager] 未找到源: {pathOrName}");
             return false;
         }
 
         config.Sources.Remove(source);
         Save(config);
         
-        Console.WriteLine($"[ConfigManager] 已移除源: {source.Name}");
+        _logger.LogInformation($"[ConfigManager] 已移除源: {source.Name}");
         return true;
     }
 
@@ -236,14 +236,14 @@ public class ConfigManager
 
         if (source == null)
         {
-            Console.WriteLine($"[ConfigManager] 未找到源: {pathOrName}");
+            _logger.LogInformation($"[ConfigManager] 未找到源: {pathOrName}");
             return false;
         }
 
         source.Enabled = enabled;
         Save(config);
         
-        Console.WriteLine($"[ConfigManager] 已{(enabled ? "启用" : "禁用")}源: {source.Name}");
+        _logger.LogInformation($"[ConfigManager] 已{(enabled ? "启用" : "禁用")}源: {source.Name}");
         return true;
     }
 
@@ -275,7 +275,7 @@ public class ConfigManager
                     Name = name,
                     Type = SourceType.Markdown
                 });
-                Console.WriteLine($"[ConfigManager] 从环境变量添加源: {name} ({sourcePath})");
+                _logger.LogInformation($"[ConfigManager] 从环境变量添加源: {name} ({sourcePath})");
             }
         }
 
@@ -299,12 +299,12 @@ public class ConfigManager
                             config.Sources.Add(source);
                         }
                     }
-                    Console.WriteLine($"[ConfigManager] 从环境变量加载 {sources.Count} 个源");
+                    _logger.LogInformation($"[ConfigManager] 从环境变量加载 {sources.Count} 个源");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[ConfigManager] 解析环境变量 OBSIDIAN_RAG_SOURCES 失败: {ex.Message}");
+                _logger.LogInformation($"[ConfigManager] 解析环境变量 OBSIDIAN_RAG_SOURCES 失败: {ex.Message}");
             }
         }
 

@@ -68,24 +68,42 @@ Write-Host "Listening port: $Port"
 
 # Detect and add CUDA path
 if (-not $SkipCuda) {
-    $cudaBinPath = $CudaPath
+    $cudaPaths = @()
 
-    # Auto-detect CUDA path if not specified
-    if ([string]::IsNullOrEmpty($cudaBinPath)) {
+    # Parse provided CUDA path(s) - support semicolon or comma separated
+    if (-not [string]::IsNullOrEmpty($CudaPath)) {
+        $cudaPaths = $CudaPath -split '[;,]' | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
+    } else {
+        # Auto-detect CUDA path
         $cudaEnv = [Environment]::GetEnvironmentVariable("CUDA_PATH", "Machine")
         if (-not [string]::IsNullOrEmpty($cudaEnv)) {
             $cudaBinPath = Join-Path $cudaEnv "bin"
+            if (Test-Path $cudaBinPath) {
+                $cudaPaths = @($cudaBinPath)
+            }
         }
     }
 
-    if (-not [string]::IsNullOrEmpty($cudaBinPath) -and (Test-Path $cudaBinPath)) {
-        # Get current system PATH
+    # Validate paths exist
+    $validCudaPaths = @()
+    foreach ($p in $cudaPaths) {
+        if (Test-Path $p) {
+            $validCudaPaths += $p
+            Write-Host "CUDA path verified: $p" -ForegroundColor Green
+        } else {
+            Write-Host "CUDA path not found: $p" -ForegroundColor Yellow
+        }
+    }
+
+    if ($validCudaPaths.Count -gt 0) {
+        # Build PATH with CUDA paths first
+        $cudaPathString = $validCudaPaths -join ';'
         $systemPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
-        $envArray += "PATH=$cudaBinPath;$systemPath"
-        Write-Host "CUDA path: $cudaBinPath" -ForegroundColor Green
+        $envArray += "PATH=$cudaPathString;$systemPath"
+        Write-Host "CUDA enabled with $($validCudaPaths.Count) path(s)" -ForegroundColor Green
     } else {
         Write-Host "CUDA not detected, using CPU mode" -ForegroundColor Yellow
-        Write-Host "To enable CUDA, specify -CudaPath parameter or install CUDA Toolkit"
+        Write-Host "To enable CUDA, specify -CudaPath parameter (supports multiple paths separated by ; or ,)"
     }
 }
 

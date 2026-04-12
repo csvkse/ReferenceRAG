@@ -8,6 +8,7 @@ using ObsidianRAG.Service.Controllers;
 using ObsidianRAG.Service.Middleware;
 using Microsoft.OpenApi;
 using System.Text.Json.Serialization;
+using ObsidianRAG.Core.Helpers;
 
 // Set working directory to application directory (important for Windows Service)
 Directory.SetCurrentDirectory(AppContext.BaseDirectory);
@@ -280,6 +281,11 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+
+#region 静态类配置
+StaticLogger.LoggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
+#endregion
+
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
@@ -350,5 +356,7 @@ using (var scope = app.Services.CreateScope())
         app.Logger.LogWarning(ex, "BM25 索引初始化失败，混合搜索可能退化为纯向量搜索");
     }
 }
+
+
 
 app.Run();
