@@ -87,6 +87,15 @@ api.interceptors.response.use(
   },
   (error) => {
     console.error('API Error:', error.response?.data || error.message)
+    // 401 未授权，跳转登录页
+    if (error.response?.status === 401) {
+      // 清除本地存储的 API Key
+      localStorage.removeItem('obsidian_rag_api_key')
+      // 跳转登录页（避免重复跳转）
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }
     return Promise.reject(error)
   }
 )

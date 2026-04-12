@@ -78,6 +78,9 @@ const router = createRouter({
   routes
 })
 
+// 标记是否已检查认证状态
+let authChecked = false
+
 router.beforeEach(async (to, _from, next) => {
   document.title = `${to.meta.title || 'Obsidian RAG'} - Obsidian RAG`
 
@@ -89,28 +92,31 @@ router.beforeEach(async (to, _from, next) => {
 
   const authStore = useAuthStore()
 
-  // 尝试验证 API Key 是否有效
+  // 如果已有 API Key，直接放行（header 已在 store 中设置）
   if (authStore.apiKey) {
+    next()
+    return
+  }
+
+  // 只在首次访问时检查是否需要认证
+  if (!authChecked) {
+    authChecked = true
     try {
-      // 静默验证，不显示错误
-      await authStore.verifyApiKey()
+      // 尝试访问一个简单的 API
+      const response = await fetch('/api/system/status')
+      if (response.status === 401 || response.status === 403) {
+        // 需要认证，跳转登录页
+        next('/login')
+        return
+      }
+      // 不需要认证，放行
       next()
     } catch {
-      // 验证失败，跳转登录
-      next('/login')
+      // 网络错误等，放行
+      next()
     }
   } else {
-    // 没有 API Key，尝试访问看是否需要认证
-    try {
-      await fetch('/api/system/status')
-      next()
-    } catch (error: any) {
-      if (error.status === 401 || error.status === 403) {
-        next('/login')
-      } else {
-        next()
-      }
-    }
+    next()
   }
 })
 
