@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
+using ObsidianRAG.Core.Services;
 
 namespace ObsidianRAG.Service.Middleware;
 
@@ -27,9 +28,30 @@ public static class ApiKeyExtensions
 
     public static IApplicationBuilder UseApiKeyAuthentication(this IApplicationBuilder app)
     {
-        var config = app.ApplicationServices.GetRequiredService<IConfiguration>();
-        var enabled = config.GetValue<bool>("ApiKey:Enabled", false);
-        var apiKey = config.GetValue<string>("ApiKey:Key", "");
+        // 从 ConfigManager 读取配置（优先级高于 appsettings.json）
+        var configManager = app.ApplicationServices.GetRequiredService<ConfigManager>();
+        var config = configManager.Load();
+        var apiKey = config.Service?.ApiKey;
+
+        // 判断是否启用认证：ApiKey 不为空则启用
+        var enabled = !string.IsNullOrEmpty(apiKey);
+
+        // 同时支持从 appsettings.json 读取（向后兼容）
+        var appConfig = app.ApplicationServices.GetRequiredService<IConfiguration>();
+        if (!enabled)
+        {
+            enabled = appConfig.GetValue<bool>("ApiKey:Enabled", false);
+            apiKey = appConfig.GetValue<string>("ApiKey:Key", "");
+        }
+
+        if (enabled)
+        {
+            Console.WriteLine($"[ApiKey] API Key 认证已启用");
+        }
+        else
+        {
+            Console.WriteLine($"[ApiKey] API Key 认证未启用（未配置 ApiKey）");
+        }
 
         app.Use(async (context, next) =>
         {

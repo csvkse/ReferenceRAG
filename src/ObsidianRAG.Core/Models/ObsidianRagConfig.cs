@@ -318,6 +318,11 @@ public class ServiceConfig
     /// 日志级别
     /// </summary>
     public string LogLevel { get; set; } = "Information";
+
+    /// <summary>
+    /// API Key 用于认证（为空则不启用认证）
+    /// </summary>
+    public string? ApiKey { get; set; }
 }
 
 /// <summary>
