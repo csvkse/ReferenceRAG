@@ -4,7 +4,7 @@ using Microsoft.Extensions.Logging;
 namespace ObsidianRAG.Service.Middleware;
 
 /// <summary>
-/// API Key 认证中间件 - 可通过配置 ApiKey:Enabled 关闭
+/// API Key 认证中间件 - 可通过配置 ApiKey 启用，启用后所有接口都需要认证
 /// </summary>
 public class ApiKeyMiddleware
 {
@@ -23,13 +23,6 @@ public class ApiKeyMiddleware
         // 检查是否启用 API Key 认证
         var enabled = context.Items["ApiKeyEnabled"] as bool? ?? false;
         if (!enabled)
-        {
-            await _next(context);
-            return;
-        }
-
-        // 健康检查端点无需认证
-        if (context.Request.Path.StartsWithSegments("/api/system/health"))
         {
             await _next(context);
             return;
