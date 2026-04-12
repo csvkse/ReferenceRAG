@@ -203,6 +203,7 @@ export interface ServiceConfig {
   enableCors: boolean
   enableSwagger: boolean
   logLevel: string
+  apiKey?: string
 }
 
 export interface RerankConfig {

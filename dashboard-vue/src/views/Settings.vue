@@ -115,6 +115,30 @@
                   style="width: 200px"
                 />
               </n-form-item>
+              <n-form-item label="API Key">
+                <n-input-group>
+                  <n-input
+                    v-model:value="config.service.apiKey"
+                    type="password"
+                    show-password-on="click"
+                    placeholder="留空则不启用认证"
+                    style="width: 300px"
+                  />
+                  <n-button
+                    v-if="config.service.apiKey"
+                    type="warning"
+                    style="margin-left: 8px"
+                    @click="config.service.apiKey = ''"
+                  >
+                    清除
+                  </n-button>
+                </n-input-group>
+              </n-form-item>
+              <n-form-item label="">
+                <n-text depth="3" style="font-size: 12px">
+                  {{ config.service.apiKey ? 'API Key 已设置，写操作需要认证' : '未设置 API Key，所有接口无需认证' }}
+                </n-text>
+              </n-form-item>
             </n-form>
           </n-card>
         </n-tab-pane>
@@ -219,7 +243,8 @@ const defaultConfig: ObsidianRagConfig = {
     host: 'localhost',
     enableCors: true,
     enableSwagger: true,
-    logLevel: 'Information'
+    logLevel: 'Information',
+    apiKey: ''
   },
   rerank: {
     enabled: false,
