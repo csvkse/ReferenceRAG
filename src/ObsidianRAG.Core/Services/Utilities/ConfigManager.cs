@@ -19,6 +19,7 @@ public class ConfigManager
     public ConfigManager(ILogger<SearchService> _logger,string? configPath = null)
     {
         _configPath = configPath ?? GetConfigPathFromAppSettings() ?? GetDefaultConfigPath();
+        
         _logger.LogInformation($"[ConfigManager] 使用配置文件路径: {_configPath}");
     }
 
@@ -36,6 +37,10 @@ public class ConfigManager
             // 尝试开发环境路径
             appSettingsPath = Path.Combine(currentDir, "appsettings.Development.json");
         }
+
+#if DEBUG
+        appSettingsPath = Path.Combine(currentDir, "appsettings.Development.json");
+#endif
 
         if (!File.Exists(appSettingsPath))
         {

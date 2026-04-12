@@ -40,14 +40,25 @@ public class EmbeddingService : IEmbeddingService, IDisposable
     private void LoadModel(string modelPath, string modelName)
     {
         // 设置 CUDA/TensorRT 库路径（必须在加载 ONNX Runtime 之前）
-        if (_options.UseCuda && !string.IsNullOrEmpty(_options.CudaLibraryPath))
+        // 只要有配置就设置 PATH，不管当前是否启用 CUDA（为热切换做准备）
+        if (!string.IsNullOrEmpty(_options.CudaLibraryPath))
         {
-            var cudaPath = _options.CudaLibraryPath;
             var currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
-            if (!currentPath.Contains(cudaPath))
+            var existingPaths = new HashSet<string>(
+                currentPath.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries),
+                StringComparer.OrdinalIgnoreCase
+            );
+
+            var pathsToAdd = _options.CudaLibraryPath
+                .Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(p => !existingPaths.Contains(p.Trim()))
+                .ToList();
+
+            if (pathsToAdd.Count > 0)
             {
-                Environment.SetEnvironmentVariable("PATH", $"{cudaPath};{currentPath}");
-                Console.WriteLine($"[EmbeddingService] 已添加库路径到 PATH: {cudaPath}");
+                var newPath = string.Join(";", pathsToAdd) + ";" + currentPath;
+                Environment.SetEnvironmentVariable("PATH", newPath);
+                Console.WriteLine($"[EmbeddingService] 已添加 CUDA 库路径到 PATH: {string.Join(", ", pathsToAdd)}");
             }
         }
 

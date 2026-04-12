@@ -26,9 +26,10 @@ $needsAdmin = $Action -in @("start", "stop", "restart")
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if ($needsAdmin -and -not $isAdmin) {
-    Write-Host "Error: This action requires Administrator privileges." -ForegroundColor Red
-    Write-Host "Please restart PowerShell as admin." -ForegroundColor Yellow
-    exit 1
+    Write-Host "Requesting administrator privileges..." -ForegroundColor Yellow
+    $scriptPath = $MyInvocation.MyCommand.Path
+    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$scriptPath`" $Action" -Wait
+    exit 0
 }
 
 # Get service
