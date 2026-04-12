@@ -48,15 +48,25 @@ const handleLogin = async () => {
   errorMsg.value = ''
 
   try {
-    // If API Key provided, save it
-    if (apiKey.value.trim()) {
-      authStore.setApiKey(apiKey.value.trim())
-    } else {
-      // Clear any existing API Key
+    // First check if server requires authentication
+    const authRequired = await authStore.checkAuthRequired()
+
+    if (!authRequired) {
+      // Server doesn't require auth, login directly
       authStore.clearApiKey()
+      message.success('Login successful')
+      router.push('/')
+      return
     }
 
-    // Verify if we can access the API
+    // Server requires auth, validate API Key
+    if (!apiKey.value.trim()) {
+      errorMsg.value = 'API Key is required. Please enter your API Key.'
+      return
+    }
+
+    // Save and verify API Key
+    authStore.setApiKey(apiKey.value.trim())
     const valid = await authStore.verifyApiKey()
 
     if (valid) {
@@ -64,15 +74,11 @@ const handleLogin = async () => {
       router.push('/')
     } else {
       authStore.clearApiKey()
-      errorMsg.value = 'API Key is required. Please enter a valid API Key.'
+      errorMsg.value = 'Invalid API Key. Please try again.'
     }
   } catch (error: any) {
     authStore.clearApiKey()
-    if (error.response?.status === 401) {
-      errorMsg.value = 'API Key is required. Please enter a valid API Key.'
-    } else {
-      errorMsg.value = error.response?.data?.error || 'Verification failed'
-    }
+    errorMsg.value = error.response?.data?.error || 'Connection failed. Please check if service is running.'
   } finally {
     loading.value = false
   }

@@ -8,7 +8,7 @@ export const useAuthStore = defineStore('auth', () => {
   const apiKey = ref<string | null>(localStorage.getItem(API_KEY_STORAGE_KEY))
   const isAuthenticated = computed(() => !!apiKey.value)
 
-  // 设置 axios 默认 header
+  // Set axios default header
   const updateAuthHeader = (key: string | null) => {
     if (key) {
       axios.defaults.headers.common['X-API-Key'] = key
@@ -17,7 +17,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  // 初始化时设置 header
+  // Initialize header on load
   if (apiKey.value) {
     updateAuthHeader(apiKey.value)
   }
@@ -34,16 +34,27 @@ export const useAuthStore = defineStore('auth', () => {
     updateAuthHeader(null)
   }
 
+  // Check if authentication is required by server
+  const checkAuthRequired = async (): Promise<boolean> => {
+    try {
+      const response = await axios.get('/api/auth/check')
+      return response.data.authRequired === true
+    } catch {
+      // If endpoint fails, assume auth is required
+      return true
+    }
+  }
+
   const verifyApiKey = async (): Promise<boolean> => {
     try {
-      // 使用一个简单的 API 调用来验证 API Key
+      // Use a simple API call to verify API Key
       await axios.get('/api/system/status')
       return true
     } catch (error: any) {
       if (error.response?.status === 401 || error.response?.status === 403) {
         return false
       }
-      // 其他错误（如网络错误）可能不是 API Key 问题
+      // Other errors (like network) may not be API Key issue
       throw error
     }
   }
@@ -57,6 +68,7 @@ export const useAuthStore = defineStore('auth', () => {
     isAuthenticated,
     setApiKey,
     clearApiKey,
+    checkAuthRequired,
     verifyApiKey,
     logout
   }

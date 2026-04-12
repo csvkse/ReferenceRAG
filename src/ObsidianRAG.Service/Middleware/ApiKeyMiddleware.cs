@@ -4,7 +4,7 @@ using Microsoft.Extensions.Logging;
 namespace ObsidianRAG.Service.Middleware;
 
 /// <summary>
-/// API Key 认证中间件 - 仅对 /api/* 路径进行认证
+/// API Key authentication middleware - only authenticates /api/* paths
 /// </summary>
 public class ApiKeyMiddleware
 {
@@ -20,14 +20,26 @@ public class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        // 只对 /api/* 路径进行认证，静态文件直接放行
+        // Special endpoint: /api/auth/check - always allowed, returns auth status
+        if (context.Request.Path.StartsWithSegments("/api/auth/check"))
+        {
+            var enabled = context.Items["ApiKeyEnabled"] as bool? ?? false;
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            await context.Response.WriteAsJsonAsync(new {
+                authRequired = enabled,
+                message = enabled ? "API Key is required" : "No authentication required"
+            });
+            return;
+        }
+
+        // Only authenticate /api/* paths, skip static files
         if (!context.Request.Path.StartsWithSegments("/api"))
         {
             await _next(context);
             return;
         }
 
-        // 检查是否启用 API Key 认证
+        // Check if API Key authentication is enabled
         var enabled = context.Items["ApiKeyEnabled"] as bool? ?? false;
         if (!enabled)
         {
@@ -42,7 +54,7 @@ public class ApiKeyMiddleware
             return;
         }
 
-        // 仅支持 Header 传递 API Key (安全考虑)
+        // Only support Header for API Key (security consideration)
         string? providedKey = null;
         if (context.Request.Headers.TryGetValue(ApiKeyHeaderName, out var headerKey))
         {
@@ -52,15 +64,15 @@ public class ApiKeyMiddleware
         if (string.IsNullOrEmpty(providedKey))
         {
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsJsonAsync(new { error = "缺少 API Key。请在请求头中添加 X-API-Key" });
+            await context.Response.WriteAsJsonAsync(new { error = "Missing API Key. Please add X-API-Key header" });
             return;
         }
 
         if (!string.Equals(providedKey, expectedApiKey, StringComparison.Ordinal))
         {
-            _logger.LogWarning("API Key 验证失败，来源 IP: {RemoteIp}", context.Connection.RemoteIpAddress);
+            _logger.LogWarning("API Key verification failed, source IP: {RemoteIp}", context.Connection.RemoteIpAddress);
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
-            await context.Response.WriteAsJsonAsync(new { error = "API Key 无效" });
+            await context.Response.WriteAsJsonAsync(new { error = "Invalid API Key" });
             return;
         }
 
