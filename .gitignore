@@ -50,6 +50,7 @@ reference/
 resource/archived/
 resource/skills/
 resource/test-suites/
+!resource/SKILL.md
 
 # GSD workflow
 .gsd/
