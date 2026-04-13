@@ -90,11 +90,40 @@
     <!-- Search Options -->
     <n-card title="搜索选项">
       <template #header-extra>
-        <n-button text size="small" @click="handleReset" :disabled="isDefaultOptions">
-          <template #icon><n-icon :component="RefreshOutline" /></template>
-          重置为默认
-        </n-button>
+        <n-space align="center" :size="12">
+          <n-button text size="small" @click="showModeHelp = !showModeHelp">
+            <template #icon><n-icon :component="HelpCircleOutline" /></template>
+            模式说明
+          </n-button>
+          <n-button text size="small" @click="handleReset" :disabled="isDefaultOptions">
+            <template #icon><n-icon :component="RefreshOutline" /></template>
+            重置为默认
+          </n-button>
+        </n-space>
       </template>
+
+      <!-- Mode Help Collapse -->
+      <n-collapse-transition :show="showModeHelp">
+        <n-card size="small" style="margin-bottom: 16px; background: var(--help-card-bg, rgba(255,255,255,0.02))">
+          <n-descriptions label-placement="left" :column="1" size="small">
+            <n-descriptions-item label="快速模式">
+              <n-text depth="3">~1000 tokens，快速返回少量结果，适合简单查询</n-text>
+            </n-descriptions-item>
+            <n-descriptions-item label="标准模式">
+              <n-text depth="3">~3000 tokens，默认模式，平衡速度与结果质量</n-text>
+            </n-descriptions-item>
+            <n-descriptions-item label="深度模式">
+              <n-text depth="3">~6000 tokens，返回更多内容，适合复杂查询</n-text>
+            </n-descriptions-item>
+            <n-descriptions-item label="混合模式">
+              <n-text depth="3">BM25关键词 + 向量语义混合搜索，综合召回能力强</n-text>
+            </n-descriptions-item>
+            <n-descriptions-item label="两阶段模式">
+              <n-text depth="3">召回(BM25+向量) + Rerank精排，精确度最高</n-text>
+            </n-descriptions-item>
+          </n-descriptions>
+        </n-card>
+      </n-collapse-transition>
       <n-grid :cols="4" :x-gap="20">
         <n-gi>
           <n-form-item label="查询模式">
@@ -270,7 +299,8 @@ import {
   RefreshOutline,
   CubeOutline,
   GitMergeOutline,
-  LayersOutline
+  LayersOutline,
+  HelpCircleOutline
 } from '@vicons/ionicons5'
 import { aiQueryApi, sourcesApi, pathsApi, type SearchStatusResponse } from '@/api'
 import type { SourceDetail, AIQueryResponse, ChunkResult, DrilldownResponse, QueryMode, SourcePathInfo } from '@/types/api'
@@ -278,6 +308,7 @@ import type { SourceDetail, AIQueryResponse, ChunkResult, DrilldownResponse, Que
 const searchQuery = ref('')
 const loading = ref(false)
 const searched = ref(false)
+const showModeHelp = ref(false)
 const searchResponse = ref<AIQueryResponse | null>(null)
 const sources = ref<SourceDetail[]>([])
 const paths = ref<SourcePathInfo[]>([])
@@ -317,7 +348,8 @@ const modeOptions = [
     { label: '快速 (Quick)', value: 'Quick' },
     { label: '标准 (Standard)', value: 'Standard' },
     { label: '深度 (Deep)', value: 'Deep' },
-    { label: '混合 (Hybrid) - 推荐', value: 'Hybrid' }
+    { label: '混合 (Hybrid) - 推荐', value: 'Hybrid' },
+    { label: '两阶段 (HybridRerank)', value: 'HybridRerank' }
 ]
 
 const sourceOptions = computed(() =>
@@ -464,3 +496,10 @@ onMounted(() => {
   loadSearchStatus()
 })
 </script>
+
+<style scoped>
+/* 浅色模式适配 */
+:global(body.light-theme) .n-card[style*="background"] {
+  --help-card-bg: rgba(0, 0, 0, 0.02);
+}
+</style>

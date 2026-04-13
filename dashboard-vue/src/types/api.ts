@@ -81,7 +81,7 @@ export interface QueryOptions {
   debiasPopularity?: boolean
 }
 
-export type QueryMode = 'Quick' | 'Standard' | 'Deep' | 'Hybrid'
+export type QueryMode = 'Quick' | 'Standard' | 'Deep' | 'Hybrid' | 'HybridRerank'
 
 export interface SearchFilter {
   tags?: string[]
