@@ -105,23 +105,43 @@
       <!-- Mode Help Collapse -->
       <n-collapse-transition :show="showModeHelp">
         <n-card size="small" style="margin-bottom: 16px; background: var(--help-card-bg, rgba(255,255,255,0.02))">
-          <n-descriptions label-placement="left" :column="1" size="small">
-            <n-descriptions-item label="快速模式">
-              <n-text depth="3">~1000 tokens，快速返回少量结果，适合简单查询</n-text>
-            </n-descriptions-item>
-            <n-descriptions-item label="标准模式">
-              <n-text depth="3">~3000 tokens，默认模式，平衡速度与结果质量</n-text>
-            </n-descriptions-item>
-            <n-descriptions-item label="深度模式">
-              <n-text depth="3">~6000 tokens，返回更多内容，适合复杂查询</n-text>
-            </n-descriptions-item>
-            <n-descriptions-item label="混合模式">
-              <n-text depth="3">BM25关键词 + 向量语义混合搜索，综合召回能力强</n-text>
-            </n-descriptions-item>
-            <n-descriptions-item label="两阶段模式">
-              <n-text depth="3">召回(BM25+向量) + Rerank精排，精确度最高</n-text>
-            </n-descriptions-item>
-          </n-descriptions>
+          <n-tabs type="line" size="small">
+            <n-tab-pane name="mode" tab="查询模式">
+              <n-descriptions label-placement="left" :column="1" size="small">
+                <n-descriptions-item label="快速模式">
+                  <n-text depth="3">纯向量搜索，~1000 tokens，适合简单查询</n-text>
+                </n-descriptions-item>
+                <n-descriptions-item label="标准模式">
+                  <n-text depth="3">纯向量搜索，~3000 tokens，平衡速度与质量</n-text>
+                </n-descriptions-item>
+                <n-descriptions-item label="深度模式">
+                  <n-text depth="3">纯向量搜索，~6000 tokens，适合复杂查询</n-text>
+                </n-descriptions-item>
+                <n-descriptions-item label="混合模式">
+                  <n-text depth="3">BM25关键词 + 向量语义混合召回，速度快</n-text>
+                </n-descriptions-item>
+                <n-descriptions-item label="混合重排">
+                  <n-text depth="3">BM25 + 向量召回 + Rerank精排，精确度最高，推荐</n-text>
+                </n-descriptions-item>
+              </n-descriptions>
+            </n-tab-pane>
+            <n-tab-pane name="params" tab="参数说明">
+              <n-descriptions label-placement="left" :column="1" size="small">
+                <n-descriptions-item label="返回数量">
+                  <n-text depth="3">返回结果数量，混合模式下召回数为 TopK × 系数</n-text>
+                </n-descriptions-item>
+                <n-descriptions-item label="上下文窗口">
+                  <n-text depth="3">深入查询时扩展的相邻分段数量</n-text>
+                </n-descriptions-item>
+                <n-descriptions-item label="源筛选">
+                  <n-text depth="3">限定搜索范围到指定的知识库源</n-text>
+                </n-descriptions-item>
+                <n-descriptions-item label="路径过滤">
+                  <n-text depth="3">限定搜索范围到指定的文件夹路径</n-text>
+                </n-descriptions-item>
+              </n-descriptions>
+            </n-tab-pane>
+          </n-tabs>
         </n-card>
       </n-collapse-transition>
       <n-grid :cols="4" :x-gap="20">
@@ -318,7 +338,7 @@ const searchStatus = ref<SearchStatusResponse | null>(null)
 
 // Default options for reset
 const defaultOptions = {
-  mode: 'Hybrid' as QueryMode,
+  mode: 'HybridRerank' as QueryMode,
   topK: 10,
   contextWindow: 1,
   sources: [] as string[],
@@ -348,8 +368,8 @@ const modeOptions = [
     { label: '快速 (Quick)', value: 'Quick' },
     { label: '标准 (Standard)', value: 'Standard' },
     { label: '深度 (Deep)', value: 'Deep' },
-    { label: '混合 (Hybrid) - 推荐', value: 'Hybrid' },
-    { label: '两阶段 (HybridRerank)', value: 'HybridRerank' }
+    { label: '混合 (Hybrid)', value: 'Hybrid' },
+    { label: '混合重排 (HybridRerank) - 推荐', value: 'HybridRerank' }
 ]
 
 const sourceOptions = computed(() =>

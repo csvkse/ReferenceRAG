@@ -230,15 +230,12 @@ public class SearchService : ISearchService
         if (request.EnableRerank.HasValue)
             return request.EnableRerank.Value;
 
-        // HybridRerank 模式强制启用
+        // HybridRerank 模式强制启用重排
         if (request.Mode == QueryMode.HybridRerank)
             return true;
 
-        // Hybrid 模式根据配置决定
-        if (request.Mode == QueryMode.Hybrid && config.AutoRerankInHybrid)
-            return config.Enabled;
-
-        // 其他模式不启用
+        // Hybrid 模式不启用重排（纯混合召回）
+        // 其他模式也不启用
         return false;
     }
 
