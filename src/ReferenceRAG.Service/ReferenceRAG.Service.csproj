@@ -11,6 +11,12 @@
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
 
+  <!-- 排除开发时配置文件，不复制到发布输出 -->
+  <ItemGroup>
+    <Content Remove="obsidian-rag.json" />
+    <None Include="obsidian-rag.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.2" />
