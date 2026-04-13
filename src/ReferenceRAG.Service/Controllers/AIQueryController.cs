@@ -140,89 +140,37 @@ public class AIQueryController : ControllerBase
 
     /// <summary>
     /// 根据模式调整请求参数
+    /// 优先使用前端传入的值，未传入时使用模式默认值
     /// </summary>
     private AIQueryRequest AdjustRequestByMode(AIQueryRequest request)
     {
-        var adjusted = new AIQueryRequest
+        // 获取模式默认参数
+        var (defaultTopK, defaultContextWindow, defaultMaxTokens) = request.Mode switch
+        {
+            QueryMode.Quick => (3, 0, 1000),
+            QueryMode.Standard => (10, 1, 3000),
+            QueryMode.Hybrid => (15, 1, 4000),
+            QueryMode.Deep => (20, 2, 6000),
+            QueryMode.HybridRerank => (10, 1, 4000),
+            _ => (10, 1, 3000)
+        };
+
+        return new AIQueryRequest
         {
             Query = request.Query,
             Mode = request.Mode,
+            // 优先使用前端传入的值，否则使用模式默认值
+            TopK = request.TopK > 0 ? request.TopK : defaultTopK,
+            ContextWindow = request.ContextWindow >= 0 ? request.ContextWindow : defaultContextWindow,
+            MaxTokens = request.MaxTokens > 0 ? request.MaxTokens : defaultMaxTokens,
             Sources = request.Sources,
             Filters = request.Filters,
             Options = request.Options,
             K1 = request.K1,
-            B = request.B
-        };
-
-        return request.Mode switch
-        {
-            QueryMode.Quick => new AIQueryRequest
-            {
-                Query = request.Query,
-                Mode = request.Mode,
-                TopK = 3,
-                ContextWindow = 0,
-                MaxTokens = 1000,
-                Sources = request.Sources,
-                Filters = request.Filters,
-                Options = request.Options,
-                K1 = request.K1,
-                B = request.B
-            },
-            QueryMode.Standard => new AIQueryRequest
-            {
-                Query = request.Query,
-                Mode = request.Mode,
-                TopK = 10,
-                ContextWindow = 1,
-                MaxTokens = 3000,
-                Sources = request.Sources,
-                Filters = request.Filters,
-                Options = request.Options,
-                K1 = request.K1,
-                B = request.B
-            },
-            QueryMode.Hybrid => new AIQueryRequest
-            {
-                Query = request.Query,
-                Mode = request.Mode,
-                TopK = 15,
-                ContextWindow = 1,
-                MaxTokens = 4000,
-                Sources = request.Sources,
-                Filters = request.Filters,
-                Options = request.Options,
-                K1 = request.K1,
-                B = request.B
-            },
-            QueryMode.Deep => new AIQueryRequest
-            {
-                Query = request.Query,
-                Mode = request.Mode,
-                TopK = 20,
-                ContextWindow = 2,
-                MaxTokens = 6000,
-                Sources = request.Sources,
-                Filters = request.Filters,
-                Options = request.Options,
-                K1 = request.K1,
-                B = request.B
-            },
-            QueryMode.HybridRerank => new AIQueryRequest
-            {
-                Query = request.Query,
-                Mode = request.Mode,
-                TopK = 10,  // 最终返回数量
-                ContextWindow = 1,
-                MaxTokens = 4000,
-                Sources = request.Sources,
-                Filters = request.Filters,
-                Options = request.Options,
-                K1 = request.K1,
-                B = request.B,
-                EnableRerank = true  // 强制启用重排
-            },
-            _ => adjusted
+            B = request.B,
+            // HybridRerank 模式强制启用重排
+            EnableRerank = request.Mode == QueryMode.HybridRerank ? true : request.EnableRerank,
+            RerankTopN = request.RerankTopN
         };
     }
 

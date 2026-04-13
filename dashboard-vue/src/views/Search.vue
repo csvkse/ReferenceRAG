@@ -109,7 +109,7 @@
             <n-tab-pane name="mode" tab="查询模式">
               <n-descriptions label-placement="left" :column="1" size="small">
                 <n-descriptions-item label="快速模式">
-                  <n-text depth="3">纯向量搜索，TopK=3，~1000 tokens，适合简单查询</n-text>
+                  <n-text depth="3">纯向量搜索，TopK=3，~1000 tokens，禁用重排</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="标准模式">
                   <n-text depth="3">纯向量搜索，TopK=10，~3000 tokens，平衡速度与质量</n-text>
@@ -121,17 +121,20 @@
                   <n-text depth="3">BM25+向量召回，TopK=15，~4000 tokens，速度快</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="混合重排">
-                  <n-text depth="3">BM25+向量召回(×3倍)+Rerank精排，TopK=10，推荐</n-text>
+                  <n-text depth="3">BM25+向量召回(×3倍)+Rerank精排，TopK=10，强制启用重排，推荐</n-text>
                 </n-descriptions-item>
               </n-descriptions>
             </n-tab-pane>
             <n-tab-pane name="params" tab="参数说明">
               <n-descriptions label-placement="left" :column="1" size="small">
-                <n-descriptions-item label="返回数量 (TopK)">
-                  <n-text depth="3">各模式有默认值。混合重排模式下召回数=TopK×3，再Rerank精排</n-text>
+                <n-descriptions-item label="返回数量">
+                  <n-text depth="3">启用重排时作为最终返回数，召回数自动×3；未启用时直接控制返回数量</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="上下文窗口">
                   <n-text depth="3">深入查询时扩展的相邻分段数。快速=0，标准/混合=1，深度=2</n-text>
+                </n-descriptions-item>
+                <n-descriptions-item label="启用重排">
+                  <n-text depth="3">开启后召回数=返回数×3，再精排返回指定数量。快速模式禁用，混合重排强制启用</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="源筛选">
                   <n-text depth="3">限定搜索范围到指定的知识库源</n-text>
@@ -151,13 +154,27 @@
           </n-form-item>
         </n-gi>
         <n-gi>
-          <n-form-item label="返回数量 (Top K)">
+          <n-form-item :label="(searchOptions.enableRerank === true || searchOptions.mode === 'HybridRerank') ? '重排返回数' : '返回数量 (Top K)'">
             <n-input-number v-model:value="searchOptions.topK" :min="1" :max="50" style="width: 100%" />
           </n-form-item>
         </n-gi>
         <n-gi>
           <n-form-item label="上下文窗口">
             <n-input-number v-model:value="searchOptions.contextWindow" :min="0" :max="5" style="width: 100%" />
+          </n-form-item>
+        </n-gi>
+        <!-- 只在非强制重排模式下显示重排开关 -->
+        <n-gi v-if="searchOptions.mode !== 'HybridRerank' && searchOptions.mode !== 'Quick'">
+          <n-form-item label="启用重排">
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-switch
+                  :value="searchOptions.enableRerank === true"
+                  @update:value="(v: boolean) => searchOptions.enableRerank = v ? true : false"
+                />
+              </template>
+              {{ searchOptions.enableRerank ? '启用重排，召回数=返回数×3' : '禁用重排' }}（覆盖配置）
+            </n-tooltip>
           </n-form-item>
         </n-gi>
         <n-gi>
@@ -310,7 +327,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import {
   SearchOutline,
   ArrowDownOutline,
@@ -336,11 +353,21 @@ const selectedPaths = ref<string[]>([])
 const pathsLoading = ref(false)
 const searchStatus = ref<SearchStatusResponse | null>(null)
 
+// Mode default configurations - matches backend AdjustRequestByMode
+const modeDefaults: Record<QueryMode, { topK: number; contextWindow: number; enableRerank: boolean | null }> = {
+  Quick: { topK: 3, contextWindow: 0, enableRerank: false },
+  Standard: { topK: 10, contextWindow: 1, enableRerank: null },
+  Deep: { topK: 20, contextWindow: 2, enableRerank: null },
+  Hybrid: { topK: 15, contextWindow: 1, enableRerank: null },
+  HybridRerank: { topK: 10, contextWindow: 1, enableRerank: true }
+}
+
 // Default options for reset
 const defaultOptions = {
   mode: 'HybridRerank' as QueryMode,
   topK: 10,
   contextWindow: 1,
+  enableRerank: true as boolean | null,
   sources: [] as string[],
   folders: [] as string[]
 }
@@ -349,9 +376,18 @@ const searchOptions = ref<{
   mode: QueryMode
   topK: number
   contextWindow: number
+  enableRerank: boolean | null
   sources: string[]
   folders: string[]
 }>({ ...defaultOptions })
+
+// Watch mode changes and update defaults
+watch(() => searchOptions.value.mode, (newMode) => {
+  const defaults = modeDefaults[newMode]
+  searchOptions.value.topK = defaults.topK
+  searchOptions.value.contextWindow = defaults.contextWindow
+  searchOptions.value.enableRerank = defaults.enableRerank
+})
 
 // Check if current options are default
 const isDefaultOptions = computed(() => {
@@ -359,6 +395,7 @@ const isDefaultOptions = computed(() => {
     searchOptions.value.mode === defaultOptions.mode &&
     searchOptions.value.topK === defaultOptions.topK &&
     searchOptions.value.contextWindow === defaultOptions.contextWindow &&
+    searchOptions.value.enableRerank === defaultOptions.enableRerank &&
     searchOptions.value.sources.length === 0 &&
     searchOptions.value.folders.length === 0
   )
@@ -446,11 +483,15 @@ const handleSearch = async () => {
   loading.value = true
   searched.value = true
   try {
+    // 启用重排时，TopK 作为 RerankTopN（最终返回数），召回数由后端自动计算
+    const enableRerank = searchOptions.value.enableRerank === true || searchOptions.value.mode === 'HybridRerank'
     const response = await aiQueryApi.query({
       query: searchQuery.value,
       mode: searchOptions.value.mode,
-      topK: searchOptions.value.topK,
+      topK: enableRerank ? searchOptions.value.topK * 3 : searchOptions.value.topK, // 重排时召回数=返回数×3
       contextWindow: searchOptions.value.contextWindow,
+      enableRerank: enableRerank ? true : (searchOptions.value.enableRerank === false ? false : undefined),
+      rerankTopN: enableRerank ? searchOptions.value.topK : undefined, // 重排返回数=TopK
       sources: searchOptions.value.sources.length > 0 ? searchOptions.value.sources : undefined,
       filters: searchOptions.value.folders.length > 0 ? { folders: searchOptions.value.folders } : undefined
     })

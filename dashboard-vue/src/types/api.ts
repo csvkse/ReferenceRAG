@@ -98,6 +98,10 @@ export interface AIQueryRequest {
   sources?: string[]
   filters?: SearchFilter
   options?: QueryOptions
+  /** 启用重排: null=使用配置, true=强制启用, false=强制禁用 */
+  enableRerank?: boolean | null
+  /** 重排后返回数量, null=使用配置 */
+  rerankTopN?: number
 }
 
 export interface AIQueryResponse {

@@ -120,7 +120,7 @@ import {
   NInput, NSelect, NSwitch, NSpin, NEmpty, NForm, NFormItem, NGrid, NGridItem,
   NDescriptions, NDescriptionsItem, NCollapse, NCollapseItem, useMessage
 } from 'naive-ui'
-import { CopyOutline, CheckmarkOutline, PlayOutline } from '@vicons/ionicons5'
+import { PlayOutline } from '@vicons/ionicons5'
 import axios from 'axios'
 
 const message = useMessage()
