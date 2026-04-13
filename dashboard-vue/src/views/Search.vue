@@ -76,19 +76,13 @@
               </n-button>
             </template>
           </n-input>
-          <n-button-group vertical>
-            <n-button type="primary" :loading="loading" @click="handleSearch" :disabled="!searchQuery.trim()">
+          <n-button type="primary" :loading="loading" @click="handleSearch" :disabled="!searchQuery.trim()">
               <template #icon><n-icon :component="SearchOutline" /></template>
               搜索
             </n-button>
-            <n-button @click="handleReset" :disabled="isDefaultOptions">
-              <template #icon><n-icon :component="RefreshOutline" /></template>
-              重置
-            </n-button>
-          </n-button-group>
         </div>
         <n-text depth="3" style="font-size: 12px">
-          Enter 搜索 | Shift+Enter 换行 | Ctrl+Enter 快速搜索
+          Enter 搜索 | Shift+Enter 换行
         </n-text>
       </div>
     </n-card>

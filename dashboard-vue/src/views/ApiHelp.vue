@@ -1,5 +1,60 @@
 <template>
   <n-space vertical :size="20">
+    <!-- API 测试工具 (移到上方) -->
+    <n-card title="API 测试工具" size="small">
+      <n-space vertical>
+        <n-form label-placement="left" label-width="80">
+          <n-grid :cols="24" :x-gap="12">
+            <n-grid-item :span="4">
+              <n-form-item label="方法">
+                <n-select
+                  v-model:value="testMethod"
+                  :options="methodOptions"
+                />
+              </n-form-item>
+            </n-grid-item>
+            <n-grid-item :span="20">
+              <n-form-item label="路径">
+                <n-input v-model:value="testPath" placeholder="/api/..." />
+              </n-form-item>
+            </n-grid-item>
+          </n-grid>
+          <n-form-item label="请求体">
+            <n-input
+              v-model:value="testBody"
+              type="textarea"
+              placeholder="JSON 格式请求体（可选）"
+              :rows="6"
+              style="font-family: monospace"
+            />
+          </n-form-item>
+        </n-form>
+        <n-space>
+          <n-button type="primary" :loading="testLoading" @click="runApiTest">
+            发送请求
+          </n-button>
+          <n-button @click="copyTestCurl">
+            复制 cURL
+          </n-button>
+          <n-button @click="clearTestResult">
+            清空
+          </n-button>
+        </n-space>
+
+        <n-card v-if="testResponse" title="响应结果" size="small" class="response-card">
+          <template #header-extra>
+            <n-space>
+              <n-tag :type="testResponseStatus >= 200 && testResponseStatus < 300 ? 'success' : 'error'" size="small">
+                {{ testResponseStatus }}
+              </n-tag>
+              <n-text depth="3">{{ testDuration }}ms</n-text>
+            </n-space>
+          </template>
+          <n-code :code="testResponse" language="json" word-wrap />
+        </n-card>
+      </n-space>
+    </n-card>
+
     <!-- API Key 配置 -->
     <n-card title="API 认证配置" size="small">
       <n-space align="center">
@@ -30,14 +85,13 @@
 
       <n-spin :show="loading">
         <n-tabs v-if="swaggerData" type="line" animated>
-          <!-- 按 Tag 分组显示 -->
           <n-tab-pane
             v-for="tag in apiTags"
             :key="tag"
             :name="tag"
             :tab="getTagDisplayName(tag)"
           >
-            <n-space vertical :size="16">
+            <n-space vertical :size="12">
               <ApiEndpointCard
                 v-for="(endpoint, index) in getEndpointsByTag(tag)"
                 :key="index"
@@ -55,61 +109,6 @@
           </template>
         </n-empty>
       </n-spin>
-    </n-card>
-
-    <!-- API 测试工具 -->
-    <n-card title="API 测试工具">
-      <n-space vertical>
-        <n-form label-placement="left" label-width="80">
-          <n-grid :cols="24" :x-gap="12">
-            <n-grid-item :span="4">
-              <n-form-item label="方法">
-                <n-select
-                  v-model:value="testMethod"
-                  :options="methodOptions"
-                />
-              </n-form-item>
-            </n-grid-item>
-            <n-grid-item :span="20">
-              <n-form-item label="路径">
-                <n-input v-model:value="testPath" placeholder="/api/..." />
-              </n-form-item>
-            </n-grid-item>
-          </n-grid>
-          <n-form-item label="请求体">
-            <n-input
-              v-model:value="testBody"
-              type="textarea"
-              placeholder="JSON 格式请求体（可选）"
-              :rows="8"
-              style="font-family: monospace"
-            />
-          </n-form-item>
-        </n-form>
-        <n-space>
-          <n-button type="primary" :loading="testLoading" @click="runApiTest">
-            发送请求
-          </n-button>
-          <n-button @click="copyTestCurl">
-            复制 cURL
-          </n-button>
-          <n-button @click="clearTestResult">
-            清空结果
-          </n-button>
-        </n-space>
-
-        <n-card v-if="testResponse" title="响应结果" size="small">
-          <template #header-extra>
-            <n-space>
-              <n-tag :type="testResponseStatus >= 200 && testResponseStatus < 300 ? 'success' : 'error'" size="small">
-                {{ testResponseStatus }}
-              </n-tag>
-              <n-text depth="3">{{ testDuration }}ms</n-text>
-            </n-space>
-          </template>
-          <n-code :code="testResponse" language="json" word-wrap />
-        </n-card>
-      </n-space>
     </n-card>
   </n-space>
 </template>
@@ -260,7 +259,6 @@ const getTagDisplayName = (tag: string) => tagDisplayNames[tag] || tag
 const loadSwagger = async () => {
   loading.value = true
   try {
-    // 直接从后端端口获取 swagger.json
     const baseUrl = import.meta.env.DEV ? 'http://localhost:5294' : ''
     const response = await axios.get<SwaggerData>(`${baseUrl}/swagger/v1/swagger.json`)
     swaggerData.value = response.data
@@ -280,21 +278,19 @@ const ApiEndpointCard = defineComponent({
     schemas: { type: Object as () => Record<string, unknown>, required: true },
     apiKey: { type: String, default: '' }
   },
-  setup(props) {
+  emits: ['test'],
+  setup(props, { emit }) {
     const expanded = ref(false)
     const copied = ref(false)
-    const testLoading = ref(false)
-    const testResult = ref<string | null>(null)
-    const testStatus = ref(0)
 
     const getMethodColor = (method: string) => {
       switch (method.toUpperCase()) {
-        case 'GET': return '#18a058'
-        case 'POST': return '#2080f0'
-        case 'PUT': return '#f0a020'
-        case 'DELETE': return '#d03050'
-        case 'PATCH': return '#909399'
-        default: return '#909399'
+        case 'GET': return '#0d7a40'
+        case 'POST': return '#1060c0'
+        case 'PUT': return '#c08010'
+        case 'DELETE': return '#a02040'
+        case 'PATCH': return '#707580'
+        default: return '#707580'
       }
     }
 
@@ -367,115 +363,74 @@ const ApiEndpointCard = defineComponent({
       }
     }
 
-    const testDuration = ref(0)
-
-    const testEndpoint = async () => {
-      testLoading.value = true
-      testResult.value = null
-      const startTime = Date.now()
-
-      try {
-        const config: Record<string, unknown> = {
-          method: props.endpoint.method.toLowerCase(),
-          url: props.endpoint.path
+    const sendToTestTool = async () => {
+      // 复制请求体到剪贴板
+      const body = getRequestBodyExample()
+      if (body) {
+        try {
+          await navigator.clipboard.writeText(JSON.stringify(body, null, 2))
+        } catch {
+          // 忽略复制失败
         }
-
-        if (props.apiKey) {
-          config.headers = { 'X-API-Key': props.apiKey }
-        }
-
-        const body = getRequestBodyExample()
-        if (body && ['post', 'put', 'delete', 'patch'].includes(config.method as string)) {
-          config.data = body
-        }
-
-        const response = await axios.request(config as Parameters<typeof axios.request>[0])
-        testStatus.value = response.status
-        testResult.value = JSON.stringify(response.data, null, 2)
-        testDuration.value = Date.now() - startTime
-      } catch (error: unknown) {
-        const err = error as { response?: { status: number; data: unknown } }
-        testStatus.value = err.response?.status || 0
-        testResult.value = err.response?.data
-          ? JSON.stringify(err.response.data, null, 2)
-          : String(error)
-        testDuration.value = Date.now() - startTime
-      } finally {
-        testLoading.value = false
       }
+      emit('test', { path: props.endpoint.path, method: props.endpoint.method, body })
     }
 
     return () => h('div', {
-      style: {
-        padding: '16px',
-        background: 'var(--n-color)',
-        borderRadius: '8px',
-        border: '1px solid var(--n-border-color)'
-      }
+      class: 'api-endpoint-card'
     }, [
       // Header
-      h(NSpace, { align: 'center', justify: 'space-between', style: { marginBottom: '12px' } }, {
-        default: () => [
-          h(NSpace, { align: 'center' }, {
-            default: () => [
-              h(NTag, {
-                size: 'small',
-                style: { background: getMethodColor(props.endpoint.method), color: '#fff', fontWeight: 'bold', minWidth: '60px', textAlign: 'center' }
-              }, { default: () => props.endpoint.method.toUpperCase() }),
-              h(NText, { code: true, style: { fontSize: '14px' } }, { default: () => props.endpoint.path }),
-              props.endpoint.operation.summary && h(NText, { depth: 3, style: { marginLeft: '8px' } }, {
-                default: () => props.endpoint.operation.summary
-              })
-            ]
-          }),
-          h(NSpace, { align: 'center' }, {
-            default: () => [
-              h(NButton, {
-                size: 'small',
-                onClick: () => { expanded.value = !expanded.value },
-                text: true
-              }, { default: () => expanded.value ? '收起' : '展开' }),
-              h(NButton, {
-                size: 'small',
-                onClick: copyCurl,
-                type: copied.value ? 'success' : 'default'
-              }, {
-                default: () => copied.value ? '已复制' : '复制 cURL',
-                icon: () => h(NIcon, null, { default: () => h(copied.value ? CheckmarkOutline : CopyOutline) })
-              }),
-              h(NButton, {
-                size: 'small',
-                type: 'primary',
-                loading: testLoading.value,
-                onClick: testEndpoint
-              }, {
-                default: () => '测试',
-                icon: () => h(NIcon, null, { default: () => h(PlayOutline) })
-              })
-            ]
-          })
-        ]
-      }),
+      h('div', { class: 'api-endpoint-header' }, [
+        h(NSpace, { align: 'center' }, {
+          default: () => [
+            h(NTag, {
+              size: 'small',
+              class: 'method-tag',
+              style: { background: getMethodColor(props.endpoint.method), color: '#fff', fontWeight: 'bold', minWidth: '60px', textAlign: 'center' }
+            }, { default: () => props.endpoint.method.toUpperCase() }),
+            h('code', { class: 'api-path' }, props.endpoint.path),
+            props.endpoint.operation.summary && h('span', { class: 'api-summary' }, props.endpoint.operation.summary)
+          ]
+        }),
+        h(NSpace, { align: 'center', size: 'small' }, {
+          default: () => [
+            h(NButton, {
+              size: 'tiny',
+              onClick: () => { expanded.value = !expanded.value },
+              text: true
+            }, { default: () => expanded.value ? '收起' : '详情' }),
+            h(NButton, {
+              size: 'tiny',
+              onClick: copyCurl,
+              type: copied.value ? 'success' : 'default'
+            }, {
+              default: () => copied.value ? '已复制' : 'cURL'
+            }),
+            h(NButton, {
+              size: 'tiny',
+              type: 'primary',
+              onClick: sendToTestTool
+            }, {
+              default: () => '测试',
+              icon: () => h(NIcon, { size: 14 }, { default: () => h(PlayOutline) })
+            })
+          ]
+        })
+      ]),
 
       // Expanded content
-      expanded.value && h('div', { style: { marginTop: '16px' } }, [
+      expanded.value && h('div', { class: 'api-endpoint-body' }, [
         // Parameters
-        props.endpoint.operation.parameters && props.endpoint.operation.parameters.length > 0 && h('div', { style: { marginBottom: '16px' } }, [
-          h(NText, { strong: true, style: { display: 'block', marginBottom: '8px' } }, { default: () => '参数:' }),
+        props.endpoint.operation.parameters && props.endpoint.operation.parameters.length > 0 && h('div', { class: 'api-section' }, [
+          h('div', { class: 'api-section-title' }, '参数'),
           h(NDescriptions, { labelPlacement: 'left', bordered: true, size: 'small', column: 1 }, {
             default: () => props.endpoint.operation.parameters?.map(param => {
-              const labelParts: Array<string | ReturnType<typeof h>> = []
-              if (param.required) {
-                labelParts.push('[必填] ')
-              }
+              const labelParts: string[] = []
+              if (param.required) labelParts.push('[必填] ')
               labelParts.push(param.name)
               labelParts.push(` (${param.in})`)
-              if (param.schema?.type) {
-                labelParts.push(` (${param.schema.type})`)
-              }
-              return h(NDescriptionsItem, {
-                label: labelParts.join('')
-              }, {
+              if (param.schema?.type) labelParts.push(` (${param.schema.type})`)
+              return h(NDescriptionsItem, { label: labelParts.join('') }, {
                 default: () => param.description || '-'
               })
             })
@@ -483,69 +438,54 @@ const ApiEndpointCard = defineComponent({
         ]),
 
         // Request Body
-        props.endpoint.operation.requestBody && h('div', { style: { marginBottom: '16px' } }, [
-          h(NSpace, { align: 'center', style: { marginBottom: '8px' } }, {
-            default: () => [
-              h(NText, { strong: true }, { default: () => '请求体:' }),
-              props.endpoint.operation.requestBody?.required && h(NTag, { type: 'error', size: 'tiny' }, { default: () => '必填' }),
-              props.endpoint.operation.requestBody?.description && h(NText, { depth: 3 }, {
-                default: () => props.endpoint.operation.requestBody?.description
-              })
-            ]
-          }),
-          h(NCode, {
-            language: 'json',
-            code: JSON.stringify(getRequestBodyExample(), null, 2),
-            wordWrap: true
-          })
+        props.endpoint.operation.requestBody && h('div', { class: 'api-section' }, [
+          h('div', { class: 'api-section-title' }, [
+            '请求体',
+            props.endpoint.operation.requestBody?.required && h(NTag, { type: 'error', size: 'tiny', style: 'margin-left: 8px' }, { default: () => '必填' })
+          ]),
+          h('div', { class: 'code-block' }, [
+            h(NCode, {
+              language: 'json',
+              code: JSON.stringify(getRequestBodyExample(), null, 2),
+              wordWrap: true
+            })
+          ])
         ]),
 
         // Responses
-        props.endpoint.operation.responses && h('div', [
-          h(NText, { strong: true, style: { display: 'block', marginBottom: '8px' } }, { default: () => '响应:' }),
+        props.endpoint.operation.responses && h('div', { class: 'api-section' }, [
+          h('div', { class: 'api-section-title' }, '响应'),
           h(NCollapse, {}, {
             default: () => Object.entries(props.endpoint.operation.responses ?? {}).map(([code, response]) =>
               h(NCollapseItem, {
-                name: code,
-                header: h(NSpace, { align: 'center' }, {
+                name: code
+              }, {
+                header: () => h(NSpace, { align: 'center', size: 'small' }, {
                   default: () => [
                     h(NTag, {
                       type: code.startsWith('2') ? 'success' : code.startsWith('4') ? 'warning' : 'error',
                       size: 'small'
                     }, { default: () => code }),
-                    h(NText, null, { default: () => response.description })
+                    h('span', { class: 'response-desc' }, response.description)
                   ]
-                })
-              }, {
+                }),
                 default: () => {
                   const schema = response.content?.['application/json']?.schema
                   if (schema?.$ref) {
                     const resolved = resolveSchema(schema.$ref)
-                    return h(NCode, {
-                      language: 'json',
-                      code: JSON.stringify(getSchemaExample(resolved), null, 2),
-                      wordWrap: true
-                    })
+                    return h('div', { class: 'code-block' }, [
+                      h(NCode, {
+                        language: 'json',
+                        code: JSON.stringify(getSchemaExample(resolved), null, 2),
+                        wordWrap: true
+                      })
+                    ])
                   }
-                  return h(NText, { depth: 3 }, { default: () => '无响应体' })
+                  return h('span', { class: 'no-body-hint' }, '无响应体')
                 }
               })
             )
           })
-        ]),
-
-        // Test result
-        testResult.value && h('div', { style: { marginTop: '16px' } }, [
-          h(NSpace, { align: 'center', style: { marginBottom: '8px' } }, {
-            default: () => [
-              h(NText, { strong: true }, { default: () => '测试结果:' }),
-              h(NTag, {
-                type: testStatus.value >= 200 && testStatus.value < 300 ? 'success' : 'error',
-                size: 'small'
-              }, { default: () => testStatus.value })
-            ]
-          }),
-          h(NCode, { language: 'json', code: testResult.value, wordWrap: true })
         ])
       ])
     ])
@@ -628,14 +568,24 @@ const copyTestCurl = async () => {
 }
 
 const clearTestResult = () => {
+  testPath.value = ''
+  testBody.value = ''
   testResponse.value = ''
   testResponseStatus.value = 0
   testDuration.value = 0
 }
 
-const handleTestEndpoint = (endpoint: { path: string; method: string }) => {
+const handleTestEndpoint = (endpoint: { path: string; method: string; body?: unknown }) => {
   testPath.value = endpoint.path
   testMethod.value = endpoint.method.toUpperCase()
+  // 使用传递过来的请求体
+  if (endpoint.body) {
+    testBody.value = JSON.stringify(endpoint.body, null, 2)
+  } else {
+    testBody.value = ''
+  }
+  // 滚动到顶部
+  window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
 // 初始化
@@ -646,7 +596,6 @@ onMounted(() => {
   loadSwagger()
 })
 
-// 监听 authEnabled 和 apiKey 变化
 watch([authEnabled, apiKey], ([enabled, key]) => {
   if (enabled && key) {
     axios.defaults.headers.common['X-API-Key'] = key
@@ -657,8 +606,200 @@ watch([authEnabled, apiKey], ([enabled, key]) => {
 </script>
 
 <style scoped>
+/* API 端点卡片 */
+.api-endpoint-card {
+  padding: 12px 16px;
+  background: var(--card-bg, rgba(255, 255, 255, 0.03));
+  border-radius: 6px;
+  border: 1px solid var(--card-border, rgba(255, 255, 255, 0.08));
+  transition: all 0.2s;
+}
+
+.api-endpoint-card:hover {
+  border-color: var(--card-border-hover, rgba(255, 255, 255, 0.15));
+}
+
+/* 浅色模式 */
+:global(body.light-theme) .api-endpoint-card {
+  --card-bg: rgba(0, 0, 0, 0.02);
+  --card-border: rgba(0, 0, 0, 0.12);
+  --card-border-hover: rgba(0, 0, 0, 0.2);
+}
+
+.api-endpoint-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.method-tag {
+  font-size: 11px;
+}
+
+.api-path {
+  font-family: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+  color: var(--path-color, #a1a1aa);
+  background: var(--path-bg, rgba(255, 255, 255, 0.03));
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+:global(body.light-theme) .api-path {
+  --path-color: #52525b;
+  --path-bg: rgba(0, 0, 0, 0.05);
+}
+
+.api-summary {
+  font-size: 13px;
+  color: var(--summary-color, #c9d1d9);
+  margin-left: 8px;
+}
+
+:global(body.light-theme) .api-summary {
+  --summary-color: #52525b;
+}
+
+.api-endpoint-body {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--n-border-color);
+}
+
+.api-section {
+  margin-bottom: 16px;
+}
+
+.api-section:last-child {
+  margin-bottom: 0;
+}
+
+.api-section-title {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--n-text-color-2);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+}
+
+/* 代码块样式 */
+.code-block {
+  background: var(--code-bg, rgba(0, 0, 0, 0.4));
+  border-radius: 4px;
+  padding: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--code-border, rgba(255, 255, 255, 0.1));
+}
+
+:global(body.light-theme) .code-block {
+  --code-bg: rgba(0, 0, 0, 0.04);
+  --code-border: rgba(0, 0, 0, 0.1);
+}
+
 :deep(.n-code) {
-  max-height: 400px;
-  overflow: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 代码高亮 */
+:deep(.n-code pre) {
+  background: transparent !important;
+}
+
+:deep(.n-code .hljs) {
+  background: transparent !important;
+  color: var(--hljs-base, #c9d1d9);
+}
+
+:deep(.n-code .hljs-string) {
+  color: var(--hljs-string, #a5d6ff);
+}
+
+:deep(.n-code .hljs-number) {
+  color: var(--hljs-number, #ffa657);
+}
+
+:deep(.n-code .hljs-keyword) {
+  color: var(--hljs-keyword, #ff7b72);
+}
+
+:deep(.n-code .hljs-attr) {
+  color: var(--hljs-attr, #7ee787);
+}
+
+:deep(.n-code .hljs-literal) {
+  color: var(--hljs-literal, #79c0ff);
+}
+
+/* 浅色模式代码高亮 */
+:global(body.light-theme) :deep(.n-code .hljs) {
+  --hljs-base: #24292e;
+  --hljs-string: #032f62;
+  --hljs-number: #636c07;
+  --hljs-keyword: #d73a49;
+  --hljs-attr: #005cc5;
+  --hljs-literal: #005cc5;
+}
+
+/* 响应描述 */
+.response-desc {
+  font-size: 13px;
+  color: var(--n-text-color-2);
+}
+
+.no-body-hint {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+}
+
+/* 响应结果卡片 */
+.response-card {
+  margin-top: 12px;
+}
+
+.response-card :deep(.n-card__content) {
+  padding: 12px;
+}
+
+/* Descriptions */
+:deep(.n-descriptions) {
+  background: transparent;
+}
+
+:deep(.n-descriptions-table-wrapper) {
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+:deep(.n-descriptions-table-content) {
+  background: var(--n-color);
+}
+
+:deep(.n-descriptions-table-header) {
+  background: var(--desc-header-bg, rgba(0, 0, 0, 0.15));
+}
+
+:global(body.light-theme) :deep(.n-descriptions-table-header) {
+  --desc-header-bg: rgba(0, 0, 0, 0.04);
+}
+
+:deep(.n-descriptions-table-header__label) {
+  font-size: 12px;
+  color: var(--n-text-color-2);
+}
+
+:deep(.n-descriptions-table-body__label) {
+  font-size: 12px;
+  color: var(--n-text-color-1);
+}
+
+/* Collapse */
+:deep(.n-collapse-item__header-main) {
+  font-size: 13px;
+}
+
+:deep(.n-collapse-item__content-inner) {
+  padding: 8px 0;
 }
 </style>
