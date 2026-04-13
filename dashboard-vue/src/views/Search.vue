@@ -109,29 +109,29 @@
             <n-tab-pane name="mode" tab="查询模式">
               <n-descriptions label-placement="left" :column="1" size="small">
                 <n-descriptions-item label="快速模式">
-                  <n-text depth="3">纯向量搜索，~1000 tokens，适合简单查询</n-text>
+                  <n-text depth="3">纯向量搜索，TopK=3，~1000 tokens，适合简单查询</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="标准模式">
-                  <n-text depth="3">纯向量搜索，~3000 tokens，平衡速度与质量</n-text>
+                  <n-text depth="3">纯向量搜索，TopK=10，~3000 tokens，平衡速度与质量</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="深度模式">
-                  <n-text depth="3">纯向量搜索，~6000 tokens，适合复杂查询</n-text>
+                  <n-text depth="3">纯向量搜索，TopK=20，~6000 tokens，适合复杂查询</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="混合模式">
-                  <n-text depth="3">BM25关键词 + 向量语义混合召回，速度快</n-text>
+                  <n-text depth="3">BM25+向量召回，TopK=15，~4000 tokens，速度快</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="混合重排">
-                  <n-text depth="3">BM25 + 向量召回 + Rerank精排，精确度最高，推荐</n-text>
+                  <n-text depth="3">BM25+向量召回(×3倍)+Rerank精排，TopK=10，推荐</n-text>
                 </n-descriptions-item>
               </n-descriptions>
             </n-tab-pane>
             <n-tab-pane name="params" tab="参数说明">
               <n-descriptions label-placement="left" :column="1" size="small">
-                <n-descriptions-item label="返回数量">
-                  <n-text depth="3">返回结果数量，混合模式下召回数为 TopK × 系数</n-text>
+                <n-descriptions-item label="返回数量 (TopK)">
+                  <n-text depth="3">各模式有默认值。混合重排模式下召回数=TopK×3，再Rerank精排</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="上下文窗口">
-                  <n-text depth="3">深入查询时扩展的相邻分段数量</n-text>
+                  <n-text depth="3">深入查询时扩展的相邻分段数。快速=0，标准/混合=1，深度=2</n-text>
                 </n-descriptions-item>
                 <n-descriptions-item label="源筛选">
                   <n-text depth="3">限定搜索范围到指定的知识库源</n-text>
