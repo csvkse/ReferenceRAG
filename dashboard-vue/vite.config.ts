@@ -41,6 +41,10 @@ export default defineConfig({
         target: 'http://localhost:5294',
         changeOrigin: true
       },
+      '/swagger': {
+        target: 'http://localhost:5294',
+        changeOrigin: true
+      },
       '/hubs': {
         target: 'http://localhost:5294',
         changeOrigin: true,
