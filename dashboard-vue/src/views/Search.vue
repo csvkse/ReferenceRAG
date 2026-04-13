@@ -1,27 +1,106 @@
 <template>
   <n-space vertical :size="20">
+    <!-- Model & Index Status -->
+    <n-card size="small">
+      <n-space align="center" justify="space-between">
+        <n-space align="center" :size="24">
+          <!-- Embedding Model -->
+          <n-space align="center" :size="8">
+            <n-icon :component="CubeOutline" size="18" />
+            <n-text>嵌入模型:</n-text>
+            <n-tag v-if="searchStatus?.embeddingModel" type="success" size="small" round>
+              {{ searchStatus.embeddingModel }} ({{ searchStatus.embeddingDimension }}d)
+            </n-tag>
+            <n-tag v-else type="warning" size="small" round>未配置</n-tag>
+          </n-space>
+
+          <!-- Rerank Model -->
+          <n-space align="center" :size="8">
+            <n-icon :component="GitMergeOutline" size="18" />
+            <n-text>重排模型:</n-text>
+            <n-tag v-if="searchStatus?.rerankEnabled && searchStatus?.rerankModel" type="success" size="small" round>
+              {{ searchStatus.rerankModel }}
+            </n-tag>
+            <n-tag v-else type="default" size="small" round>未启用</n-tag>
+          </n-space>
+
+          <!-- BM25 Index -->
+          <n-space align="center" :size="8">
+            <n-icon :component="SearchOutline" size="18" />
+            <n-text>BM25:</n-text>
+            <n-tag v-if="searchStatus?.bm25HasIndex" type="success" size="small" round>
+              {{ searchStatus.bm25IndexedDocuments }} 文档
+            </n-tag>
+            <n-tag v-else type="warning" size="small" round>无索引</n-tag>
+          </n-space>
+
+          <!-- Vector Index -->
+          <n-space align="center" :size="8">
+            <n-icon :component="LayersOutline" size="18" />
+            <n-text>向量:</n-text>
+            <n-tag v-if="searchStatus?.vectorHasIndex" type="success" size="small" round>
+              {{ searchStatus.vectorIndexedChunks }} 分块
+            </n-tag>
+            <n-tag v-else type="warning" size="small" round>无索引</n-tag>
+          </n-space>
+        </n-space>
+
+        <!-- Total Files -->
+        <n-text depth="3">共 {{ searchStatus?.totalFiles ?? 0 }} 个文件</n-text>
+      </n-space>
+    </n-card>
+
     <!-- Search Input -->
     <n-card>
-      <div style="display: flex; align-items: center; gap: 12px">
-        <n-input
-          v-model:value="searchQuery"
-          type="textarea"
-          placeholder="输入搜索内容..."
-          :rows="2"
-          autosize
-          style="flex: 1; min-width: 0"
-          @keydown.enter.ctrl="handleSearch"
-        />
-        <n-button type="primary" :loading="loading" @click="handleSearch" :disabled="!searchQuery.trim()">
-          <template #icon><n-icon :component="SearchOutline" /></template>
-          搜索
-        </n-button>
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <div style="display: flex; align-items: flex-start; gap: 12px">
+          <n-input
+            v-model:value="searchQuery"
+            type="textarea"
+            placeholder="输入搜索内容... (Enter 搜索, Shift+Enter 换行)"
+            :rows="2"
+            autosize
+            style="flex: 1; min-width: 0"
+            @keydown.enter="handleKeyDown"
+          >
+            <template #suffix>
+              <n-button
+                v-if="searchQuery"
+                text
+                @click="handleClearQuery"
+                style="padding: 0 4px"
+              >
+                <template #icon>
+                  <n-icon :component="CloseOutline" />
+                </template>
+              </n-button>
+            </template>
+          </n-input>
+          <n-button-group vertical>
+            <n-button type="primary" :loading="loading" @click="handleSearch" :disabled="!searchQuery.trim()">
+              <template #icon><n-icon :component="SearchOutline" /></template>
+              搜索
+            </n-button>
+            <n-button @click="handleReset" :disabled="isDefaultOptions">
+              <template #icon><n-icon :component="RefreshOutline" /></template>
+              重置
+            </n-button>
+          </n-button-group>
+        </div>
+        <n-text depth="3" style="font-size: 12px">
+          Enter 搜索 | Shift+Enter 换行 | Ctrl+Enter 快速搜索
+        </n-text>
       </div>
-      <n-text depth="3" style="margin-top: 8px; display: block">Ctrl + Enter 快速搜索</n-text>
     </n-card>
 
     <!-- Search Options -->
     <n-card title="搜索选项">
+      <template #header-extra>
+        <n-button text size="small" @click="handleReset" :disabled="isDefaultOptions">
+          <template #icon><n-icon :component="RefreshOutline" /></template>
+          重置为默认
+        </n-button>
+      </template>
       <n-grid :cols="4" :x-gap="20">
         <n-gi>
           <n-form-item label="查询模式">
@@ -192,9 +271,14 @@ import { ref, computed, onMounted } from 'vue'
 import {
   SearchOutline,
   ArrowDownOutline,
-  OpenOutline
+  OpenOutline,
+  CloseOutline,
+  RefreshOutline,
+  CubeOutline,
+  GitMergeOutline,
+  LayersOutline
 } from '@vicons/ionicons5'
-import { aiQueryApi, sourcesApi, pathsApi } from '@/api'
+import { aiQueryApi, sourcesApi, pathsApi, type SearchStatusResponse } from '@/api'
 import type { SourceDetail, AIQueryResponse, ChunkResult, DrilldownResponse, QueryMode, SourcePathInfo } from '@/types/api'
 
 const searchQuery = ref('')
@@ -205,6 +289,16 @@ const sources = ref<SourceDetail[]>([])
 const paths = ref<SourcePathInfo[]>([])
 const selectedPaths = ref<string[]>([])
 const pathsLoading = ref(false)
+const searchStatus = ref<SearchStatusResponse | null>(null)
+
+// Default options for reset
+const defaultOptions = {
+  mode: 'Hybrid' as QueryMode,
+  topK: 10,
+  contextWindow: 1,
+  sources: [] as string[],
+  folders: [] as string[]
+}
 
 const searchOptions = ref<{
   mode: QueryMode
@@ -212,12 +306,17 @@ const searchOptions = ref<{
   contextWindow: number
   sources: string[]
   folders: string[]
-}>({
-  mode: 'Standard',
-  topK: 10,
-  contextWindow: 1,
-  sources: [],
-  folders: []
+}>({ ...defaultOptions })
+
+// Check if current options are default
+const isDefaultOptions = computed(() => {
+  return (
+    searchOptions.value.mode === defaultOptions.mode &&
+    searchOptions.value.topK === defaultOptions.topK &&
+    searchOptions.value.contextWindow === defaultOptions.contextWindow &&
+    searchOptions.value.sources.length === 0 &&
+    searchOptions.value.folders.length === 0
+  )
 })
 
 const modeOptions = [
@@ -269,6 +368,31 @@ const getScoreType = (score: number) => {
 const truncateContent = (content: string, maxLen = 300) => {
   if (!content) return ''
   return content.length > maxLen ? content.substring(0, maxLen) + '...' : content
+}
+
+// Handle Enter key: Shift+Enter for newline, Enter for search
+const handleKeyDown = (e: KeyboardEvent) => {
+  if (e.shiftKey) {
+    // Shift+Enter: allow default behavior (newline)
+    return
+  }
+  // Enter (without Shift): prevent newline and search
+  e.preventDefault()
+  handleSearch()
+}
+
+// Clear search query
+const handleClearQuery = () => {
+  searchQuery.value = ''
+}
+
+// Reset all search options to default
+const handleReset = () => {
+  searchOptions.value = { ...defaultOptions }
+  selectedPaths.value = []
+  searchQuery.value = ''
+  searchResponse.value = null
+  searched.value = false
 }
 
 const handleSearch = async () => {
@@ -331,8 +455,18 @@ const loadPaths = async () => {
   }
 }
 
+const loadSearchStatus = async () => {
+  try {
+    const response = await aiQueryApi.getSearchStatus()
+    searchStatus.value = response.data
+  } catch (error) {
+    console.error('Failed to load search status:', error)
+  }
+}
+
 onMounted(() => {
   loadSources()
   loadPaths()
+  loadSearchStatus()
 })
 </script>

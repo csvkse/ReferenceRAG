@@ -103,7 +103,21 @@ api.interceptors.response.use(
 // AI Query
 export const aiQueryApi = {
   query: (data: AIQueryRequest) => api.post<AIQueryResponse>('/ai/query', data),
-  drilldown: (data: DrilldownRequest) => api.post<DrilldownResponse>('/ai/drill-down', data)
+  drilldown: (data: DrilldownRequest) => api.post<DrilldownResponse>('/ai/drill-down', data),
+  getSearchStatus: () => api.get<SearchStatusResponse>('/ai/status')
+}
+
+// Search Status
+export interface SearchStatusResponse {
+  embeddingModel?: string
+  embeddingDimension: number
+  rerankModel?: string
+  rerankEnabled: boolean
+  bm25IndexedDocuments: number
+  bm25HasIndex: boolean
+  vectorIndexedChunks: number
+  vectorHasIndex: boolean
+  totalFiles: number
 }
 
 // Dashboard
