@@ -10,41 +10,52 @@ namespace ReferenceRAG.Core.Services;
 /// </summary>
 public class FileChangeDetector : IFileChangeDetector, IDisposable
 {
-    private readonly FileSystemWatcher? _watcher;
+    private readonly List<FileSystemWatcher> _watchers;
     private readonly Dictionary<string, DateTime> _pendingChanges;
     private readonly Timer _debounceTimer;
     private readonly int _debounceMs;
     private readonly object _lock = new();
     private bool _disposed;
+    private readonly List<string> _filePatterns;
+
+    // 默认文件模式
+    private static readonly List<string> DefaultFilePatterns = new() { "*.md", "*.txt" };
 
     public event EventHandler<FileChangeEventArgs>? FileChanged;
     public event EventHandler<FileChangeEventArgs>? FileDeleted;
     public event EventHandler<FileChangeEventArgs>? FileRenamed;
 
-    public FileChangeDetector(string watchPath, int debounceMs = 500)
+    public FileChangeDetector(string watchPath, int debounceMs = 500, List<string>? filePatterns = null)
     {
+        _watchers = new List<FileSystemWatcher>();
         _pendingChanges = new Dictionary<string, DateTime>();
         _debounceMs = debounceMs;
+        _filePatterns = filePatterns ?? DefaultFilePatterns;
         _debounceTimer = new Timer(ProcessPendingChanges, null, debounceMs, debounceMs);
 
         // 转换路径格式（WSL 环境下将 Windows 路径转为 /mnt/x/ 格式）
         var normalizedPath = PathUtility.NormalizePath(watchPath);
         if (Directory.Exists(normalizedPath))
         {
-            _watcher = new FileSystemWatcher(normalizedPath)
+            // 为每个文件模式创建一个 FileSystemWatcher
+            foreach (var pattern in _filePatterns)
             {
-                Filter = "*.md",
-                IncludeSubdirectories = true,
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size
-            };
+                var watcher = new FileSystemWatcher(normalizedPath)
+                {
+                    Filter = pattern,
+                    IncludeSubdirectories = true,
+                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size
+                };
 
-            _watcher.Changed += OnFileChanged;
-            _watcher.Created += OnFileCreated;
-            _watcher.Deleted += OnFileDeleted;
-            _watcher.Renamed += OnFileRenamed;
-            _watcher.Error += OnWatcherError;
+                watcher.Changed += OnFileChanged;
+                watcher.Created += OnFileCreated;
+                watcher.Deleted += OnFileDeleted;
+                watcher.Renamed += OnFileRenamed;
+                watcher.Error += OnWatcherError;
 
-            _watcher.EnableRaisingEvents = true;
+                watcher.EnableRaisingEvents = true;
+                _watchers.Add(watcher);
+            }
         }
         else
         {
@@ -72,18 +83,21 @@ public class FileChangeDetector : IFileChangeDetector, IDisposable
         if (!Directory.Exists(normalizedPath))
             return changes;
 
-        var files = Directory.EnumerateFiles(normalizedPath, "*.md", SearchOption.AllDirectories);
-        foreach (var file in files)
+        foreach (var pattern in _filePatterns)
         {
-            var lastWrite = File.GetLastWriteTime(file);
-            if (lastWrite > since)
+            var files = Directory.EnumerateFiles(normalizedPath, pattern, SearchOption.AllDirectories);
+            foreach (var file in files)
             {
-                changes.Add(new FileChangeEventArgs
+                var lastWrite = File.GetLastWriteTime(file);
+                if (lastWrite > since)
                 {
-                    FilePath = file,
-                    ChangeType = ChangeType.Modified,
-                    Timestamp = lastWrite
-                });
+                    changes.Add(new FileChangeEventArgs
+                    {
+                        FilePath = file,
+                        ChangeType = ChangeType.Modified,
+                        Timestamp = lastWrite
+                    });
+                }
             }
         }
 
@@ -114,7 +128,7 @@ public class FileChangeDetector : IFileChangeDetector, IDisposable
     }
 
     /// <summary>
-    /// 扫描目录获取所有 Markdown 文件
+    /// 扫描目录获取所有支持的文件（Markdown 和 TXT）
     /// </summary>
     public IEnumerable<string> ScanMarkdownFiles(string directory)
     {
@@ -122,7 +136,30 @@ public class FileChangeDetector : IFileChangeDetector, IDisposable
         if (!Directory.Exists(normalizedPath))
             return Enumerable.Empty<string>();
 
-        return Directory.EnumerateFiles(normalizedPath, "*.md", SearchOption.AllDirectories);
+        var results = new List<string>();
+        foreach (var pattern in _filePatterns)
+        {
+            results.AddRange(Directory.EnumerateFiles(normalizedPath, pattern, SearchOption.AllDirectories));
+        }
+        return results.Distinct();
+    }
+    
+    /// <summary>
+    /// 扫描目录获取所有支持的文件（带自定义模式）
+    /// </summary>
+    public static IEnumerable<string> ScanFiles(string directory, List<string>? filePatterns = null)
+    {
+        var normalizedPath = PathUtility.NormalizePath(directory);
+        if (!Directory.Exists(normalizedPath))
+            return Enumerable.Empty<string>();
+
+        var patterns = filePatterns ?? DefaultFilePatterns;
+        var results = new List<string>();
+        foreach (var pattern in patterns)
+        {
+            results.AddRange(Directory.EnumerateFiles(normalizedPath, pattern, SearchOption.AllDirectories));
+        }
+        return results.Distinct();
     }
 
     /// <summary>
@@ -231,7 +268,11 @@ public class FileChangeDetector : IFileChangeDetector, IDisposable
         if (!_disposed)
         {
             _debounceTimer?.Dispose();
-            _watcher?.Dispose();
+            foreach (var watcher in _watchers)
+            {
+                watcher?.Dispose();
+            }
+            _watchers.Clear();
             _disposed = true;
         }
     }

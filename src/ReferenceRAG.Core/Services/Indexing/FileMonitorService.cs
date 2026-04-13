@@ -28,7 +28,7 @@ public interface IFileMonitorService
     /// <summary>
     /// 添加监控源
     /// </summary>
-    void AddSource(string path, string name);
+    void AddSource(string path, string name, List<string>? filePatterns = null);
 
     /// <summary>
     /// 移除监控源
@@ -88,6 +88,7 @@ public class FileMonitorService : IFileMonitorService, IDisposable
 
     private readonly Dictionary<string, FileSystemWatcher> _watchers;
     private readonly Dictionary<string, string> _sources;
+    private readonly Dictionary<string, List<string>> _sourceFilePatterns; // 每个源的文件模式
     private readonly ConcurrentDictionary<string, string> _oldPaths;
     private readonly ConcurrentDictionary<string, Timer> _debounceTimers;
     private readonly Timer _statusTimer;
@@ -99,12 +100,16 @@ public class FileMonitorService : IFileMonitorService, IDisposable
     private int _changesDetected;
     private DateTime? _lastChange;
 
+    // 默认文件模式
+    private static readonly List<string> DefaultFilePatterns = new() { "*.md", "*.txt" };
+
     public event EventHandler<FileChangeEventArgs>? FileChanged;
 
     public FileMonitorService(int debounceMs = 500, ILogger<FileMonitorService>? logger = null)
     {
         _watchers = new Dictionary<string, FileSystemWatcher>();
         _sources = new Dictionary<string, string>();
+        _sourceFilePatterns = new Dictionary<string, List<string>>();
         _oldPaths = new ConcurrentDictionary<string, string>();
         _debounceTimers = new ConcurrentDictionary<string, Timer>();
         _debounceMs = debounceMs;
@@ -180,14 +185,19 @@ public class FileMonitorService : IFileMonitorService, IDisposable
             if (!Directory.Exists(dirPath))
                 return;
 
-            var mdFiles = Directory.EnumerateFiles(dirPath, "*.md", SearchOption.AllDirectories);
-            foreach (var filePath in mdFiles)
+            // 获取该目录对应的文件模式
+            var patterns = GetPatternsForDirectory(dirPath);
+            foreach (var pattern in patterns)
             {
-                // 为每个文件触发变更事件（带防抖）
-                var source = _sources.FirstOrDefault(s => s.Value == dirPath).Key;
-                if (!string.IsNullOrEmpty(source))
+                var files = Directory.EnumerateFiles(dirPath, pattern, SearchOption.AllDirectories);
+                foreach (var filePath in files)
                 {
-                    OnFileChanged(filePath, source, ChangeType.Modified);
+                    // 为每个文件触发变更事件（带防抖）
+                    var source = _sources.FirstOrDefault(s => s.Value == dirPath).Key;
+                    if (!string.IsNullOrEmpty(source))
+                    {
+                        OnFileChanged(filePath, source, ChangeType.Modified);
+                    }
                 }
             }
         }
@@ -197,20 +207,37 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         }
     }
 
-    public void AddSource(string path, string name)
+    /// <summary>
+    /// 获取目录对应的文件模式
+    /// </summary>
+    private List<string> GetPatternsForDirectory(string dirPath)
+    {
+        var source = _sources.FirstOrDefault(s => PathUtility.NormalizePath(s.Value) == PathUtility.NormalizePath(dirPath));
+        if (!string.IsNullOrEmpty(source.Key) && _sourceFilePatterns.TryGetValue(source.Key, out var patterns))
+        {
+            return patterns;
+        }
+        return DefaultFilePatterns;
+    }
+
+    public void AddSource(string path, string name, List<string>? filePatterns = null)
     {
         var normalizedPath = PathUtility.NormalizePath(path);
+        var patterns = filePatterns ?? DefaultFilePatterns;
+        
         lock (_lock)
         {
             _sources[name] = normalizedPath;
+            _sourceFilePatterns[name] = patterns;
 
             if (_isRunning)
             {
-                CreateWatcher(normalizedPath, name);
+                CreateWatchers(normalizedPath, name, patterns);
             }
         }
 
-        _logger?.LogInformation("添加监控源: {Name} ({Path})", name, normalizedPath);
+        _logger?.LogInformation("添加监控源: {Name} ({Path}), 文件模式: {Patterns}", 
+            name, normalizedPath, string.Join(", ", patterns));
     }
 
     public void RemoveSource(string name)
@@ -219,10 +246,17 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         {
             if (_sources.Remove(name))
             {
-                if (_watchers.TryGetValue(name, out var watcher))
+                _sourceFilePatterns.Remove(name);
+                
+                // 移除所有以 name 为前缀的 watcher（每个文件模式一个）
+                var keysToRemove = _watchers.Keys.Where(k => k.StartsWith(name + "_")).ToList();
+                foreach (var key in keysToRemove)
                 {
-                    watcher.Dispose();
-                    _watchers.Remove(name);
+                    if (_watchers.TryGetValue(key, out var watcher))
+                    {
+                        watcher.Dispose();
+                        _watchers.Remove(key);
+                    }
                 }
             }
         }
@@ -242,7 +276,8 @@ public class FileMonitorService : IFileMonitorService, IDisposable
 
             foreach (var (name, path) in _sources)
             {
-                CreateWatcher(path, name);
+                var patterns = _sourceFilePatterns.GetValueOrDefault(name, DefaultFilePatterns);
+                CreateWatchers(path, name, patterns);
             }
 
             _isRunning = true;
@@ -250,7 +285,7 @@ public class FileMonitorService : IFileMonitorService, IDisposable
             _lastChange = null;
         }
 
-        _logger?.LogInformation("监控已启动，监控 {Count} 个目录", _watchers.Count);
+        _logger?.LogInformation("监控已启动，监控 {Count} 个目录", _sources.Count);
 
         // 检查是否需要启用混合模式
         if (_sources.Count > _inotifyLimit)
@@ -312,18 +347,22 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         lock (_lock)
         {
             var totalFiles = 0;
-            foreach (var path in _sources.Values)
+            foreach (var (name, path) in _sources)
             {
                 if (Directory.Exists(path))
                 {
-                    totalFiles += Directory.EnumerateFiles(path, "*.md", SearchOption.AllDirectories).Count();
+                    var patterns = _sourceFilePatterns.GetValueOrDefault(name, DefaultFilePatterns);
+                    foreach (var pattern in patterns)
+                    {
+                        totalFiles += Directory.EnumerateFiles(path, pattern, SearchOption.AllDirectories).Count();
+                    }
                 }
             }
 
             return new FileMonitorStatus
             {
                 IsRunning = _isRunning,
-                WatchedDirectories = _watchers.Count,
+                WatchedDirectories = _sources.Count,
                 TotalFiles = totalFiles,
                 LastChange = _lastChange,
                 ChangesDetected = _changesDetected,
@@ -332,7 +371,10 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         }
     }
 
-    private void CreateWatcher(string path, string name)
+    /// <summary>
+    /// 为源创建多个 FileSystemWatcher（每个文件模式一个）
+    /// </summary>
+    private void CreateWatchers(string path, string name, List<string> patterns)
     {
         if (!Directory.Exists(path))
         {
@@ -340,23 +382,27 @@ public class FileMonitorService : IFileMonitorService, IDisposable
             return;
         }
 
-        var watcher = new FileSystemWatcher(path)
+        foreach (var pattern in patterns)
         {
-            Filter = "*.md",
-            IncludeSubdirectories = true,
-            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size
-        };
+            var watcherKey = $"{name}_{pattern}";
+            var watcher = new FileSystemWatcher(path)
+            {
+                Filter = pattern,
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size
+            };
 
-        watcher.Changed += (s, e) => OnFileChanged(e.FullPath, name, ChangeType.Modified);
-        watcher.Created += (s, e) => OnFileChanged(e.FullPath, name, ChangeType.Created);
-        watcher.Deleted += (s, e) => OnFileChanged(e.FullPath, name, ChangeType.Deleted);
-        watcher.Renamed += (s, e) => OnFileRenamed(e.OldFullPath, e.FullPath, name);
-        watcher.Error += (s, e) => _logger?.LogError(e.GetException(), "文件监控错误");
+            watcher.Changed += (s, e) => OnFileChanged(e.FullPath, name, ChangeType.Modified);
+            watcher.Created += (s, e) => OnFileChanged(e.FullPath, name, ChangeType.Created);
+            watcher.Deleted += (s, e) => OnFileChanged(e.FullPath, name, ChangeType.Deleted);
+            watcher.Renamed += (s, e) => OnFileRenamed(e.OldFullPath, e.FullPath, name);
+            watcher.Error += (s, e) => _logger?.LogError(e.GetException(), "文件监控错误");
 
-        watcher.EnableRaisingEvents = true;
-        _watchers[name] = watcher;
+            watcher.EnableRaisingEvents = true;
+            _watchers[watcherKey] = watcher;
 
-        _logger?.LogInformation("开始监控: {Path}", path);
+            _logger?.LogInformation("开始监控: {Path} ({Pattern})", path, pattern);
+        }
     }
 
     /// <summary>
@@ -517,26 +563,46 @@ public class FileMonitorService : IFileMonitorService, IDisposable
     /// <summary>
     /// 并行分区扫描：利用多核加速大目录扫描
     /// </summary>
-    public static IEnumerable<string> ParallelScanFiles(string root, string pattern = "*.md")
+    public static IEnumerable<string> ParallelScanFiles(string root, List<string>? patterns = null)
     {
         if (!Directory.Exists(root))
             return Enumerable.Empty<string>();
         
+        var filePatterns = patterns ?? DefaultFilePatterns;
         var topDirs = Directory.GetDirectories(root);
+        
+        var results = new List<string>();
         
         if (topDirs.Length == 0)
         {
-            // 无子目录，直接扫描
-            return Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly);
+            // 无子目录，直接扫描所有模式
+            foreach (var pattern in filePatterns)
+            {
+                results.AddRange(Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly));
+            }
+            return results.Distinct();
         }
         
         // 并行扫描第一层子目录，限制并发度避免线程爆炸
-        return topDirs
-            .AsParallel()
-            .WithDegreeOfParallelism(Math.Min(Environment.ProcessorCount, 8))
-            .SelectMany(dir => Directory.EnumerateFiles(dir, pattern, SearchOption.AllDirectories))
-            .Concat(Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly).AsParallel())
-            .Distinct();
+        foreach (var pattern in filePatterns)
+        {
+            results.AddRange(topDirs
+                .AsParallel()
+                .WithDegreeOfParallelism(Math.Min(Environment.ProcessorCount, 8))
+                .SelectMany(dir => Directory.EnumerateFiles(dir, pattern, SearchOption.AllDirectories)));
+            
+            results.AddRange(Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly));
+        }
+        
+        return results.Distinct();
+    }
+    
+    /// <summary>
+    /// 并行分区扫描（单模式重载，保持向后兼容）
+    /// </summary>
+    public static IEnumerable<string> ParallelScanFiles(string root, string pattern)
+    {
+        return ParallelScanFiles(root, new List<string> { pattern });
     }
 }
 

@@ -173,7 +173,10 @@ builder.Services.AddSingleton<IFileChangeDetector>(sp =>
     var configManager = sp.GetRequiredService<ConfigManager>();
     var config = configManager.Load();
     var firstSource = config.Sources.FirstOrDefault();
-    return new FileChangeDetector(firstSource?.Path ?? Directory.GetCurrentDirectory());
+    return new FileChangeDetector(
+        firstSource?.Path ?? Directory.GetCurrentDirectory(),
+        config.Indexing?.DebounceMs ?? 500,
+        firstSource?.FilePatterns);
 });
 builder.Services.AddScoped<ISearchService>(sp =>
 {

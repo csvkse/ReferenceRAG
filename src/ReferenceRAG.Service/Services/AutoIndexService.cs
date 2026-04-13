@@ -57,8 +57,9 @@ public class AutoIndexService : IHostedService, IDisposable
         var config = _configManager.Load();
         foreach (var source in config.Sources.Where(s => s.Enabled))
         {
-            _fileMonitor.AddSource(source.Path, source.Name);
-            _logger?.LogInformation("添加监控源: {Name} ({Path})", source.Name, source.Path);
+            _fileMonitor.AddSource(source.Path, source.Name, source.FilePatterns);
+            _logger?.LogInformation("添加监控源: {Name} ({Path}), 文件模式: {Patterns}", 
+                source.Name, source.Path, string.Join(", ", source.FilePatterns));
         }
 
         // 启动文件监控
