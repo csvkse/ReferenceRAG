@@ -88,6 +88,7 @@ public class StartupSyncService : IHostedService
         {
             var config = _configManager.Load();
             var enabledSources = config.Sources.Where(s => s.Enabled).ToList();
+            var allSourcePaths = config.Sources.Select(s => PathUtility.NormalizePath(s.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             if (enabledSources.Count == 0)
             {
@@ -104,7 +105,10 @@ public class StartupSyncService : IHostedService
 
             _logger.LogInformation("向量库中共有 {Count} 个文件记录", storedFilesDict.Count);
 
-            // 2. 收集磁盘上的所有文件
+            // 2. 清除不存在源的文件数据（配置中已删除的源）
+            await CleanOrphanedSourceFilesAsync(storedFilesDict, allSourcePaths, result, cancellationToken);
+
+            // 3. 收集磁盘上的所有文件
             var diskFiles = new HashSet<string>();
             var enabledSourcePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var source in enabledSources)
@@ -129,13 +133,13 @@ public class StartupSyncService : IHostedService
 
             _logger.LogInformation("磁盘上共有 {Count} 个文件", diskFiles.Count);
 
-            // 3. 删除检测：磁盘已不存在的文件（但保留已禁用源的索引）
+            // 4. 删除检测：磁盘已不存在的文件（但保留已禁用源的索引）
             await ProcessDeletedFilesAsync(storedFilesDict, diskFiles, enabledSourcePaths, result, cancellationToken);
 
-            // 4. 新增检测：快照中不存在的文件
+            // 5. 新增检测：快照中不存在的文件
             await ProcessNewFilesAsync(storedFilesDict, diskFiles, result, cancellationToken);
 
-            // 5. 修改检测：mtime 晚于 IndexedAt 的文件
+            // 6. 修改检测：mtime 晚于 IndexedAt 的文件
             await ProcessModifiedFilesAsync(storedFilesDict, diskFiles, result, cancellationToken);
 
             sw.Stop();
@@ -144,7 +148,8 @@ public class StartupSyncService : IHostedService
             result.Success = true;
 
             _logger.LogInformation(
-                "启动同步完成: 删除 {DeletedCount} 个文件, 新增 {NewCount} 个文件, 修改 {ModifiedCount} 个文件, 耗时 {Duration}ms",
+                "启动同步完成: 清理孤立源索引 {OrphanedCount} 个, 删除文件索引 {DeletedCount} 个, 新增 {NewCount} 个文件, 修改 {ModifiedCount} 个文件, 耗时 {Duration}ms",
+                result.OrphanedSourceFiles.Count,
                 result.DeletedFiles.Count,
                 result.NewFiles.Count,
                 result.ModifiedFiles.Count,
@@ -177,6 +182,71 @@ public class StartupSyncService : IHostedService
             dict[file.Path] = file;
         }
         return dict;
+    }
+
+    /// <summary>
+    /// 清理不存在源的文件索引信息（配置中已删除的源）
+    /// 注意：仅删除向量库中的文件记录和索引，不删除磁盘上的真实文件
+    /// </summary>
+    private async Task CleanOrphanedSourceFilesAsync(
+        Dictionary<string, FileRecord> storedFilesDict,
+        HashSet<string> allConfigSourcePaths,
+        StartupSyncResult result,
+        CancellationToken cancellationToken)
+    {
+        // 找出属于不存在源的文件
+        var orphanedFiles = storedFilesDict.Values
+            .Where(f => !string.IsNullOrEmpty(f.Source))
+            .Where(f => !allConfigSourcePaths.Any(sourcePath =>
+                f.Path.StartsWith(sourcePath, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (orphanedFiles.Count == 0)
+        {
+            _logger.LogDebug("没有发现孤立源文件索引");
+            return;
+        }
+
+        _logger.LogInformation("检测到 {Count} 个属于已删除源的文件索引，开始清理索引信息", orphanedFiles.Count);
+
+        var batchSize = 100;
+        var processedCount = 0;
+
+        foreach (var file in orphanedFiles)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            try
+            {
+                await _vectorStore.DeleteFileAsync(file.Id, cancellationToken);
+                result.OrphanedSourceFiles.Add(file.Path);
+                processedCount++;
+
+                _logger.LogDebug("已清理孤立源文件索引信息: {FilePath} (源: {Source})", file.Path, file.Source);
+
+                // 批量处理后让出CPU
+                if (processedCount % batchSize == 0)
+                {
+                    await Task.Delay(BatchDelayMs, cancellationToken);
+                }
+
+                SyncProgress?.Invoke(this, new StartupSyncProgressEventArgs
+                {
+                    Phase = "清理孤立源索引",
+                    CurrentFile = file.Path,
+                    ProcessedCount = processedCount,
+                    TotalCount = orphanedFiles.Count
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "清理孤立源文件索引失败: {FilePath}", file.Path);
+                result.Errors.Add($"清理孤立源文件索引失败: {file.Path} - {ex.Message}");
+            }
+        }
+
+        _logger.LogInformation("已清理 {Count} 个孤立源文件的索引信息", result.OrphanedSourceFiles.Count);
     }
 
     /// <summary>
@@ -426,6 +496,11 @@ public class StartupSyncResult
     public List<string> ModifiedFiles { get; set; } = [];
 
     /// <summary>
+    /// 孤立源文件索引列表（源已从配置中删除，清理了索引信息但不删除磁盘文件）
+    /// </summary>
+    public List<string> OrphanedSourceFiles { get; set; } = [];
+
+    /// <summary>
     /// 错误列表
     /// </summary>
     public List<string> Errors { get; set; } = [];
@@ -433,7 +508,7 @@ public class StartupSyncResult
     /// <summary>
     /// 总变更数
     /// </summary>
-    public int TotalChanges => DeletedFiles.Count + NewFiles.Count + ModifiedFiles.Count;
+    public int TotalChanges => OrphanedSourceFiles.Count + DeletedFiles.Count + NewFiles.Count + ModifiedFiles.Count;
 }
 
 /// <summary>

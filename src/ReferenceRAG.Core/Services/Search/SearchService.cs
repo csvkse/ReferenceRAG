@@ -38,15 +38,12 @@ public class SearchService : ISearchService
     }
 
     /// <summary>
-    /// 初始化搜索服务 - 预热 BM25 索引
+    /// 初始化搜索服务
     /// </summary>
-    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    public Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        if (_hybridSearchService != null)
-        {
-            _logger.LogInformation("初始化混合搜索服务 BM25 索引...");
-            await _hybridSearchService.InitializeAsync(cancellationToken);
-        }
+        // HybridSearchService 不再需要初始化（已移除多模型支持）
+        return Task.CompletedTask;
     }
 
     /// <summary>
