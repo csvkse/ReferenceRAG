@@ -68,6 +68,12 @@ const routes: RouteRecordRaw[] = [
         name: 'BM25Index',
         component: () => import('@/views/BM25Index.vue'),
         meta: { title: 'BM25索引' }
+      },
+      {
+        path: 'guide',
+        name: 'Guide',
+        component: () => import('@/views/Guide.vue'),
+        meta: { title: '使用指南' }
       }
     ]
   }

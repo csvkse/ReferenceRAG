@@ -68,7 +68,8 @@ import {
   SpeedometerOutline,
   CodeSlashOutline,
   CubeOutline,
-  PulseOutline
+  PulseOutline,
+  HelpCircleOutline
 } from '@vicons/ionicons5'
 import { useIndexStore } from '@/stores/index'
 import { useAuthStore } from '@/stores/auth'
@@ -133,6 +134,11 @@ const menuOptions: MenuOption[] = [
     label: 'BM25索引',
     key: 'BM25Index',
     icon: renderIcon(BookOutline)
+  },
+  {
+    label: '使用指南',
+    key: 'Guide',
+    icon: renderIcon(HelpCircleOutline)
   }
 ]
 
