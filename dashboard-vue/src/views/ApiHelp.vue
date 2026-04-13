@@ -260,7 +260,9 @@ const getTagDisplayName = (tag: string) => tagDisplayNames[tag] || tag
 const loadSwagger = async () => {
   loading.value = true
   try {
-    const response = await axios.get<SwaggerData>('/swagger/v1/swagger.json')
+    // 直接从后端端口获取 swagger.json
+    const baseUrl = import.meta.env.DEV ? 'http://localhost:5294' : ''
+    const response = await axios.get<SwaggerData>(`${baseUrl}/swagger/v1/swagger.json`)
     swaggerData.value = response.data
   } catch (error) {
     message.error('加载 API 文档失败')
