@@ -21,6 +21,11 @@ public class IndexService : IHostedService
     private readonly ILogger<IndexService> _logger;
 
     private readonly ConcurrentDictionary<string, IndexJob> _activeJobs = new();
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _jobCancellationTokens = new();
+
+    // 已完成任务记录（最多保留20条）
+    private readonly ConcurrentQueue<IndexJob> _completedJobs = new();
+    private const int MaxCompletedJobs = 20;
 
     public IndexService(
         IServiceProvider serviceProvider,
@@ -40,6 +45,20 @@ public class IndexService : IHostedService
     public IReadOnlyDictionary<string, IndexJob> ActiveJobs => _activeJobs;
 
     /// <summary>
+    /// 已完成/已取消的索引任务历史（最多20条）
+    /// </summary>
+    public IReadOnlyCollection<IndexJob> CompletedJobs => _completedJobs;
+
+    /// <summary>
+    /// 清空已完成/已取消的索引任务历史
+    /// </summary>
+    public void ClearCompletedJobs()
+    {
+        while (_completedJobs.TryDequeue(out _)) { }
+        _logger.LogInformation("已清空所有已完成的索引任务记录");
+    }
+
+    /// <summary>
     /// 启动索引任务
     /// </summary>
     public async Task<IndexJob> StartIndexAsync(IndexRequest request, CancellationToken cancellationToken = default)
@@ -53,6 +72,9 @@ public class IndexService : IHostedService
             StartTime = DateTime.UtcNow
         };
 
+        // 创建可取消的 CancellationTokenSource
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _jobCancellationTokens[indexId] = cts;
         _activeJobs[indexId] = job;
 
         // 后台执行索引
@@ -110,7 +132,7 @@ public class IndexService : IHostedService
                 });
 
                 var sw = Stopwatch.StartNew();
-                var errors = new List<string>();
+                var errors = new ConcurrentBag<string>();
                 var processedCount = 0;
                 var errorsCount = 0;
                 var currentFileLock = new object();
@@ -123,14 +145,21 @@ public class IndexService : IHostedService
                 // 并行处理文件
                 var tasks = allFiles.Select(async file =>
                 {
-                    if (cancellationToken.IsCancellationRequested)
+                    // 检查取消状态
+                    if (cts.Token.IsCancellationRequested)
                     {
                         return;
                     }
 
-                    await semaphore.WaitAsync(cancellationToken);
+                    await semaphore.WaitAsync(cts.Token);
                     try
                     {
+                        // 再次检查取消状态
+                        if (cts.Token.IsCancellationRequested)
+                        {
+                            return;
+                        }
+
                         var fileName = Path.GetFileName(file);
 
                         // 线程安全地更新当前文件
@@ -154,6 +183,11 @@ public class IndexService : IHostedService
                             Timestamp = DateTime.UtcNow
                         });
                     }
+                    catch (OperationCanceledException)
+                    {
+                        // 任务被取消，正常退出
+                        return;
+                    }
                     catch (Exception ex)
                     {
                         errors.Add($"{file}: {ex.Message}");
@@ -174,7 +208,18 @@ public class IndexService : IHostedService
 
                 sw.Stop();
 
-                job.Status = IndexStatus.Completed;
+                // 根据是否被取消设置最终状态
+                if (cts.Token.IsCancellationRequested)
+                {
+                    job.Status = IndexStatus.Cancelled;
+                    _logger.LogInformation("索引任务 {IndexId} 已取消，已处理 {ProcessedFiles}/{TotalFiles} 文件",
+                        indexId, processedCount, job.TotalFiles);
+                }
+                else
+                {
+                    job.Status = IndexStatus.Completed;
+                }
+
                 job.EndTime = DateTime.UtcNow;
                 job.Duration = sw.Elapsed;
 
@@ -187,24 +232,46 @@ public class IndexService : IHostedService
                     TotalVectors = job.ProcessedFiles,
                     Duration = sw.Elapsed,
                     CompletedAt = job.EndTime.Value,
-                    Errors = errors
+                    Errors = errors.ToList()
                 });
+            }
+            catch (OperationCanceledException)
+            {
+                job.Status = IndexStatus.Cancelled;
+                job.EndTime = DateTime.UtcNow;
+                _logger.LogInformation("索引任务 {IndexId} 已取消", indexId);
             }
             catch (Exception ex)
             {
                 job.Status = IndexStatus.Failed;
                 job.ErrorMessage = ex.Message;
+                job.EndTime = DateTime.UtcNow;
                 _logger.LogError(ex, "Index job {IndexId} failed", indexId);
             }
             finally
             {
-                // 延迟移除，允许客户端查询结果
-                _ = Task.Delay(TimeSpan.FromMinutes(5)).ContinueWith(_ =>
+                // 清理 CancellationTokenSource
+                if (_jobCancellationTokens.TryRemove(indexId, out var cts))
                 {
-                    _activeJobs.TryRemove(indexId, out var _);
-                });
+                    cts.Dispose();
+                }
+
+                // 将已完成/已取消的任务添加到历史队列
+                if (job.Status == IndexStatus.Completed || job.Status == IndexStatus.Cancelled)
+                {
+                    _completedJobs.Enqueue(job);
+
+                    // 保持历史记录不超过最大数量
+                    while (_completedJobs.Count > MaxCompletedJobs)
+                    {
+                        _completedJobs.TryDequeue(out _);
+                    }
+                }
+
+                // 从活跃任务中移除
+                _activeJobs.TryRemove(indexId, out var _);
             }
-        }, cancellationToken);
+        }, cts.Token);
 
         return job;
     }
@@ -214,11 +281,23 @@ public class IndexService : IHostedService
     /// </summary>
     public Task<bool> StopIndexAsync(string indexId)
     {
-        if (_activeJobs.TryGetValue(indexId, out var job) && job.Status == IndexStatus.Running)
+        if (_activeJobs.TryGetValue(indexId, out var job) &&
+            (job.Status == IndexStatus.Running || job.Status == IndexStatus.Pending))
         {
+            _logger.LogInformation("请求停止索引任务 {IndexId}", indexId);
+
+            // 取消 CancellationToken
+            if (_jobCancellationTokens.TryGetValue(indexId, out var cts))
+            {
+                cts.Cancel();
+            }
+
             job.Status = IndexStatus.Cancelled;
             return Task.FromResult(true);
         }
+
+        _logger.LogWarning("无法停止索引任务 {IndexId}：任务不存在或状态不允许 (当前状态: {Status})",
+            indexId, job?.Status.ToString() ?? "null");
         return Task.FromResult(false);
     }
 

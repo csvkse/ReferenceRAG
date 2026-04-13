@@ -212,8 +212,11 @@ export const vectorIndexApi = {
   // 索引任务管理
   startIndex: (request?: IndexJobRequest) => api.post<IndexJobResponse>('/VectorIndex/index', request || {}),
   getJobs: () => api.get<IndexJobResponse[]>('/VectorIndex/jobs'),
+  getAllJobs: () => api.get<import('@/types/api').AllJobsResponse>('/VectorIndex/jobs/all'),
   getJob: (jobId: string) => api.get<IndexJobResponse>(`/VectorIndex/jobs/${jobId}`),
   stopJob: (jobId: string) => api.post(`/VectorIndex/jobs/${jobId}/stop`),
+  getCompletedJobs: () => api.get<IndexJobResponse[]>('/VectorIndex/jobs/history'),
+  clearCompletedJobs: () => api.delete('/VectorIndex/jobs/history'),
 
   // 向量索引重建
   rebuild: (request?: RebuildRequest) => api.post<RebuildJob>('/VectorIndex/rebuild', request || {}),
@@ -242,7 +245,8 @@ export const systemApi = {
   getMetricsSummary: () => api.get<MetricsSummary>('/system/metrics/queries'),
   getAlerts: () => api.get<Alert[]>('/system/alerts'),
   checkAlerts: () => api.post<Alert[]>('/system/alerts/check'),
-  getAlertRules: () => api.get<AlertRule[]>('/system/alerts/rules')
+  getAlertRules: () => api.get<AlertRule[]>('/system/alerts/rules'),
+  restart: () => api.post<import('@/types/api').RestartResponse>('/system/restart')
 }
 
 // BM25 Index

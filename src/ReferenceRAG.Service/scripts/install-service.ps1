@@ -68,6 +68,8 @@ $envArray = @()
 
 # Set ASPNETCORE_URLS
 $envArray += "ASPNETCORE_URLS=http://0.0.0.0:$Port"
+# Set service name for restart API detection
+$envArray += "REFERENCERAG_SERVICE_NAME=$ServiceName"
 Write-Host "Listening port: $Port"
 
 # Detect and add CUDA path

@@ -474,6 +474,14 @@ export interface AlertRule {
   cooldownMinutes?: number
 }
 
+export interface RestartResponse {
+  message: string
+  oldProcessId: number
+  newProcessId: number
+  processPath: string
+  timestamp: string
+}
+
 // --- Vector Stats ---
 
 export interface VectorStats {
@@ -570,6 +578,11 @@ export interface IndexJobResponse {
   endTime?: string
   duration?: string
   errorMessage?: string
+}
+
+export interface AllJobsResponse {
+  activeJobs: IndexJobResponse[]
+  completedJobs: IndexJobResponse[]
 }
 
 // --- Rerank Test ---

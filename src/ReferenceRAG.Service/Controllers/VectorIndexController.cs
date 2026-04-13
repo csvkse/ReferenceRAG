@@ -99,6 +99,55 @@ public class VectorIndexController : ControllerBase
     }
 
     /// <summary>
+    /// 获取所有索引任务（包括已完成的历史记录）
+    /// </summary>
+    [HttpGet("jobs/all")]
+    public ActionResult<AllJobsResponse> GetAllJobs()
+    {
+        var activeJobs = _indexService.ActiveJobs.Values.Select(job => new IndexJobResponse
+        {
+            JobId = job.Id,
+            Status = job.Status.ToString(),
+            Sources = job.Request?.Sources ?? new List<string>(),
+            Force = job.Request?.Force ?? false,
+            TotalFiles = job.TotalFiles,
+            ProcessedFiles = job.ProcessedFiles,
+            CurrentFile = job.CurrentFile,
+            Errors = job.Errors,
+            ProgressPercent = (int)job.ProgressPercent,
+            StartTime = job.StartTime,
+            EndTime = job.EndTime,
+            Duration = job.Duration.ToString(),
+            ErrorMessage = job.ErrorMessage
+        }).ToList();
+
+        var completedJobs = _indexService.CompletedJobs
+            .OrderByDescending(j => j.EndTime ?? j.StartTime)
+            .Select(job => new IndexJobResponse
+        {
+            JobId = job.Id,
+            Status = job.Status.ToString(),
+            Sources = job.Request?.Sources ?? new List<string>(),
+            Force = job.Request?.Force ?? false,
+            TotalFiles = job.TotalFiles,
+            ProcessedFiles = job.ProcessedFiles,
+            CurrentFile = job.CurrentFile,
+            Errors = job.Errors,
+            ProgressPercent = (int)job.ProgressPercent,
+            StartTime = job.StartTime,
+            EndTime = job.EndTime,
+            Duration = job.Duration.ToString(),
+            ErrorMessage = job.ErrorMessage
+        }).ToList();
+
+        return Ok(new AllJobsResponse
+        {
+            ActiveJobs = activeJobs,
+            CompletedJobs = completedJobs
+        });
+    }
+
+    /// <summary>
     /// 获取索引任务状态
     /// </summary>
     [HttpGet("jobs/{indexId}")]
@@ -140,6 +189,42 @@ public class VectorIndexController : ControllerBase
             return NotFound(new { error = $"索引任务 '{indexId}' 不存在或已完成" });
         }
         return Ok(new { message = "索引任务已停止" });
+    }
+
+    /// <summary>
+    /// 获取已完成/已取消的索引任务历史
+    /// </summary>
+    [HttpGet("jobs/history")]
+    public ActionResult<List<IndexJobResponse>> GetCompletedJobs()
+    {
+        var jobs = _indexService.CompletedJobs.Select(job => new IndexJobResponse
+        {
+            JobId = job.Id,
+            Status = job.Status.ToString(),
+            Sources = job.Request?.Sources ?? new List<string>(),
+            Force = job.Request?.Force ?? false,
+            TotalFiles = job.TotalFiles,
+            ProcessedFiles = job.ProcessedFiles,
+            CurrentFile = job.CurrentFile,
+            Errors = job.Errors,
+            ProgressPercent = (int)job.ProgressPercent,
+            StartTime = job.StartTime,
+            EndTime = job.EndTime,
+            Duration = job.Duration.ToString(),
+            ErrorMessage = job.ErrorMessage
+        }).ToList();
+
+        return Ok(jobs);
+    }
+
+    /// <summary>
+    /// 清空已完成/已取消的索引任务历史
+    /// </summary>
+    [HttpDelete("jobs/history")]
+    public ActionResult ClearCompletedJobs()
+    {
+        _indexService.ClearCompletedJobs();
+        return Ok(new { message = "已清空所有已完成的索引任务记录" });
     }
 
     // ==================== 向量索引重建 ====================
@@ -592,4 +677,20 @@ public class IndexJobResponse
     public DateTime? EndTime { get; set; }
     public string? Duration { get; set; }
     public string? ErrorMessage { get; set; }
+}
+
+/// <summary>
+/// 所有索引任务响应（包含活跃和历史记录）
+/// </summary>
+public class AllJobsResponse
+{
+    /// <summary>
+    /// 正在进行的任务（Running, Pending）
+    /// </summary>
+    public List<IndexJobResponse> ActiveJobs { get; set; } = new();
+
+    /// <summary>
+    /// 已完成/已取消的任务记录（最多20条）
+    /// </summary>
+    public List<IndexJobResponse> CompletedJobs { get; set; } = new();
 }
