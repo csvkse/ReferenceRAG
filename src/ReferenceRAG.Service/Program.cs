@@ -293,6 +293,9 @@ var app = builder.Build();
 StaticLogger.LoggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
 #endregion
 
+// CORS 必须在其他中间件之前
+app.UseCors();
+
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
@@ -316,8 +319,6 @@ else
         });
     }
 }
-
-app.UseCors();
 
 // 静态文件服务（Vue 前端）
 app.UseDefaultFiles();
