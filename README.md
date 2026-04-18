@@ -72,32 +72,23 @@ cd ReferenceRAG
 dotnet restore
 ```
 
-### 3. 初始化配置
+### 3. 配置文件
 
-```bash
-dotnet run --project src/ReferenceRAG.CLI -- config init
+编辑 `reference-rag.json` 配置文件，添加源文件夹：
+
+```json
+{
+  "sources": [
+    {
+      "name": "我的笔记",
+      "path": "C:\\Users\\YourName\\Documents\\Notes",
+      "type": "obsidian"
+    }
+  ]
+}
 ```
 
-### 4. 添加源文件夹（支持多个）
-
-```bash
-# 添加 Obsidian 笔记库
-dotnet run --project src/ReferenceRAG.CLI -- source add /path/to/obsidian/vault --name "我的笔记" --type obsidian
-
-# 添加普通 Markdown 文件夹
-dotnet run --project src/ReferenceRAG.CLI -- source add /path/to/documents --name "文档库" --type markdown
-
-# 添加代码文档
-dotnet run --project src/ReferenceRAG.CLI -- source add /path/to/project/docs --name "项目文档" --type code
-
-# 查看所有源
-dotnet run --project src/ReferenceRAG.CLI -- source list
-```
-
-**Windows 示例:**
-```powershell
-dotnet run --project src/ReferenceRAG.CLI -- source add "C:\Users\YourName\Documents\Notes" --name "笔记"
-```
+### 4. 启动服务
 
 ### 5. 下载向量模型（可选）
 
@@ -132,15 +123,14 @@ chmod +x scripts/download-model.sh
 
 ### 7. 索引文档
 
-```bash
-# 索引所有源
-dotnet run --project src/ReferenceRAG.CLI -- index
+通过 API 触发索引：
 
-# 索引指定源
-dotnet run --project src/ReferenceRAG.CLI -- index --source "我的笔记"
+```bash
+# 触发所有源索引
+curl -X POST http://localhost:5000/api/index/all
 
 # 强制重新索引
-dotnet run --project src/ReferenceRAG.CLI -- index --force
+curl -X POST http://localhost:5000/api/index/reindex
 ```
 
 ### 8. 启动服务
@@ -232,77 +222,6 @@ GET /api/system/status
 
 ```http
 GET /api/system/health
-```
-
-## 🛠️ CLI 命令
-
-### 源管理
-
-```bash
-# 列出所有源
-dotnet run --project src/ReferenceRAG.CLI -- source list
-
-# 添加源
-dotnet run --project src/ReferenceRAG.CLI -- source add /path/to/folder --name "名称" --type obsidian|markdown|code|custom
-
-# 移除源
-dotnet run --project src/ReferenceRAG.CLI -- source remove "名称"
-
-# 启用/禁用源
-dotnet run --project src/ReferenceRAG.CLI -- source enable "名称"
-dotnet run --project src/ReferenceRAG.CLI -- source disable "名称"
-```
-
-### 索引
-
-```bash
-# 索引所有源
-dotnet run --project src/ReferenceRAG.CLI -- index
-
-# 索引指定源
-dotnet run --project src/ReferenceRAG.CLI -- index --source "我的笔记"
-
-# 强制重新索引
-dotnet run --project src/ReferenceRAG.CLI -- index --force
-
-# 详细输出
-dotnet run --project src/ReferenceRAG.CLI -- index --verbose
-```
-
-### 查询
-
-```bash
-# 标准查询
-dotnet run --project src/ReferenceRAG.CLI -- query "搜索关键词"
-
-# 限定源查询
-dotnet run --project src/ReferenceRAG.CLI -- query "关键词" --source "我的笔记" --source "文档库"
-
-# 深度模式
-dotnet run --project src/ReferenceRAG.CLI -- query "详细内容" --mode deep --top-k 20
-```
-
-### 监控
-
-```bash
-# 监控所有源
-dotnet run --project src/ReferenceRAG.CLI -- watch
-
-# 监控指定源
-dotnet run --project src/ReferenceRAG.CLI -- watch --source "我的笔记"
-```
-
-### 其他
-
-```bash
-# 查看状态
-dotnet run --project src/ReferenceRAG.CLI -- status
-
-# 查看配置
-dotnet run --project src/ReferenceRAG.CLI -- config show
-
-# 清理索引
-dotnet run --project src/ReferenceRAG.CLI -- clean --confirm
 ```
 
 ## 🐳 Docker 部署
@@ -435,20 +354,15 @@ dotnet test --filter "FullyQualifiedName~MarkdownChunkerTests"
 ReferenceRAG/
 ├── src/
 │   ├── ReferenceRAG.Service/      # ASP.NET Core Web API 服务
+│   │   └── McpTools/              # MCP 工具集（Claude Code 集成）
 │   ├── ReferenceRAG.Core/         # 核心业务逻辑
 │   │   ├── Services/             # 服务层（SearchService, EmbeddingService 等）
 │   │   ├── Models/               # 领域模型
 │   │   ├── Abstractions/          # 接口抽象
 │   │   └── Indexing/             # 索引处理
-│   ├── ReferenceRAG.Storage/      # 存储层（SQLite + 向量存储）
-│   ├── ReferenceRAG.CLI/          # 命令行工具
-│   └── McpTools/                  # MCP 工具集（Claude Code 集成）
-│       ├── SourceManager/         # 源管理工具
-│       ├── QueryTools/            # 查询工具
-│       └── ScriptSystem/          # 脚本系统
+│   └── ReferenceRAG.Storage/      # 存储层（SQLite + 向量存储）
 ├── tests/
 │   └── ReferenceRAG.Tests/        # 单元测试
-├── docs/                         # 文档
 ├── .planning/                    # GSD 规划目录
 ├── scripts/                      # 脚本（模型下载等）
 ├── Dockerfile
