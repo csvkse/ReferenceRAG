@@ -5,6 +5,9 @@ obj/
 *.exe
 *.pdb
 dist/
+
+# Excluded from public repo
+docs/
 resource/
 
 # IDE
@@ -61,3 +64,4 @@ resource/test-suites/
 *.pem
 *.key
 appsettings.Production.json
+appsettings.json
