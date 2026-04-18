@@ -1,6 +1,6 @@
-# ObsidianRAG Service Scripts
+# ReferenceRAG Service Scripts
 
-Scripts for registering ObsidianRAG as a system service with automatic startup.
+Scripts for registering ReferenceRAG as a system service with automatic startup.
 
 ## Windows
 
@@ -16,7 +16,7 @@ Scripts for registering ObsidianRAG as a system service with automatic startup.
 .\install-service.ps1
 
 # With custom path and user
-.\install-service.ps1 -ServicePath "C:\Program Files\ObsidianRAG" -ServiceUser "DOMAIN\user"
+.\install-service.ps1 -ServicePath "C:\Program Files\ReferenceRAG" -ServiceUser "DOMAIN\user"
 ```
 
 ### Service Control
@@ -59,12 +59,12 @@ Scripts for registering ObsidianRAG as a system service with automatic startup.
 sudo ./install-service.sh
 
 # With custom user and path
-sudo ./install-service.sh --user obsidianrag --path /opt/obsidianrag
+sudo ./install-service.sh --user referencerag --path /opt/referencerag
 ```
 
 The script will:
-1. Create a dedicated service user (obsidianrag) if it doesn't exist
-2. Create required directories (/var/log/obsidianrag, data directories)
+1. Create a dedicated service user (referencerag) if it doesn't exist
+2. Create required directories (/var/log/referencerag, data directories)
 3. Install the systemd unit file
 4. Enable and start the service
 
@@ -102,13 +102,13 @@ sudo ./uninstall-service.sh --purge
 ### Windows Service Configuration
 
 Edit `install-service.ps1` parameters:
-- `-ServicePath`: Path where ObsidianRAG.Service.dll is located
+- `-ServicePath`: Path where ReferenceRAG.Service.dll is located
 - `-ServiceUser`: User account to run the service (default: LocalService)
 - `-NSSMPath`: Custom path to nssm.exe if not in PATH
 
 ### Linux Service Configuration
 
-Edit `obsidianrag.service` before installation:
+Edit `referencerag.service` before installation:
 - `ExecStart`: Path to dotnet and DLL
 - `WorkingDirectory`: Service working directory
 - `User`/`Group`: Service user (must not be root)
@@ -119,11 +119,11 @@ Edit `obsidianrag.service` before installation:
 
 | Property | Windows | Linux |
 |----------|---------|-------|
-| Service Name | ObsidianRAG | obsidianrag |
-| Display Name | ObsidianRAG Knowledge Base Service | - |
+| Service Name | ReferenceRAG | referencerag |
+| Display Name | ReferenceRAG Knowledge Base Service | - |
 | Description | Vector search and RAG API for Obsidian notes | - |
-| Default Path | Script directory | /opt/obsidianrag |
-| Log Location | {path}/logs/ | /var/log/obsidianrag/ |
+| Default Path | Script directory | /opt/referencerag |
+| Log Location | {path}/logs/ | /var/log/referencerag/ |
 | Auto-restart | Yes (5s delay) | Yes (10s delay) |
 
 ## Troubleshooting
@@ -131,28 +131,28 @@ Edit `obsidianrag.service` before installation:
 ### Windows
 ```powershell
 # Check event log
-Get-EventLog -LogName Application -Source "ObsidianRAG" -Newest 20
+Get-EventLog -LogName Application -Source "ReferenceRAG" -Newest 20
 
 # Check NSSM logs
 # Located at: {service_path}/logs/service-error.log
 
 # Manual service management
-sc.exe query ObsidianRAG
-sc.exe stop ObsidianRAG
-sc.exe start ObsidianRAG
+sc.exe query ReferenceRAG
+sc.exe stop ReferenceRAG
+sc.exe start ReferenceRAG
 ```
 
 ### Linux
 ```bash
 # Check service status with details
-sudo systemctl status obsidianrag -l
+sudo systemctl status referencerag -l
 
 # View real-time logs
-sudo journalctl -u obsidianrag -f
+sudo journalctl -u referencerag -f
 
 # View error log
-cat /var/log/obsidianrag/error.log
+cat /var/log/referencerag/error.log
 
 # Check service configuration
-sudo systemctl cat obsidianrag
+sudo systemctl cat referencerag
 ```

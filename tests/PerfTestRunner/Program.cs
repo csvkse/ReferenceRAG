@@ -27,7 +27,7 @@ public class PerformanceTests : IDisposable
         _baseUrl = "http://localhost:5000";
         _httpClient = new HttpClient { BaseAddress = new Uri(_baseUrl), Timeout = TimeSpan.FromSeconds(30) };
         // 添加 API Key 认证
-        _httpClient.DefaultRequestHeaders.Add("X-API-Key", "obsidian-rag-default-api-key-change-in-production");
+        _httpClient.DefaultRequestHeaders.Add("X-API-Key", "reference-rag-default-api-key-change-in-production");
 
         // 创建服务容器以访问核心组件
         var services = new ServiceCollection();

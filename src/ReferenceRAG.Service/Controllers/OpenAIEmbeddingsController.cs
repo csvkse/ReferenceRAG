@@ -205,7 +205,7 @@ public class OpenAIEmbeddingsController : ControllerBase
                 {
                     id = _embeddingService.ModelName,
                     @object = "model",
-                    owned_by = "obsidian-rag",
+                    owned_by = "reference-rag",
                     created = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                 }
             }

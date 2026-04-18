@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(dirname "$SCRIPT_DIR")"
-SERVICE_NAME="obsidianrag"
+SERVICE_NAME="referencerag"
 EXECUTABLE="$SERVICE_DIR/ReferenceRAG.Service"
 PORT=5000
 CUDA_PATH=""

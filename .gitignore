@@ -28,7 +28,7 @@ test-vault/
 *.html
 
 # User-specific config
-obsidian-rag.json
+reference-rag.json
 CODEBUDDY.md
 
 # Model files (large binary)
@@ -57,6 +57,7 @@ resource/test-suites/
 
 # GSD workflow
 .gsd/
+.planning/
 
 # Sensitive files
 .env
@@ -64,4 +65,5 @@ resource/test-suites/
 *.pem
 *.key
 appsettings.Production.json
+appsettings.Development.json
 appsettings.json

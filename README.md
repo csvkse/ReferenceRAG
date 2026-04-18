@@ -1,6 +1,8 @@
-# Obsidian RAG Knowledge Base System
+# ReferenceRAG
 
 > 本地优先、高召回率、低延迟的知识库 RAG 系统 - **支持多源文件夹，不限于 Obsidian**
+
+基于 Semantic Kernel + SQLite 向量存储构建，集成 MCP 工具集支持 Claude Code。
 
 ## ✨ 特性
 
@@ -10,13 +12,15 @@
 - 📊 **层级检索**: 文档 → 章节 → 分段三级检索
 - 🔄 **实时监控**: 内置指标采集和告警
 - 🔗 **链接生成**: 自动生成 `[[file#L10-L20]]` 格式链接
+- 🤖 **MCP 集成**: Claude Code 工具集，直接在 AI 对话中查询知识库
 - 🐳 **容器化**: Docker 一键部署
 
 ## 🏗️ 架构
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Obsidian Vault                          │
+│                     Data Sources                              │
+│     (Obsidian Vault / Markdown / Code Docs / Custom)         │
 └──────────────────────────┬──────────────────────────────────┘
                            │ FileSystemWatcher
                            ▼
@@ -25,24 +29,30 @@
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
 │  │ AI Query API│  │ Index Hub   │  │ System API  │         │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘         │
-└─────────┼────────────────┼────────────────┼─────────────────┘
-          │                │                │
-          ▼                ▼                ▼
+│         └────────────────┼────────────────┘                 │
+│                          ▼                                   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │               McpTools (MCP 工具集)                  │    │
+│  │   SourceManager / QueryTools / ScriptSystem           │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                     ReferenceRAG.Core                         │
 │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐   │
-│  │ MarkdownChunker│  │EmbeddingService│  │SearchService │   │
+│  │MarkdownChunker│  │EmbeddingService│  │ SearchService │   │
 │  └───────────────┘  └───────────────┘  └───────────────┘   │
 │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐   │
-│  │VectorAggregator│  │QueryOptimizer │  │MetricsCollector│   │
+│  │VectorAggregator│  │ QueryOptimizer│  │MetricsCollector│   │
 │  └───────────────┘  └───────────────┘  └───────────────┘   │
 └─────────────────────────────────────────────────────────────┘
-                           │
-                           ▼
+                          │
+                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    ReferenceRAG.Storage                       │
 │  ┌───────────────┐  ┌───────────────┐                      │
-│  │ JsonVectorStore│  │SqliteVectorStore│                    │
+│  │JsonVectorStore│  │SqliteVectorStore│                    │
 │  └───────────────┘  └───────────────┘                      │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -52,8 +62,8 @@
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/your-repo/obsidian-rag.git
-cd obsidian-rag
+git clone https://github.com/your-repo/ReferenceRAG.git
+cd ReferenceRAG
 ```
 
 ### 2. 安装依赖
@@ -89,20 +99,7 @@ dotnet run --project src/ReferenceRAG.CLI -- source list
 dotnet run --project src/ReferenceRAG.CLI -- source add "C:\Users\YourName\Documents\Notes" --name "笔记"
 ```
 
-### 5. 下载向量模型（可选）
-
-```bash
-# Windows
-scripts\download-model.bat
-
-# Linux/macOS
-chmod +x scripts/download-model.sh
-./scripts/download-model.sh
-```
-
-> 如果不下载模型，系统会自动使用模拟模式进行测试。
-
-### 6. GPU 加速配置（可选）
+### 5. GPU 加速配置（可选）
 
 要启用 GPU 加速，需要安装 **CUDA 12.x**：
 
@@ -126,7 +123,7 @@ chmod +x scripts/download-model.sh
 
 4. **启用 GPU**：
    
-   编辑 `obsidian-rag.json` 或 `src/ReferenceRAG.Service/obsidian-rag.json`：
+   编辑 `reference-rag.json` 或 `src/ReferenceRAG.Service/reference-rag.json`：
    ```json
    {
      "embedding": {
@@ -153,7 +150,7 @@ chmod +x scripts/download-model.sh
 
 > **注意**：CUDA 13.x 可能存在兼容性问题，推荐使用 CUDA 12.x。
 
-### 7. 索引文档
+### 6. 索引文档
 
 ```bash
 # 索引所有源
@@ -263,76 +260,76 @@ GET /api/system/health
 
 ```bash
 # 列出所有源
-obsidian-rag source list
+reference-rag source list
 
 # 添加源
-obsidian-rag source add /path/to/folder --name "名称" --type obsidian|markdown|code|custom
+reference-rag source add /path/to/folder --name "名称" --type obsidian|markdown|code|custom
 
 # 移除源
-obsidian-rag source remove "名称"
+reference-rag source remove "名称"
 
 # 启用/禁用源
-obsidian-rag source enable "名称"
-obsidian-rag source disable "名称"
+reference-rag source enable "名称"
+reference-rag source disable "名称"
 ```
 
 ### 索引
 
 ```bash
 # 索引所有源
-obsidian-rag index
+reference-rag index
 
 # 索引指定源
-obsidian-rag index --source "我的笔记"
+reference-rag index --source "我的笔记"
 
 # 强制重新索引
-obsidian-rag index --force
+reference-rag index --force
 
 # 详细输出
-obsidian-rag index --verbose
+reference-rag index --verbose
 ```
 
 ### 查询
 
 ```bash
 # 标准查询
-obsidian-rag query "搜索关键词"
+reference-rag query "搜索关键词"
 
 # 限定源查询
-obsidian-rag query "关键词" --source "我的笔记" --source "文档库"
+reference-rag query "关键词" --source "我的笔记" --source "文档库"
 
 # 深度模式
-obsidian-rag query "详细内容" --mode deep --top-k 20
+reference-rag query "详细内容" --mode deep --top-k 20
 ```
 
 ### 监控
 
 ```bash
 # 监控所有源
-obsidian-rag watch
+reference-rag watch
 
 # 监控指定源
-obsidian-rag watch --source "我的笔记"
+reference-rag watch --source "我的笔记"
 ```
 
 ### 其他
 
 ```bash
 # 查看状态
-obsidian-rag status
+reference-rag status
 
 # 查看配置
-obsidian-rag config show
+reference-rag config show
 
 # 清理索引
-obsidian-rag clean --confirm
+reference-rag clean --confirm
 ```
 
 ## 🐳 Docker 部署
 
 ```bash
 # 构建镜像
-docker build -t obsidian-rag .
+docker build -t reference-rag .
 
 # 运行容器
 docker run -d \
@@ -340,7 +337,7 @@ docker run -d \
   -v ./data:/app/data \
   -v ./models:/app/models \
   -v /path/to/vault:/app/vault:ro \
-  obsidian-rag
+  reference-rag
 
 # 或使用 docker-compose
 docker-compose up -d
@@ -410,24 +407,28 @@ docker-compose up -d
 | HighMemoryUsage | 内存 > 2GB | Warning |
 | LowRecall | 平均结果 < 3 | Info |
 
-## 🔗 Obsidian 集成
+## 🔗 MCP 集成
 
-### Shell Commands 插件配置
+### Claude Code 配置
 
-1. 安装 [Shell Commands](https://github.com/Taitava/obsidian-shellcommands) 插件
+在 Claude Code 中启用知识库查询：
 
-2. 添加命令：
+1. 配置 MCP 服务器（项目已包含 `McpTools`）
+
+2. 使用 MCP 工具查询知识库：
 
 ```bash
+# 列出所有源
+mmx query-tools sources-list
+
 # 查询知识库
-curl -X POST http://localhost:5000/api/ai/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{{selection}}", "mode": "standard"}'
+mmx query-tools query-knowledge --query "如何配置？" --mode "standard"
+
+# 搜索文件内容
+mmx query-tools search-files --query "关键词" --sources "笔记"
 ```
 
-3. 设置快捷键（如 `Ctrl+Shift+Q`）
-
-### 自动链接
+### Obsidian 自动链接
 
 系统自动生成 Obsidian 兼容链接：
 
@@ -452,23 +453,45 @@ dotnet test --filter "FullyQualifiedName~MarkdownChunkerTests"
 ```
 ReferenceRAG/
 ├── src/
-│   ├── ReferenceRAG.Service/      # ASP.NET Core Web API
+│   ├── ReferenceRAG.Service/      # ASP.NET Core Web API 服务
 │   ├── ReferenceRAG.Core/         # 核心业务逻辑
-│   ├── ReferenceRAG.Storage/      # 存储层
-│   └── ReferenceRAG.CLI/          # 命令行工具
+│   │   ├── Services/             # 服务层（SearchService, EmbeddingService 等）
+│   │   ├── Models/               # 领域模型
+│   │   ├── Abstractions/          # 接口抽象
+│   │   └── Indexing/             # 索引处理
+│   ├── ReferenceRAG.Storage/      # 存储层（SQLite + 向量存储）
+│   ├── ReferenceRAG.CLI/          # 命令行工具
+│   └── McpTools/                  # MCP 工具集（Claude Code 集成）
+│       ├── SourceManager/         # 源管理工具
+│       ├── QueryTools/            # 查询工具
+│       └── ScriptSystem/          # 脚本系统
 ├── tests/
 │   └── ReferenceRAG.Tests/        # 单元测试
-├── models/                       # ONNX 模型
 ├── docs/                         # 文档
+├── .planning/                    # GSD 规划目录
+├── scripts/                      # 脚本（模型下载等）
 ├── Dockerfile
 ├── docker-compose.yml
-├── Plan.md                       # 开发计划
 └── README.md
 ```
 
+### MCP 工具集
+
+系统提供 MCP (Model Context Protocol) 工具集，支持 Claude Code 集成：
+
+| 工具 | 功能 |
+|------|------|
+| `sources-list` | 列出所有数据源 |
+| `sources-add` | 添加新数据源 |
+| `query-knowledge` | 知识库查询 |
+| `search-files` | 文件内容搜索 |
+| `run-script` | 执行自定义脚本 |
+
+详见 [.planning/codebase/](.planning/codebase/) 目录下的分析文档。
+
 ## 📝 开发进度
 
-详见 [Plan.md](Plan.md)
+详见 [.planning/ROADMAP.md](.planning/ROADMAP.md)
 
 ### 已完成 ✅
 
@@ -476,10 +499,11 @@ ReferenceRAG/
 - Phase 2: 索引与监控
 - Phase 3: 向量聚合与层级检索
 - Phase 4: Obsidian 集成 + 监控
+- Phase 5: MCP 工具集 + 服务管理
 
 ### 进行中 🔄
 
-- Phase 5: 高级优化 + 部署
+- Phase 6: 高级优化 + 部署
 
 ## 🤝 贡献
 

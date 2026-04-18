@@ -12,8 +12,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\ObsidianRAG.Core\ObsidianRAG.Core.csproj" />
-    <ProjectReference Include="..\..\src\ObsidianRAG.Storage\ObsidianRAG.Storage.csproj" />
+    <ProjectReference Include="..\..\src\ReferenceRAG.Core\ReferenceRAG.Core.csproj" />
+    <ProjectReference Include="..\..\src\ReferenceRAG.Storage\ReferenceRAG.Storage.csproj" />
   </ItemGroup>
 
 </Project>

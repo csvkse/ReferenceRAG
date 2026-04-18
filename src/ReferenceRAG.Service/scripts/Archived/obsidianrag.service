@@ -1,17 +1,17 @@
 [Unit]
-Description=ObsidianRAG Knowledge Base Service
-Documentation=https://github.com/your-repo/ObsidianRAG
+Description=ReferenceRAG Knowledge Base Service
+Documentation=https://github.com/your-repo/ReferenceRAG
 After=network.target
 
 [Service]
 Type=simple
 # The executable path - change this to match your installation
-ExecStart=/usr/bin/dotnet /opt/obsidianrag/ObsidianRAG.Service.dll
-WorkingDirectory=/opt/obsidianrag
+ExecStart=/usr/bin/dotnet /opt/referencerag/ReferenceRAG.Service.dll
+WorkingDirectory=/opt/referencerag
 
 # User and group - service will NOT run as root
-User=obsidianrag
-Group=obsidianrag
+User=referencerag
+Group=referencerag
 
 # Restart policy
 Restart=on-failure
@@ -22,8 +22,8 @@ Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=DOTNET_RUNNING_IN_CONTAINER=false
 
 # Logging
-StandardOutput=append:/var/log/obsidianrag/service.log
-StandardError=append:/var/log/obsidianrag/error.log
+StandardOutput=append:/var/log/referencerag/service.log
+StandardError=append:/var/log/referencerag/error.log
 
 # Graceful shutdown
 TimeoutStopSec=30
@@ -35,7 +35,7 @@ LimitCORE=0
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/obsidianrag/data /var/log/obsidianrag
+ReadWritePaths=/opt/referencerag/data /var/log/referencerag
 
 [Install]
 WantedBy=multi-user.target

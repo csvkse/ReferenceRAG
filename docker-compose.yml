@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  obsidian-rag:
+  reference-rag:
     build: .
-    container_name: obsidian-rag
+    container_name: reference-rag
     ports:
       - "5000:5000"
     volumes:
@@ -25,9 +25,9 @@ services:
   # Optional: PostgreSQL for production
   # postgres:
   #   image: postgres:15-alpine
-  #   container_name: obsidian-rag-db
+  #   container_name: reference-rag-db
   #   environment:
-  #     POSTGRES_DB: obsidianrag
+  #     POSTGRES_DB: referencerag
   #     POSTGRES_USER: obsidian
   #     POSTGRES_PASSWORD: obsidian123
   #   volumes:

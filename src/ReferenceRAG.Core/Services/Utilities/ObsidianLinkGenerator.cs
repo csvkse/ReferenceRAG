@@ -165,7 +165,7 @@ public class ObsidianLinkGenerator
     public string GenerateEmbedResult(AIQueryResponse response)
     {
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine("```obsidian-rag");
+        sb.AppendLine("```reference-rag");
         sb.AppendLine($"query: {response.Query}");
         sb.AppendLine($"mode: {response.Mode}");
         sb.AppendLine($"results: {response.Chunks.Count}");

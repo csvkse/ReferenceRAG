@@ -19,7 +19,7 @@ public class VectorSimilarityTests : IDisposable
 
     public VectorSimilarityTests()
     {
-        _testDataPath = Path.Combine(Path.GetTempPath(), $"obsidian-rag-similarity-test-{Guid.NewGuid():N}");
+        _testDataPath = Path.Combine(Path.GetTempPath(), $"reference-rag-similarity-test-{Guid.NewGuid():N}");
         _testVaultPath = Path.Combine(_testDataPath, "vault");
         Directory.CreateDirectory(_testVaultPath);
 

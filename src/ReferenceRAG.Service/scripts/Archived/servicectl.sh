@@ -5,7 +5,7 @@
 # Usage: ./servicectl.sh [status|start|stop|restart|logs]
 #
 
-SERVICE_NAME="obsidianrag"
+SERVICE_NAME="referencerag"
 
 # Color output
 RED='\033[0;31m'

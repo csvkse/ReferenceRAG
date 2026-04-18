@@ -3,7 +3,7 @@
 # Usage: sudo ./uninstall-service.sh
 
 set -e
-SERVICE_NAME="obsidianrag"
+SERVICE_NAME="referencerag"
 
 systemctl stop $SERVICE_NAME 2>/dev/null || true
 systemctl disable $SERVICE_NAME 2>/dev/null || true

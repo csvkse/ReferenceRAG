@@ -21,7 +21,7 @@ public class IntegrationTests : IDisposable
     public IntegrationTests()
     {
         // 创建临时测试目录
-        _testDataPath = Path.Combine(Path.GetTempPath(), $"obsidian-rag-test-{Guid.NewGuid():N}");
+        _testDataPath = Path.Combine(Path.GetTempPath(), $"reference-rag-test-{Guid.NewGuid():N}");
         _testVaultPath = Path.Combine(_testDataPath, "vault");
         Directory.CreateDirectory(_testVaultPath);
         Directory.CreateDirectory(Path.Combine(_testVaultPath, "subfolder"));
@@ -65,7 +65,7 @@ public class IntegrationTests : IDisposable
             
             ## 配置说明
             
-            配置文件位于 `obsidian-rag.json`。
+            配置文件位于 `reference-rag.json`。
             
             ### 基本配置
             
