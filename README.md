@@ -99,19 +99,26 @@ dotnet run --project src/ReferenceRAG.CLI -- source list
 dotnet run --project src/ReferenceRAG.CLI -- source add "C:\Users\YourName\Documents\Notes" --name "笔记"
 ```
 
-### 5. GPU 加速配置（可选）
+### 5. 下载向量模型（可选）
+
+```bash
+# Windows
+scripts\download-model.bat
+
+# Linux/macOS
+chmod +x scripts/download-model.sh
+./scripts/download-model.sh
+```
+
+> 如果不下载模型，系统会自动使用模拟模式进行测试。
+
+### 6. GPU 加速配置（可选）
 
 要启用 GPU 加速，需要安装 **CUDA 12.x**：
 
 1. **下载 CUDA Toolkit 12.x**
    
    下载地址：https://developer.nvidia.com/cuda-12-6-0-download-archive
-   
-   选择：
-   - Operating System: Windows
-   - Architecture: x86_64
-   - Version: 10/11
-   - Installer: exe (local)
 
 2. **安装后重启电脑**
 
@@ -121,36 +128,9 @@ dotnet run --project src/ReferenceRAG.CLI -- source add "C:\Users\YourName\Docum
    nvidia-smi
    ```
 
-4. **启用 GPU**：
-   
-   编辑 `reference-rag.json` 或 `src/ReferenceRAG.Service/reference-rag.json`：
-   ```json
-   {
-     "embedding": {
-       "useCuda": true,
-       "cudaDeviceId": 0
-     }
-   }
-   ```
+4. **启用 GPU**：编辑配置文件设置 `embedding.useCuda: true`
 
-**性能对比**：
-| 模式 | 速度 |
-|------|------|
-| CPU | ~4,000 字/秒 |
-| GPU (CUDA) | ~50,000-100,000 字/秒 |
-
-**推荐 BatchSize 配置**：
-
-| 模型 | 推荐 BatchSize | GPU 占用 | 说明 |
-|------|---------------|---------|------|
-| bge-small-zh-v1.5 | 2 | ~80% | 最佳性能，避免资源争用 |
-| bge-small-zh-v1.5 | 1 | ~40-50% | 低负载场景 |
-
-> **注意**：BatchSize 过大反而会降低性能，因为 GPU 资源争用和显存带宽瓶颈。对于小模型，小批次往往更高效。
-
-> **注意**：CUDA 13.x 可能存在兼容性问题，推荐使用 CUDA 12.x。
-
-### 6. 索引文档
+### 7. 索引文档
 
 ```bash
 # 索引所有源
@@ -163,7 +143,7 @@ dotnet run --project src/ReferenceRAG.CLI -- index --source "我的笔记"
 dotnet run --project src/ReferenceRAG.CLI -- index --force
 ```
 
-### 7. 启动服务
+### 8. 启动服务
 
 ```bash
 dotnet run --project src/ReferenceRAG.Service
@@ -171,7 +151,7 @@ dotnet run --project src/ReferenceRAG.Service
 
 服务将在 `http://localhost:5000` 启动。
 
-### 8. 测试查询
+### 9. 测试查询
 
 ```bash
 # 查询所有源
@@ -215,7 +195,7 @@ Content-Type: application/json
   "chunks": [
     {
       "refId": "@1",
-      "filePath": "docs/obsidian-config.md",
+      "filePath": "notes/obsidian-config.md",
       "content": "...",
       "score": 0.89,
       "obsidianLink": "[[obsidian-config#L45-L52]]"
@@ -260,69 +240,69 @@ GET /api/system/health
 
 ```bash
 # 列出所有源
-reference-rag source list
+dotnet run --project src/ReferenceRAG.CLI -- source list
 
 # 添加源
-reference-rag source add /path/to/folder --name "名称" --type obsidian|markdown|code|custom
+dotnet run --project src/ReferenceRAG.CLI -- source add /path/to/folder --name "名称" --type obsidian|markdown|code|custom
 
 # 移除源
-reference-rag source remove "名称"
+dotnet run --project src/ReferenceRAG.CLI -- source remove "名称"
 
 # 启用/禁用源
-reference-rag source enable "名称"
-reference-rag source disable "名称"
+dotnet run --project src/ReferenceRAG.CLI -- source enable "名称"
+dotnet run --project src/ReferenceRAG.CLI -- source disable "名称"
 ```
 
 ### 索引
 
 ```bash
 # 索引所有源
-reference-rag index
+dotnet run --project src/ReferenceRAG.CLI -- index
 
 # 索引指定源
-reference-rag index --source "我的笔记"
+dotnet run --project src/ReferenceRAG.CLI -- index --source "我的笔记"
 
 # 强制重新索引
-reference-rag index --force
+dotnet run --project src/ReferenceRAG.CLI -- index --force
 
 # 详细输出
-reference-rag index --verbose
+dotnet run --project src/ReferenceRAG.CLI -- index --verbose
 ```
 
 ### 查询
 
 ```bash
 # 标准查询
-reference-rag query "搜索关键词"
+dotnet run --project src/ReferenceRAG.CLI -- query "搜索关键词"
 
 # 限定源查询
-reference-rag query "关键词" --source "我的笔记" --source "文档库"
+dotnet run --project src/ReferenceRAG.CLI -- query "关键词" --source "我的笔记" --source "文档库"
 
 # 深度模式
-reference-rag query "详细内容" --mode deep --top-k 20
+dotnet run --project src/ReferenceRAG.CLI -- query "详细内容" --mode deep --top-k 20
 ```
 
 ### 监控
 
 ```bash
 # 监控所有源
-reference-rag watch
+dotnet run --project src/ReferenceRAG.CLI -- watch
 
 # 监控指定源
-reference-rag watch --source "我的笔记"
+dotnet run --project src/ReferenceRAG.CLI -- watch --source "我的笔记"
 ```
 
 ### 其他
 
 ```bash
 # 查看状态
-reference-rag status
+dotnet run --project src/ReferenceRAG.CLI -- status
 
 # 查看配置
-reference-rag config show
+dotnet run --project src/ReferenceRAG.CLI -- config show
 
 # 清理索引
-reference-rag clean --confirm
+dotnet run --project src/ReferenceRAG.CLI -- clean --confirm
 ```
 
 ## 🐳 Docker 部署
@@ -372,9 +352,11 @@ docker-compose up -d
 
 ## 📖 文档
 
-- [多源文件夹配置](docs/MULTI_SOURCE.md) - 多文件夹支持详解
-- [模型配置](docs/MODEL_CONFIG.md) - 向量模型配置指南
-- [Vault 配置](docs/VAULT_CONFIG.md) - 单源配置参考
+详细文档位于 [.planning/](.planning/) 目录：
+
+- [.planning/codebase/](.planning/codebase/) - 代码库分析
+- [.planning/intel/](.planning/intel/) - 情报文件
+- [.planning/research/](.planning/research/) - 研究资料
 
 ## 📊 监控指标
 
@@ -415,18 +397,17 @@ docker-compose up -d
 
 1. 配置 MCP 服务器（项目已包含 `McpTools`）
 
-2. 使用 MCP 工具查询知识库：
+2. 可用 MCP 工具：
 
-```bash
-# 列出所有源
-mmx query-tools sources-list
+| 工具 | 功能 |
+|------|------|
+| `sources-list` | 列出所有数据源 |
+| `sources-add` | 添加新数据源 |
+| `query-knowledge` | 知识库查询 |
+| `search-files` | 文件内容搜索 |
+| `run-script` | 执行自定义脚本 |
 
-# 查询知识库
-mmx query-tools query-knowledge --query "如何配置？" --mode "standard"
-
-# 搜索文件内容
-mmx query-tools search-files --query "关键词" --sources "笔记"
-```
+详见 MCP 工具源码：`src/McpTools/`
 
 ### Obsidian 自动链接
 
@@ -474,18 +455,6 @@ ReferenceRAG/
 ├── docker-compose.yml
 └── README.md
 ```
-
-### MCP 工具集
-
-系统提供 MCP (Model Context Protocol) 工具集，支持 Claude Code 集成：
-
-| 工具 | 功能 |
-|------|------|
-| `sources-list` | 列出所有数据源 |
-| `sources-add` | 添加新数据源 |
-| `query-knowledge` | 知识库查询 |
-| `search-files` | 文件内容搜索 |
-| `run-script` | 执行自定义脚本 |
 
 详见 [.planning/codebase/](.planning/codebase/) 目录下的分析文档。
 
