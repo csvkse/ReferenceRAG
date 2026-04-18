@@ -1,10 +1,7 @@
 name: CI Build and Test
 
 on:
-  push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
+  workflow_dispatch:
 
 env:
   DOTNET_VERSION: '10.0'

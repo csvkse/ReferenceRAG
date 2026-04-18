@@ -8,126 +8,68 @@ using ReferenceRAG.Core.Models;
 namespace ReferenceRAG.Core.Services;
 
 /// <summary>
-/// 配置管理器
+/// 配置管理器 - 从 appsettings.json 读取 ReferenceRAG 配置
 /// </summary>
 public class ConfigManager
 {
-    private readonly string _configPath;
     private ObsidianRagConfig? _config;
     private static readonly ILogger _logger = StaticLogger.GetLogger("ConfigManager");
 
-    public ConfigManager(ILogger<SearchService> _logger,string? configPath = null)
+    private static readonly JsonSerializerOptions _readOptions = new()
     {
-        _configPath = configPath ?? GetConfigPathFromAppSettings() ?? GetDefaultConfigPath();
-        
-        _logger.LogInformation($"[ConfigManager] 使用配置文件路径: {_configPath}");
-    }
+        PropertyNameCaseInsensitive = true,
+        ReadCommentHandling = JsonCommentHandling.Skip
+    };
 
-    /// <summary>
-    /// 从 appsettings.json 读取配置文件路径
-    /// </summary>
-    private static string? GetConfigPathFromAppSettings()
+    private static readonly JsonSerializerOptions _writeOptions = new()
     {
-        // 尝试从当前目录读取 appsettings.json
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
+    private static string GetAppSettingsPath()
+    {
         var currentDir = Directory.GetCurrentDirectory();
-        var appSettingsPath = Path.Combine(currentDir, "appsettings.json");
+        var path = Path.Combine(currentDir, "appsettings.json");
+        if (File.Exists(path)) return path;
 
-        if (!File.Exists(appSettingsPath))
-        {
-            // 尝试开发环境路径
-            appSettingsPath = Path.Combine(currentDir, "appsettings.Development.json");
-        }
-
+        path = Path.Combine(currentDir, "appsettings.Development.json");
 #if DEBUG
-        appSettingsPath = Path.Combine(currentDir, "appsettings.Development.json");
+        return path;
+#else
+        return File.Exists(path) ? path : Path.Combine(currentDir, "appsettings.json");
 #endif
-
-        if (!File.Exists(appSettingsPath))
-        {
-            return null;
-        }
-
-        try
-        {
-            var json = File.ReadAllText(appSettingsPath);
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("ReferenceRAG", out var obsidianRag) &&
-                obsidianRag.TryGetProperty("ConfigPath", out var configPathElement))
-            {
-                var configPath = configPathElement.GetString();
-                if (!string.IsNullOrEmpty(configPath))
-                {
-                    // 支持相对路径转换为绝对路径
-                    if (!Path.IsPathRooted(configPath))
-                    {
-                        configPath = Path.GetFullPath(Path.Combine(currentDir, configPath));
-                    }
-                    _logger.LogInformation($"[ConfigManager] 从 appsettings.json 读取配置路径: {configPath}");
-                    return configPath;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogInformation($"[ConfigManager] 读取 appsettings.json 失败: {ex.Message}");
-        }
-
-        return null;
     }
 
     /// <summary>
-    /// 获取默认配置路径
-    /// </summary>
-    private static string GetDefaultConfigPath()
-    {
-        var currentDir = Directory.GetCurrentDirectory();
-        var localConfig = Path.Combine(currentDir, "obsidian-rag.json");
-        if (File.Exists(localConfig)) return localConfig;
-
-        var userConfig = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".obsidian-rag",
-            "config.json"
-        );
-        if (File.Exists(userConfig)) return userConfig;
-
-        return localConfig;
-    }
-
-    /// <summary>
-    /// 加载配置
+    /// 加载配置 - 从 appsettings.json 读取 ReferenceRAG 节
     /// </summary>
     public ObsidianRagConfig Load()
     {
         if (_config != null) return _config;
 
-        if (File.Exists(_configPath))
+        var appSettingsPath = GetAppSettingsPath();
+        if (File.Exists(appSettingsPath))
         {
             try
             {
-                var json = File.ReadAllText(_configPath);
-                _config = JsonSerializer.Deserialize<ObsidianRagConfig>(json, new JsonSerializerOptions
+                var json = File.ReadAllText(appSettingsPath);
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("ReferenceRAG", out var ragConfig))
                 {
-                    PropertyNameCaseInsensitive = true,
-                    ReadCommentHandling = JsonCommentHandling.Skip
-                });
-
-                _logger.LogInformation($"[ConfigManager] 已加载配置文件: {_configPath}");
+                    _config = ragConfig.Deserialize<ObsidianRagConfig>(_readOptions);
+                    _logger.LogInformation($"[ConfigManager] 已从 appsettings.json 加载配置");
+                }
             }
             catch (Exception ex)
             {
                 _logger.LogInformation($"[ConfigManager] 配置文件解析失败: {ex.Message}");
-                _config = new ObsidianRagConfig();
             }
         }
-        else
-        {
-            _logger.LogInformation($"[ConfigManager] 配置文件不存在，使用默认配置");
-            _config = new ObsidianRagConfig();
-        }
 
-        ApplyEnvironmentVariables(_config!);
-        MigrateOldConfig(_config!);
+        _config ??= new ObsidianRagConfig();
+        ApplyEnvironmentVariables(_config);
+        MigrateOldConfig(_config);
 
         return _config;
     }
@@ -137,8 +79,7 @@ public class ConfigManager
     /// </summary>
     private void MigrateOldConfig(ObsidianRagConfig config)
     {
-        // 兼容旧的 VaultPath 配置
-#pragma warning disable CS0618 // 禁用过时警告
+#pragma warning disable CS0618
         var oldPath = config.VaultPath;
         if (!string.IsNullOrEmpty(oldPath) && config.Sources.Count == 0)
         {
@@ -154,27 +95,33 @@ public class ConfigManager
     }
 
     /// <summary>
-    /// 保存配置
+    /// 保存配置 - 更新 appsettings.json 的 ReferenceRAG 节
     /// </summary>
     public void Save(ObsidianRagConfig config)
     {
-        var directory = Path.GetDirectoryName(_configPath);
-        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+        var appSettingsPath = GetAppSettingsPath();
+
+        string json;
+        try
         {
-            Directory.CreateDirectory(directory);
+            json = File.Exists(appSettingsPath) ? File.ReadAllText(appSettingsPath) : "{}";
+            using var doc = JsonDocument.Parse(json);
+            var root = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json) ?? [];
+
+            var ragJson = JsonSerializer.Serialize(config, _writeOptions);
+            root["ReferenceRAG"] = JsonDocument.Parse(ragJson).RootElement;
+
+            var finalJson = JsonSerializer.Serialize(root, _writeOptions);
+            File.WriteAllText(appSettingsPath, finalJson);
+        }
+        catch
+        {
+            var ragJson = JsonSerializer.Serialize(new { ReferenceRAG = config }, _writeOptions);
+            File.WriteAllText(appSettingsPath, ragJson);
         }
 
-        var options = new JsonSerializerOptions
-        {
-            WriteIndented = true,
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-        };
-
-        var json = JsonSerializer.Serialize(config, options);
-        File.WriteAllText(_configPath, json);
-
         _config = config;
-        _logger.LogInformation($"[ConfigManager] 配置已保存到: {_configPath}");
+        _logger.LogInformation("[ConfigManager] 配置已保存到: {Path}", appSettingsPath);
     }
 
     /// <summary>
@@ -184,14 +131,12 @@ public class ConfigManager
     {
         var config = Load();
 
-        // 检查是否已存在（使用不区分大小写的路径比较）
         if (config.Sources.Any(s => s.Path.Equals(source.Path, StringComparison.OrdinalIgnoreCase)))
         {
             _logger.LogInformation($"[ConfigManager] 源路径已存在: {source.Path}");
             return false;
         }
 
-        // 自动设置名称
         if (string.IsNullOrEmpty(source.Name))
         {
             source.Name = Path.GetFileName(source.Path) ?? $"Source{config.Sources.Count + 1}";
@@ -210,8 +155,8 @@ public class ConfigManager
     public bool RemoveSource(string pathOrName)
     {
         var config = Load();
-        
-        var source = config.Sources.FirstOrDefault(s => 
+
+        var source = config.Sources.FirstOrDefault(s =>
             s.Path.Equals(pathOrName, StringComparison.OrdinalIgnoreCase) ||
             s.Name.Equals(pathOrName, StringComparison.OrdinalIgnoreCase));
 
@@ -223,7 +168,7 @@ public class ConfigManager
 
         config.Sources.Remove(source);
         Save(config);
-        
+
         _logger.LogInformation($"[ConfigManager] 已移除源: {source.Name}");
         return true;
     }
@@ -234,8 +179,8 @@ public class ConfigManager
     public bool ToggleSource(string pathOrName, bool enabled)
     {
         var config = Load();
-        
-        var source = config.Sources.FirstOrDefault(s => 
+
+        var source = config.Sources.FirstOrDefault(s =>
             s.Path.Equals(pathOrName, StringComparison.OrdinalIgnoreCase) ||
             s.Name.Equals(pathOrName, StringComparison.OrdinalIgnoreCase));
 
@@ -247,7 +192,7 @@ public class ConfigManager
 
         source.Enabled = enabled;
         Save(config);
-        
+
         _logger.LogInformation($"[ConfigManager] 已{(enabled ? "启用" : "禁用")}源: {source.Name}");
         return true;
     }
@@ -266,12 +211,11 @@ public class ConfigManager
     /// </summary>
     private void ApplyEnvironmentVariables(ObsidianRagConfig config)
     {
-        // 单个源路径（兼容）
         var sourcePath = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_SOURCE_PATH");
         if (!string.IsNullOrEmpty(sourcePath))
         {
             var name = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_SOURCE_NAME") ?? "Default";
-            
+
             if (!config.Sources.Any(s => s.Path.Equals(sourcePath, StringComparison.OrdinalIgnoreCase)))
             {
                 config.Sources.Add(new SourceFolder
@@ -284,7 +228,6 @@ public class ConfigManager
             }
         }
 
-        // 多个源路径（JSON 格式）
         var sourcesJson = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_SOURCES");
         if (!string.IsNullOrEmpty(sourcesJson))
         {
@@ -294,7 +237,7 @@ public class ConfigManager
                 {
                     PropertyNameCaseInsensitive = true
                 });
-                
+
                 if (sources != null)
                 {
                     foreach (var source in sources)
@@ -313,14 +256,12 @@ public class ConfigManager
             }
         }
 
-        // 数据路径
         var dataPath = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_DATA_PATH");
         if (!string.IsNullOrEmpty(dataPath))
         {
             config.DataPath = dataPath;
         }
 
-        // 模型配置
         var modelPath = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_MODEL_PATH");
         if (!string.IsNullOrEmpty(modelPath))
         {
@@ -339,7 +280,6 @@ public class ConfigManager
             config.Embedding.UseCuda = cuda;
         }
 
-        // 端口
         var port = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_PORT");
         if (!string.IsNullOrEmpty(port) && int.TryParse(port, out var portNum))
         {
@@ -355,7 +295,6 @@ public class ConfigManager
         var errors = new List<string>();
         var warnings = new List<string>();
 
-        // 验证源
         if (config.Sources.Count == 0)
         {
             errors.Add("未配置任何源文件夹");
@@ -380,20 +319,17 @@ public class ConfigManager
             }
         }
 
-        // 验证数据路径
         if (string.IsNullOrEmpty(config.DataPath))
         {
             errors.Add("DataPath 未配置");
         }
 
-        // 验证模型路径（可选）
-        if (!string.IsNullOrEmpty(config.Embedding.ModelPath) && 
+        if (!string.IsNullOrEmpty(config.Embedding.ModelPath) &&
             !File.Exists(config.Embedding.ModelPath))
         {
             warnings.Add($"模型文件不存在: {config.Embedding.ModelPath} (将使用模拟模式)");
         }
 
-        // 验证端口
         if (config.Service.Port < 1 || config.Service.Port > 65535)
         {
             errors.Add($"无效的端口号: {config.Service.Port}");
@@ -403,53 +339,7 @@ public class ConfigManager
     }
 
     /// <summary>
-    /// 创建默认配置文件
-    /// </summary>
-    public void CreateDefaultConfig()
-    {
-        var config = new ObsidianRagConfig
-        {
-            DataPath = "data",
-            Sources = new List<SourceFolder>
-            {
-                new()
-                {
-                    Path = "",
-                    Name = "示例源",
-                    Type = SourceType.Markdown,
-                    FilePatterns = new List<string> { "*.md" },
-                    Recursive = true,
-                    ExcludeDirs = new List<string> { ".git", "node_modules" }
-                }
-            },
-            Embedding = new EmbeddingConfig
-            {
-                ModelPath = "models/bge-small-zh-v1.5/model.onnx",
-                ModelName = "bge-small-zh-v1.5"
-            },
-            Chunking = new ChunkingConfig
-            {
-                MaxTokens = 512,
-                MinTokens = 50,
-                OverlapTokens = 50
-            },
-            Search = new SearchConfig
-            {
-                DefaultTopK = 10,
-                ContextWindow = 1
-            },
-            Service = new ServiceConfig
-            {
-                Port = 5000,
-                Host = "localhost"
-            }
-        };
-
-        Save(config);
-    }
-
-    /// <summary>
     /// 获取配置文件路径
     /// </summary>
-    public string GetConfigPath() => _configPath;
+    public static string GetConfigPath() => GetAppSettingsPath();
 }

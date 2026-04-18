@@ -1,8 +1,17 @@
-using Microsoft.AspNetCore.Mvc;
-using ReferenceRAG.Core.Interfaces;
-using ReferenceRAG.Core.Services;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.ServiceProcess;
+
+using Microsoft.AspNetCore.Mvc;
+
+using ReferenceRAG.Core.Interfaces;
+using ReferenceRAG.Core.Services;
+
+using Serilog;
+
+using Tokenizers.HuggingFace.Processors;
+
+using WebApiWindowsService;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -18,6 +27,7 @@ public class SystemController : ControllerBase
     private readonly IVectorStore _vectorStore;
     private readonly ILogger<SystemController> _logger;
     private readonly IHostApplicationLifetime _appLifetime;
+    private static int RandomValue { get; set; } = new Random().Next(1000,9999);
 
     public SystemController(
         MetricsCollector metricsCollector,
@@ -31,6 +41,15 @@ public class SystemController : ControllerBase
         _vectorStore = vectorStore;
         _logger = logger;
         _appLifetime = appLifetime;
+    }
+
+    /// <summary>
+    /// 获取静态随机数
+    /// </summary>
+    [HttpGet("random")]
+    public IActionResult GetRandom()
+    {
+        return Ok(new { RandomValue });
     }
 
     /// <summary>
@@ -181,225 +200,37 @@ public class SystemController : ControllerBase
     [HttpPost("restart")]
     public ActionResult RestartService()
     {
-        _logger.LogInformation("收到重启服务请求");
+        _logger.LogInformation("收到重启服务 API 请求");
 
         try
         {
-            // 检测是否在 Windows 服务环境下运行
-            var isWindowsService = IsRunningAsWindowsService();
-            _logger.LogInformation("运行模式: {Mode}", isWindowsService ? "Windows 服务" : "控制台应用");
-
-            if (isWindowsService)
+            if (ServiceManager.IsService)
             {
-                return RestartWindowsService();
+                // 1. 直接调全局的触发器
+                ServiceManager.TriggerRestart();
+
+                // 2. 立即给前端返回成功，随后应用会自动进入优雅关闭流程
+
+                return Ok(new RestartResponse
+                {
+                    Message = "服务正在重启",
+                    OldProcessId = Environment.ProcessId,
+                    NewProcessId = 0,
+                    ProcessPath = GetServiceName() ?? "",
+                    Timestamp = DateTime.UtcNow,
+                    RestartMode = "Program"
+                });
             }
             else
             {
-                return RestartConsoleApplication();
+                return StatusCode(500, new { error = "重启服务失败: 必须在服务模式下才能重启！" });
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "重启服务失败");
+            _logger.LogError(ex, "重启服务异常");
             return StatusCode(500, new { error = $"重启服务失败: {ex.Message}" });
         }
-    }
-
-    /// <summary>
-    /// 检测是否作为 Windows 服务运行
-    /// </summary>
-    private bool IsRunningAsWindowsService()
-    {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            return false;
-        }
-
-        try
-        {
-            // Windows 服务进程的父进程通常是 services.exe
-            var currentProcess = Process.GetCurrentProcess();
-            var parentProcess = GetParentProcess(currentProcess);
-
-            if (parentProcess != null)
-            {
-                var isService = parentProcess.ProcessName.Equals("services", StringComparison.OrdinalIgnoreCase) ||
-                               parentProcess.ProcessName.Equals("services.exe", StringComparison.OrdinalIgnoreCase);
-                parentProcess.Dispose();
-                return isService;
-            }
-
-            // 备用检测方式：检查是否在没有交互式会话中运行
-            return Environment.UserInteractive == false &&
-                   !Console.IsInputRedirected;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// 获取父进程
-    /// </summary>
-    private static Process? GetParentProcess(Process process)
-    {
-        try
-        {
-            // 使用 WMI 查询父进程
-            var query = $"SELECT ParentProcessId FROM Win32_Process WHERE ProcessId = {process.Id}";
-            using var searcher = new System.Management.ManagementObjectSearcher(query);
-            using var results = searcher.Get();
-
-            foreach (System.Management.ManagementObject result in results)
-            {
-                var parentId = Convert.ToInt32(result["ParentProcessId"]);
-                return Process.GetProcessById(parentId);
-            }
-        }
-        catch
-        {
-            // 忽略错误
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// 作为 Windows 服务重启
-    /// </summary>
-    private ActionResult RestartWindowsService()
-    {
-        var serviceName = GetServiceName();
-        if (string.IsNullOrEmpty(serviceName))
-        {
-            _logger.LogWarning("无法获取服务名称，回退到控制台模式重启");
-            return RestartConsoleApplication();
-        }
-
-        _logger.LogInformation("服务名称: {ServiceName}", serviceName);
-
-        // 验证服务是否存在且正在运行
-        try
-        {
-            using var searcher = new System.Management.ManagementObjectSearcher(
-                $"SELECT State FROM Win32_Service WHERE Name = '{serviceName}'");
-            using var results = searcher.Get();
-
-            if (results.Count == 0)
-            {
-                _logger.LogWarning("服务 '{ServiceName}' 未找到，回退到控制台模式", serviceName);
-                return RestartConsoleApplication();
-            }
-
-            foreach (System.Management.ManagementObject result in results)
-            {
-                var state = result["State"]?.ToString();
-                _logger.LogInformation("服务当前状态: {State}", state);
-
-                if (state?.Equals("Stopped", StringComparison.OrdinalIgnoreCase) == true)
-                {
-                    _logger.LogWarning("服务已停止，尝试直接启动");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "验证服务状态失败，继续尝试重启");
-        }
-
-        // 创建重启脚本并执行
-        // 使用 PowerShell 来执行服务重启，确保服务正确注册到 SCM
-        var scriptPath = Path.Combine(Path.GetTempPath(), $"restart-{serviceName}-{Guid.NewGuid():N}.ps1");
-        var script = $@"
-$ErrorActionPreference = 'Stop'
-$serviceName = '{serviceName}'
-$logPath = Join-Path $env:TEMP 'ReferenceRAG-Restart-{{0}}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
-
-function Write-Log {{
-    param([string]$Message)
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $line = '[' + $timestamp + '] ' + $Message
-    Write-Host $line
-    Add-Content -Path $logPath -Value $line -ErrorAction SilentlyContinue
-}}
-
-try {{
-    Write-Log ''Starting restart for service: $serviceName''
-
-    # 等待当前服务停止
-    Write-Log ''Stopping service...''
-    Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-
-    # 等待服务完全停止
-    $maxWait = 30
-    $waited = 0
-    while ((Get-Service -Name $serviceName -ErrorAction SilentlyContinue).Status -ne ''Stopped'' -and $waited -lt $maxWait) {{
-        Start-Sleep -Seconds 1
-        $waited++
-    }}
-    Write-Log ''Service stopped after $waited seconds''
-
-    Write-Log ''Starting service...''
-    Start-Service -Name $serviceName
-
-    # 等待服务启动
-    $waited = 0
-    while ((Get-Service -Name $serviceName -ErrorAction SilentlyContinue).Status -ne ''Running'' -and $waited -lt 30) {{
-        Start-Sleep -Seconds 1
-        $waited++
-    }}
-
-    $finalStatus = (Get-Service -Name $serviceName -ErrorAction SilentlyContinue).Status
-    Write-Log ''Service status: $finalStatus''
-
-    if ($finalStatus -ne ''Running'') {{
-        Write-Log ''ERROR: Service failed to start''
-        exit 1
-    }}
-
-    Write-Log ''Service restarted successfully''
-}} catch {{
-    Write-Log (''ERROR: '' + $_.Exception.Message)
-    exit 1
-}} finally {{
-    # 清理脚本文件
-    Start-Sleep -Seconds 2
-    Remove-Item -Path $PSCommandPath -Force -ErrorAction SilentlyContinue
-}}
-";
-
-        System.IO.File.WriteAllText(scriptPath, script);
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "powershell.exe",
-            Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden
-        };
-
-        var helperProcess = Process.Start(startInfo);
-        if (helperProcess == null)
-        {
-            System.IO.File.Delete(scriptPath);
-            return StatusCode(500, new { error = "无法启动重启辅助进程" });
-        }
-
-        _logger.LogInformation("已启动 PowerShell 重启脚本，PID: {ProcessId}", helperProcess.Id);
-        helperProcess.Dispose();
-
-        var process = Process.GetCurrentProcess();
-        return Ok(new RestartResponse
-        {
-            Message = "服务正在重启 (Windows 服务模式)",
-            OldProcessId = process.Id,
-            NewProcessId = 0, // 新进程 PID 需要服务恢复后才能确定
-            ProcessPath = serviceName,
-            Timestamp = DateTime.UtcNow,
-            RestartMode = "WindowsService"
-        });
     }
 
     /// <summary>
@@ -469,6 +300,7 @@ try {{
     /// <summary>
     /// 作为控制台应用重启
     /// </summary>
+    [Obsolete]
     private ActionResult RestartConsoleApplication()
     {
         // 获取当前进程信息

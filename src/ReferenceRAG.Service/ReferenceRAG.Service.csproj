@@ -14,15 +14,27 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.2" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.2" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.2" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.7" />
     <PackageReference Include="Microsoft.OpenApi" Version="2.4.1" />
+    
+
+    <!-- Windows 服务支持 -->
     <PackageReference Include="System.Management" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.0" />
+    <!-- Linux systemd 服务支持 -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="9.0.0" />
+    <!-- 文件日志支持 -->
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\ReferenceRAG.Core\ReferenceRAG.Core.csproj" />
     <ProjectReference Include="..\ReferenceRAG.Storage\ReferenceRAG.Storage.csproj" />
+    <!-- MCP Helper -->
+    <ProjectReference Include="..\..\..\..\SDK\McpHelper\src\McpHelper.Core\McpHelper.Core.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Interfaces;
@@ -15,21 +16,22 @@ public class DebugIssueTests : IDisposable
 {
     private readonly string _testDir;
     private readonly string _modelsPath;
-    private readonly string _configPath;
     private readonly string _dbPath;
+    private readonly string _originalDir;
 
     public DebugIssueTests()
     {
         _testDir = Path.Combine(Path.GetTempPath(), $"debug-issue-tests-{Guid.NewGuid():N}");
         _modelsPath = Path.Combine(_testDir, "models");
-        _configPath = Path.Combine(_testDir, "config.json");
         _dbPath = Path.Combine(_testDir, "test.db");
+        _originalDir = Directory.GetCurrentDirectory();
 
         Directory.CreateDirectory(_modelsPath);
     }
 
     public void Dispose()
     {
+        try { Directory.SetCurrentDirectory(_originalDir); } catch { }
         try
         {
             if (Directory.Exists(_testDir))
@@ -42,6 +44,8 @@ public class DebugIssueTests : IDisposable
 
     private ConfigManager CreateTestConfigManager()
     {
+        Directory.SetCurrentDirectory(_testDir);
+
         var config = new ObsidianRagConfig
         {
             DataPath = _testDir,
@@ -53,13 +57,11 @@ public class DebugIssueTests : IDisposable
             }
         };
 
-        var json = System.Text.Json.JsonSerializer.Serialize(config, new System.Text.Json.JsonSerializerOptions
-        {
-            WriteIndented = true
-        });
-        File.WriteAllText(_configPath, json);
+        var appSettings = new { ReferenceRAG = config };
+        var json = System.Text.Json.JsonSerializer.Serialize(appSettings, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(Path.Combine(_testDir, "appsettings.json"), json);
 
-        return new ConfigManager(_configPath);
+        return new ConfigManager();
     }
 
     #region Issue 1: Model Status "未下载" Tests

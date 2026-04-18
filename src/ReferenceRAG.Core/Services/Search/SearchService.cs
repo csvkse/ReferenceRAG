@@ -90,6 +90,14 @@ public class SearchService : ISearchService
         // 获取启用的源列表
         var enabledSources = await GetEnabledSourceNamesAsync();
 
+        // 请求源限定
+        if (request.Sources!=null
+            && request.Sources.Count!=0)
+        {
+            enabledSources = enabledSources.Where(m => request.Sources.Contains(m)).ToHashSet();
+        }
+        
+
         List<SearchResult> topResults;
         RerankStats? rerankStats = null;
 

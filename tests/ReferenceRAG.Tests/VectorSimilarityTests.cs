@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -29,8 +30,13 @@ public class VectorSimilarityTests : IDisposable
         services.AddSingleton<IEmbeddingService>(sp =>
         {
             // 使用配置的模型路径或模拟模式
-            var configPath = Path.Combine(_testDataPath, "config.json");
-            var configManager = new ConfigManager(configPath);
+            Directory.SetCurrentDirectory(_testDataPath);
+            var appSettings = Path.Combine(_testDataPath, "appsettings.json");
+            if (!File.Exists(appSettings))
+            {
+                File.WriteAllText(appSettings, """{"ReferenceRAG":{"dataPath":"data","sources":[],"embedding":{"modelPath":"","modelName":"","useCuda":false}}}}""");
+            }
+            var configManager = new ConfigManager();
             var config = configManager.Load();
 
             if (File.Exists(config.Embedding.ModelPath))

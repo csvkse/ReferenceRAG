@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Interfaces;
@@ -12,11 +13,12 @@ public class ModelSwitchTests
 {
     private const string TestDataPath = "E:/LinuxWork/Obsidian/resource/data";
     private const string TestModelsPath = "E:/LinuxWork/Obsidian/resource/data/models";
-    private const string TestConfigPath = "E:/LinuxWork/Obsidian/resource/data/config.json";
+    private const string TestAppSettingsPath = "E:/LinuxWork/Obsidian/resource/data/appsettings.json";
 
     private ConfigManager CreateTestConfigManager()
     {
-        return new ConfigManager(TestConfigPath);
+        Directory.SetCurrentDirectory(TestDataPath);
+        return new ConfigManager();
     }
 
     [Fact]
@@ -25,11 +27,11 @@ public class ModelSwitchTests
         Console.WriteLine("=== Test 1: ModelManager 初始化 ===");
 
         // 检查配置文件
-        Console.WriteLine($"配置文件路径: {TestConfigPath}");
-        Assert.True(File.Exists(TestConfigPath), $"配置文件不存在: {TestConfigPath}");
+        Console.WriteLine($"配置文件路径: {TestAppSettingsPath}");
+        Assert.True(File.Exists(TestAppSettingsPath), $"配置文件不存在: {TestAppSettingsPath}");
 
         // 读取配置
-        var configJson = File.ReadAllText(TestConfigPath);
+        var configJson = File.ReadAllText(TestAppSettingsPath);
         Console.WriteLine($"配置内容:\n{configJson}");
 
         // 创建 ModelManager
@@ -185,7 +187,7 @@ public class ModelSwitchTests
         Console.WriteLine($"切换结果: {success}");
 
         // 验证配置文件
-        var configJson = File.ReadAllText(TestConfigPath);
+        var configJson = File.ReadAllText(TestAppSettingsPath);
         Console.WriteLine($"\n更新后的配置:");
         Console.WriteLine(configJson);
 

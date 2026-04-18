@@ -1,30 +1,84 @@
+using System.Diagnostics;
+using System.Text.Json.Serialization;
+
+using Microsoft.OpenApi;
+
+using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Services.Rerank;
-using ReferenceRAG.Storage;
-using ReferenceRAG.Service.Hubs;
-using ReferenceRAG.Service.Services;
 using ReferenceRAG.Service.Controllers;
+using ReferenceRAG.Service.Hubs;
 using ReferenceRAG.Service.Middleware;
-using Microsoft.OpenApi;
-using System.Text.Json.Serialization;
-using ReferenceRAG.Core.Helpers;
+using ReferenceRAG.Service.Services;
+using ReferenceRAG.Storage;
 
+using Serilog;
+
+using WebApiWindowsService;
+
+// MCP Helper
+using McpHelper.Extensions;
+using McpHelper.Models;
+using ReferenceRAG.Service.McpTools;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+
+#region 必备环境配置
 // Set working directory to application directory (important for Windows Service)
 Directory.SetCurrentDirectory(AppContext.BaseDirectory);
-
 Console.OutputEncoding = System.Text.Encoding.UTF8;
-Console.InputEncoding= System.Text.Encoding.UTF8;
+Console.InputEncoding = System.Text.Encoding.UTF8;
+#endregion
+
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 支持 Windows 服务运行
-builder.Services.AddWindowsService();
+#region 服务注入：配置服务和日志
+// 配置日志
+ServiceManager.ConfigureLogging(builder);
+// 配置服务
+var isService = ServiceManager.ConfigureService(args, builder);
+#endregion
 
-// 文件日志（写入 logs/ 目录，按日期轮转）
-var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
-Directory.CreateDirectory(logDir);
-builder.Logging.AddProvider(new ReferenceRAG.Service.Services.FileLoggerProvider(logDir));
+#region 互斥检测
+//// ====================== 进程互斥检查（核心逻辑）======================
+//string currentProcessName = Process.GetCurrentProcess().ProcessName;
+//int maxRetryCount = 3;    // 最多重试3次
+//int waitSeconds = 10;     // 每次等待10秒
+
+//for (int retry = 1; retry <= maxRetryCount; retry++)
+//{
+//    // 判断是否存在多个同名进程
+//    if (Process.GetProcessesByName(currentProcessName).Length <= 1)
+//    {
+//        Log.Information("无占用进程，程序继续启动...");
+//        break;
+//    }
+
+//    // 第几次等待
+//    Log.Information($"[{retry}/{maxRetryCount}] 发现已有进程运行，等待 {waitSeconds} 秒...");
+
+//    // 最后一次还失败 → 直接退出
+//    if (retry == maxRetryCount)
+//    {
+//        Log.Information("重试3次仍被占用，程序自动退出！");
+//        return;
+//    }
+
+//    // 等待 10 秒
+//    Thread.Sleep(waitSeconds * 1000);
+//}
+//// ================================================================== 
+#endregion
+
+#region 简单日志（Obsolete）
+//// 文件日志（写入 logs/ 目录，按日期轮转）
+//var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
+//Directory.CreateDirectory(logDir);
+//builder.Logging.AddProvider(new ReferenceRAG.Service.Services.FileLoggerProvider(logDir));
+#endregion
 
 // Add services to the container
 builder.Services.AddControllers()
@@ -286,6 +340,58 @@ builder.Services.AddCors(options =>
     });
 });
 
+#region MCP Server 配置
+// 获取服务配置
+var serviceApiKey = builder.Configuration.GetSection("ReferenceRAG:Service:ApiKey").Get<string>();
+var mcApiKeys = string.IsNullOrWhiteSpace(serviceApiKey)
+    ? []
+    : new List<string> { serviceApiKey };
+
+var appMiddlewareOptions = new AppMiddlewareOptions
+{
+    Authentication = new AuthenticationOptions  // 添加 MCP 认证配置
+    {
+        Enabled = true,
+        Type = AuthenticationType.ApiKey,
+        ApiKey = new ApiKeyOptions
+        {
+            Keys = mcApiKeys,
+            HeaderName = "X-Api-Key"
+        }
+    },
+    Mcp = new MopOptions
+    {
+        Enabled = true,
+        EnableInfo = false,
+        ServerName = "ReferenceRAG-MCP",
+        ServerVersion = "1.0.0",
+        TransportType = MopTransportType.Sse,
+        SseEndpoint = "/api/mcp",  // 添加 SSE 端点
+        Backends = new List<BackendEndpoint>
+        { }
+    }
+};
+
+if (mcApiKeys.Count==0)
+{
+    appMiddlewareOptions.Authentication.Enabled = false;
+}
+
+
+// 注册完整的中间件套件
+builder.Services.AddAppMcpHelper(appMiddlewareOptions); 
+
+// 注册自定义 MCP Tools
+builder.Services.AddMcpToolRegistry(registry =>
+{
+    //registry.RegisterLocalTool<TestTools>();
+    registry.RegisterLocalTool<RagSearchTools>();
+    registry.RegisterLocalTool<EmbeddingTools>();
+    //registry.RegisterLocalTool<IndexStatusTools>();
+    //registry.RegisterLocalTool<SourceManagementTools>();
+});
+#endregion
+
 var app = builder.Build();
 
 
@@ -295,6 +401,9 @@ StaticLogger.LoggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
 
 // CORS 必须在其他中间件之前
 app.UseCors();
+
+// MCP 中间件（必须在 CORS 之后，其他中间件之前）
+app.UseAppMcpHelper();
 
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
@@ -367,4 +476,7 @@ using (var scope = app.Services.CreateScope())
 
 
 
-app.Run();
+#region 中间件：支持程序重启
+// 支持程序重启
+ServiceManager.AppLaunch(args, builder, app);
+#endregion

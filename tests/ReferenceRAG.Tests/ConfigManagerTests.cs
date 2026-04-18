@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
 
@@ -5,22 +6,28 @@ namespace ReferenceRAG.Tests;
 
 public class ConfigManagerTests : IDisposable
 {
-    private readonly string _testConfigPath;
-    private readonly ConfigManager _configManager;
+    private readonly string _testDir;
+    private readonly string _originalDir;
 
     public ConfigManagerTests()
     {
-        _testConfigPath = Path.Combine(Path.GetTempPath(), $"test_config_{Guid.NewGuid()}.json");
-        _configManager = new ConfigManager(_testConfigPath);
+        _testDir = Path.Combine(Path.GetTempPath(), $"config-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(_testDir);
+        _originalDir = Directory.GetCurrentDirectory();
+    }
+
+    private ConfigManager CreateConfigManager()
+    {
+        Directory.SetCurrentDirectory(_testDir);
+        var logger = NullLogger<SearchService>.Instance;
+        return new ConfigManager();
     }
 
     [Fact]
     public void Load_WithNoExistingConfig_ReturnsDefaultConfig()
     {
-        if (File.Exists(_testConfigPath))
-            File.Delete(_testConfigPath);
-
-        var config = _configManager.Load();
+        var cm = CreateConfigManager();
+        var config = cm.Load();
 
         Assert.NotNull(config);
         Assert.Equal("data", config.DataPath);
@@ -31,23 +38,25 @@ public class ConfigManagerTests : IDisposable
     [Fact]
     public void Save_ThenLoad_ReturnsSavedConfig()
     {
+        var cm = CreateConfigManager();
         var config = new ObsidianRagConfig
         {
             DataPath = "/custom/data/path",
-            Sources = new List<SourceFolder>
-            {
+            Sources =
+            [
                 new SourceFolder
                 {
                     Name = "Test Source",
                     Path = "/test/path",
                     Type = SourceType.Obsidian
                 }
-            }
+            ]
         };
 
-        _configManager.Save(config);
+        cm.Save(config);
 
-        var loaded = _configManager.Load();
+        var cm2 = CreateConfigManager();
+        var loaded = cm2.Load();
 
         Assert.Equal("/custom/data/path", loaded.DataPath);
         Assert.Single(loaded.Sources);
@@ -57,6 +66,7 @@ public class ConfigManagerTests : IDisposable
     [Fact]
     public void AddSource_AddsSourceToConfig()
     {
+        var cm = CreateConfigManager();
         var source = new SourceFolder
         {
             Name = "New Source",
@@ -64,9 +74,10 @@ public class ConfigManagerTests : IDisposable
             Type = SourceType.Markdown
         };
 
-        _configManager.AddSource(source);
+        cm.AddSource(source);
 
-        var config = _configManager.Load();
+        var cm2 = CreateConfigManager();
+        var config = cm2.Load();
         Assert.Single(config.Sources);
         Assert.Equal("New Source", config.Sources[0].Name);
     }
@@ -74,55 +85,59 @@ public class ConfigManagerTests : IDisposable
     [Fact]
     public void RemoveSource_RemovesSourceFromConfig()
     {
+        var cm = CreateConfigManager();
         var source = new SourceFolder
         {
             Name = "Source To Remove",
             Path = "/remove/path"
         };
-        _configManager.AddSource(source);
+        cm.AddSource(source);
 
-        _configManager.RemoveSource("Source To Remove");
+        cm.RemoveSource("Source To Remove");
 
-        var config = _configManager.Load();
+        var cm2 = CreateConfigManager();
+        var config = cm2.Load();
         Assert.Empty(config.Sources);
     }
 
     [Fact]
     public void ToggleSource_TogglesEnabledState()
     {
+        var cm = CreateConfigManager();
         var source = new SourceFolder
         {
             Name = "Toggle Test",
             Path = "/toggle/path",
             Enabled = true
         };
-        _configManager.AddSource(source);
+        cm.AddSource(source);
 
-        _configManager.ToggleSource("Toggle Test", false);
+        cm.ToggleSource("Toggle Test", false);
 
-        var config = _configManager.Load();
+        var cm2 = CreateConfigManager();
+        var config = cm2.Load();
         Assert.False(config.Sources[0].Enabled);
     }
 
     [Fact]
     public void AddSource_WithDuplicatePath_DoesNotAddDuplicate()
     {
+        var cm = CreateConfigManager();
         var source1 = new SourceFolder { Name = "Source 1", Path = "/duplicate/path" };
         var source2 = new SourceFolder { Name = "Source 2", Path = "/duplicate/path" };
 
-        _configManager.AddSource(source1);
-        _configManager.AddSource(source2);
+        cm.AddSource(source1);
+        cm.AddSource(source2);
 
-        var config = _configManager.Load();
+        var cm2 = CreateConfigManager();
+        var config = cm2.Load();
         Assert.Single(config.Sources);
         Assert.Equal("Source 1", config.Sources[0].Name);
     }
 
     public void Dispose()
     {
-        if (File.Exists(_testConfigPath))
-        {
-            File.Delete(_testConfigPath);
-        }
+        try { Directory.SetCurrentDirectory(_originalDir); } catch { }
+        try { Directory.Delete(_testDir, true); } catch { }
     }
 }
