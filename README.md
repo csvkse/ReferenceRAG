@@ -127,10 +127,10 @@ chmod +x scripts/download-model.sh
 
 ```bash
 # 触发所有源索引
-curl -X POST http://localhost:5000/api/index/all
+curl -X POST http://localhost:7897/api/index/all
 
 # 强制重新索引
-curl -X POST http://localhost:5000/api/index/reindex
+curl -X POST http://localhost:7897/api/index/reindex
 ```
 
 ### 8. 启动服务
@@ -139,18 +139,18 @@ curl -X POST http://localhost:5000/api/index/reindex
 dotnet run --project src/ReferenceRAG.Service
 ```
 
-服务将在 `http://localhost:5000` 启动。
+服务将在 `http://localhost:7897` 启动。
 
 ### 9. 测试查询
 
 ```bash
 # 查询所有源
-curl -X POST http://localhost:5000/api/ai/query \
+curl -X POST http://localhost:7897/api/ai/query \
   -H "Content-Type: application/json" \
   -d '{"query": "如何配置？", "mode": "standard"}'
 
 # 限定源查询
-curl -X POST http://localhost:5000/api/ai/query \
+curl -X POST http://localhost:7897/api/ai/query \
   -H "Content-Type: application/json" \
   -d '{"query": "关键词", "sources": ["我的笔记"]}'
 ```
@@ -232,7 +232,7 @@ docker build -t reference-rag .
 
 # 运行容器
 docker run -d \
-  -p 5000:5000 \
+  -p 7897:7897 \
   -v ./data:/app/data \
   -v ./models:/app/models \
   -v /path/to/vault:/app/vault:ro \
@@ -363,30 +363,12 @@ ReferenceRAG/
 │   └── ReferenceRAG.Storage/      # 存储层（SQLite + 向量存储）
 ├── tests/
 │   └── ReferenceRAG.Tests/        # 单元测试
-├── .planning/                    # GSD 规划目录
 ├── scripts/                      # 脚本（模型下载等）
 ├── Dockerfile
 ├── docker-compose.yml
 └── README.md
 ```
 
-详见 [.planning/codebase/](.planning/codebase/) 目录下的分析文档。
-
-## 📝 开发进度
-
-详见 [.planning/ROADMAP.md](.planning/ROADMAP.md)
-
-### 已完成 ✅
-
-- Phase 1: 核心基础
-- Phase 2: 索引与监控
-- Phase 3: 向量聚合与层级检索
-- Phase 4: Obsidian 集成 + 监控
-- Phase 5: MCP 工具集 + 服务管理
-
-### 进行中 🔄
-
-- Phase 6: 高级优化 + 部署
 
 ## 🤝 贡献
 
