@@ -1,9 +1,11 @@
-version: '3.8'
-
 services:
+  # CPU version
   reference-rag:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: reference-rag
+    image: reference-rag:latest
     ports:
       - "5000:5000"
     volumes:
@@ -11,20 +13,53 @@ services:
       - ./models:/app/models
       - ./vault:/app/vault:ro
     environment:
-      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_ENVIRONMENT=Production
       - DataPath=/app/data
-      - ModelPath=/app/models/bge-small-zh-v1.5.onnx
+      - LogsPath=/app/logs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/api/system/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/api/system/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+
+  # GPU version (uncomment to use)
+  # reference-rag-gpu:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.gpu
+  #   container_name: reference-rag-gpu
+  #   image: reference-rag:gpu
+  #   ports:
+  #     - "5000:5000"
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./models:/app/models
+  #     - ./vault:/app/vault:ro
+  #   environment:
+  #     - ASPNETCORE_ENVIRONMENT=Production
+  #     - DataPath=/app/data
+  #     - LogsPath=/app/logs
+  #     - CUDA_VISIBLE_DEVICES=0
+  #   restart: unless-stopped
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  #   healthcheck:
+  #     test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/api/system/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 15s
 
   # Optional: PostgreSQL for production
   # postgres:
-  #   image: postgres:15-alpine
+  #   image: postgres:16-alpine
   #   container_name: reference-rag-db
   #   environment:
   #     POSTGRES_DB: referencerag

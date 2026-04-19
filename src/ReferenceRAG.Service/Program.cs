@@ -35,6 +35,16 @@ Console.InputEncoding = System.Text.Encoding.UTF8;
 
 var builder = WebApplication.CreateBuilder(args);
 
+#region 配置服务端口
+// 从配置文件中读取端口设置
+var serviceConfig = builder.Configuration.GetSection("ReferenceRAG:Service");
+var host = serviceConfig["host"] ?? "localhost";
+var port = serviceConfig["port"] ?? "5000";
+var urls = $"http://{host}:{port}";
+builder.WebHost.UseUrls(urls);
+Console.WriteLine($"[配置] 服务地址: {urls}");
+#endregion
+
 #region 服务注入：配置服务和日志
 // 配置日志
 ServiceManager.ConfigureLogging(builder);

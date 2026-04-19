@@ -1,0 +1,72 @@
+name: Desktop Release
+
+on:
+  push:
+    tags:
+      - "v*" # 当推送形如 v1.0.0 的 tag 时自动触发打包并发布 Release
+  workflow_dispatch: # 允许在 GitHub Actions 面板手动点击运行
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Publish
+        run: dotnet publish src/ReferenceRAG.Service/ReferenceRAG.Service.csproj -c Release -r win-x64 --self-contained true -o publish_output
+
+      - name: Archive production artifacts
+        run: Compress-Archive -Path publish_output\* -DestinationPath ReferenceRAG-win-x64.zip
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReferenceRAG-win-x64
+          path: ReferenceRAG-win-x64.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    # 只有当触发是 Tag 推送时，才会执行正式发布 release
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*/*
+          generate_release_notes: true
+          body: |
+            🎉 **ReferenceRAG Windows 桌面版更新发布**
+
+            本次发布包含适用于 Windows x64 的独立运行程序。
+            **无需安装 .NET 运行时**，下载解压即可直接运行！
+
+            ### 📦 下载与运行指南
+
+            * **🪟 Windows x64**:
+                * 下载对应的 `.zip` 文件。
+                * 解压后直接双击运行 `ReferenceRAG.Service.exe`。
+
+            ---
+
+            *💡 详细的代码更新日志请参考下方自动生成的 Release Notes 👇*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

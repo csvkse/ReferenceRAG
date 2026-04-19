@@ -1,45 +1,34 @@
-# ReferenceRAG - Multi-stage Docker Build
-# Supports both CPU and GPU (CUDA) modes
+# ReferenceRAG GPU Variant - NVIDIA CUDA support for ONNX model inference
+# Build with: docker build -t reference-rag:gpu -f Dockerfile.gpu .
 
 # ============================================================
 # Stage 1: Build Vue Frontend
 # ============================================================
-FROM docker.io/library/node:22-alpine AS frontend-build
+FROM node:22-alpine AS frontend-build
 WORKDIR /frontend
-
-# Copy Vue frontend source
-COPY ["dashboard-vue/package.json", "dashboard-vue/package-lock.json*", "./"]
+COPY dashboard-vue/package*.json ./
+RUN npm ci --prefer-offline
 COPY dashboard-vue/ ./
-
-# Install dependencies and build
-RUN npm ci --prefer-offline && npm run build
+RUN npm run build
 
 # ============================================================
-# Stage 2: Restore NuGet packages
+# Stage 2: Restore
 # ============================================================
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS restore
 WORKDIR /src
-
-# Copy solution and project files
 COPY ReferenceRAG.slnx ./
 COPY src/ReferenceRAG.Core/ReferenceRAG.Core.csproj src/ReferenceRAG.Core/
 COPY src/ReferenceRAG.Storage/ReferenceRAG.Storage.csproj src/ReferenceRAG.Storage/
 COPY src/ReferenceRAG.Service/ReferenceRAG.Service.csproj src/ReferenceRAG.Service/
-
-# Restore dependencies
 RUN dotnet restore
 
 # ============================================================
-# Stage 3: Build .NET application
+# Stage 3: Build
 # ============================================================
 FROM restore AS build
 WORKDIR /src
-
-# Copy source code
 COPY src/ ./src/
 COPY Directory.Build.props ./
-
-# Build (skip SPA target - Vue is built in frontend-build stage)
 WORKDIR /src/src/ReferenceRAG.Service
 RUN dotnet build -c Release -o /app/build --no-restore
 
@@ -54,18 +43,20 @@ RUN dotnet publish -c Release -o /app/publish \
     /p:DebugSymbols=false
 
 # ============================================================
-# Stage 5: Runtime (CPU version)
+# Stage 5: Runtime (GPU / CUDA)
 # ============================================================
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+# Uses NVIDIA CUDA base image - requires nvidia-container-toolkit
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-cuda12.6-rockchip AS runtime
 WORKDIR /app
 
-# Install wget for health check and other utilities
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     unzip \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create data directory and non-root user
+# Create directories and user
 RUN mkdir -p /app/data /app/models /app/logs \
     && groupadd -r appgroup \
     && useradd -r -g appgroup appuser \
@@ -74,7 +65,7 @@ RUN mkdir -p /app/data /app/models /app/logs \
 # Copy published application
 COPY --from=publish /app/publish .
 
-# Copy pre-built Vue frontend (from frontend-build stage)
+# Copy pre-built Vue frontend
 COPY --from=frontend-build /frontend/dist ./wwwroot
 
 # Environment variables
@@ -83,19 +74,15 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 ENV DataPath=/app/data
 ENV LogsPath=/app/logs
 ENV DOTNET_RUNNING_IN_CONTAINER=true
+# GPU settings
+ENV CUDA_VISIBLE_DEVICES=0
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
 
-# Switch to non-root user
 USER appuser
 
 EXPOSE 5000
 
 ENTRYPOINT ["dotnet", "ReferenceRAG.Service.dll"]
-
-# ============================================================
-# GPU variant: build with
-#   docker build -t reference-rag:gpu --build-arg VARIANT=gpu .
-# ============================================================

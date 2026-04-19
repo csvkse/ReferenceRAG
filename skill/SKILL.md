@@ -1,451 +1,103 @@
-# ReferenceRAG Skill Document
-
-## Project Overview
-
-ReferenceRAG is a high-performance local knowledge base retrieval system designed for Obsidian vaults and Markdown documents. It uses a hybrid retrieval architecture combining vector semantic search with keyword search, supporting automatic indexing, real-time file change monitoring, and precise semantic retrieval.
-
-### Core Features
-
-- **Multi-source Support**: Index multiple folders simultaneously - Obsidian vaults, plain Markdown, document directories
-- **Hybrid Retrieval**: BM25 keyword search + Embedding semantic search with score-level weighted fusion
-- **Two-stage Search**: Recall + Rerank architecture with Rerank model secondary sorting
-- **Auto Indexing**: Real-time file change monitoring with incremental vector index updates
-- **GPU Acceleration**: CUDA support for vector computation and rerank inference
-- **Local Deployment**: Fully local, data never leaves your machine
-
+---
+name: ReferenceRAG
+description: 本地知识库语义检索服务。从 Obsidian 笔记库检索技术教程、配置说明、最佳实践等内容。触发规则：(1)强制触发：rag:关键词、/rag 关键词 (2)组合触发：领域词(知识库/笔记/vault/obsidian/文档) + 动作词(搜/查/找/检索/查询) (3)意图触发：笔记里有没有、帮我搜一下笔记、在知识库中查找。NOT for: 天气、新闻、股票等实时信息。
+allowed-tools: Read, Bash
 ---
 
-## Initialization Configuration
+# ObsidianRAG 知识库检索
 
-Before using this skill, you need to provide the following configuration:
+本地知识库检索服务，支持 Obsidian 笔记和 Markdown 文档的语义搜索。
 
-### Required Parameters
+## 触发规则（优先级从高到低）
 
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `API_BASE_URL` | ReferenceRAG service address | `http://localhost:5000` |
-| `API_KEY` | Authentication key (if enabled) | `your-api-key-here` |
+### 1. 强制触发（无需领域词）
+| 输入格式 | 示例 |
+|---------|------|
+| `rag:关键词` | `rag:Git 分支管理` |
+| `/rag 关键词` | `/rag TypeScript 类型` |
 
-### Configuration File Location
+### 2. 组合触发（领域词 + 动作词）
+**领域词**：知识库、笔记、vault、obsidian、文档、文库
+**动作词**：搜、查、找、检索、查询、翻一下、看看
 
-Configuration will be saved to: `~/.agents/.env`
+| 示例输入 | 触发原因 |
+|---------|---------|
+| 在知识库搜 Git | 领域词 + 动作词 ✅ |
+| 笔记里查一下配置 | 领域词 + 动作词 ✅ |
+| 帮我在 obsidian 找教程 | 领域词 + 动作词 ✅ |
+| vault 里有没有 | 领域词 + 动作词 ✅ |
 
-### How to Get API Key
+### 3. 意图触发（完整短语）
+- `笔记里有没有 xxx`
+- `帮我搜一下笔记`
+- `在知识库中查找`
+- `看看笔记里的 xxx`
 
-1. Start ReferenceRAG service
-2. Open Settings page: `http://localhost:5000/settings`
-3. Find "Service" section, set API Key
-4. Save configuration
+### 4. 不触发场景
+- 纯动作词无领域词：`查询 Git`、`搜索配置` ❌
+- 实时信息：天气、新闻、股票 ❌
+- 明确其他数据源：数据库查询、API 调用 ❌
 
-### Example Configuration
+## 执行流程
+
+**查询词扩展策略**：将用户输入扩展为多个相关关键词（中英文、同义词、相关概念），提升召回率。
+
+示例：`Git 分支管理` → `Git 分支管理 branch 版本控制 分支策略 git flow`
+
+直接调用 `POST http://localhost:5000/api/ai/query` 执行 HybridRerank 搜索，格式化返回结果。
+
+## 配置（可选）
+
+如需自定义地址，修改 `~/.agents/.env`：
 
 ```env
-# ReferenceRAG Configuration
 OBSIDIAN_RAG_API_URL=http://localhost:5000
-OBSIDIAN_RAG_API_KEY=your-api-key-here
+OBSIDIAN_RAG_API_KEY=
 ```
 
----
+## API 调用示例
 
-## API Authentication
+### Windows Git Bash 中文请求方式（重要）
 
-### Authentication Method
+⚠️ **Windows Git Bash 中直接使用 `-d` 发送中文会导致乱码**，因为 bash 字符串处理会破坏 UTF-8 编码。
 
-All API requests require authentication when API Key is configured:
-
-- **Header**: `X-API-Key: your-api-key`
-- **Response**: 401 Unauthorized if missing or invalid
-
-### Authentication Flow
-
-```
-1. Check if API Key is configured
-2. Add X-API-Key header to request
-3. Server validates the key
-4. Return response or 401/403 error
-```
-
-### Error Responses
-
-| Status | Error | Description |
-|--------|-------|-------------|
-| 401 | Missing API Key | No X-API-Key header provided |
-| 403 | Invalid API Key | API Key does not match |
-
----
-
-## API Reference
-
-### Base URL
-
-```
-{API_BASE_URL}/api
-```
-
-### Common Headers
-
-```http
-Content-Type: application/json
-X-API-Key: your-api-key-here
-```
-
-### Search API
-
-#### Basic Query
-
-```http
-POST /api/ai/query
-Content-Type: application/json
-X-API-Key: your-api-key
-
-{
-  "query": "search keywords",
-  "mode": "Hybrid",
-  "topK": 10,
-  "sources": ["My Notes"]
-}
-```
-
-**Query Modes**:
-| Mode | Description | TopK | MaxTokens |
-|------|-------------|------|-----------|
-| Quick | Fast query | 3 | 1000 |
-| Standard | Standard query | 10 | 3000 |
-| Hybrid | Hybrid retrieval | 15 | 4000 |
-| HybridRerank | Hybrid + rerank | 10 | 4000 |
-| Deep | Deep query | 20 | 6000 |
-
-#### Response Structure
-
-```json
-{
-  "query": "search keywords",
-  "mode": "HybridRerank",
-  "chunks": [{
-    "refId": "@1",
-    "source": "My Notes",
-    "filePath": "/path/to/note.md",
-    "content": "...",
-    "score": 0.89,
-    "bm25Score": 0.75,
-    "embeddingScore": 0.82,
-    "rerankScore": 0.89
-  }],
-  "context": "# Related Content\n...",
-  "stats": {
-    "totalMatches": 10,
-    "durationMs": 150
-  },
-  "rerankApplied": true
-}
-```
-
-#### Drill-down Query
-
-Get expanded context for hit results:
-
-```http
-POST /api/ai/drill-down
-Content-Type: application/json
-X-API-Key: your-api-key
-
-{
-  "refIds": ["@1", "@2"],
-  "expandContext": 2
-}
-```
-
-### Index API
-
-#### Start Indexing
-
-```http
-POST /api/index
-Content-Type: application/json
-X-API-Key: your-api-key
-
-{
-  "sources": ["My Notes"],
-  "force": false
-}
-```
-
-#### Check Index Status
-
-```http
-GET /api/index/{indexId}/status
-X-API-Key: your-api-key
-```
-
-### Model Management API
-
-#### Get Available Models
-
-```http
-GET /api/models
-X-API-Key: your-api-key
-```
-
-#### Switch Model
-
-```http
-POST /api/models/switch
-Content-Type: application/json
-X-API-Key: your-api-key
-
-{
-  "modelName": "bge-large-zh-v1.5",
-  "deleteOldVectors": false
-}
-```
-
-#### Download Model
-
-```http
-POST /api/models/download/{modelName}
-X-API-Key: your-api-key
-```
-
-#### Get Download Progress
-
-```http
-GET /api/models/download/{modelName}/progress
-X-API-Key: your-api-key
-```
-
-#### Rerank Model Management
-
-```http
-# Get rerank model list
-GET /api/models/rerank
-X-API-Key: your-api-key
-
-# Switch rerank model
-POST /api/models/rerank/switch
-Content-Type: application/json
-X-API-Key: your-api-key
-
-{
-  "modelName": "bge-reranker-large"
-}
-```
-
-### Source Management API
-
-#### Get All Sources
-
-```http
-GET /api/sources
-X-API-Key: your-api-key
-```
-
-#### Add Source
-
-```http
-POST /api/sources
-Content-Type: application/json
-X-API-Key: your-api-key
-
-{
-  "path": "/path/to/documents",
-  "name": "Document Library",
-  "type": "Markdown",
-  "recursive": true,
-  "filePatterns": ["*.md", "*.txt"]
-}
-```
-
-#### Scan Source Files
-
-```http
-GET /api/sources/{name}/scan
-X-API-Key: your-api-key
-```
-
-### Settings API
-
-#### Get Configuration
-
-```http
-GET /api/settings
-X-API-Key: your-api-key
-```
-
-#### Save Configuration
-
-```http
-POST /api/settings
-Content-Type: application/json
-X-API-Key: your-api-key
-
-{
-  "sources": [...],
-  "embedding": {...},
-  "search": {...}
-}
-```
-
-### System API
-
-#### Get System Status
-
-```http
-GET /api/system/status
-X-API-Key: your-api-key
-```
-
-#### Get System Metrics
-
-```http
-GET /api/system/metrics
-X-API-Key: your-api-key
-```
-
----
-
-## Supported Embedding Models
-
-| Model | Dimension | Language | Description |
-|-------|-----------|----------|-------------|
-| bge-small-zh-v1.5 | 512 | Chinese | Lightweight, fast retrieval |
-| bge-base-zh-v1.5 | 768 | Chinese | Balanced performance |
-| bge-large-zh-v1.5 | 1024 | Chinese | High precision, GPU recommended |
-| bge-m3 | 1024 | Multilingual | Chinese-English mixed |
-| bge-base-en-v1.5 | 768 | English | English only |
-
-## Supported Rerank Models
-
-| Model | Description |
-|-------|-------------|
-| bge-reranker-base | Base rerank model |
-| bge-reranker-large | Large rerank model, higher precision |
-
----
-
-## Configuration Reference
-
-### Complete Configuration Example
-
-```json
-{
-  "dataPath": "data",
-  "sources": [{
-    "path": "/Users/name/Obsidian/MyVault",
-    "name": "My Notes",
-    "enabled": true,
-    "type": "Obsidian",
-    "filePatterns": ["*.md"],
-    "recursive": true,
-    "excludeDirs": [".obsidian", ".trash", ".git"],
-    "priority": 10
-  }],
-  "embedding": {
-    "modelPath": "models/bge-small-zh-v1.5/model.onnx",
-    "modelName": "bge-small-zh-v1.5",
-    "useCuda": false,
-    "cudaDeviceId": 0,
-    "maxSequenceLength": 512,
-    "batchSize": 32
-  },
-  "chunking": {
-    "maxTokens": 512,
-    "minTokens": 50,
-    "overlapTokens": 50,
-    "preserveHeadings": true,
-    "preserveCodeBlocks": true
-  },
-  "search": {
-    "defaultTopK": 10,
-    "contextWindow": 1,
-    "similarityThreshold": 0.5,
-    "bm25Provider": "fts5"
-  },
-  "rerank": {
-    "enabled": false,
-    "modelName": "bge-reranker-base",
-    "topN": 10,
-    "recallFactor": 3
-  },
-  "service": {
-    "port": 5000,
-    "host": "localhost",
-    "apiKey": "your-api-key-here"
-  }
-}
-```
-
----
-
-## Performance Optimization
-
-### Batch Indexing
-
-**Recommended Settings**:
-- Batch size: 32-128 (adjust based on GPU memory)
-- Concurrent file processing: 4 (avoid file lock conflicts)
-- RTX 4060 recommended BatchSize: 64-128
-
-### GPU Acceleration
-
-**CUDA Configuration**:
-```json
-{
-  "embedding": {
-    "useCuda": true,
-    "cudaDeviceId": 0,
-    "cudaLibraryPath": "/usr/local/cuda/lib64"
-  },
-  "rerank": {
-    "useCuda": true,
-    "cudaDeviceId": 0
-  }
-}
-```
-
-### Memory Recommendations
-
-| Document Count | BatchSize | Recommended Model | GPU Memory |
-|----------------|-----------|-------------------|------------|
-| < 1000 | 32 | bge-small-zh | 4GB |
-| 1000-10000 | 64 | bge-base-zh | 6GB |
-| > 10000 | 128 | bge-large-zh | 8GB+ |
-
----
-
-## FAQ
-
-### Q: How to choose the right embedding model?
-
-A: Choose based on scenario:
-- **Fast retrieval**: bge-small-zh-v1.5 (512 dim, fast)
-- **Balanced**: bge-base-zh-v1.5 (768 dim, recommended)
-- **High precision**: bge-large-zh-v1.5 (1024 dim, requires GPU)
-
-### Q: How to enable two-stage search?
-
-A: Set `rerank.enabled = true` and download rerank model:
+**正确方式：使用 heredoc + --data-binary**
 ```bash
-# Download rerank model
-POST /api/models/rerank/download/bge-reranker-base
-
-# Query with HybridRerank mode
-POST /api/ai/query
-{
-  "query": "search content",
-  "mode": "HybridRerank"
-}
+curl -s -X POST "http://localhost:5000/api/ai/query" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  --data-binary @- << 'EOF'
+{"query": "搜索关键词", "mode": "HybridRerank", "topK": 10}
+EOF
 ```
 
-### Q: How to handle authentication errors?
+**关键点：**
+- `--data-binary @-` 从标准输入读取原始二进制数据
+- 使用单引号 `'EOF'` 包裹内容，防止变量展开
+- 确保中文字符以正确的 UTF-8 字节发送
 
-A: Check the following:
-1. API Key is configured in service settings
-2. X-API-Key header is included in request
-3. API Key value matches the configured key
+### 其他方式
+```bash
+# PowerShell（推荐） - 不需要特殊处理
+curl -X POST "http://localhost:5000/api/ai/query" -H "Content-Type: application/json" -d '{"query": "搜索关键词", "mode": "HybridRerank"}'
 
----
+# CMD - 需先设置编码
+chcp 65001
+curl -X POST "http://localhost:5000/api/ai/query" -H "Content-Type: application/json; charset=utf-8" -d "{\"query\": \"搜索关键词\"}"
+```
 
-## Related Links
+**查询模式**：Quick(3) | Standard(10) | Hybrid(15) | HybridRerank(10,推荐) | Deep(20)
 
-- [API Documentation](http://localhost:5000/swagger) - Access Swagger UI after starting service
-- [GitHub Repository](https://github.com/hlrlive/ReferenceRAG)
+## 服务地址
+
+- Web UI: `http://localhost:5000`
+- Swagger: `http://localhost:5000/swagger`
+
+## 支持的模型
+
+**Embedding**：bge-small-zh-v1.5、bge-base-zh-v1.5、bge-large-zh-v1.5、bge-m3
+
+**Rerank**：bge-reranker-base、bge-reranker-large
+
+## GitHub
+
+https://github.com/hlrlive/ObsidianRAG

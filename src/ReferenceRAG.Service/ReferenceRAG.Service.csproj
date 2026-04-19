@@ -33,8 +33,8 @@
   <ItemGroup>
     <ProjectReference Include="..\ReferenceRAG.Core\ReferenceRAG.Core.csproj" />
     <ProjectReference Include="..\ReferenceRAG.Storage\ReferenceRAG.Storage.csproj" />
-    <!-- MCP Helper -->
-    <ProjectReference Include="..\..\..\..\SDK\McpHelper\src\McpHelper.Core\McpHelper.Core.csproj" />
+    <!-- MCP Helper (NuGet) -->
+    <PackageReference Include="McpHelper.Core" Version="1.0.8" />
   </ItemGroup>
 
   <PropertyGroup>
