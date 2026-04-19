@@ -33,6 +33,7 @@ CODEBUDDY.md
 
 # Model files (large binary)
 models/
+!src/**/Models/
 
 # Frontend build outputs
 dist/
