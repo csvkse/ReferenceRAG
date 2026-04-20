@@ -26,7 +26,7 @@ test-vault/
 .bg-shell/
 
 # Session files
-*.html
+/*.html
 
 # User-specific config
 reference-rag.json
