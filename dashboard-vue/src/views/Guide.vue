@@ -110,78 +110,6 @@ source ~/.bashrc`" language="bash" />
               </n-collapse>
             </n-space>
           </n-card>
-
-          <!-- 一键安装 N 卡环境 -->
-          <n-card title="一键安装 NVIDIA 环境">
-            <n-space vertical>
-              <n-alert type="info">
-                此功能自动检测并安装 CUDA、cuDNN 等 GPU 加速所需依赖
-              </n-alert>
-
-              <n-form label-placement="left" label-width="100">
-                <n-form-item label="安装目录">
-                  <n-input-group>
-                    <n-input v-model:value="cudaInstallDir" placeholder="默认: C:\CUDA" style="width: 300px" />
-                    <n-button @click="selectInstallDir">选择目录</n-button>
-                  </n-input-group>
-                </n-form-item>
-                <n-form-item label="CUDA 版本">
-                  <n-select v-model:value="cudaVersion" :options="cudaVersionOptions" style="width: 200px" />
-                </n-form-item>
-                <n-form-item label="包含 cuDNN">
-                  <n-switch v-model:value="includeCudnn" />
-                </n-form-item>
-              </n-form>
-
-              <n-space>
-                <n-button type="primary" :loading="installing" @click="installCuda">
-                  <template #icon>
-                    <n-icon><DownloadOutline /></n-icon>
-                  </template>
-                  开始安装
-                </n-button>
-                <n-button @click="checkCudaEnv">检测当前环境</n-button>
-              </n-space>
-
-              <n-card v-if="envCheckResult" title="环境检测结果" size="small">
-                <n-descriptions label-placement="left" bordered :column="1">
-                  <n-descriptions-item label="NVIDIA 驱动">
-                    <n-tag :type="envCheckResult.driver ? 'success' : 'error'">
-                      {{ envCheckResult.driver ? '已安装' : '未安装' }}
-                    </n-tag>
-                    <n-text v-if="envCheckResult.driverVersion" depth="3" style="margin-left: 8px">
-                      版本: {{ envCheckResult.driverVersion }}
-                    </n-text>
-                  </n-descriptions-item>
-                  <n-descriptions-item label="CUDA Toolkit">
-                    <n-tag :type="envCheckResult.cuda ? 'success' : 'error'">
-                      {{ envCheckResult.cuda ? '已安装' : '未安装' }}
-                    </n-tag>
-                    <n-text v-if="envCheckResult.cudaVersion" depth="3" style="margin-left: 8px">
-                      版本: {{ envCheckResult.cudaVersion }}
-                    </n-text>
-                  </n-descriptions-item>
-                  <n-descriptions-item label="cuDNN">
-                    <n-tag :type="envCheckResult.cudnn ? 'success' : 'warning'">
-                      {{ envCheckResult.cudnn ? '已安装' : '未安装' }}
-                    </n-tag>
-                  </n-descriptions-item>
-                  <n-descriptions-item label="GPU 设备">
-                    <n-text v-if="envCheckResult.gpuName">{{ envCheckResult.gpuName }}</n-text>
-                    <n-text v-else depth="3">未检测到</n-text>
-                  </n-descriptions-item>
-                </n-descriptions>
-              </n-card>
-
-              <n-progress
-                v-if="installProgress > 0"
-                type="line"
-                :percentage="installProgress"
-                :status="installProgress === 100 ? 'success' : 'default'"
-                :show-indicator="true"
-              />
-            </n-space>
-          </n-card>
         </n-space>
       </n-tab-pane>
 
@@ -211,29 +139,49 @@ source ~/.bashrc`" language="bash" />
                 </thead>
                 <tbody>
                   <tr>
-                    <td><n-text code>search</n-text></td>
-                    <td>语义搜索知识库</td>
-                    <td>query, topK, mode</td>
-                  </tr>
-                  <tr>
-                    <td><n-text code>drilldown</n-text></td>
-                    <td>深入展开上下文</td>
-                    <td>refIds, expandContext</td>
-                  </tr>
-                  <tr>
-                    <td><n-text code>get_sources</n-text></td>
-                    <td>获取所有数据源</td>
+                    <td><n-text code>sources-list</n-text></td>
+                    <td>列出所有数据源及索引统计</td>
                     <td>-</td>
                   </tr>
                   <tr>
-                    <td><n-text code>get_models</n-text></td>
-                    <td>获取可用模型列表</td>
+                    <td><n-text code>sources-get-info</n-text></td>
+                    <td>获取指定数据源详细信息</td>
+                    <td>sourceName</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>rag-semantic-search</n-text></td>
+                    <td>向量语义搜索</td>
+                    <td>query, topK, sources</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>rag-hybrid-search</n-text></td>
+                    <td>混合搜索（向量+BM25）</td>
+                    <td>query, topK, k1, b, enableRerank</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>rag-rerank-results</n-text></td>
+                    <td>对候选文档重排</td>
+                    <td>query, documents, topK</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>embedding-encode-text</n-text></td>
+                    <td>文本向量化</td>
+                    <td>text</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>embedding-calculate-similarity</n-text></td>
+                    <td>计算文本相似度</td>
+                    <td>text1, text2</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>index-status</n-text></td>
+                    <td>获取索引状态</td>
                     <td>-</td>
                   </tr>
                   <tr>
-                    <td><n-text code>switch_model</n-text></td>
-                    <td>切换嵌入模型</td>
-                    <td>modelName</td>
+                    <td><n-text code>ping</n-text></td>
+                    <td>测试 MCP 连通性</td>
+                    <td>-</td>
                   </tr>
                 </tbody>
               </n-table>
@@ -294,40 +242,36 @@ source ~/.bashrc`" language="bash" />
 
               <n-text strong>Skill 安装方式</n-text>
               <n-steps vertical :current="0">
-                <n-step title="创建 Skills 目录" description="在项目中创建 .cursor/skills 或 .claude/skills 目录" />
-                <n-step title="复制 Skill 文件" description="将 .md 格式的 Skill 文件放入目录" />
+                <n-step title="复制 Skill 文件" description="将 skill 目录中的 SKILL.md 复制到 .cursor/skills 或 .claude/skills 目录" />
+                <n-step title="配置服务地址（可选）" description="在 ~/.agents/.env 中设置 OBSIDIAN_RAG_API_URL" />
                 <n-step title="重启 AI 助手" description="重新加载以识别新的 Skills" />
               </n-steps>
             </n-space>
           </n-card>
 
-          <n-card title="推荐 Skills 配置">
+          <n-card title="Skill 触发方式">
             <n-space vertical>
-              <n-text>以下是与 ReferenceRAG 配合使用的推荐 Skills:</n-text>
+              <n-text>ReferenceRAG Skill 支持以下触发方式:</n-text>
 
               <n-table :bordered="false" :single-line="false">
                 <thead>
                   <tr>
-                    <th>Skill 名称</th>
-                    <th>用途</th>
-                    <th>触发词</th>
+                    <th>触发类型</th>
+                    <th>示例</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
-                    <td>ReferenceRAG Search</td>
-                    <td>知识库语义搜索</td>
-                    <td><n-text code>搜索知识库</n-text>, <n-text code>查找文档</n-text></td>
+                    <td>强制触发</td>
+                    <td><n-text code>rag:关键词</n-text> 或 <n-text code>/rag 关键词</n-text></td>
                   </tr>
                   <tr>
-                    <td>ReferenceRAG Index</td>
-                    <td>触发索引更新</td>
-                    <td><n-text code>更新索引</n-text>, <n-text code>重建索引</n-text></td>
+                    <td>组合触发</td>
+                    <td>领域词(知识库/笔记/vault/obsidian/文档) + 动作词(搜/查/找/检索/查询)</td>
                   </tr>
                   <tr>
-                    <td>ReferenceRAG Models</td>
-                    <td>模型管理操作</td>
-                    <td><n-text code>切换模型</n-text>, <n-text code>下载模型</n-text></td>
+                    <td>意图触发</td>
+                    <td>笔记里有没有、帮我搜一下笔记、在知识库中查找</td>
                   </tr>
                 </tbody>
               </n-table>
@@ -485,116 +429,149 @@ source ~/.bashrc`" language="bash" />
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
 import { useMessage } from 'naive-ui'
-import { DownloadOutline, CopyOutline } from '@vicons/ionicons5'
+import { CopyOutline } from '@vicons/ionicons5'
 
 const message = useMessage()
 
-// CUDA 安装配置
-const cudaInstallDir = ref('')
-const cudaVersion = ref('12.3')
-const includeCudnn = ref(true)
-const installing = ref(false)
-const installProgress = ref(0)
+// Skill 模板
 
-const cudaVersionOptions = [
-  { label: 'CUDA 12.3', value: '12.3' },
-  { label: 'CUDA 12.2', value: '12.2' },
-  { label: 'CUDA 12.1', value: '12.1' },
-  { label: 'CUDA 11.8', value: '11.8' }
-]
-
-interface EnvCheckResult {
-  driver: boolean
-  driverVersion?: string
-  cuda: boolean
-  cudaVersion?: string
-  cudnn: boolean
-  gpuName?: string
-}
-
-const envCheckResult = ref<EnvCheckResult | null>(null)
-
-const selectInstallDir = () => {
-  // 在实际实现中打开目录选择对话框
-  message.info('目录选择功能需要后端支持')
-}
-
-const installCuda = async () => {
-  installing.value = true
-  installProgress.value = 0
-
-  // 模拟安装过程
-  for (let i = 0; i <= 100; i += 10) {
-    await new Promise(resolve => setTimeout(resolve, 500))
-    installProgress.value = i
-  }
-
-  installing.value = false
-  message.success('CUDA 环境安装完成')
-}
-
-const checkCudaEnv = async () => {
-  // 模拟检测结果
-  envCheckResult.value = {
-    driver: true,
-    driverVersion: '535.154.05',
-    cuda: true,
-    cudaVersion: '12.3',
-    cudnn: true,
-    gpuName: 'NVIDIA GeForce RTX 3080'
-  }
-  message.success('环境检测完成')
-}
-
-// MCP 配置示例
 const mcpConfigExample = JSON.stringify({
-  mcpServers: {
-    referencerag: {
-      command: "node",
-      args: ["path/to/referencerag-mcp/dist/index.js"],
-      env: {
-        REFERENCERAG_API_URL: "http://localhost:5000"
-      }
+  "mcpServers": {
+    "ReferenceRAG": {
+      "isActive": true,
+      "name": "ReferenceRAG",
+      "type": "streamableHttp",
+      "description": "",
+      "baseUrl": "http://127.0.0.1:7897/api/mcp",
+      "command": "",
+      "args": [],
+      "env": {},
+      "installSource": "unknown"
     }
   }
 }, null, 2)
 
 const mcpSearchExample = JSON.stringify({
-  tool: "search",
+  tool: "rag-semantic-search",
   arguments: {
     query: "向量数据库",
     topK: 10,
-    mode: "Hybrid"
+    sources: []
   }
 }, null, 2)
 
 const mcpDrilldownExample = JSON.stringify({
-  tool: "drilldown",
+  tool: "rag-hybrid-search",
   arguments: {
-    refIds: ["chunk-001", "chunk-002"],
-    expandContext: 2
+    query: "向量数据库",
+    topK: 10,
+    k1: 1.5,
+    b: 0.75,
+    enableRerank: false
   }
 }, null, 2)
 
-// Skill 示例
-const skillExample = `# ReferenceRAG Search Skill
+// Skill 示例（直接使用 skill/SKILL.md 内容）
+const skillExample = `---
+name: ReferenceRAG
+description: 本地知识库语义检索服务。从 Obsidian 笔记库检索技术教程、配置说明、最佳实践等内容。触发规则：(1)强制触发：rag:关键词、/rag 关键词 (2)组合触发：领域词(知识库/笔记/vault/obsidian/文档) + 动作词(搜/查/找/检索/查询) (3)意图触发：笔记里有没有、帮我搜一下笔记、在知识库中查找。NOT for: 天气、新闻、股票等实时信息。
+allowed-tools: Read, Bash
+---
 
-搜索 Obsidian 知识库中的内容。
+# ObsidianRAG 知识库检索
 
-## 触发条件
-- 用户提到 "搜索知识库"
-- 用户提到 "查找文档"
-- 用户询问具体的技术问题
+本地知识库检索服务，支持 Obsidian 笔记和 Markdown 文档的语义搜索。
 
-## 使用方式
-调用 MCP 工具 \`search\` 进行语义搜索。
+## 触发规则（优先级从高到低）
 
-## 参数
-- query: 搜索查询词
-- topK: 返回结果数量 (默认: 10)
-- mode: 搜索模式 (Vector/BM25/Hybrid)`
+### 1. 强制触发（无需领域词）
+| 输入格式 | 示例 |
+|---------|------|
+| \`rag:关键词\` | \`rag:Git 分支管理\` |
+| \`/rag 关键词\` | \`/rag TypeScript 类型\` |
+
+### 2. 组合触发（领域词 + 动作词）
+**领域词**：知识库、笔记、vault、obsidian、文档、文库
+**动作词**：搜、查、找、检索、查询、翻一下、看看
+
+| 示例输入 | 触发原因 |
+|---------|---------|
+| 在知识库搜 Git | 领域词 + 动作词 ✅ |
+| 笔记里查一下配置 | 领域词 + 动作词 ✅ |
+| 帮我在 obsidian 找教程 | 领域词 + 动作词 ✅ |
+| vault 里有没有 | 领域词 + 动作词 ✅ |
+
+### 3. 意图触发（完整短语）
+- \`笔记里有没有 xxx\`
+- \`帮我搜一下笔记\`
+- \`在知识库中查找\`
+- \`看看笔记里的 xxx\`
+
+### 4. 不触发场景
+- 纯动作词无领域词：\`查询 Git\`、\`搜索配置\` ❌
+- 实时信息：天气、新闻、股票 ❌
+- 明确其他数据源：数据库查询、API 调用 ❌
+
+## 执行流程
+
+**查询词扩展策略**：将用户输入扩展为多个相关关键词（中英文、同义词、相关概念），提升召回率。
+
+示例：\`Git 分支管理\` → \`Git 分支管理 branch 版本控制 分支策略 git flow\`
+
+直接调用 \`POST http://localhost:7897/api/ai/query\` 执行 HybridRerank 搜索，格式化返回结果。
+
+## 配置（可选）
+
+如需自定义地址，修改 \`~/.agents/.env\`：
+
+\`\`\`env
+OBSIDIAN_RAG_API_URL=http://localhost:7897
+OBSIDIAN_RAG_API_KEY=
+\`\`\`
+
+## API 调用示例
+
+### Windows Git Bash 中文请求方式（重要）
+
+⚠️ **Windows Git Bash 中直接使用 \`-d\` 发送中文会导致乱码**，因为 bash 字符串处理会破坏 UTF-8 编码。
+
+**正确方式：使用 heredoc + --data-binary**
+\`\`\`bash
+curl -s -X POST "http://localhost:7897/api/ai/query" \\
+  -H "Content-Type: application/json; charset=utf-8" \\
+  --data-binary @- << 'EOF'
+{"query": "搜索关键词", "mode": "HybridRerank", "topK": 10}
+EOF
+\`\`\`
+
+**关键点：**
+- \`--data-binary @-\` 从标准输入读取原始二进制数据
+- 使用单引号 \`'EOF'\` 包裹内容，防止变量展开
+- 确保中文字符以正确的 UTF-8 字节发送
+
+### 其他方式
+\`\`\`bash
+# PowerShell（推荐） - 不需要特殊处理
+curl -X POST "http://localhost:7897/api/ai/query" -H "Content-Type: application/json" -d '{"query": "搜索关键词", "mode": "HybridRerank"}'
+
+# CMD - 需先设置编码
+chcp 65001
+curl -X POST "http://localhost:7897/api/ai/query" -H "Content-Type: application/json; charset=utf-8" -d "{\\"query\\": \\"搜索关键词\\"}"
+\`\`\`
+
+**查询模式**：Quick(3) | Standard(10) | Hybrid(15) | HybridRerank(10,推荐) | Deep(20)
+
+## 服务地址
+
+- Web UI: \`http://localhost:7897\`
+- Swagger: \`http://localhost:7897/swagger\`
+
+## 支持的模型
+
+**Embedding**：bge-small-zh-v1.5、bge-base-zh-v1.5、bge-large-zh-v1.5、bge-m3
+
+**Rerank**：bge-reranker-base、bge-reranker-large`
 
 const skillTemplate = `# [Skill Name]
 

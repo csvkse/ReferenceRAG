@@ -16,6 +16,7 @@ resource/
 *.user
 *.suo
 .claude/
+.qoder/
 
 # Runtime data
 data/

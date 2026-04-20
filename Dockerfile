@@ -4,7 +4,7 @@
 # ============================================================
 # Stage 1: Build Vue Frontend
 # ============================================================
-FROM docker.io/library/node:22-alpine AS frontend-build
+FROM node:22-alpine AS frontend-build
 WORKDIR /frontend
 
 # Copy Vue frontend source
@@ -15,38 +15,24 @@ COPY dashboard-vue/ ./
 RUN npm ci --prefer-offline && npm run build
 
 # ============================================================
-# Stage 2: Restore NuGet packages
+# Stage 2: Build and Publish .NET application
 # ============================================================
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS restore
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-# Copy solution and project files
-COPY ReferenceRAG.slnx ./
+# Copy project files and restore dependencies
 COPY src/ReferenceRAG.Core/ReferenceRAG.Core.csproj src/ReferenceRAG.Core/
 COPY src/ReferenceRAG.Storage/ReferenceRAG.Storage.csproj src/ReferenceRAG.Storage/
 COPY src/ReferenceRAG.Service/ReferenceRAG.Service.csproj src/ReferenceRAG.Service/
+COPY Directory.Build.props ./
 
 # Restore dependencies
-RUN dotnet restore
-
-# ============================================================
-# Stage 3: Build .NET application
-# ============================================================
-FROM restore AS build
-WORKDIR /src
+RUN dotnet restore src/ReferenceRAG.Service/ReferenceRAG.Service.csproj
 
 # Copy source code
 COPY src/ ./src/
-COPY Directory.Build.props ./
 
-# Build (skip SPA target - Vue is built in frontend-build stage)
-WORKDIR /src/src/ReferenceRAG.Service
-RUN dotnet build -c Release -o /app/build --no-restore
-
-# ============================================================
-# Stage 4: Publish
-# ============================================================
-FROM build AS publish
+# Build and publish
 WORKDIR /src/src/ReferenceRAG.Service
 RUN dotnet publish -c Release -o /app/publish \
     /p:UseAppHost=false \
@@ -54,7 +40,7 @@ RUN dotnet publish -c Release -o /app/publish \
     /p:DebugSymbols=false
 
 # ============================================================
-# Stage 5: Runtime (CPU version)
+# Stage 3: Runtime (CPU version)
 # ============================================================
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
@@ -72,7 +58,10 @@ RUN mkdir -p /app/data /app/models /app/logs \
     && chown -R appuser:appgroup /app
 
 # Copy published application
-COPY --from=publish /app/publish .
+COPY --from=build /app/publish .
+
+# Copy Docker-specific configuration
+COPY appsettings.Docker.json ./appsettings.Production.json
 
 # Copy pre-built Vue frontend (from frontend-build stage)
 COPY --from=frontend-build /frontend/dist ./wwwroot

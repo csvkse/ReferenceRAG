@@ -118,8 +118,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         var extensionName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? "vec0.dll"
             : RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-                ? "libvec0.dylib"
-                : "libvec0.so";
+                ? "vec0.dylib"  // macOS 上也是 vec0.dylib 而不是 libvec0.dylib
+                : "vec0.so";    // Linux 上是 vec0.so 而不是 libvec0.so
 
         // 可能的搜索路径
         var searchPaths = new[]

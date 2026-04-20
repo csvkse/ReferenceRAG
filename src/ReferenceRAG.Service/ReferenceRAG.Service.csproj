@@ -17,7 +17,8 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.2" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.7" />
     <PackageReference Include="Microsoft.OpenApi" Version="2.4.1" />
-    
+    <PackageReference Include="ModelContextProtocol" Version="1.2.0" />
+    <PackageReference Include="McpHelper.Core" Version="1.0.9" />
 
     <!-- Windows 服务支持 -->
     <PackageReference Include="System.Management" Version="10.0.2" />
@@ -33,24 +34,21 @@
   <ItemGroup>
     <ProjectReference Include="..\ReferenceRAG.Core\ReferenceRAG.Core.csproj" />
     <ProjectReference Include="..\ReferenceRAG.Storage\ReferenceRAG.Storage.csproj" />
-    <!-- MCP Helper (NuGet) -->
-    <PackageReference Include="McpHelper.Core" Version="1.0.8" />
   </ItemGroup>
 
+
+  <!--
   <PropertyGroup>
-    <!-- Vue 前端项目目录 -->
     <SpaRoot>..\..\dashboard-vue\</SpaRoot>
     <DefaultItemExcludes>$(DefaultItemExcludes);$(SpaRoot)node_modules\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <Target Name="PublishRunWebpack" AfterTargets="ComputeFilesToPublish">
-    <!-- 在发布前编译 Vue 项目 -->
     <Message Importance="high" Text="Restoring dependencies using 'npm'..." />
     <Exec WorkingDirectory="$(SpaRoot)" Command="npm install" />
     <Message Importance="high" Text="Building the Vue frontend..." />
     <Exec WorkingDirectory="$(SpaRoot)" Command="npm run build" />
 
-    <!-- 将 Vue 构建输出目录 (dist) 包含到发布输出的 wwwroot 中 -->
     <ItemGroup>
       <DistFiles Include="$(SpaRoot)dist\**" />
       <ResolvedFileToPublish Include="@(DistFiles->'%(FullPath)')" Exclude="@(ResolvedFileToPublish)">
@@ -60,7 +58,6 @@
       </ResolvedFileToPublish>
     </ItemGroup>
 
-    <!-- 复制服务安装脚本到发布输出 -->
     <ItemGroup>
       <ScriptFiles Include="scripts\**" />
       <ResolvedFileToPublish Include="@(ScriptFiles->'%(FullPath)')" Exclude="@(ResolvedFileToPublish)">
@@ -70,5 +67,6 @@
       </ResolvedFileToPublish>
     </ItemGroup>
   </Target>
+  -->
 
 </Project>

@@ -12,30 +12,24 @@ COPY dashboard-vue/ ./
 RUN npm run build
 
 # ============================================================
-# Stage 2: Restore
+# Stage 2: Build and Publish
 # ============================================================
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS restore
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
-COPY ReferenceRAG.slnx ./
+
+# Copy project files
 COPY src/ReferenceRAG.Core/ReferenceRAG.Core.csproj src/ReferenceRAG.Core/
 COPY src/ReferenceRAG.Storage/ReferenceRAG.Storage.csproj src/ReferenceRAG.Storage/
 COPY src/ReferenceRAG.Service/ReferenceRAG.Service.csproj src/ReferenceRAG.Service/
-RUN dotnet restore
-
-# ============================================================
-# Stage 3: Build
-# ============================================================
-FROM restore AS build
-WORKDIR /src
-COPY src/ ./src/
 COPY Directory.Build.props ./
-WORKDIR /src/src/ReferenceRAG.Service
-RUN dotnet build -c Release -o /app/build --no-restore
 
-# ============================================================
-# Stage 4: Publish
-# ============================================================
-FROM build AS publish
+# Restore dependencies
+RUN dotnet restore src/ReferenceRAG.Service/ReferenceRAG.Service.csproj
+
+# Copy source code
+COPY src/ ./src/
+
+# Build and publish
 WORKDIR /src/src/ReferenceRAG.Service
 RUN dotnet publish -c Release -o /app/publish \
     /p:UseAppHost=false \
@@ -43,9 +37,8 @@ RUN dotnet publish -c Release -o /app/publish \
     /p:DebugSymbols=false
 
 # ============================================================
-# Stage 5: Runtime (GPU / CUDA)
+# Stage 3: Runtime (GPU / CUDA)
 # ============================================================
-# Uses NVIDIA CUDA base image - requires nvidia-container-toolkit
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-cuda12.6-rockchip AS runtime
 WORKDIR /app
 
@@ -63,7 +56,7 @@ RUN mkdir -p /app/data /app/models /app/logs \
     && chown -R appuser:appgroup /app
 
 # Copy published application
-COPY --from=publish /app/publish .
+COPY --from=build /app/publish .
 
 # Copy pre-built Vue frontend
 COPY --from=frontend-build /frontend/dist ./wwwroot
@@ -74,7 +67,6 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 ENV DataPath=/app/data
 ENV LogsPath=/app/logs
 ENV DOTNET_RUNNING_IN_CONTAINER=true
-# GPU settings
 ENV CUDA_VISIBLE_DEVICES=0
 
 # Health check

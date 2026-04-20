@@ -11,4 +11,5 @@ models/
 resource/
 docs/
 tests/
+!tests/ReferenceRAG.Tests/ReferenceRAG.Tests.csproj
 *.md
