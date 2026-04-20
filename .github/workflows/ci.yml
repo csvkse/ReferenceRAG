@@ -21,13 +21,13 @@ jobs:
         dotnet-version: ${{ env.DOTNET_VERSION }}
 
     - name: Restore dependencies
-      run: dotnet restore
+      run: dotnet restore ReferenceRAG.slnx
 
     - name: Build
-      run: dotnet build --no-restore --configuration Release
+      run: dotnet build ReferenceRAG.slnx --no-restore --configuration Release
 
     - name: Run Tests
-      run: dotnet test --no-build --configuration Release --verbosity normal
+      run: dotnet test ReferenceRAG.slnx --no-build --configuration Release --verbosity normal
 
   build-frontend:
     runs-on: ubuntu-latest
