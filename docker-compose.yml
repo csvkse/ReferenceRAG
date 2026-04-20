@@ -8,7 +8,12 @@ services:
     ports:
       - "5123:5000"
     volumes:
+      # 持久化配置（防止容器重建/重启丢失用户设置）
+      - ./config:/app
+      # 持久化数据
       - ./data:/app/data
+      - ./logs:/app/logs
+      # 持久化模型（可选，减少重复下载）
       - ./models:/app/models
     environment:
       - ASPNETCORE_ENVIRONMENT=Production

@@ -105,6 +105,19 @@ menu.bat
 | 7 | 控制台运行 (Run as Console) |
 | 8 | 打开浏览器 |
 
+### Docker 部署
+
+```bash
+# 构建并启动
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+```
+
+> **配置持久化**：容器内配置文件挂载到宿主 `config/` 目录，配置修改后重启容器不丢失。
+> GPU 版本使用 `Dockerfile.gpu` 构建即可。
+
 ### 编译运行
 
 ```bash
