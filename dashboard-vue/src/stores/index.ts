@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import * as signalR from '@microsoft/signalr'
+import { HUB_URLS } from '@/config/env'
 
 export interface ProgressUpdate {
   sourceId: string
@@ -21,9 +22,8 @@ export const useIndexStore = defineStore('index', () => {
   const connect = async () => {
     if (connection.value) return
 
-    const hubUrl = '/hubs/index'
     connection.value = new signalR.HubConnectionBuilder()
-      .withUrl(hubUrl)
+      .withUrl(HUB_URLS.index)
       .withAutomaticReconnect()
       .build()
 

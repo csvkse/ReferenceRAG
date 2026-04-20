@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { API_URL } from '@/config/env'
 import type {
   AddSourceRequest,
   SourceDetail,
@@ -64,7 +65,7 @@ function transformKeysDeep(obj: unknown, keyFn: (key: string) => string): unknow
 }
 
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: API_URL,
   timeout: 60000,
   headers: { 'Content-Type': 'application/json' }
 })
@@ -210,7 +211,10 @@ export const modelsApi = {
     api.post(`/Models/rerank/download/${modelName}`, onnxFilePath ? { onnxFilePath } : {}),
   getRerankDownloadProgress: (modelName: string) => api.get(`/Models/rerank/download/${modelName}/progress`),
   deleteRerankModel: (modelName: string) => api.delete(`/Models/rerank/${modelName}`),
-  getRerankDownloadOptions: (modelName: string) => api.get<ModelDownloadOptions>(`/Models/rerank/download-options/${modelName}`)
+  getRerankDownloadOptions: (modelName: string) => api.get<ModelDownloadOptions>(`/Models/rerank/download-options/${modelName}`),
+
+  // 扫描模型目录
+  scanModels: () => api.post('/Models/scan')
 }
 
 // Vectors

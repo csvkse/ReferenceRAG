@@ -2,14 +2,14 @@
   <n-space vertical :size="20">
     <!-- System Status -->
     <n-card title="系统状态">
-      <template #header-extra>
+      <!-- <template #header-extra>
         <n-space>
           <n-button type="warning" @click="handleRestart" :loading="restartLoading" :disabled="restartLoading">
             <template #icon><n-icon :component="RefreshOutline" /></template>
             重启服务
           </n-button>
         </n-space>
-      </template>
+      </template> -->
       <n-spin :show="statusLoading">
         <n-grid :cols="4" :x-gap="20">
           <n-gi>
@@ -357,7 +357,7 @@ const healthResult = ref<{ status: string; version: string; timestamp: string } 
 const checkingAlerts = ref(false)
 
 // Restart
-const restartLoading = ref(false)
+// const restartLoading = ref(false)
 
 // Active Jobs
 const jobsLoading = ref(false)
@@ -545,30 +545,30 @@ const checkAlerts = async () => {
   }
 }
 
-const handleRestart = () => {
-  dialog.warning({
-    title: '确认重启',
-    content: '重启服务将暂时中断所有正在进行的操作。确定要重启吗？',
-    positiveText: '确认重启',
-    negativeText: '取消',
-    onPositiveClick: async () => {
-      restartLoading.value = true
-      try {
-        const response = await systemApi.restart()
-        message.success(`服务正在重启，新进程 ID: ${response.data.newProcessId}`)
-        // 等待几秒后尝试重新连接
-        setTimeout(() => {
-          loadAll()
-        }, 5000)
-      } catch (error: any) {
-        console.error('Restart failed:', error)
-        message.error(`重启失败: ${error.response?.data?.error || error.message}`)
-      } finally {
-        restartLoading.value = false
-      }
-    }
-  })
-}
+// const handleRestart = () => {
+//   dialog.warning({
+//     title: '确认重启',
+//     content: '重启服务将暂时中断所有正在进行的操作。确定要重启吗？',
+//     positiveText: '确认重启',
+//     negativeText: '取消',
+//     onPositiveClick: async () => {
+//       restartLoading.value = true
+//       try {
+//         const response = await systemApi.restart()
+//         message.success(`服务正在重启，新进程 ID: ${response.data.newProcessId}`)
+//         // 等待几秒后尝试重新连接
+//         setTimeout(() => {
+//           loadAll()
+//         }, 5000)
+//       } catch (error: any) {
+//         console.error('Restart failed:', error)
+//         message.error(`重启失败: ${error.response?.data?.error || error.message}`)
+//       } finally {
+//         restartLoading.value = false
+//       }
+//     }
+//   })
+// }
 
 const handleStopJob = async (jobId: string) => {
   dialog.warning({

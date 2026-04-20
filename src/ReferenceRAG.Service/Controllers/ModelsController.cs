@@ -38,6 +38,34 @@ public class ModelsController : ControllerBase
     }
 
     /// <summary>
+    /// 扫描模型目录
+    /// </summary>
+    [HttpPost("scan")]
+    public async Task<ActionResult> ScanModels()
+    {
+        try
+        {
+            _modelManager.RefreshLocalModels();
+
+            // 返回扫描后的模型列表
+            var embeddingModels = await _modelManager.GetAvailableModelsAsync("embedding");
+            var rerankModels = await _modelManager.GetAvailableModelsAsync("reranker");
+
+            return Ok(new
+            {
+                message = "模型扫描完成",
+                embeddingModels,
+                rerankModels
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "扫描模型失败");
+            return StatusCode(500, new { error = $"扫描模型失败: {ex.Message}" });
+        }
+    }
+
+    /// <summary>
     /// 获取当前模型信息
     /// </summary>
     [HttpGet("current")]

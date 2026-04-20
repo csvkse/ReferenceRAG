@@ -90,6 +90,7 @@ var isService = ServiceManager.ConfigureService(args, builder);
 //builder.Logging.AddProvider(new ReferenceRAG.Service.Services.FileLoggerProvider(logDir));
 #endregion
 
+#region 依赖注入服务管理
 // Add services to the container
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
@@ -231,7 +232,7 @@ builder.Services.AddSingleton(sp =>
     return new QueryStatsService(statsDbPath);
 });
 // FileChangeDetector 需要配置路径，使用工厂方法延迟创建
-builder.Services.AddSingleton<IFileChangeDetector>(sp => 
+builder.Services.AddSingleton<IFileChangeDetector>(sp =>
 {
     var configManager = sp.GetRequiredService<ConfigManager>();
     var config = configManager.Load();
@@ -348,7 +349,9 @@ builder.Services.AddCors(options =>
                   .AllowCredentials();
         }
     });
-});
+}); 
+#endregion
+
 
 #region MCP Server 配置
 // 获取服务配置
@@ -408,6 +411,8 @@ var app = builder.Build();
 #region 静态类配置
 StaticLogger.LoggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
 #endregion
+
+#region 中间件管理
 
 // CORS 必须在其他中间件之前
 app.UseCors();
@@ -482,11 +487,13 @@ using (var scope = app.Services.CreateScope())
     {
         app.Logger.LogWarning(ex, "BM25 索引初始化失败，混合搜索可能退化为纯向量搜索");
     }
-}
-
-
+} 
+#endregion
 
 #region 中间件：支持程序重启
-// 支持程序重启
-ServiceManager.AppLaunch(args, builder, app);
+// 使用原版（不支持重启）
+app.Run();
+
+//// 支持程序重启
+//ServiceManager.AppLaunch(args, builder, app);
 #endregion

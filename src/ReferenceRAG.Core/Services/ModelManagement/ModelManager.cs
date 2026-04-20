@@ -694,10 +694,47 @@ public class ModelManager : IModelManager, IDisposable
             model.LocalPath = null;
         }
 
-        // 然后扫描新路径，更新实际存在的模型
+        // 扫描 Embedding 子目录
+        var embeddingPath = Path.Combine(_modelsPath, "Embedding");
+        if (Directory.Exists(embeddingPath))
+        {
+            ScanModelDirectory(embeddingPath, "embedding");
+        }
+
+        // 扫描 Reranker 子目录
+        var rerankerPath = Path.Combine(_modelsPath, "Reranker");
+        if (Directory.Exists(rerankerPath))
+        {
+            ScanModelDirectory(rerankerPath, "reranker");
+        }
+
+        // 兼容旧结构：扫描根目录下的模型（未分类的模型）
         foreach (var dir in Directory.GetDirectories(_modelsPath))
         {
-            var modelName = Path.GetFileName(dir);
+            var dirName = Path.GetFileName(dir);
+            // 跳过已处理的新结构目录
+            if (dirName == "Embedding" || dirName == "Reranker")
+                continue;
+
+            // 尝试检测模型类型
+            var modelType = DetectModelType(dir);
+            ScanModelDirectory(_modelsPath, modelType, new[] { dirName });
+        }
+    }
+
+    /// <summary>
+    /// 扫描指定目录下的模型
+    /// </summary>
+    private void ScanModelDirectory(string basePath, string modelType, string[]? specificDirs = null)
+    {
+        var dirsToScan = specificDirs ?? Directory.GetDirectories(basePath).Select(d => Path.GetFileName(d));
+
+        foreach (var modelName in dirsToScan)
+        {
+            var dir = specificDirs != null ? Path.Combine(basePath, modelName) : Path.Combine(basePath, modelName);
+            if (!Directory.Exists(dir))
+                continue;
+
             var onnxPath = Path.Combine(dir, "model.onnx");
 
             // 检查是否有 ONNX 文件（可能在子目录中，如 external 格式的 onnx/model.onnx）
@@ -740,6 +777,7 @@ public class ModelManager : IModelManager, IDisposable
                         DisplayName = modelName,
                         Description = "本地模型",
                         Dimension = dimension,
+                        ModelType = modelType,
                         IsDownloaded = hasValidOnnx, // 残缺文件视为未下载
                         LocalPath = dir,
                         ModelSizeBytes = directorySize,
@@ -789,6 +827,7 @@ public class ModelManager : IModelManager, IDisposable
                                 DisplayName = modelName,
                                 Description = "本地模型",
                                 Dimension = dimension,
+                                ModelType = modelType,
                                 IsDownloaded = true,
                                 LocalPath = dir,
                                 ModelSizeBytes = directorySize,
@@ -800,6 +839,52 @@ public class ModelManager : IModelManager, IDisposable
                     }
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// 检测模型类型（基于目录名或配置文件）
+    /// </summary>
+    private string DetectModelType(string modelDir)
+    {
+        try
+        {
+            var configPath = Path.Combine(modelDir, "config.json");
+            if (File.Exists(configPath))
+            {
+                var json = File.ReadAllText(configPath);
+                var config = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(json);
+
+                // 检查模型类型标识
+                if (config.TryGetProperty("model_type", out var modelType))
+                {
+                    var typeStr = modelType.GetString()?.ToLower();
+                    if (typeStr?.Contains("rerank") == true)
+                        return "reranker";
+                }
+
+                // 检查架构类型
+                if (config.TryGetProperty("architectures", out var architectures))
+                {
+                    var archList = architectures.EnumerateArray()
+                        .Select(a => a.GetString() ?? "")
+                        .ToList();
+
+                    if (archList.Any(a => a.ToLower().Contains("rerank")))
+                        return "reranker";
+                }
+            }
+
+            // 根据目录名称推断
+            var dirName = Path.GetFileName(modelDir).ToLower();
+            if (dirName.Contains("rerank"))
+                return "reranker";
+
+            return "embedding";
+        }
+        catch
+        {
+            return "embedding"; // 默认为嵌入模型
         }
     }
 

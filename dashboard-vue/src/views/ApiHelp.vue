@@ -122,6 +122,7 @@ import {
 } from 'naive-ui'
 import { PlayOutline } from '@vicons/ionicons5'
 import axios from 'axios'
+import { API_URL } from '@/config/env'
 
 const message = useMessage()
 
@@ -147,7 +148,7 @@ const testAuth = async () => {
     const config = authEnabled.value && apiKey.value
       ? { headers: { 'X-API-Key': apiKey.value } }
       : {}
-    const response = await axios.get('/api/system/status', config)
+    const response = await axios.get(`${API_URL}/system/status`, config)
     if (response.status === 200) {
       message.success('认证成功')
     }

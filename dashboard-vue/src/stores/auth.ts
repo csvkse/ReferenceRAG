@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import axios from 'axios'
+import { API_URL } from '@/config/env'
 
 const API_KEY_STORAGE_KEY = 'reference_rag_api_key'
 
@@ -48,7 +49,7 @@ export const useAuthStore = defineStore('auth', () => {
   const verifyApiKey = async (): Promise<boolean> => {
     try {
       // Use a simple API call to verify API Key
-      await axios.get('/api/system/status')
+      await axios.get(`${API_URL}/system/status`)
       return true
     } catch (error: any) {
       if (error.response?.status === 401 || error.response?.status === 403) {

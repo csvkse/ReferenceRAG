@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
+import { API_URL } from '@/config/env'
 import { useAuthStore } from '@/stores/auth'
 
 const routes: RouteRecordRaw[] = [
@@ -109,7 +110,7 @@ router.beforeEach(async (to, _from, next) => {
     authChecked = true
     try {
       // 尝试访问一个简单的 API
-      const response = await fetch('/api/system/status')
+      const response = await fetch(`${API_URL}/system/status`)
       if (response.status === 401 || response.status === 403) {
         // 需要认证，跳转登录页
         next('/login')
