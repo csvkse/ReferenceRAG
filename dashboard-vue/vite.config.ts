@@ -7,6 +7,13 @@ import { NaiveUiResolver } from 'unplugin-vue-components/resolvers'
 
 export default defineConfig({
   base: '/',
+  build: {
+    outDir: 'dist',
+    assetsDir: 'assets'
+  },
+  define: {
+    __API_BASE_URL__: JSON.stringify(process.env.VITE_API_BASE_URL || '')
+  },
   plugins: [
     vue(),
     AutoImport({
@@ -48,5 +55,8 @@ export default defineConfig({
         ws: true
       }
     }
+  },
+  preview: {
+    port: 7897
   }
 })
