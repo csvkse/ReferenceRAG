@@ -17,16 +17,21 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+- name: Checkout repository
+  uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
+- name: Setup .NET
+  uses: actions/setup-dotnet@v4
+  with:
+    dotnet-version: "10.0.x"
 
-      - name: Restore dependencies
-        run: dotnet restore ReferenceRAG.sln
+- name: Setup Node.js
+  uses: actions/setup-node@v4
+  with:
+    node-version: "20"
+
+- name: Restore dependencies
+  run: dotnet restore ReferenceRAG.sln
 
       - name: Publish
         run: dotnet publish src/ReferenceRAG.Service/ReferenceRAG.Service.csproj -c Release -r win-x64 --self-contained true -o publish_output
