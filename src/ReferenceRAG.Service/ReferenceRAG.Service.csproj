@@ -37,7 +37,7 @@
   </ItemGroup>
 
 
-  <!--
+
   <PropertyGroup>
     <SpaRoot>..\..\dashboard-vue\</SpaRoot>
     <DefaultItemExcludes>$(DefaultItemExcludes);$(SpaRoot)node_modules\**</DefaultItemExcludes>
@@ -67,6 +67,5 @@
       </ResolvedFileToPublish>
     </ItemGroup>
   </Target>
-  -->
 
 </Project>
