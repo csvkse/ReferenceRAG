@@ -5,6 +5,11 @@ on:
     tags:
       - "v*" # 当推送形如 v1.0.0 的 tag 时自动触发打包并发布 Release
   workflow_dispatch: # 允许在 GitHub Actions 面板手动点击运行
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0) - Leave empty to build only without creating release'
+        required: false
+        type: string
 
 jobs:
   build:
@@ -38,8 +43,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    # 只有当触发是 Tag 推送时，才会执行正式发布 release
-    if: startsWith(github.ref, 'refs/tags/')
+    # Tag 推送或手动触发且填写版本号时创建 release
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
     permissions:
       contents: write
     steps:
@@ -51,6 +56,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           files: artifacts/*/*
           generate_release_notes: true
           body: |
