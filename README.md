@@ -4,6 +4,19 @@
 
 基于 ASP.NET Core + ONNX Runtime + SQLite 向量存储构建，集成 MCP 工具集支持 Claude Code，提供完整的知识库检索与管理解决方案。
 
+## 🖼️ 功能预览
+
+> 📸 完整截图预览，包含所有页面效果：**[PREVIEW.md](PREVIEW.md)**
+
+---
+
+> **重点提示** - 模型下载需要安装依赖：
+> ```bash
+> pip install torch transformers optimum onnx numpy
+> ```
+
+---
+
 ## ✨ 核心特性
 
 - 🚀 **高性能检索**: 检索延迟 P95 ≤ 50ms，召回率 ≥ 85%
@@ -566,6 +579,8 @@ ReferenceRAG 提供完整的 MCP（Model Context Protocol）工具集，可在 C
 ```
 
 点击链接可直接在 Obsidian 中定位到具体内容。
+
+> **Obsidian 使用插件**：推荐使用 [claudian](https://github.com/YishenTu/claudian)，可在 Obsidian 内直接调用 Claude 进行 RAG 问答。
 
 ## 🧪 测试
 
