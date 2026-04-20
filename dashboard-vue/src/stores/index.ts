@@ -23,7 +23,7 @@ export const useIndexStore = defineStore('index', () => {
     if (connection.value) return
 
     connection.value = new signalR.HubConnectionBuilder()
-      .withUrl(HUB_URLS.index)
+      .withUrl(HUB_URLS.index, { withCredentials: false })
       .withAutomaticReconnect()
       .build()
 

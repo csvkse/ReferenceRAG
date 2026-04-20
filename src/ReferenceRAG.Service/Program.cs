@@ -327,13 +327,10 @@ builder.Services.AddCors(options =>
     {
         if (builder.Environment.IsDevelopment())
         {
-            // 开发环境：允许指定的 localhost 端口
-            policy.WithOrigins(
-                    "http://localhost:3000",
-                    "http://localhost:5000",
-                    "http://localhost:5001",
-                    "http://localhost:7897"
-                  )
+            // 开发环境：从配置文件读取允许的 localhost 端口
+            var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+                ?? new[] { "http://localhost:3000", "http://localhost:7897" };
+            policy.WithOrigins(allowedOrigins)
                   .WithMethods("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS")
                   .WithHeaders("Content-Type", "Authorization", "X-API-Key")
                   .AllowCredentials();

@@ -43,18 +43,7 @@ export default defineConfig({
     }
   },
   server: {
-    port: 3000,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:7897',
-        changeOrigin: true
-      },
-      '/hubs': {
-        target: 'http://localhost:7897',
-        changeOrigin: true,
-        ws: true
-      }
-    }
+    port: 3000
   },
   preview: {
     port: 7897
