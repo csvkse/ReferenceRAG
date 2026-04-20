@@ -1,8 +1,10 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Storage;
 
 namespace ReferenceRAG.Tests;
@@ -19,6 +21,9 @@ public class VectorSimilarityTests : IDisposable
 
     public VectorSimilarityTests()
     {
+        // 初始化 StaticLogger 以避免 NullReferenceException
+        StaticLogger.LoggerFactory ??= LoggerFactory.Create(builder => builder.AddConsole());
+
         _testDataPath = Path.Combine(Path.GetTempPath(), $"reference-rag-similarity-test-{Guid.NewGuid():N}");
         _testVaultPath = Path.Combine(_testDataPath, "vault");
         Directory.CreateDirectory(_testVaultPath);

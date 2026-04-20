@@ -1,16 +1,9 @@
 using Xunit;
+using static Xunit.Skip;
 using System.Net.Http.Json;
 using System.Text.Json;
 
 namespace ReferenceRAG.Tests;
-
-/// <summary>
-/// 自定义跳过异常
-/// </summary>
-public class SkipException : Exception
-{
-    public SkipException(string message) : base(message) { }
-}
 
 /// <summary>
 /// 重排 API 集成测试
@@ -59,15 +52,12 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     private void SkipIfServiceNotAvailable()
     {
-        if (!_serviceAvailable)
-        {
-            throw new SkipException("后端服务未启动，跳过测试");
-        }
+        Skip.If(!_serviceAvailable, "后端服务未启动，跳过测试");
     }
 
     #region TC-OA-001: POST /v1/rerank 基本测试
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_OA_001_Rerank_ReturnsValidResults()
     {
         SkipIfServiceNotAvailable();
@@ -118,7 +108,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-OA-002: 参数验证 - 缺少 query
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_OA_002_MissingQuery_ReturnsBadRequest()
     {
         SkipIfServiceNotAvailable();
@@ -142,7 +132,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-OA-003: 参数验证 - 缺少 documents
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_OA_003_MissingDocuments_ReturnsBadRequest()
     {
         SkipIfServiceNotAvailable();
@@ -166,7 +156,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-OA-004: return_documents=false
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_OA_004_ReturnDocumentsFalse_DocumentIsNull()
     {
         SkipIfServiceNotAvailable();
@@ -202,7 +192,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-OA-005: 文档数量限制
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_OA_005_ExceedMaxDocuments_ReturnsBadRequest()
     {
         SkipIfServiceNotAvailable();
@@ -230,7 +220,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-OA-006: POST /v1/rerank/single
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_OA_006_RerankSingle_ReturnsValidScore()
     {
         SkipIfServiceNotAvailable();
@@ -265,7 +255,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-RT-001: GET /api/reranktest/presets
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_RT_001_GetPresets_ReturnsPresetList()
     {
         SkipIfServiceNotAvailable();
@@ -300,7 +290,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-RT-002: POST /api/reranktest/preset/{suiteName}
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_RT_002_RunPresetTest_ReturnsTestResult()
     {
         SkipIfServiceNotAvailable();
@@ -336,7 +326,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-RT-003: POST /api/reranktest/test
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_RT_003_CustomTest_ReturnsMetrics()
     {
         SkipIfServiceNotAvailable();
@@ -380,7 +370,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-RT-004: GET /api/reranktest/statistics
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_RT_004_GetStatistics_ReturnsStats()
     {
         SkipIfServiceNotAvailable();
@@ -406,7 +396,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-RT-005: 不存在的预设测试
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_RT_005_InvalidPreset_ReturnsNotFound()
     {
         SkipIfServiceNotAvailable();
@@ -425,7 +415,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
 
     #region TC-RT-006: 文档对象格式测试
 
-    [Fact]
+    [SkippableFact]
     public async Task TC_RT_006_DocumentObjectFormat_Works()
     {
         SkipIfServiceNotAvailable();

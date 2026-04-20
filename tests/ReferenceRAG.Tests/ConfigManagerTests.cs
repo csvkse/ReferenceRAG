@@ -1,6 +1,8 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Core.Helpers;
 
 namespace ReferenceRAG.Tests;
 
@@ -11,6 +13,9 @@ public class ConfigManagerTests : IDisposable
 
     public ConfigManagerTests()
     {
+        // 初始化 StaticLogger 以避免 NullReferenceException
+        StaticLogger.LoggerFactory ??= LoggerFactory.Create(builder => builder.AddConsole());
+
         _testDir = Path.Combine(Path.GetTempPath(), $"config-tests-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_testDir);
         _originalDir = Directory.GetCurrentDirectory();

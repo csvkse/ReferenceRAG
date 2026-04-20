@@ -130,10 +130,11 @@ public class IntegrationTests : IDisposable
         var services = new ServiceCollection();
         services.AddLogging(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
         services.AddSingleton(_config);
+        services.AddSingleton<ConfigManager>();
         services.AddSingleton<ITokenizer, SimpleTokenizer>();
         services.AddSingleton<ITextEnhancer, TextEnhancer>();
         services.AddSingleton<IVectorStore>(sp => new JsonVectorStore(_config.DataPath));
-        services.AddSingleton<IEmbeddingService>(sp => 
+        services.AddSingleton<IEmbeddingService>(sp =>
             new EmbeddingService(new EmbeddingOptions
             {
                 ModelPath = _config.Embedding.ModelPath,

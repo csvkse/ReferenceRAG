@@ -1,7 +1,9 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Interfaces;
+using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Storage;
 using System.IO;
 
@@ -21,6 +23,9 @@ public class DebugIssueTests : IDisposable
 
     public DebugIssueTests()
     {
+        // 初始化 StaticLogger 以避免 NullReferenceException
+        StaticLogger.LoggerFactory ??= LoggerFactory.Create(builder => builder.AddConsole());
+
         _testDir = Path.Combine(Path.GetTempPath(), $"debug-issue-tests-{Guid.NewGuid():N}");
         _modelsPath = Path.Combine(_testDir, "models");
         _dbPath = Path.Combine(_testDir, "test.db");

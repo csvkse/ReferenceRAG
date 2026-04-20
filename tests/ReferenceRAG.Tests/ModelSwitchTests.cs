@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
+using static Xunit.Skip;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Interfaces;
 using System.Diagnostics;
@@ -17,13 +18,22 @@ public class ModelSwitchTests
 
     private ConfigManager CreateTestConfigManager()
     {
+        if (!Directory.Exists(TestDataPath))
+            throw new InvalidOperationException($"测试数据路径不存在: {TestDataPath}");
+
         Directory.SetCurrentDirectory(TestDataPath);
         return new ConfigManager();
     }
 
-    [Fact]
+    private static bool TestPathsExist()
+    {
+        return File.Exists(TestAppSettingsPath) && Directory.Exists(TestModelsPath);
+    }
+
+    [SkippableFact]
     public void Test1_ModelManager_Initialization()
     {
+        Skip.If(!TestPathsExist(), "本地测试路径不存在，跳过");
         Console.WriteLine("=== Test 1: ModelManager 初始化 ===");
 
         // 检查配置文件
@@ -56,9 +66,10 @@ public class ModelSwitchTests
         Console.WriteLine($"  ModelSizeBytes: {bgeBase.ModelSizeBytes}");
     }
 
-    [Fact]
+    [SkippableFact]
     public void Test2_ModelFiles_Exist()
     {
+        Skip.If(!TestPathsExist(), "本地测试路径不存在，跳过");
         Console.WriteLine("=== Test 2: 模型文件存在性检查 ===");
 
         var modelDir = Path.Combine(TestModelsPath, "bge-base-zh-v1.5");
@@ -81,9 +92,10 @@ public class ModelSwitchTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void Test3_EmbeddingService_LoadModel()
     {
+        Skip.If(!TestPathsExist(), "本地测试路径不存在，跳过");
         Console.WriteLine("=== Test 3: EmbeddingService 模型加载 ===");
 
         var modelPath = Path.Combine(TestModelsPath, "bge-base-zh-v1.5", "model.onnx");
@@ -159,9 +171,10 @@ public class ModelSwitchTests
         Assert.NotEqual(initialDimension, service.Dimension);
     }
 
-    [Fact]
+    [SkippableFact]
     public void Test5_ModelManager_SwitchModel()
     {
+        Skip.If(!TestPathsExist(), "本地测试路径不存在，跳过");
         Console.WriteLine("=== Test 5: ModelManager 切换模型 ===");
 
         var configManager = CreateTestConfigManager();
@@ -194,9 +207,10 @@ public class ModelSwitchTests
         Assert.True(success, "ModelManager.SwitchModelAsync 失败");
     }
 
-    [Fact]
+    [SkippableFact]
     public void Test6_DiagnoseModelRegistry()
     {
+        Skip.If(!TestPathsExist(), "本地测试路径不存在，跳过");
         Console.WriteLine("=== Test 6: 诊断模型注册表 ===");
 
         var configManager = CreateTestConfigManager();
@@ -233,9 +247,10 @@ public class ModelSwitchTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void Test7_FullSwitchWorkflow()
     {
+        Skip.If(!TestPathsExist(), "本地测试路径不存在，跳过");
         Console.WriteLine("=== Test 7: 完整切换流程 ===");
 
         // 1. 初始化 ModelManager
