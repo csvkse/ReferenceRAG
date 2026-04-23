@@ -211,7 +211,8 @@ public partial class App : Application
             .AddJsonFile("appsettings.json", optional: true)
             .Build();
 
-        int configured = config.GetValue("ReferenceRAG:Service:DesktopPort", 7898);
+        // 与独立服务使用同一端口配置，因为两者不会同时运行
+        int configured = config.GetValue("ReferenceRAG:Service:port", 7897);
 
         if (PortHelper.IsPortFree(configured))
         {
