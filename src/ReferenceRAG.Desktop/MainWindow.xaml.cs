@@ -32,6 +32,11 @@ public partial class MainWindow : Window
                 userDataFolder: Path.Combine(AppContext.BaseDirectory, "webview2-data"));
 
             await webView.EnsureCoreWebView2Async(env);
+
+            // 每次启动清除 HTTP 磁盘缓存，确保加载最新前端资源
+            await webView.CoreWebView2.Profile.ClearBrowsingDataAsync(
+                CoreWebView2BrowsingDataKinds.DiskCache);
+
             webView.CoreWebView2.Navigate($"http://localhost:{_port}/");
         }
         catch (Exception ex)

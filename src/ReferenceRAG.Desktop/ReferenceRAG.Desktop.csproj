@@ -32,15 +32,16 @@
   <!--
     确保 Vue SPA 产物在 Desktop build/publish 时包含在输出目录中。
     dist/ 不存在时自动执行 npm install + npm run build，无需手动预构建。
+    Publish 时先清空 wwwroot，避免旧 hash 文件堆积导致前端显示旧版本。
   -->
   <Target Name="CopyVueSpaFiles" AfterTargets="Build" BeforeTargets="Publish">
     <PropertyGroup>
       <VueRoot>$(MSBuildProjectDirectory)\..\..\dashboard-vue</VueRoot>
       <VueDistPath Condition="'$(VueDistPath)' == ''">$(VueRoot)\dist</VueDistPath>
-      <!-- publish 时使用 PublishDir，否则使用 TargetDir（MSBuild 保留属性，始终等于 exe 实际输出目录）-->
       <TargetOutputPath Condition="'$(PublishDir)' != '' AND !HasTrailingSlash('$(PublishDir)')">$(PublishDir)\</TargetOutputPath>
       <TargetOutputPath Condition="'$(PublishDir)' != '' AND HasTrailingSlash('$(PublishDir)')">$(PublishDir)</TargetOutputPath>
       <TargetOutputPath Condition="'$(PublishDir)' == ''">$(TargetDir)</TargetOutputPath>
+      <WwwrootDir>$(TargetOutputPath)wwwroot</WwwrootDir>
     </PropertyGroup>
 
     <!-- dist/ 不存在时自动构建 Vue -->
@@ -48,15 +49,18 @@
     <Exec WorkingDirectory="$(VueRoot)" Command="npm install" Condition="!Exists('$(VueDistPath)')" />
     <Exec WorkingDirectory="$(VueRoot)" Command="npm run build" Condition="!Exists('$(VueDistPath)')" />
 
+    <!-- Publish 时清空旧 wwwroot（避免不同 hash 的旧文件残留） -->
+    <RemoveDir Directories="$(WwwrootDir)"
+               Condition="'$(PublishDir)' != '' AND Exists('$(WwwrootDir)')" />
+
     <ItemGroup>
       <VueFiles Include="$(VueDistPath)\**\*" />
     </ItemGroup>
 
     <Copy SourceFiles="@(VueFiles)"
-          DestinationFiles="@(VueFiles->'$(TargetOutputPath)wwwroot\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true"
+          DestinationFiles="@(VueFiles->'$(WwwrootDir)\%(RecursiveDir)%(Filename)%(Extension)')"
           Condition="Exists('$(VueDistPath)')" />
 
-    <Message Importance="high" Text="[Desktop] Vue SPA 文件已复制到 $(TargetOutputPath)wwwroot" Condition="Exists('$(VueDistPath)')" />
+    <Message Importance="high" Text="[Desktop] Vue SPA 已同步到 $(WwwrootDir)" Condition="Exists('$(VueDistPath)')" />
   </Target>
 </Project>

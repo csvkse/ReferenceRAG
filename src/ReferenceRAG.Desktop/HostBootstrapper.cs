@@ -251,6 +251,18 @@ public static class HostBootstrapper
         // 测试记录存储
         builder.Services.AddSingleton<TestRecordStore>();
 
+        // 知识图谱存储（与向量存储共用同一 DB）
+        builder.Services.AddSingleton<ReferenceRAG.Core.Interfaces.IGraphStore>(sp =>
+        {
+            var config = sp.GetRequiredService<ConfigManager>();
+            var cfg = config.Load();
+            var dataPath = cfg.DataPath ?? "data";
+            var dbPath = Path.Combine(dataPath, "vectors.db");
+            return new ReferenceRAG.Storage.SqliteGraphStore(dbPath);
+        });
+        builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.WikiLinkExtractor>();
+        builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.GraphIndexingService>();
+
         // SignalR
         builder.Services.AddSignalR(options =>
         {
