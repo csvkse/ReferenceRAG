@@ -932,226 +932,202 @@ internal class HuggingFaceModelDownloader : IDisposable
     /// </summary>
     private static string GetConversionScript(string format = "embedded")
     {
-        // 使用普通原始字符串，避免插值字符串中花括号转义问题
         return """
 import argparse
 import sys
 import os
+import json
 import shutil
 
-# Fix Windows encoding issues
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-def convert_onnx_format(model_dir, output_path, format):
-    # Convert between ONNX embedded and external formats using onnx library
-    import onnx
+def get_model_type(model_dir):
+    # 从 config.json 检测模型架构：reranker / embedding
+    config_path = os.path.join(model_dir, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path, encoding='utf-8') as f:
+            config = json.load(f)
+        for arch in config.get("architectures", []):
+            if "SequenceClassification" in arch or "CrossEncoder" in arch:
+                return "reranker"
+    return "embedding"
+
+def inline_external_data(onnx_model):
+    # 将外部数据内联进 ONNX 模型（embedded 格式）
     from onnx import numpy_helper
+    for init in onnx_model.graph.initializer:
+        if len(init.external_data) > 0:
+            np_array = numpy_helper.to_array(init)
+            init.ClearField('external_data')
+            init.ClearField('data_location')
+            init.raw_data = np_array.tobytes()
 
-    src_onnx = os.path.join(model_dir, "model.onnx")
-    print(f"Loading existing ONNX model from: {src_onnx}")
-    onnx_model = onnx.load(src_onnx, load_external_data=True)
-
-    if format == 'external':
-        print("Converting to external format (model.onnx + model.onnx.data)...")
-        onnx.save(
-            onnx_model,
-            output_path,
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location="model.onnx.data",
-            size_threshold=0,
-        )
-    else:  # embedded
-        print("Converting to embedded format (single file)...")
-        # 关键：必须显式清除所有 tensor 的 ExternalDataDescriptor，
-        # 否则 onnx.save 可能保留外部数据引用而非内联数据
-        for init in onnx_model.graph.initializer:
-            if init.HasField('data_location') or len(init.external_data) > 0:
-                # 将外部数据内联为 raw_data
-                # numpy_helper.to_array 返回的 ndarray 已保持正确的 dtype
-                np_array = numpy_helper.to_array(init)
-                init.ClearField('external_data')
-                init.ClearField('data_location')
-                init.raw_data = np_array.tobytes()
+def save_and_cleanup(onnx_model, output_path, fmt):
+    import onnx
+    data_file = output_path + ".data"
+    if fmt == 'external':
+        onnx.save(onnx_model, output_path,
+                  save_as_external_data=True,
+                  all_tensors_to_one_file=True,
+                  location="model.onnx.data",
+                  size_threshold=0)
+    else:
+        inline_external_data(onnx_model)
         onnx.save(onnx_model, output_path)
-        # 清理可能残留的 .data 文件
-        data_file = output_path + ".data"
         if os.path.exists(data_file):
-            print(f"Removing residual external data file after embedded conversion: {data_file}")
             os.remove(data_file)
 
+def convert_onnx_format(model_dir, output_path, fmt):
+    import onnx
+    src = os.path.join(model_dir, "model.onnx")
+    print(f"Converting existing ONNX: {src} -> format={fmt}")
+    model = onnx.load(src, load_external_data=True)
+    save_and_cleanup(model, output_path, fmt)
     return True
 
-def export_with_optimum(model_dir, output_path, format):
-    # Use optimum library for ONNX export (most reliable for embedded format)
+def export_with_optimum(model_dir, output_path, fmt, model_type):
     try:
-        from optimum.onnxruntime import ORTModelForFeatureExtraction
         from transformers import AutoTokenizer
-    except ImportError:
+        if model_type == "reranker":
+            from optimum.onnxruntime import ORTModelForSequenceClassification as ORTModel
+            print("Detected reranker model, using ORTModelForSequenceClassification")
+        else:
+            from optimum.onnxruntime import ORTModelForFeatureExtraction as ORTModel
+            print("Detected embedding model, using ORTModelForFeatureExtraction")
+    except ImportError as e:
+        print(f"optimum not available: {e}")
         return False
 
-    model = ORTModelForFeatureExtraction.from_pretrained(model_dir, export=True)
+    model = ORTModel.from_pretrained(model_dir, export=True)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
-    # optimum exports to a directory; we save then move
     temp_dir = output_path + "_optimum_temp"
     os.makedirs(temp_dir, exist_ok=True)
     try:
         model.save_pretrained(temp_dir)
         tokenizer.save_pretrained(temp_dir)
 
-        # Move the exported ONNX file to output_path
         src_onnx = os.path.join(temp_dir, "model.onnx")
         src_data = os.path.join(temp_dir, "model.onnx.data")
-
-        # For embedded: remove any pre-existing .data file in target dir first
         target_data = output_path + ".data"
-        if format == 'embedded':
+
+        if fmt == 'embedded':
             if os.path.exists(target_data):
                 os.remove(target_data)
-                print("Removed pre-existing external data file for embedded format")
             shutil.move(src_onnx, output_path)
-            # If optimum also produced a .data file in temp, merge it
             if os.path.exists(src_data):
                 import onnx
-                from onnx import numpy_helper
                 merged = onnx.load(output_path, load_external_data=True)
-                # 清除外部数据引用，强制内联
-                for init in merged.graph.initializer:
-                    if init.HasField('data_location') or len(init.external_data) > 0:
-                        np_array = numpy_helper.to_array(init)
-                        init.ClearField('external_data')
-                        init.ClearField('data_location')
-                        init.raw_data = np_array.tobytes()
-                onnx.save(merged, output_path)
-                os.remove(src_data)
-                print("Merged external data into embedded ONNX file")
+                save_and_cleanup(merged, output_path, 'embedded')
+                if os.path.exists(src_data):
+                    os.remove(src_data)
+                print("Merged external data into embedded ONNX")
         else:
             shutil.move(src_onnx, output_path)
             if os.path.exists(src_data):
                 shutil.move(src_data, target_data)
-
         return True
     finally:
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
-def export_with_torch(model_dir, output_path, format):
-    # Fallback: torch.onnx.export with post-processing for embedded format
+def export_with_torch(model_dir, output_path, fmt, model_type):
     import torch
-    from transformers import AutoModel, AutoTokenizer
+    from transformers import AutoTokenizer
 
-    print(f"Loading model from: {model_dir}")
-    model = AutoModel.from_pretrained(model_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model.eval()
 
-    dummy_input = tokenizer("test input", return_tensors="pt", padding=True, truncation=True)
+    if model_type == "reranker":
+        from transformers import AutoModelForSequenceClassification
+        model = AutoModelForSequenceClassification.from_pretrained(model_dir)
+        model.eval()
+        print("Detected reranker model, using AutoModelForSequenceClassification")
+        dummy = tokenizer("query text", "document text",
+                          return_tensors="pt", padding=True, truncation=True, max_length=512)
+        output_names = ["logits"]
+        dynamic_axes = {
+            "input_ids":      {0: "batch_size", 1: "seq_len"},
+            "attention_mask": {0: "batch_size", 1: "seq_len"},
+            "logits":         {0: "batch_size"},
+        }
+    else:
+        from transformers import AutoModel
+        model = AutoModel.from_pretrained(model_dir)
+        model.eval()
+        print("Detected embedding model, using AutoModel")
+        dummy = tokenizer("test input", return_tensors="pt", padding=True, truncation=True)
+        output_names = ["last_hidden_state"]
+        dynamic_axes = {
+            "input_ids":        {0: "batch_size", 1: "seq_len"},
+            "attention_mask":   {0: "batch_size", 1: "seq_len"},
+            "last_hidden_state":{0: "batch_size", 1: "seq_len"},
+        }
 
-    print(f"Exporting ONNX to: {output_path}")
-    print(f"Format: {format}")
+    inputs = (dummy["input_ids"], dummy["attention_mask"])
+    input_names = ["input_ids", "attention_mask"]
+    if "token_type_ids" in dummy:
+        inputs = inputs + (dummy["token_type_ids"],)
+        input_names.append("token_type_ids")
+        for k in output_names + ["token_type_ids"]:
+            dynamic_axes[k] = {0: "batch_size", 1: "seq_len"}
 
-    # Always export with external data first (most reliable)
+    print(f"Exporting ONNX to: {output_path}, format={fmt}")
     torch.onnx.export(
-        model,
-        (dummy_input["input_ids"], dummy_input["attention_mask"]),
-        output_path,
-        input_names=["input_ids", "attention_mask"],
-        output_names=["last_hidden_state"],
-        dynamic_axes={
-            "input_ids": {0: "batch_size", 1: "sequence_length"},
-            "attention_mask": {0: "batch_size", 1: "sequence_length"},
-            "last_hidden_state": {0: "batch_size", 1: "sequence_length"}
-        },
+        model, inputs, output_path,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
         opset_version=14,
         do_constant_folding=True,
         export_params=True,
     )
 
-    # Post-process: if target is embedded but external data was produced, merge
     data_file = output_path + ".data"
-    if format == 'embedded' and os.path.exists(data_file):
-        print("Merging external data into single embedded file...")
+    if fmt == 'embedded' and os.path.exists(data_file):
         import onnx
-        from onnx import numpy_helper
         merged = onnx.load(output_path, load_external_data=True)
-        # 清除外部数据引用，强制内联
-        for init in merged.graph.initializer:
-            if init.HasField('data_location') or len(init.external_data) > 0:
-                np_array = numpy_helper.to_array(init)
-                init.ClearField('external_data')
-                init.ClearField('data_location')
-                init.raw_data = np_array.tobytes()
-        onnx.save(merged, output_path)
-        os.remove(data_file)
-        # 检查是否还有残留的 .data 文件
-        if os.path.exists(data_file):
-            print(f"Warning: .data file still exists after embedded save, removing: {data_file}")
-            os.remove(data_file)
-        print("Merged external data into embedded format successfully")
-    elif format == 'external' and not os.path.exists(data_file):
-        # Already embedded, force external by saving with external_data_to
-        print("Converting to external format...")
+        save_and_cleanup(merged, output_path, 'embedded')
+        print("Merged external data into embedded format")
+    elif fmt == 'external' and not os.path.exists(data_file):
         import onnx
-        tmp_output = output_path + ".tmp"
-        os.rename(output_path, tmp_output)
-        onnx_model = onnx.load(tmp_output)
-        onnx.save(
-            onnx_model,
-            output_path,
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location="model.onnx.data",
-            size_threshold=0,
-        )
-        os.remove(tmp_output)
-
+        tmp = output_path + ".tmp"
+        os.rename(output_path, tmp)
+        m = onnx.load(tmp)
+        save_and_cleanup(m, output_path, 'external')
+        os.remove(tmp)
     return True
 
 def main():
-    parser = argparse.ArgumentParser(description='Convert PyTorch model to ONNX')
-    parser.add_argument('--model_dir', required=True, help='Path to the model directory')
-    parser.add_argument('--output', required=True, help='Output ONNX file path')
-    parser.add_argument('--format', default='embedded', choices=['embedded', 'external'], help='ONNX format')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_dir', required=True)
+    parser.add_argument('--output',    required=True)
+    parser.add_argument('--format', default='embedded', choices=['embedded', 'external'])
     args = parser.parse_args()
 
-    # Check if model is already ONNX (no PyTorch weights) - use direct format conversion
-    has_pytorch = os.path.exists(os.path.join(args.model_dir, "pytorch_model.bin")) or \
-                  os.path.exists(os.path.join(args.model_dir, "model.safetensors"))
-    has_onnx = os.path.exists(os.path.join(args.model_dir, "model.onnx"))
+    model_type = get_model_type(args.model_dir)
+    print(f"Model type detected: {model_type}")
+
+    has_pytorch = (os.path.exists(os.path.join(args.model_dir, "pytorch_model.bin")) or
+                   os.path.exists(os.path.join(args.model_dir, "model.safetensors")))
+    has_onnx    = os.path.exists(os.path.join(args.model_dir, "model.onnx"))
 
     if not has_pytorch and has_onnx:
-        # Already ONNX, just convert between embedded/external formats
-        print("Model is already ONNX (no PyTorch weights), converting format directly...")
+        print("Model already ONNX, converting format only...")
         convert_onnx_format(args.model_dir, args.output, args.format)
     else:
-        # Strategy 1: Try optimum (most reliable for embedded format)
-        print(f"Attempting ONNX export with optimum...")
-        if export_with_optimum(args.model_dir, args.output, args.format):
-            # Verify export
-            try:
-                import onnx
-                onnx_model = onnx.load(args.output, load_external_data=False)
-                onnx.checker.check_model(onnx_model)
-            except Exception as e:
-                print(f"Warning: ONNX verification failed: {e}")
-        else:
-            print("optimum not available, falling back to torch.onnx.export...")
-            export_with_torch(args.model_dir, args.output, args.format)
+        print("Attempting export with optimum...")
+        if not export_with_optimum(args.model_dir, args.output, args.format, model_type):
+            print("optimum failed, falling back to torch.onnx.export...")
+            export_with_torch(args.model_dir, args.output, args.format, model_type)
 
-    # Report results
-    file_size = os.path.getsize(args.output) / (1024 * 1024)
-    print(f"ONNX export completed successfully! Size: {file_size:.2f} MB")
-
-    data_file = args.output + ".data"
-    if os.path.exists(data_file):
-        data_size = os.path.getsize(data_file) / (1024 * 1024)
-        print(f"External data file: {data_size:.2f} MB")
-        print("Note: Using external data format (model.onnx + model.onnx.data)")
+    size = os.path.getsize(args.output) / 1024 / 1024
+    print(f"Export completed! model.onnx: {size:.1f} MB")
+    data = args.output + ".data"
+    if os.path.exists(data):
+        print(f"External data: {os.path.getsize(data)/1024/1024:.1f} MB (format=external)")
     else:
-        print("Note: Using embedded format (single file)")
+        print("Format: embedded (single file)")
 
 if __name__ == "__main__":
     main()

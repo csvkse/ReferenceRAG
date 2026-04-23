@@ -6,17 +6,10 @@
              Exit="Application_Exit"
              ShutdownMode="OnExplicitShutdown">
     <Application.Resources>
+        <!-- ContextMenu 在 App.xaml.cs 中动态构建，方便 IsChecked 状态控制 -->
         <tb:TaskbarIcon x:Key="TrayIcon"
                         IconSource="/Assets/tray-icon.ico"
                         ToolTipText="ReferenceRAG"
-                        TrayLeftMouseDown="TrayIcon_LeftMouseDown">
-            <tb:TaskbarIcon.ContextMenu>
-                <ContextMenu>
-                    <MenuItem Header="打开" Click="OpenMenuItem_Click" />
-                    <Separator />
-                    <MenuItem Header="退出" Click="ExitMenuItem_Click" />
-                </ContextMenu>
-            </tb:TaskbarIcon.ContextMenu>
-        </tb:TaskbarIcon>
+                        TrayLeftMouseDown="TrayIcon_LeftMouseDown" />
     </Application.Resources>
 </Application>

@@ -1,5 +1,7 @@
+using System.IO;
 using System.Net.Http;
 using System.Windows;
+using System.Windows.Controls;
 using Hardcodet.Wpf.TaskbarNotification;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
@@ -17,9 +19,40 @@ public partial class App : Application
     private Task? _hostTask;
     private MainWindow? _mainWindow;
 
+    // 托盘菜单中需要动态更新 IsChecked 的项
+    private MenuItem? _autoStartMenuItem;
+    private MenuItem? _startMinimizedMenuItem;
+
     public static int ServicePort { get; private set; }
 
     private async void Application_Startup(object sender, StartupEventArgs e)
+    {
+        // 全局异常处理：捕获 Dispatcher 未处理异常，写日志后报错
+        DispatcherUnhandledException += (_, ex) =>
+        {
+            WriteCrashLog(ex.Exception);
+            MessageBox.Show($"未处理异常：{ex.Exception.Message}\n\n详情见 crash.log",
+                "ReferenceRAG 崩溃", MessageBoxButton.OK, MessageBoxImage.Error);
+            ex.Handled = true;
+            Shutdown(1);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, ex) =>
+            WriteCrashLog(ex.ExceptionObject as Exception);
+
+        try
+        {
+            await StartupCore(e);
+        }
+        catch (Exception ex)
+        {
+            WriteCrashLog(ex);
+            MessageBox.Show($"启动失败：{ex.Message}\n\n详情见 crash.log",
+                "ReferenceRAG 启动失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            Shutdown(1);
+        }
+    }
+
+    private async Task StartupCore(StartupEventArgs e)
     {
         if (!CheckWebView2Runtime()) return;
 
@@ -33,6 +66,9 @@ public partial class App : Application
             Shutdown();
             return;
         }
+
+        // 构建托盘菜单（在服务启动前先显示图标）
+        BuildTrayContextMenu();
 
         ServicePort = ResolvePort();
         Console.WriteLine($"[Desktop] 分配端口: {ServicePort}");
@@ -59,7 +95,22 @@ public partial class App : Application
         }
 
         _mainWindow = new MainWindow(ServicePort);
-        _mainWindow.Show();
+
+        // --minimized 参数由注册表自启动传入，或用户开启了"最小化启动"设置
+        bool startMinimized = e.Args.Contains("--minimized") || StartupManager.GetStartMinimized();
+        if (!startMinimized)
+            _mainWindow.Show();
+    }
+
+    private static void WriteCrashLog(Exception? ex)
+    {
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "crash.log");
+            File.AppendAllText(path,
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]\n{ex}\n\n");
+        }
+        catch { }
     }
 
     private async void Application_Exit(object sender, ExitEventArgs e)
@@ -80,6 +131,41 @@ public partial class App : Application
         _instanceMutex?.Dispose();
     }
 
+    // ── 托盘菜单 ──────────────────────────────────────────────────
+
+    private void BuildTrayContextMenu()
+    {
+        _autoStartMenuItem = new MenuItem
+        {
+            Header = "开机自启动",
+            IsCheckable = true,
+            IsChecked = StartupManager.GetAutoStart()
+        };
+        _autoStartMenuItem.Click += AutoStartMenuItem_Click;
+
+        _startMinimizedMenuItem = new MenuItem
+        {
+            Header = "最小化启动",
+            IsCheckable = true,
+            IsChecked = StartupManager.GetStartMinimized()
+        };
+        _startMinimizedMenuItem.Click += StartMinimizedMenuItem_Click;
+
+        var menu = new ContextMenu();
+        menu.Items.Add(new MenuItem { Header = "打开" });
+        ((MenuItem)menu.Items[0]).Click += OpenMenuItem_Click;
+        menu.Items.Add(new Separator());
+        menu.Items.Add(_autoStartMenuItem);
+        menu.Items.Add(_startMinimizedMenuItem);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(new MenuItem { Header = "退出" });
+        ((MenuItem)menu.Items[5]).Click += ExitMenuItem_Click;
+
+        var trayIcon = TryFindResource("TrayIcon") as TaskbarIcon;
+        if (trayIcon != null)
+            trayIcon.ContextMenu = menu;
+    }
+
     private void TrayIcon_LeftMouseDown(object sender, RoutedEventArgs e)
     {
         RestoreMainWindow();
@@ -88,6 +174,18 @@ public partial class App : Application
     private void OpenMenuItem_Click(object sender, RoutedEventArgs e)
     {
         RestoreMainWindow();
+    }
+
+    private void AutoStartMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        bool newValue = _autoStartMenuItem!.IsChecked;
+        StartupManager.SetAutoStart(newValue);
+    }
+
+    private void StartMinimizedMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        bool newValue = _startMinimizedMenuItem!.IsChecked;
+        StartupManager.SetStartMinimized(newValue);
     }
 
     private void ExitMenuItem_Click(object sender, RoutedEventArgs e)
@@ -104,9 +202,8 @@ public partial class App : Application
         _mainWindow.RestoreFromTray();
     }
 
-    /// <summary>
-    /// 读取配置中的 DesktopPort（默认 7898），端口被占用时回退随机端口。
-    /// </summary>
+    // ── 端口解析 ──────────────────────────────────────────────────
+
     private static int ResolvePort()
     {
         var config = new ConfigurationBuilder()
@@ -126,6 +223,8 @@ public partial class App : Application
         Console.WriteLine($"[Desktop] 配置端口 {configured} 已占用，回退到随机端口: {fallback}");
         return fallback;
     }
+
+    // ── 辅助方法 ──────────────────────────────────────────────────
 
     private static bool AcquireSingleInstanceMutex()
     {

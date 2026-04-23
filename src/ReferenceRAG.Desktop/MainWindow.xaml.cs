@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.IO;
 using System.Windows;
 using Microsoft.Web.WebView2.Core;
@@ -44,7 +45,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 最小化到托盘：隐藏窗口并从任务栏移除。
+    /// 最小化按钮：隐藏窗口并从任务栏移除。
     /// </summary>
     protected override void OnStateChanged(EventArgs e)
     {
@@ -54,6 +55,17 @@ public partial class MainWindow : Window
             ShowInTaskbar = false;
         }
         base.OnStateChanged(e);
+    }
+
+    /// <summary>
+    /// 关闭按钮（X）：最小化到托盘而非退出，退出须通过托盘菜单"退出"。
+    /// </summary>
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        e.Cancel = true;
+        Hide();
+        ShowInTaskbar = false;
+        base.OnClosing(e);
     }
 
     /// <summary>
