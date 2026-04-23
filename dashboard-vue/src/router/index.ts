@@ -75,6 +75,12 @@ const routes: RouteRecordRaw[] = [
         name: 'Guide',
         component: () => import('@/views/Guide.vue'),
         meta: { title: '使用指南' }
+      },
+      {
+        path: 'graph',
+        name: 'Graph',
+        component: () => import('@/views/Graph.vue'),
+        meta: { title: '知识图谱' }
       }
     ]
   }

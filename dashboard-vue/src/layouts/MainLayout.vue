@@ -77,7 +77,8 @@ import {
   LayersOutline,
   ConstructOutline,
   TerminalOutline,
-  InformationCircleOutline
+  InformationCircleOutline,
+  GitNetworkOutline
 } from '@vicons/ionicons5'
 import { useIndexStore } from '@/stores/index'
 import { useAuthStore } from '@/stores/auth'
@@ -118,6 +119,11 @@ const menuOptions: MenuOption[] = [
         label: '向量搜索',
         key: 'Search',
         icon: renderIcon(SearchOutline)
+      },
+      {
+        label: '知识图谱',
+        key: 'Graph',
+        icon: renderIcon(GitNetworkOutline)
       }
     ]
   },

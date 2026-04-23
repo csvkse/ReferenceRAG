@@ -99,8 +99,18 @@
               <n-form-item label="监听端口">
                 <n-input-number v-model:value="config.service.port" :min="1024" :max="65535" style="width: 200px" />
               </n-form-item>
-              <n-form-item label="监听地址">
-                <n-input v-model:value="config.service.host" placeholder="localhost" style="width: 200px" />
+              <n-form-item label="允许外网访问">
+                <n-space align="center">
+                  <n-switch
+                    v-model:value="config.service.allowNetworkAccess"
+                    @update:value="onNetworkAccessChange"
+                  />
+                  <n-text depth="3" style="font-size: 12px">
+                    {{ config.service.allowNetworkAccess
+                      ? '监听 0.0.0.0（局域网/外网可访问）— 修改后需重启'
+                      : '仅监听 localhost（本机访问）' }}
+                  </n-text>
+                </n-space>
               </n-form-item>
               <n-form-item label="启用 CORS">
                 <n-switch v-model:value="config.service.enableCors" />
@@ -241,6 +251,7 @@ const defaultConfig: ReferenceRAGConfig = {
   service: {
     port: 5000,
     host: 'localhost',
+    allowNetworkAccess: false,
     enableCors: true,
     enableSwagger: true,
     logLevel: 'Information',
@@ -319,6 +330,12 @@ const loadCudaAvailability = async () => {
   }
 }
 
+const networkAccessChanged = ref(false)
+
+const onNetworkAccessChange = () => {
+  networkAccessChanged.value = true
+}
+
 const handleSave = async () => {
   saving.value = true
   try {
@@ -327,7 +344,12 @@ const handleSave = async () => {
       await settingsApi.updateModelsPath(modelsPath)
     }
     await settingsApi.save(config.value)
-    message.success('配置已保存，模型页面将自动刷新模型列表')
+    if (networkAccessChanged.value) {
+      message.warning('配置已保存 — 监听地址已变更，需要重启服务才能生效')
+      networkAccessChanged.value = false
+    } else {
+      message.success('配置已保存，模型页面将自动刷新模型列表')
+    }
     // 通知模型页面刷新（通过 localStorage 事件）
     localStorage.setItem('modelsPathChanged', Date.now().toString())
   } catch (error: any) {

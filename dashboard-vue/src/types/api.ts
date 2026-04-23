@@ -204,6 +204,7 @@ export interface SearchConfig {
 export interface ServiceConfig {
   port: number
   host: string
+  allowNetworkAccess: boolean
   enableCors: boolean
   enableSwagger: boolean
   logLevel: string

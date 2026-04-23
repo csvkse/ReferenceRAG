@@ -327,4 +327,14 @@ export const pathsApi = {
   getPaths: () => api.get<PathsResponse>('/paths')
 }
 
+// Knowledge Graph
+export const graphApi = {
+  stats: () => api.get('/graph/stats'),
+  node: (nodeId: string) => api.get(`/graph/node/${encodeURIComponent(nodeId)}`),
+  neighbors: (nodeId: string, depth = 1, edgeTypes?: string) =>
+    api.get(`/graph/neighbors/${encodeURIComponent(nodeId)}`, { params: { depth, edgeTypes } }),
+  search: (q: string, limit = 10) => api.get('/graph/search', { params: { q, limit } }),
+  subgraph: (rootIds: string[], depth = 1) => api.post('/graph/subgraph', { rootIds, depth })
+}
+
 export default api
