@@ -943,11 +943,11 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-# Windows: onnx/onnxruntime installed to C:\py (short path workaround for MAX_PATH limit)
-# Append at END so system packages (torch, transformers) take priority
+# Windows: onnx/onnxscript installed to C:\py (short path workaround for MAX_PATH limit)
+# INSERT at front so C:\py onnx takes priority over any broken system onnx install
 _short_path = r'C:\py'
 if os.path.isdir(_short_path) and _short_path not in sys.path:
-    sys.path.append(_short_path)
+    sys.path.insert(0, _short_path)
 
 def get_model_type(model_dir):
     # 从 config.json 检测模型架构：reranker / embedding
@@ -1077,16 +1077,17 @@ def export_with_torch(model_dir, output_path, fmt, model_type):
         input_names.append("token_type_ids")
         dynamic_axes["token_type_ids"] = {0: "batch", 1: "seq"}
 
-    print(f"Exporting ONNX to: {output_path}, opset=17, format={fmt}")
+    print(f"Exporting ONNX to: {output_path}, opset=14, format={fmt}")
     with torch.no_grad():
         torch.onnx.export(
             model, inputs, output_path,
             input_names=input_names,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
-            opset_version=17,
+            opset_version=14,
             do_constant_folding=True,
             export_params=True,
+            dynamo=False,  # use legacy TorchScript path; torch 2.9+ new exporter needs onnxscript
         )
     print(f"Export complete, size={os.path.getsize(output_path)/1024/1024:.1f} MB")
 
