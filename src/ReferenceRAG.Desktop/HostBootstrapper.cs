@@ -196,10 +196,11 @@ public static class HostBootstrapper
             var logger           = sp.GetRequiredService<ILogger<SearchService>>();
             var hybridService    = sp.GetRequiredService<HybridSearchService>();
             var rerankService    = sp.GetRequiredService<IRerankService>();
+            var graphStore       = sp.GetService<ReferenceRAG.Core.Interfaces.IGraphStore>();
 
             return new SearchService(
                 vectorStore, embeddingService, textEnhancer,
-                configManager, logger, hybridService, rerankService);
+                configManager, logger, hybridService, rerankService, graphStore);
         });
 
         builder.Services.AddScoped<HierarchicalSearchService>();

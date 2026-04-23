@@ -3,6 +3,7 @@ using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Core.Services.Graph;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -16,6 +17,7 @@ public class SearchService : ISearchService
     private readonly ITextEnhancer _textEnhancer;
     private readonly HybridSearchService? _hybridSearchService;
     private readonly IRerankService? _rerankService;
+    private readonly IGraphStore? _graphStore;
     private readonly ConfigManager _configManager;
     private readonly ILogger<SearchService> _logger;
 
@@ -26,7 +28,8 @@ public class SearchService : ISearchService
         ConfigManager configManager,
         ILogger<SearchService> logger,
         HybridSearchService? hybridSearchService = null,
-        IRerankService? rerankService = null)
+        IRerankService? rerankService = null,
+        IGraphStore? graphStore = null)
     {
         _vectorStore = vectorStore;
         _embeddingService = embeddingService;
@@ -35,6 +38,7 @@ public class SearchService : ISearchService
         _logger = logger;
         _hybridSearchService = hybridSearchService;
         _rerankService = rerankService;
+        _graphStore = graphStore;
     }
 
     /// <summary>
@@ -137,6 +141,13 @@ public class SearchService : ISearchService
         {
             // 标准向量搜索
             topResults = await ExecuteStandardSearchAsync(request, enabledSources, cancellationToken);
+        }
+
+        // ========== 图扩展：补充 wiki-link 邻居节点 ==========
+        var searchConfig = config.Search;
+        if (searchConfig.EnableGraphExpansion && _graphStore != null && topResults.Count > 0)
+        {
+            topResults = await ExpandWithGraphAsync(topResults, searchConfig, cancellationToken);
         }
 
         // ========== 第二阶段：精排 ==========
@@ -467,6 +478,87 @@ public class SearchService : ISearchService
                 ObsidianLink = $"[[#L{c.StartLine}-L{c.EndLine}]]"
             })
             .ToList();
+    }
+
+    /// <summary>
+    /// 图扩展：对每个召回结果，查找其 wiki-link 邻居文件的 chunks，追加到候选集。
+    /// 邻居 chunks 初始分数设为直接召回结果的最低分乘以衰减系数，确保精排后不会盲目排前。
+    /// </summary>
+    private async Task<List<SearchResult>> ExpandWithGraphAsync(
+        List<SearchResult> results,
+        SearchConfig config,
+        CancellationToken ct)
+    {
+        if (_graphStore == null) return results;
+
+        var depth = Math.Clamp(config.GraphExpansionDepth, 1, 2);
+        var maxNodes = Math.Clamp(config.GraphExpansionMaxNodes, 1, 10);
+        var existingChunkIds = results.Select(r => r.ChunkId).ToHashSet();
+        var existingFileIds = results.Select(r => r.FileId).ToHashSet();
+        var additions = new List<SearchResult>();
+
+        // 邻居初始分 = 当前最低分 × 0.6（低于直接命中，精排后可能升排）
+        var minScore = results.Min(r => r.Score) * 0.6f;
+
+        foreach (var result in results)
+        {
+            if (string.IsNullOrEmpty(result.FilePath)) continue;
+
+            // 用相对路径作为节点 ID（与 GraphIndexingService.NormalizeNodeId 一致）
+            var nodeId = result.FilePath.Replace('\\', '/').TrimStart('/');
+
+            try
+            {
+                var traversal = await _graphStore.GetNeighborsAsync(nodeId, depth, ct: ct);
+
+                var neighborNodes = traversal.Nodes
+                    .Where(n => n.Id != nodeId)
+                    .Take(maxNodes)
+                    .ToList();
+
+                foreach (var neighbor in neighborNodes)
+                {
+                    // 已召回的文件跳过
+                    if (existingFileIds.Contains(neighbor.Id)) continue;
+
+                    // 用 chunkIds 里存的第一个 chunk
+                    var chunkId = neighbor.ChunkIds.FirstOrDefault();
+                    if (string.IsNullOrEmpty(chunkId) || existingChunkIds.Contains(chunkId)) continue;
+
+                    var chunk = await _vectorStore.GetChunkAsync(chunkId, ct);
+                    if (chunk == null) continue;
+
+                    var file = await _vectorStore.GetFileAsync(chunk.FileId, ct);
+                    if (file == null) continue;
+
+                    additions.Add(new SearchResult
+                    {
+                        ChunkId = chunk.Id,
+                        FileId = chunk.FileId,
+                        FilePath = file.Path,
+                        Title = file.Title ?? file.FileName,
+                        Content = chunk.Content,
+                        Score = minScore,
+                        Source = file.Source ?? string.Empty,
+                        StartLine = chunk.StartLine,
+                        EndLine = chunk.EndLine,
+                        HeadingPath = chunk.HeadingPath
+                    });
+
+                    existingChunkIds.Add(chunk.Id);
+                    existingFileIds.Add(chunk.FileId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "图扩展失败: {NodeId}", nodeId);
+            }
+        }
+
+        if (additions.Count > 0)
+            _logger.LogInformation("图扩展: +{Count} 个邻居 chunks（共 {Total} 个候选）", additions.Count, results.Count + additions.Count);
+
+        return results.Concat(additions).ToList();
     }
 
 }

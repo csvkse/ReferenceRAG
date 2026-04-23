@@ -287,6 +287,21 @@ public class SearchConfig
     /// legacy: 使用手动倒排索引实现（备用）
     /// </summary>
     public string BM25Provider { get; set; } = "fts5";
+
+    /// <summary>
+    /// 是否启用知识图谱扩展召回（基于 wiki-link 邻居节点）
+    /// </summary>
+    public bool EnableGraphExpansion { get; set; } = false;
+
+    /// <summary>
+    /// 图扩展遍历深度（1-2，默认 1）
+    /// </summary>
+    public int GraphExpansionDepth { get; set; } = 1;
+
+    /// <summary>
+    /// 每个结果最多扩展的邻居节点数（默认 3）
+    /// </summary>
+    public int GraphExpansionMaxNodes { get; set; } = 3;
 }
 
 /// <summary>

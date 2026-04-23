@@ -266,6 +266,7 @@ builder.Services.AddScoped<ISearchService>(sp =>
     var logger = sp.GetRequiredService<ILogger<SearchService>>();
     var hybridSearchService = sp.GetRequiredService<HybridSearchService>();
     var rerankService = sp.GetRequiredService<IRerankService>();
+    var graphStore = sp.GetService<IGraphStore>();
 
     return new SearchService(
         vectorStore,
@@ -274,7 +275,8 @@ builder.Services.AddScoped<ISearchService>(sp =>
         configManager,
         logger,
         hybridSearchService,
-        rerankService);
+        rerankService,
+        graphStore);
 });
 builder.Services.AddScoped<HierarchicalSearchService>();
 // 注册混合搜索服务（从 appsettings.json 读取 HybridSearch 配置）
