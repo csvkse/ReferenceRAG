@@ -65,6 +65,9 @@ public class BM25IndexController : ControllerBase
             });
         }
 
+        // 先清空再重建，避免孤立条目累积
+        await _bm25Store.ClearIndexAsync();
+
         var progress = new Progress<int>(p =>
         {
             // 进度报告

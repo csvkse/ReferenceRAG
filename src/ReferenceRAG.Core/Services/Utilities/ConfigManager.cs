@@ -9,11 +9,15 @@ namespace ReferenceRAG.Core.Services;
 
 /// <summary>
 /// 配置管理器 - 从 appsettings.json 读取 ReferenceRAG 配置
+/// 支持独立配置文件以保留 appsettings.json 中的注释
 /// </summary>
 public class ConfigManager
 {
     private ObsidianRagConfig? _config;
     private static readonly ILogger _logger = StaticLogger.GetLogger("ConfigManager");
+
+    // 独立配置文件路径（优先使用，避免修改 appsettings.json 导致注释丢失）
+    private static readonly string RagConfigFileName = "referencerag.json";
 
     private static readonly JsonSerializerOptions _readOptions = new()
     {
@@ -42,12 +46,44 @@ public class ConfigManager
     }
 
     /// <summary>
-    /// 加载配置 - 从 appsettings.json 读取 ReferenceRAG 节
+    /// 获取独立配置文件路径
+    /// </summary>
+    private static string GetRagConfigPath()
+    {
+        var currentDir = Directory.GetCurrentDirectory();
+        return Path.Combine(currentDir, RagConfigFileName);
+    }
+
+    /// <summary>
+    /// 加载配置 - 优先从独立配置文件读取，其次从 appsettings.json 读取 ReferenceRAG 节
     /// </summary>
     public ObsidianRagConfig Load()
     {
         if (_config != null) return _config;
 
+        // 优先尝试从独立配置文件加载
+        var ragConfigPath = GetRagConfigPath();
+        if (File.Exists(ragConfigPath))
+        {
+            try
+            {
+                var json = File.ReadAllText(ragConfigPath);
+                _config = JsonSerializer.Deserialize<ObsidianRagConfig>(json, _readOptions);
+                if (_config != null)
+                {
+                    _logger.LogInformation($"[ConfigManager] 已从 {RagConfigFileName} 加载配置");
+                    ApplyEnvironmentVariables(_config);
+                    MigrateOldConfig(_config);
+                    return _config;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning($"[ConfigManager] 独立配置文件解析失败: {ex.Message}，尝试从 appsettings.json 加载");
+            }
+        }
+
+        // 回退到 appsettings.json
         var appSettingsPath = GetAppSettingsPath();
         if (File.Exists(appSettingsPath))
         {
@@ -59,11 +95,18 @@ public class ConfigManager
                 {
                     _config = ragConfig.Deserialize<ObsidianRagConfig>(_readOptions);
                     _logger.LogInformation($"[ConfigManager] 已从 appsettings.json 加载配置");
+
+                    // 迁移到独立配置文件
+                    if (_config != null)
+                    {
+                        Save(_config);
+                        _logger.LogInformation($"[ConfigManager] 已迁移配置到 {RagConfigFileName}");
+                    }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogInformation($"[ConfigManager] 配置文件解析失败: {ex.Message}");
+                _logger.LogWarning($"[ConfigManager] 配置文件解析失败: {ex.Message}");
             }
         }
 
@@ -95,33 +138,26 @@ public class ConfigManager
     }
 
     /// <summary>
-    /// 保存配置 - 更新 appsettings.json 的 ReferenceRAG 节
+    /// 保存配置 - 保存到独立配置文件，避免修改 appsettings.json 导致注释丢失
     /// </summary>
     public void Save(ObsidianRagConfig config)
     {
-        var appSettingsPath = GetAppSettingsPath();
+        var ragConfigPath = GetRagConfigPath();
 
-        string json;
         try
         {
-            json = File.Exists(appSettingsPath) ? File.ReadAllText(appSettingsPath) : "{}";
-            using var doc = JsonDocument.Parse(json);
-            var root = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json) ?? [];
+            // 保存到独立配置文件（保留 appsettings.json 中的注释）
+            var json = JsonSerializer.Serialize(config, _writeOptions);
+            File.WriteAllText(ragConfigPath, json);
 
-            var ragJson = JsonSerializer.Serialize(config, _writeOptions);
-            root["ReferenceRAG"] = JsonDocument.Parse(ragJson).RootElement;
-
-            var finalJson = JsonSerializer.Serialize(root, _writeOptions);
-            File.WriteAllText(appSettingsPath, finalJson);
+            _config = config;
+            _logger.LogInformation($"[ConfigManager] 配置已保存到: {ragConfigPath}");
         }
-        catch
+        catch (Exception ex)
         {
-            var ragJson = JsonSerializer.Serialize(new { ReferenceRAG = config }, _writeOptions);
-            File.WriteAllText(appSettingsPath, ragJson);
+            _logger.LogError($"[ConfigManager] 保存配置失败: {ex.Message}");
+            throw;
         }
-
-        _config = config;
-        _logger.LogInformation("[ConfigManager] 配置已保存到: {Path}", appSettingsPath);
     }
 
     /// <summary>

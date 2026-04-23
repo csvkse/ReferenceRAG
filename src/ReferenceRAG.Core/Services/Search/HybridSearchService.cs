@@ -63,7 +63,10 @@ public class HybridSearchService
         // 1. BM25 关键词搜索
         var bm25Results = await _bm25Store.SearchAsync(query, topK * 2, k1, b);
         var bm25RankMap = CreateRankMap(bm25Results.Select(r => r.ChunkId).ToList());
-        var bm25Dict = bm25Results.ToDictionary(r => r.ChunkId, r => r);
+        // 使用 GroupBy 处理可能的重复 ChunkId，取第一个结果
+        var bm25Dict = bm25Results
+            .GroupBy(r => r.ChunkId)
+            .ToDictionary(g => g.Key, g => g.First());
 
         // 获取 BM25 最大分数用于归一化
         var maxBm25Score = bm25Results.Count > 0 ? bm25Results.Max(r => r.Score) : 1.0;
@@ -73,7 +76,10 @@ public class HybridSearchService
         var queryVector = await _embeddingService.EncodeAsync(query, EmbeddingMode.Query, cancellationToken);
         var modelName = _embeddingService.ModelName;
         var embeddingResults = await _vectorStore.SearchAsync(queryVector, modelName, topK * 2, cancellationToken);
-        var embeddingDict = embeddingResults.ToDictionary(r => r.ChunkId, r => r);
+        // 使用 GroupBy 处理可能的重复 ChunkId，取第一个结果
+        var embeddingDict = embeddingResults
+            .GroupBy(r => r.ChunkId)
+            .ToDictionary(g => g.Key, g => g.First());
         var embeddingRankMap = CreateRankMap(embeddingResults.Select(r => r.ChunkId).ToList());
 
         // 获取 Embedding 最大分数用于归一化
@@ -107,6 +113,7 @@ public class HybridSearchService
             int startLine = embeddingResult?.StartLine ?? 0;
             int endLine = embeddingResult?.EndLine ?? 0;
             string? headingPath = embeddingResult?.HeadingPath;
+            string? sqliteContent = null;  // 从 SQLite 取到的原始内容，优先于 BM25 分词内容
 
             if (embeddingResult == null && bm25Result != null)
             {
@@ -115,6 +122,12 @@ public class HybridSearchService
                     var chunk = await _vectorStore.GetChunkAsync(docId, cancellationToken);
                     if (chunk != null)
                     {
+                        // 使用 SQLite 存储的原始内容，而非 BM25 的分词内容
+                        sqliteContent = chunk.Content;
+                        startLine = chunk.StartLine;
+                        endLine = chunk.EndLine;
+                        headingPath = chunk.HeadingPath;
+
                         var file = await _vectorStore.GetFileAsync(chunk.FileId, cancellationToken);
                         if (file != null)
                         {
@@ -137,7 +150,8 @@ public class HybridSearchService
                 FileId = fileId,
                 FilePath = filePath,
                 Title = title,
-                Content = embeddingResult?.Content ?? bm25Result?.Content ?? string.Empty,
+                // 优先级：向量搜索内容 > SQLite 原始内容 > BM25 分词内容
+                Content = embeddingResult?.Content ?? sqliteContent ?? bm25Result?.Content ?? string.Empty,
                 Score = fusedScore,
                 BM25Score = (float)(bm25Result?.Score ?? 0),
                 EmbeddingScore = (float)(embeddingResult?.Score ?? 0),
@@ -205,30 +219,16 @@ public class HybridSearchService
             var bm25Rank = bm25RankMap.GetValueOrDefault(docId, -1);
             var embeddingRank = embeddingRankMap.GetValueOrDefault(docId, -1);
 
-            double fusedScore = 0;
-
-            if (bm25Rank >= 0)
-            {
-                fusedScore += 1.0 / (k + bm25Rank);
-            }
-
-            if (embeddingRank >= 0)
-            {
-                fusedScore += 1.0 / (k + embeddingRank);
-            }
-
-            if (bm25Rank < 0 && embeddingRank < 0)
-            {
-                fusedScore = 0;
-            }
-            else if (bm25Rank < 0)
-            {
-                fusedScore = 0.5 / (k + embeddingRank);
-            }
-            else if (embeddingRank < 0)
-            {
+            // 同时出现在两个列表：标准 RRF 求和；仅出现在一个列表：打 0.5 折扣
+            double fusedScore;
+            if (bm25Rank >= 0 && embeddingRank >= 0)
+                fusedScore = 1.0 / (k + bm25Rank) + 1.0 / (k + embeddingRank);
+            else if (bm25Rank >= 0)
                 fusedScore = 0.5 / (k + bm25Rank);
-            }
+            else if (embeddingRank >= 0)
+                fusedScore = 0.5 / (k + embeddingRank);
+            else
+                fusedScore = 0;
 
             fusedScores[docId] = (float)fusedScore;
         }

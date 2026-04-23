@@ -376,8 +376,8 @@ public class RerankMetricsTests
     {
         Console.WriteLine("=== TC-MET-009: 全部不相关文档 ===");
 
-        // 所有关联性都是 0 或低于阈值
-        var expectedRelevance = new List<double> { 0.1, 0.2, 0.3 };
+        // 所有关联性都是 0（真正的不相关）
+        var expectedRelevance = new List<double> { 0, 0, 0 };
         var results = new List<(int OriginalIndex, double Score)>
         {
             (0, 0.5),

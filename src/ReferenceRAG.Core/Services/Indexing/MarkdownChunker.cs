@@ -15,6 +15,10 @@ public class MarkdownChunker : IMarkdownChunker
     private readonly ITokenizer? _tokenizer;
     private ChunkingOptions _options;
 
+    // 预编译正则表达式，避免循环中重复创建
+    private static readonly System.Text.RegularExpressions.Regex HeadingPattern =
+        new(@"^(#{1,6})\s+(.+)$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
     public MarkdownChunker(ChunkingOptions? options = null, ITokenizer? tokenizer = null)
     {
         _options = options ?? new ChunkingOptions();
@@ -97,7 +101,7 @@ public class MarkdownChunker : IMarkdownChunker
             var lineNum = i + 1;
 
             // 检测标题 (Markdown 格式: # Title)
-            var headingMatch = System.Text.RegularExpressions.Regex.Match(line, @"^(#{1,6})\s+(.+)$");
+            var headingMatch = HeadingPattern.Match(line);
 
             if (headingMatch.Success)
             {
@@ -202,11 +206,17 @@ public class MarkdownChunker : IMarkdownChunker
             }
             else if (bufferTokens + paraTokens > _options.MaxTokens)
             {
-                // 缓冲区满
+                // 缓冲区满，输出当前 chunk
                 result.Add(CreateChunkFromParagraphs(buffer, allLines, chunkIndex++, section, fileId));
+
+                // 保留末尾段落作为滑动重叠，提升边界处的语义召回率
+                var overlap = TakeTrailingParagraphs(buffer, _options.OverlapTokens);
                 buffer.Clear();
+                buffer.AddRange(overlap);
+                bufferTokens = overlap.Sum(p => _tokenizer?.CountTokens(p.Content) ?? TokenEstimator.EstimateTokens(p.Content));
+
                 buffer.Add(para);
-                bufferTokens = paraTokens;
+                bufferTokens += paraTokens;
             }
             else
             {
@@ -422,6 +432,27 @@ public class MarkdownChunker : IMarkdownChunker
         if (content.Length < ShortContentThreshold) weight *= 1.2f;
 
         return weight;
+    }
+
+    /// <summary>
+    /// 从缓冲区末尾取不超过 maxTokens 的段落，用于滑动重叠
+    /// </summary>
+    private List<Paragraph> TakeTrailingParagraphs(List<Paragraph> buffer, int maxTokens)
+    {
+        if (maxTokens <= 0 || buffer.Count == 0) return new List<Paragraph>();
+
+        var result = new List<Paragraph>();
+        var tokens = 0;
+
+        for (int i = buffer.Count - 1; i >= 0; i--)
+        {
+            var t = _tokenizer?.CountTokens(buffer[i].Content) ?? TokenEstimator.EstimateTokens(buffer[i].Content);
+            if (tokens + t > maxTokens && result.Count > 0) break;
+            result.Insert(0, buffer[i]);
+            tokens += t;
+        }
+
+        return result;
     }
 
     /// <summary>

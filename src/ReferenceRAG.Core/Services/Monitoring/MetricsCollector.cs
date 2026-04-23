@@ -127,7 +127,26 @@ public class MetricsCollector : IDisposable
         _totalIndexTokens = 0;
 
         // 初始化定时器，每 30 秒持久化一次
-        _flushTimer = new Timer(async _ => await FlushTokenMetricsAsync(), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        // 使用 try-catch 包裹 async void lambda，避免异常导致应用崩溃
+        _flushTimer = new Timer(_ =>
+        {
+            _ = FlushTokenMetricsAsyncSafe();
+        }, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>
+    /// 安全的持久化方法，捕获所有异常
+    /// </summary>
+    private async Task FlushTokenMetricsAsyncSafe()
+    {
+        try
+        {
+            await FlushTokenMetricsAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[MetricsCollector] 定时持久化异常: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -375,10 +394,13 @@ public class MetricsCollector : IDisposable
     {
         if (_tokenBuffer.IsEmpty) return;
 
+        // 备份缓冲区数据，写入失败时可恢复
+        var metricsToFlush = new List<TokenMetrics>();
+        var flushFailed = false;
+
         try
         {
             // 尝试清空缓冲区并获取所有待写入的记录
-            var metricsToFlush = new List<TokenMetrics>();
             while (_tokenBuffer.TryTake(out var metric))
             {
                 metricsToFlush.Add(metric);
@@ -399,10 +421,15 @@ public class MetricsCollector : IDisposable
 
             await File.AppendAllLinesAsync(_tokenLogPath, lines);
         }
-        catch
+        catch (Exception ex)
         {
-            // 持久化失败时静默处理，避免影响主业务
-            // 可根据需要添加日志记录
+            flushFailed = true;
+            // 持久化失败时，将数据放回缓冲区，避免丢失
+            foreach (var metric in metricsToFlush)
+            {
+                _tokenBuffer.Add(metric);
+            }
+            Console.WriteLine($"[MetricsCollector] Token 指标持久化失败: {ex.Message}，已保留 {metricsToFlush.Count} 条记录在缓冲区");
         }
     }
 

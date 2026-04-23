@@ -6,6 +6,13 @@ import Components from 'unplugin-vue-components/vite';
 import { NaiveUiResolver } from 'unplugin-vue-components/resolvers';
 export default defineConfig({
     base: '/',
+    build: {
+        outDir: 'dist',
+        assetsDir: 'assets'
+    },
+    define: {
+        __API_BASE_URL__: JSON.stringify(process.env.VITE_API_BASE_URL || '')
+    },
     plugins: [
         vue(),
         AutoImport({
@@ -35,17 +42,9 @@ export default defineConfig({
         }
     },
     server: {
-        port: 3000,
-        proxy: {
-            '/api': {
-                target: 'http://localhost:7897',
-                changeOrigin: true
-            },
-            '/hubs': {
-                target: 'http://localhost:7897',
-                changeOrigin: true,
-                ws: true
-            }
-        }
+        port: 3000
+    },
+    preview: {
+        port: 7897
     }
 });

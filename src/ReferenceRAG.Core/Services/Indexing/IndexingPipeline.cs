@@ -82,7 +82,9 @@ public class IndexingPipeline : IDisposable
                 {
                     // Cancel remaining stages when one fails
                     combinedCts.Cancel();
-                    Console.WriteLine($"Pipeline stage failed: {completedTask.Exception?.GetBaseException().Message}");
+                    var exception = completedTask.Exception;
+                    Console.WriteLine($"Pipeline stage failed: {exception?.GetBaseException().Message}");
+                    Console.WriteLine($"Stack trace: {exception?.GetBaseException().StackTrace}");
                     try { await completedTask; } catch { } // Observe the exception
                     break;
                 }
@@ -95,6 +97,12 @@ public class IndexingPipeline : IDisposable
             }
             catch (AggregateException ae)
             {
+                // 记录所有内部异常，而不仅仅是第一个
+                Console.WriteLine($"Pipeline failed with {ae.InnerExceptions.Count} exception(s):");
+                foreach (var innerEx in ae.InnerExceptions)
+                {
+                    Console.WriteLine($"  - {innerEx.GetType().Name}: {innerEx.Message}");
+                }
                 throw ae.InnerException ?? ae;
             }
 

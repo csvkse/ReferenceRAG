@@ -1362,9 +1362,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     {
         var stats = new List<VectorStats>();
 
-        // 直接从数据库查询所有模型，而不是依赖内存中的 _modelDimensions
-        // 先清空内存缓存，确保只从数据库获取最新数据
-        _modelDimensions.Clear();
+        // 先构建新缓存，避免 Clear() 在并发搜索时导致模型查找失败
+        var freshDimensions = new Dictionary<string, int>();
 
         var sql = "SELECT name, dimension, updated_at FROM models";
         using (var cmd = _connection.CreateCommand())
@@ -1379,8 +1378,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 var updatedAtStr = reader.IsDBNull(2) ? null : reader.GetString(2);
                 DateTime? updatedAt = updatedAtStr != null ? DateTime.Parse(updatedAtStr) : null;
 
-                // 重建内存缓存
-                _modelDimensions[modelName] = dimension;
+                freshDimensions[modelName] = dimension;
 
                 var tableName = ModelToTableName(modelName);
                 long count = 0;
@@ -1408,6 +1406,12 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 });
             }
         }
+
+        // 增量同步：新增/更新条目，移除已不存在的模型（避免 Clear 导致并发窗口期）
+        foreach (var kv in freshDimensions)
+            _modelDimensions[kv.Key] = kv.Value;
+        foreach (var key in _modelDimensions.Keys.Except(freshDimensions.Keys).ToList())
+            _modelDimensions.Remove(key);
 
         return stats;
     }

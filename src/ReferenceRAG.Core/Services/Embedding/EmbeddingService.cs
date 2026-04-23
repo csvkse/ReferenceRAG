@@ -4,6 +4,7 @@ using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services.Tokenizers;
 using System.Diagnostics;
+using System.Numerics;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -277,24 +278,33 @@ public class EmbeddingService : IEmbeddingService, IDisposable
         {
             return await Task.Run(() =>
             {
-                // CUDA 路径同样需要 null guard
-                if (_session == null)
+                // 在 lock 内检查 _session 状态，避免竞态条件
+                lock (_lock)
                 {
-                    Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
-                    return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
-                }
+                    if (_session == null || _simulationMode)
+                    {
+                        Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
+                        return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
+                    }
 
-                return textList.Select(text => EncodeSingleInternal(text)).ToArray();
+                    return textList.Select(text => EncodeSingleInternal(text)).ToArray();
+                }
             }, cancellationToken);
         }
 
         // 非 CUDA 外部格式 路径：包在 Task.Run 中避免阻塞 async 调用方
         return await Task.Run(() =>
         {
-            if (_session == null)
+            // 在 lock 内检查 _session 状态，避免竞态条件
+            InferenceSession? session;
+            lock (_lock)
             {
-                Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
-                return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
+                if (_session == null || _simulationMode)
+                {
+                    Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
+                    return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
+                }
+                session = _session;
             }
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -305,7 +315,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             sw.Restart();
 
             // ONNX 推理
-            var inputNames = _session.InputNames;
+            var inputNames = session.InputNames;
             var hasTokenTypeIds = inputNames.Contains("token_type_ids");
 
             NamedOnnxValue[] inputs = hasTokenTypeIds
@@ -319,7 +329,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable
                 inputs[2] = NamedOnnxValue.CreateFromTensor("token_type_ids", tokens.TokenTypeIds);
             }
 
-            using var results = _session.Run(inputs);
+            using var results = session.Run(inputs);
             var outputTensor = results.First().AsTensor<float>();
             var outputShape = outputTensor.Dimensions;
 
@@ -510,22 +520,73 @@ public class EmbeddingService : IEmbeddingService, IDisposable
     }
 
     /// <summary>
-    /// L2 归一化（原地操作）
+    /// L2 归一化（原地操作，使用 SIMD 加速）
     /// </summary>
     public float[] Normalize(float[] vector)
     {
+        var span = vector.AsSpan();
         float sum = 0;
-        for (int i = 0; i < vector.Length; i++)
+
+        // 使用 SIMD 向量化计算平方和
+        if (Vector.IsHardwareAccelerated && span.Length >= Vector<float>.Count)
         {
-            sum += vector[i] * vector[i];
+            var sumVec = Vector<float>.Zero;
+            var i = 0;
+
+            // 每次处理一个向量宽度
+            for (; i <= span.Length - Vector<float>.Count; i += Vector<float>.Count)
+            {
+                var v = new Vector<float>(span.Slice(i, Vector<float>.Count));
+                sumVec += v * v;
+            }
+
+            // 水平求和
+            sum = Vector.Dot(sumVec, Vector<float>.One);
+
+            // 处理剩余元素
+            for (; i < span.Length; i++)
+            {
+                sum += span[i] * span[i];
+            }
         }
+        else
+        {
+            // 回退到标量计算
+            for (int i = 0; i < span.Length; i++)
+            {
+                sum += span[i] * span[i];
+            }
+        }
+
         var norm = MathF.Sqrt(sum);
         if (norm < 1e-10f) return vector;
 
-        for (int i = 0; i < vector.Length; i++)
+        // 使用 SIMD 向量化除法
+        if (Vector.IsHardwareAccelerated && span.Length >= Vector<float>.Count)
         {
-            vector[i] /= norm;
+            var normVec = new Vector<float>(norm);
+            var j = 0;
+
+            for (; j <= span.Length - Vector<float>.Count; j += Vector<float>.Count)
+            {
+                var v = new Vector<float>(span.Slice(j, Vector<float>.Count));
+                (v / normVec).CopyTo(span.Slice(j));
+            }
+
+            // 处理剩余元素
+            for (; j < span.Length; j++)
+            {
+                span[j] /= norm;
+            }
         }
+        else
+        {
+            for (int i = 0; i < span.Length; i++)
+            {
+                span[i] /= norm;
+            }
+        }
+
         return vector;
     }
 

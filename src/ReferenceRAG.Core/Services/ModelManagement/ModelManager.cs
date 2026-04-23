@@ -119,6 +119,41 @@ public interface IModelManager
     /// 获取已下载的重排模型列表
     /// </summary>
     List<ModelInfo> GetDownloadedRerankModels();
+
+    // ========== 模型变更事件 ==========
+
+    /// <summary>
+    /// 当模型路径变更时触发（需要外部服务重新加载模型）
+    /// </summary>
+    event EventHandler<ModelPathChangedEventArgs>? ModelPathChanged;
+
+    /// <summary>
+    /// 当 Embedding 模型切换时触发
+    /// </summary>
+    event EventHandler<ModelSwitchedEventArgs>? EmbeddingModelSwitched;
+
+    /// <summary>
+    /// 当 Rerank 模型切换时触发
+    /// </summary>
+    event EventHandler<ModelSwitchedEventArgs>? RerankModelSwitched;
+}
+
+/// <summary>
+/// 模型路径变更事件参数
+/// </summary>
+public class ModelPathChangedEventArgs : EventArgs
+{
+    public string NewPath { get; set; } = string.Empty;
+    public List<string> MigratedModels { get; set; } = new();
+}
+
+/// <summary>
+/// 模型切换事件参数
+/// </summary>
+public class ModelSwitchedEventArgs : EventArgs
+{
+    public string ModelName { get; set; } = string.Empty;
+    public string ModelPath { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -132,6 +167,11 @@ public class ModelManager : IModelManager, IDisposable
     private ModelInfo? _currentModel;
     private ModelInfo? _currentRerankModel;
     private bool _disposed;
+
+    // 事件声明
+    public event EventHandler<ModelPathChangedEventArgs>? ModelPathChanged;
+    public event EventHandler<ModelSwitchedEventArgs>? EmbeddingModelSwitched;
+    public event EventHandler<ModelSwitchedEventArgs>? RerankModelSwitched;
 
     // 预定义模型库 - 包含 ONNX 和 PyTorch 版本信息
     private static readonly List<ModelInfo> PredefinedModels = new()
@@ -955,6 +995,14 @@ public class ModelManager : IModelManager, IDisposable
 
             _currentModel = model;
             Console.WriteLine($"[ModelManager] 已切换到模型: {model.DisplayName}");
+
+            // 触发模型切换事件，通知外部服务重新加载
+            EmbeddingModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
+            {
+                ModelName = modelName,
+                ModelPath = model.LocalPath ?? ""
+            });
+
             return true;
         }
         catch (Exception ex)
@@ -1603,6 +1651,13 @@ public class ModelManager : IModelManager, IDisposable
             }
             await SaveConfigAsync(config);
 
+            // 触发模型路径变更事件，通知外部服务卸载旧模型
+            ModelPathChanged?.Invoke(this, new ModelPathChangedEventArgs
+            {
+                NewPath = normalizedPath,
+                MigratedModels = result.Migrated
+            });
+
             Console.WriteLine($"[ModelManager] 模型路径已更新: {normalizedPath} (迁移了 {result.Migrated.Count} 个模型, 扫描到 {result.EmbeddingModels.Count} 个嵌入模型, {result.RerankModels.Count} 个重排模型)");
             result.Success = true;
             return result;
@@ -1690,6 +1745,14 @@ public class ModelManager : IModelManager, IDisposable
             await SaveConfigAsync(config);
 
             Console.WriteLine($"[ModelManager] 已切换重排模型: {model.DisplayName}");
+
+            // 触发重排模型切换事件
+            RerankModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
+            {
+                ModelName = modelName,
+                ModelPath = model.LocalPath ?? ""
+            });
+
             return true;
         }
         catch (Exception ex)

@@ -2,11 +2,11 @@
 setlocal EnableDelayedExpansion
 
 echo ============================================
-echo   Web API Windows Service - 启动服务
+echo   ReferenceRAG Service - 启动服务
 echo ============================================
 echo.
 
-:: 检查管理员权限
+REM 检查管理员权限
 net session >nul 2>&1
 if %ERRORLEVEL% neq 0 (
     echo 错误: 请以管理员身份运行此脚本
@@ -16,41 +16,29 @@ if %ERRORLEVEL% neq 0 (
 
 cd /d "%~dp0.."
 
-:: 查找 exe 文件 - 按优先级检查
-set EXE_PATH=
+REM 调用公共函数查找 exe
+call "%~dp0_find_exe.bat"
 
-if exist "ReferenceRAG.Service.exe" (
-    set EXE_PATH=%cd%\ReferenceRAG.Service.exe
-    goto :found_exe
-)
-if exist "publish\ReferenceRAG.Service.exe" (
-    set EXE_PATH=%cd%\publish\ReferenceRAG.Service.exe
-    goto :found_exe
-)
-if exist "WebApiWindowsService.exe" (
-    set EXE_PATH=%cd%\WebApiWindowsService.exe
-    goto :found_exe
-)
-if exist "publish\WebApiWindowsService.exe" (
-    set EXE_PATH=%cd%\publish\WebApiWindowsService.exe
-    goto :found_exe
-)
-if exist "bin\Release\net10.0\win-x64\ReferenceRAG.Service.exe" (
-    set EXE_PATH=%cd%\bin\Release\net10.0\win-x64\ReferenceRAG.Service.exe
-    goto :found_exe
-)
-if exist "bin\Debug\net10.0\win-x64\ReferenceRAG.Service.exe" (
-    set EXE_PATH=%cd%\bin\Debug\net10.0\win-x64\ReferenceRAG.Service.exe
-    goto :found_exe
-)
-
-:found_exe
-if "!EXE_PATH!"=="" (
+if "%EXE_PATH%"=="" (
     echo 错误: 未找到 ReferenceRAG.Service.exe
+    echo 请先运行 build.bat 构建项目
     pause
     exit /b 1
 )
 
-"!EXE_PATH!" --start
+echo 程序路径: %EXE_PATH%
+echo.
 
-pause
+"%EXE_PATH%" --start
+
+if %ERRORLEVEL% equ 0 (
+    echo 服务启动成功！
+    echo [%date% %time%] 服务启动成功 >> "%~dp0service.log"
+) else (
+    echo 服务启动失败，错误代码: %ERRORLEVEL%
+    echo [%date% %time%] 服务启动失败 - 错误代码: %ERRORLEVEL% >> "%~dp0service.log"
+)
+
+echo.
+echo 按任意键返回...
+pause >nul

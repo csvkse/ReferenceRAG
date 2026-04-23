@@ -16,81 +16,113 @@ public class JsonVectorStore : IVectorStore, IDisposable
     private Dictionary<string, ChunkRecord> _chunks = new();
     private Dictionary<string, VectorRecord> _vectors = new();
     private bool _disposed;
+    private bool _initialized;
+    private readonly SemaphoreSlim _initLock = new(1, 1);
 
     public JsonVectorStore(string? dataPath = null)
     {
         _dataPath = dataPath ?? Path.Combine(Environment.CurrentDirectory, "data");
         Directory.CreateDirectory(_dataPath);
-        
+
         _jsonOptions = new JsonSerializerOptions
         {
             WriteIndented = true,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
 
-        LoadDataAsync().GetAwaiter().GetResult();
+        // 延迟初始化：首次访问时加载数据，避免构造函数中同步等待
+        _initialized = false;
+    }
+
+    /// <summary>
+    /// 确保数据已加载（线程安全的延迟初始化）
+    /// </summary>
+    private async Task EnsureInitializedAsync(CancellationToken cancellationToken = default)
+    {
+        if (_initialized) return;
+
+        await _initLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_initialized) return;
+            await LoadDataAsync(cancellationToken);
+            _initialized = true;
+        }
+        finally
+        {
+            _initLock.Release();
+        }
     }
 
     // ==================== 文件操作 ====================
 
     public async Task UpsertFileAsync(FileRecord file, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         _files[file.Id] = file;
         await SaveDataAsync(cancellationToken);
     }
 
-    public Task<FileRecord?> GetFileAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<FileRecord?> GetFileAsync(string id, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         _files.TryGetValue(id, out var file);
-        return Task.FromResult(file);
+        return file;
     }
 
-    public Task<FileRecord?> GetFileByPathAsync(string path, CancellationToken cancellationToken = default)
+    public async Task<FileRecord?> GetFileByPathAsync(string path, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var file = _files.Values.FirstOrDefault(f => f.Path == path);
-        return Task.FromResult(file);
+        return file;
     }
 
-    public Task<FileRecord?> GetFileByHashAsync(string contentHash, CancellationToken cancellationToken = default)
+    public async Task<FileRecord?> GetFileByHashAsync(string contentHash, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var file = _files.Values.FirstOrDefault(f => f.ContentHash == contentHash);
-        return Task.FromResult(file);
+        return file;
     }
 
     public async Task DeleteFileAsync(string id, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         _files.Remove(id);
-        
+
         var chunkIds = _chunks.Values.Where(c => c.FileId == id).Select(c => c.Id).ToList();
         foreach (var chunkId in chunkIds)
         {
             _chunks.Remove(chunkId);
             _vectors.Remove(chunkId);
         }
-        
+
         await SaveDataAsync(cancellationToken);
     }
 
-    public Task<IEnumerable<FileRecord>> GetAllFilesAsync(CancellationToken cancellationToken = default)
+    public async Task<IEnumerable<FileRecord>> GetAllFilesAsync(CancellationToken cancellationToken = default)
     {
-        return Task.FromResult(_files.Values.AsEnumerable());
+        await EnsureInitializedAsync(cancellationToken);
+        return _files.Values.AsEnumerable();
     }
 
-    public Task<IAsyncEnumerable<FileRecord>> StreamAllFilesAsync(CancellationToken cancellationToken = default)
+    public async Task<IAsyncEnumerable<FileRecord>> StreamAllFilesAsync(CancellationToken cancellationToken = default)
     {
-        return Task.FromResult((IAsyncEnumerable<FileRecord>)_files.Values.ToAsyncEnumerable());
+        await EnsureInitializedAsync(cancellationToken);
+        return _files.Values.ToAsyncEnumerable();
     }
 
     // ==================== 分段操作 ====================
 
     public async Task UpsertChunkAsync(ChunkRecord chunk, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         _chunks[chunk.Id] = chunk;
         await SaveDataAsync(cancellationToken);
     }
 
     public async Task UpsertChunksAsync(IEnumerable<ChunkRecord> chunks, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         foreach (var chunk in chunks)
         {
             _chunks[chunk.Id] = chunk;
@@ -98,19 +130,22 @@ public class JsonVectorStore : IVectorStore, IDisposable
         await SaveDataAsync(cancellationToken);
     }
 
-    public Task<ChunkRecord?> GetChunkAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<ChunkRecord?> GetChunkAsync(string id, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         _chunks.TryGetValue(id, out var chunk);
-        return Task.FromResult(chunk);
+        return chunk;
     }
 
-    public Task<IEnumerable<ChunkRecord>> GetChunksByFileAsync(string fileId, CancellationToken cancellationToken = default)
+    public async Task<IEnumerable<ChunkRecord>> GetChunksByFileAsync(string fileId, CancellationToken cancellationToken = default)
     {
-        return Task.FromResult(_chunks.Values.Where(c => c.FileId == fileId).AsEnumerable());
+        await EnsureInitializedAsync(cancellationToken);
+        return _chunks.Values.Where(c => c.FileId == fileId).AsEnumerable();
     }
 
     public async Task DeleteChunksByFileAsync(string fileId, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var chunkIds = _chunks.Values.Where(c => c.FileId == fileId).Select(c => c.Id).ToList();
         foreach (var chunkId in chunkIds)
         {
@@ -122,6 +157,7 @@ public class JsonVectorStore : IVectorStore, IDisposable
 
     public async Task DeleteChunkAsync(string id, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         _chunks.Remove(id);
         _vectors.Remove(id);
         await SaveDataAsync(cancellationToken);
@@ -131,12 +167,14 @@ public class JsonVectorStore : IVectorStore, IDisposable
 
     public async Task UpsertVectorAsync(VectorRecord vector, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         _vectors[vector.ChunkId] = vector;
         await SaveDataAsync(cancellationToken);
     }
 
     public async Task UpsertVectorsAsync(IEnumerable<VectorRecord> vectors, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         foreach (var vector in vectors)
         {
             _vectors[vector.ChunkId] = vector;
@@ -144,20 +182,23 @@ public class JsonVectorStore : IVectorStore, IDisposable
         await SaveDataAsync(cancellationToken);
     }
 
-    public Task<VectorRecord?> GetVectorAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<VectorRecord?> GetVectorAsync(string id, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var vector = _vectors.Values.FirstOrDefault(v => v.Id == id);
-        return Task.FromResult(vector);
+        return vector;
     }
 
-    public Task<VectorRecord?> GetVectorByChunkIdAsync(string chunkId, CancellationToken cancellationToken = default)
+    public async Task<VectorRecord?> GetVectorByChunkIdAsync(string chunkId, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         _vectors.TryGetValue(chunkId, out var vector);
-        return Task.FromResult(vector);
+        return vector;
     }
 
     public async Task DeleteVectorAsync(string id, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var vector = _vectors.Values.FirstOrDefault(v => v.Id == id);
         if (vector != null)
         {
@@ -168,21 +209,23 @@ public class JsonVectorStore : IVectorStore, IDisposable
 
     // ==================== 检索操作 ====================
 
-    public Task<IEnumerable<SearchResult>> SearchAsync(
+    public async Task<IEnumerable<SearchResult>> SearchAsync(
         float[] queryVector,
         int topK,
         CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         // JsonVectorStore 不区分模型，使用默认实现
-        return SearchAsync(queryVector, "default", topK, cancellationToken);
+        return await SearchAsync(queryVector, "default", topK, cancellationToken);
     }
 
-    public Task<IEnumerable<SearchResult>> SearchAsync(
+    public async Task<IEnumerable<SearchResult>> SearchAsync(
         float[] queryVector,
         string modelName,
         int topK,
         CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var results = new List<(string ChunkId, float Score)>();
 
         foreach (var (chunkId, vector) in _vectors)
@@ -197,15 +240,16 @@ public class JsonVectorStore : IVectorStore, IDisposable
             .ToList();
 
         var searchResults = BuildSearchResults(topResults);
-        return Task.FromResult(searchResults.AsEnumerable());
+        return searchResults.AsEnumerable();
     }
 
-    public Task<IEnumerable<SearchResult>> SearchByAggregateTypeAsync(
+    public async Task<IEnumerable<SearchResult>> SearchByAggregateTypeAsync(
         float[] queryVector,
         AggregateType aggregateType,
         int topK,
         CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var results = new List<(string ChunkId, float Score)>();
 
         foreach (var (chunkId, vector) in _vectors)
@@ -223,15 +267,16 @@ public class JsonVectorStore : IVectorStore, IDisposable
             .ToList();
 
         var searchResults = BuildSearchResults(topResults);
-        return Task.FromResult(searchResults.AsEnumerable());
+        return searchResults.AsEnumerable();
     }
 
-    public Task<IEnumerable<SearchResult>> SearchInIdsAsync(
+    public async Task<IEnumerable<SearchResult>> SearchInIdsAsync(
         float[] queryVector,
         IEnumerable<string> ids,
         int topK,
         CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var idSet = ids.ToHashSet();
         var results = new List<(string ChunkId, float Score)>();
 
@@ -248,13 +293,14 @@ public class JsonVectorStore : IVectorStore, IDisposable
             .ToList();
 
         var searchResults = BuildSearchResults(topResults);
-        return Task.FromResult(searchResults.AsEnumerable());
+        return searchResults.AsEnumerable();
     }
 
     public async Task DeleteBySourceAsync(string source, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var fileIds = _files.Values.Where(f => f.Source == source).Select(f => f.Id).ToHashSet();
-        
+
         foreach (var fileId in fileIds)
         {
             _files.Remove(fileId);
@@ -272,6 +318,7 @@ public class JsonVectorStore : IVectorStore, IDisposable
 
     public async Task StoreBatchAsync(IEnumerable<VectorRecord> records, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         foreach (var record in records)
         {
             _vectors[record.ChunkId] = record;
@@ -281,8 +328,9 @@ public class JsonVectorStore : IVectorStore, IDisposable
 
     // ==================== 统计与管理操作 ====================
 
-    public Task<List<VectorStats>> GetVectorStatsAsync(CancellationToken cancellationToken = default)
+    public async Task<List<VectorStats>> GetVectorStatsAsync(CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var stats = _vectors.Values
             .GroupBy(v => v.ModelName)
             .Select(g => new VectorStats
@@ -296,11 +344,12 @@ public class JsonVectorStore : IVectorStore, IDisposable
             })
             .ToList();
 
-        return Task.FromResult(stats);
+        return stats;
     }
 
     public async Task<int> DeleteVectorsByModelAsync(string modelName, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var toRemove = _vectors.Values.Where(v => v.ModelName == modelName).ToList();
         foreach (var v in toRemove)
         {
@@ -312,6 +361,7 @@ public class JsonVectorStore : IVectorStore, IDisposable
 
     public async Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var modelSet = existingModelNames.ToHashSet();
         var toRemove = _vectors.Values
             .Where(v => !string.IsNullOrEmpty(v.ModelName) && !modelSet.Contains(v.ModelName))
@@ -359,7 +409,7 @@ public class JsonVectorStore : IVectorStore, IDisposable
         return searchResults;
     }
 
-    private async Task LoadDataAsync()
+    private async Task LoadDataAsync(CancellationToken cancellationToken = default)
     {
         var filesPath = Path.Combine(_dataPath, "files.json");
         var chunksPath = Path.Combine(_dataPath, "chunks.json");
@@ -367,19 +417,19 @@ public class JsonVectorStore : IVectorStore, IDisposable
 
         if (File.Exists(filesPath))
         {
-            var json = await File.ReadAllTextAsync(filesPath);
+            var json = await File.ReadAllTextAsync(filesPath, cancellationToken);
             _files = JsonSerializer.Deserialize<Dictionary<string, FileRecord>>(json, _jsonOptions) ?? new();
         }
 
         if (File.Exists(chunksPath))
         {
-            var json = await File.ReadAllTextAsync(chunksPath);
+            var json = await File.ReadAllTextAsync(chunksPath, cancellationToken);
             _chunks = JsonSerializer.Deserialize<Dictionary<string, ChunkRecord>>(json, _jsonOptions) ?? new();
         }
 
         if (File.Exists(vectorsPath))
         {
-            var json = await File.ReadAllTextAsync(vectorsPath);
+            var json = await File.ReadAllTextAsync(vectorsPath, cancellationToken);
             _vectors = JsonSerializer.Deserialize<Dictionary<string, VectorRecord>>(json, _jsonOptions) ?? new();
         }
     }
@@ -399,13 +449,23 @@ public class JsonVectorStore : IVectorStore, IDisposable
     {
         if (!_disposed)
         {
-            SaveDataAsync().GetAwaiter().GetResult();
+            // 同步保存数据（Dispose 必须是同步的）
+            try
+            {
+                SaveDataAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[JsonVectorStore] Dispose 保存数据失败: {ex.Message}");
+            }
+            _initLock.Dispose();
             _disposed = true;
         }
     }
 
-    public Task<int> BackfillSourceAsync(IDictionary<string, string> sourceNameToPath, CancellationToken cancellationToken = default)
+    public async Task<int> BackfillSourceAsync(IDictionary<string, string> sourceNameToPath, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var orphaned = _files.Values.Where(f => string.IsNullOrEmpty(f.Source)).ToList();
         var updated = 0;
         foreach (var file in orphaned)
@@ -419,16 +479,17 @@ public class JsonVectorStore : IVectorStore, IDisposable
                 updated++;
             }
         }
-        return Task.FromResult(updated);
+        return updated;
     }
 
-    public Task<int> UpdateSourceNameAsync(string oldName, string newName, CancellationToken cancellationToken = default)
+    public async Task<int> UpdateSourceNameAsync(string oldName, string newName, CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var files = _files.Values.Where(f => f.Source == oldName).ToList();
         foreach (var file in files)
         {
             file.Source = newName;
         }
-        return Task.FromResult(files.Count);
+        return files.Count;
     }
 }

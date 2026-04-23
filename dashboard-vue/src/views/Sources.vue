@@ -209,7 +209,7 @@ const columns = [
             size: 'small',
             onClick: () => handleReindex(row)
           }, {
-            default: () => '开始索引'
+            default: () => '重建索引'
           }),
           h(NPopconfirm, {
             onPositiveClick: () => handleDelete(row)
@@ -367,16 +367,17 @@ const handleEdit = (source: SourceDetail) => {
 
 const handleReindex = (source: SourceDetail) => {
   dialog.warning({
-    title: '确认开始索引',
-    content: `确定要开始索引 "${source.name}" 吗？`,
+    title: '确认重建索引',
+    content: `确定要重建 "${source.name}" 的向量索引吗？这会基于当前模型重新生成该数据源的向量。`,
     positiveText: '确定',
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
-        await vectorIndexApi.startIndex({ sources: [source.name] })
-        message.success('索引已启动')
+        const response = await vectorIndexApi.rebuildSource(source.name)
+        message.success(response.data.message || '重建任务已启动')
+        await loadVectorIndex()
       } catch (error) {
-        message.error('启动索引失败')
+        message.error('启动重建失败')
       }
     }
   })

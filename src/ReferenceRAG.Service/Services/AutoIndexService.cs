@@ -17,6 +17,7 @@ public class AutoIndexService : IHostedService, IDisposable
     private readonly IMarkdownChunker _chunker;
     private readonly ContentHashDetector _hashDetector;
     private readonly ConfigManager _configManager;
+    private readonly IBM25Store _bm25Store;
     private readonly ILogger<AutoIndexService>? _logger;
     private readonly Queue<FileChangeEventArgs> _indexQueue;
     private readonly Timer _processTimer;
@@ -32,6 +33,7 @@ public class AutoIndexService : IHostedService, IDisposable
         IMarkdownChunker chunker,
         ContentHashDetector hashDetector,
         ConfigManager configManager,
+        IBM25Store bm25Store,
         ILogger<AutoIndexService>? logger = null)
     {
         _fileMonitor = fileMonitor;
@@ -40,6 +42,7 @@ public class AutoIndexService : IHostedService, IDisposable
         _chunker = chunker;
         _hashDetector = hashDetector;
         _configManager = configManager;
+        _bm25Store = bm25Store;
         _logger = logger;
         _indexQueue = new Queue<FileChangeEventArgs>();
 
@@ -235,11 +238,24 @@ public class AutoIndexService : IHostedService, IDisposable
                     }
                 }
 
+                // 获取旧 chunk ID，用于清理 BM25 旧条目
+                var oldChunks = await _vectorStore.GetChunksByFileAsync(fileRecord.Id);
+                var oldChunkIds = oldChunks.Select(c => c.Id).ToList();
+
                 // 保存到存储
                 await _vectorStore.UpsertFileAsync(fileRecord);
                 await _vectorStore.DeleteChunksByFileAsync(fileRecord.Id);
+
+                // 同步清理 BM25 中的旧条目
+                if (oldChunkIds.Count > 0)
+                    await _bm25Store.DeleteDocumentsByIdsAsync(oldChunkIds);
+
                 await _vectorStore.UpsertChunksAsync(chunks);
                 await _vectorStore.UpsertVectorsAsync(vectors);
+
+                // 索引新 chunks 到 BM25
+                var bm25Docs = chunks.Select(c => (c.Id, c.Content));
+                await _bm25Store.IndexBatchAsync(bm25Docs);
 
                 sw.Stop();
 

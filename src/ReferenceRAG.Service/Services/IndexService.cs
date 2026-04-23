@@ -27,15 +27,19 @@ public class IndexService : IHostedService
     private readonly ConcurrentQueue<IndexJob> _completedJobs = new();
     private const int MaxCompletedJobs = 20;
 
+    private readonly IBM25Store _bm25Store;
+
     public IndexService(
         IServiceProvider serviceProvider,
         IHubContext<IndexHub> hubContext,
         ConfigManager configManager,
+        IBM25Store bm25Store,
         ILogger<IndexService> logger)
     {
         _serviceProvider = serviceProvider;
         _hubContext = hubContext;
         _configManager = configManager;
+        _bm25Store = bm25Store;
         _logger = logger;
     }
 
@@ -168,7 +172,14 @@ public class IndexService : IHostedService
                             currentFile = fileName;
                         }
 
-                        await ProcessFileAsync(file, embeddingService, chunker, vectorStore, sources);
+                        await ProcessFileAsync(
+                            file,
+                            embeddingService,
+                            chunker,
+                            vectorStore,
+                            sources,
+                            _bm25Store,
+                            request.Force);
 
                         // 线程安全地递增计数器
                         var count = Interlocked.Increment(ref processedCount);
@@ -314,7 +325,9 @@ public class IndexService : IHostedService
         IEmbeddingService embeddingService,
         IMarkdownChunker chunker,
         IVectorStore vectorStore,
-        List<SourceFolder> sources)
+        List<SourceFolder> sources,
+        IBM25Store? bm25Store = null,
+        bool forceReindex = false)
     {
         var content = await File.ReadAllTextAsync(filePath);
 
@@ -339,6 +352,17 @@ public class IndexService : IHostedService
             : filePath;
         var relativePath = source != null ? Path.GetRelativePath(sourcePathForRelative, filePath) : Path.GetFileName(filePath);
 
+        // 提前计算 hash，未变化时直接跳过，避免执行后续切块和向量化
+        var contentHash = ComputeHash(content);
+        var existingFile = await vectorStore.GetFileByPathAsync(filePath);
+        var fileId = existingFile?.Id ?? Guid.NewGuid().ToString();
+
+        if (!forceReindex && existingFile != null && existingFile.ContentHash == contentHash)
+        {
+            _logger.LogDebug("内容未变化，跳过: {FileName}", Path.GetFileName(filePath));
+            return;
+        }
+
         // 分段
         var chunks = chunker.Chunk(content, new ChunkingOptions
         {
@@ -348,13 +372,6 @@ public class IndexService : IHostedService
         });
 
         if (chunks.Count == 0) return;
-
-        // 计算内容哈希
-        var contentHash = ComputeHash(content);
-
-        // 检查文件是否已存在（通过路径或哈希）
-        var existingFile = await vectorStore.GetFileByPathAsync(filePath);
-        var fileId = existingFile?.Id ?? Guid.NewGuid().ToString();
 
         // 创建或更新文件记录
         var fileRecord = new FileRecord
@@ -374,8 +391,16 @@ public class IndexService : IHostedService
 
         await vectorStore.UpsertFileAsync(fileRecord);
 
+        // 获取旧 chunk ID，用于清理 BM25 旧条目
+        var oldChunks = await vectorStore.GetChunksByFileAsync(fileId);
+        var oldChunkIds = oldChunks.Select(c => c.Id).ToList();
+
         // 删除该文件关联的旧chunks和vectors（防止重复索引）
         await vectorStore.DeleteChunksByFileAsync(fileId);
+
+        // 同步清理 BM25 中的旧条目
+        if (bm25Store != null && oldChunkIds.Count > 0)
+            await bm25Store.DeleteDocumentsByIdsAsync(oldChunkIds);
 
         // 为每个 chunk 设置文件信息
         foreach (var chunk in chunks)
@@ -388,6 +413,13 @@ public class IndexService : IHostedService
         var config = _configManager.Load();
         using var pipeline = new IndexingPipeline(embeddingService, vectorStore, batchSize: config.Embedding.BatchSize);
         await pipeline.ExecuteAsync(chunks, source?.Name ?? "unknown");
+
+        // 索引新 chunks 到 BM25
+        if (bm25Store != null)
+        {
+            var bm25Docs = chunks.Select(c => (c.Id, c.Content));
+            await bm25Store.IndexBatchAsync(bm25Docs);
+        }
     }
 
     private static string ComputeHash(string content)

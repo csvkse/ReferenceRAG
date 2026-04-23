@@ -64,6 +64,9 @@ public class OnnxRerankService : IRerankService, IDisposable
             Console.WriteLine($"[OnnxRerankService] 模型文件不存在: {modelPath}");
             Console.WriteLine("[OnnxRerankService] 使用模拟模式（返回随机分数）");
             _simulationMode = true;
+            // 即使模型不存在，也更新配置中的模型名称
+            _options.ModelPath = modelPath;
+            _options.ModelName = modelName;
             return;
         }
 
@@ -117,6 +120,9 @@ public class OnnxRerankService : IRerankService, IDisposable
         {
             Console.WriteLine($"[OnnxRerankService] 模型加载失败: {ex.Message}");
             _simulationMode = true;
+            // 即使加载失败，也更新配置中的模型名称
+            _options.ModelPath = modelPath;
+            _options.ModelName = modelName;
         }
     }
 
@@ -241,21 +247,12 @@ public class OnnxRerankService : IRerankService, IDisposable
             return result;
         }
 
-        // 实际推理
+        // 批量推理优化：将多个 query-document 对一起输入模型
         var scores = await Task.Run(() =>
         {
             lock (_lock)
             {
-                return docList.Select((doc, index) =>
-                {
-                    var score = ComputeRelevanceScore(query, doc);
-                    return new RerankDocument
-                    {
-                        Index = index,
-                        Document = doc,
-                        RelevanceScore = score
-                    };
-                }).ToList();
+                return ComputeRelevanceScoresBatch(query, docList);
             }
         }, cancellationToken);
 
@@ -264,6 +261,114 @@ public class OnnxRerankService : IRerankService, IDisposable
         result.DurationMs = sw.ElapsedMilliseconds;
 
         return result;
+    }
+
+    /// <summary>
+    /// 批量计算多个 Query-Document 对的相关性分数
+    /// </summary>
+    private List<RerankDocument> ComputeRelevanceScoresBatch(string query, List<string> documents)
+    {
+        if (_session == null || _simulationMode)
+        {
+            return documents.Select((doc, index) => new RerankDocument
+            {
+                Index = index,
+                Document = doc,
+                RelevanceScore = Random.Shared.NextDouble()
+            }).ToList();
+        }
+
+        var maxLength = _options.MaxSequenceLength;
+        var batchSize = documents.Count;
+
+        // 批量分词
+        var allInputIds = new long[batchSize, maxLength];
+        var allAttentionMask = new long[batchSize, maxLength];
+        var allTokenTypeIds = new long[batchSize, maxLength];
+
+        for (int i = 0; i < batchSize; i++)
+        {
+            var tokens = TokenizeQueryDocument(query, documents[i]);
+            for (int j = 0; j < maxLength; j++)
+            {
+                allInputIds[i, j] = tokens.InputIds[0, j];
+                allAttentionMask[i, j] = tokens.AttentionMask[0, j];
+                allTokenTypeIds[i, j] = tokens.TokenTypeIds[0, j];
+            }
+        }
+
+        // 构建 ONNX 输入
+        var inputNames = _session.InputNames;
+        var hasTokenTypeIds = inputNames.Contains("token_type_ids");
+
+        // 使用正确的方式创建 DenseTensor：先创建一维数组再指定维度
+        var inputIdsFlat = new long[batchSize * maxLength];
+        var attentionMaskFlat = new long[batchSize * maxLength];
+        var tokenTypeIdsFlat = new long[batchSize * maxLength];
+
+        for (int i = 0; i < batchSize; i++)
+        {
+            for (int j = 0; j < maxLength; j++)
+            {
+                inputIdsFlat[i * maxLength + j] = allInputIds[i, j];
+                attentionMaskFlat[i * maxLength + j] = allAttentionMask[i, j];
+                tokenTypeIdsFlat[i * maxLength + j] = allTokenTypeIds[i, j];
+            }
+        }
+
+        var inputIdsTensor = new DenseTensor<long>(inputIdsFlat, new[] { batchSize, maxLength });
+        var attentionMaskTensor = new DenseTensor<long>(attentionMaskFlat, new[] { batchSize, maxLength });
+
+        NamedOnnxValue[] inputs = hasTokenTypeIds
+            ? new NamedOnnxValue[3]
+            : new NamedOnnxValue[2];
+
+        inputs[0] = NamedOnnxValue.CreateFromTensor("input_ids", inputIdsTensor);
+        inputs[1] = NamedOnnxValue.CreateFromTensor("attention_mask", attentionMaskTensor);
+        if (hasTokenTypeIds)
+        {
+            var tokenTypeIdsTensor = new DenseTensor<long>(tokenTypeIdsFlat, new[] { batchSize, maxLength });
+            inputs[2] = NamedOnnxValue.CreateFromTensor("token_type_ids", tokenTypeIdsTensor);
+        }
+
+        // 执行批量推理
+        using var results = _session.Run(inputs);
+        var outputTensor = results.First().AsTensor<float>();
+        var outputShape = outputTensor.Dimensions;
+
+        // 解析输出
+        var scores = new List<RerankDocument>();
+        for (int i = 0; i < batchSize; i++)
+        {
+            double score;
+            if (outputShape.Length == 1 || (outputShape.Length == 2 && outputShape[1] == 1))
+            {
+                // 单输出：[batch] 或 [batch, 1]
+                var rawScore = outputShape.Length == 1 ? outputTensor[i] : outputTensor[i, 0];
+                score = Sigmoid(rawScore);
+            }
+            else if (outputShape.Length == 2 && outputShape[1] == 2)
+            {
+                // 二分类输出：[batch, 2]
+                var negLogit = outputTensor[i, 0];
+                var posLogit = outputTensor[i, 1];
+                score = Softmax(posLogit, negLogit);
+            }
+            else
+            {
+                // 尝试取第一个值
+                score = Sigmoid(outputTensor[i]);
+            }
+
+            scores.Add(new RerankDocument
+            {
+                Index = i,
+                Document = documents[i],
+                RelevanceScore = Math.Clamp(score, 0.0, 1.0)
+            });
+        }
+
+        return scores;
     }
 
     /// <summary>

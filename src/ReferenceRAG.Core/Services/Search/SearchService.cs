@@ -114,8 +114,8 @@ public class SearchService : ISearchService
 
             var hybridResults = await _hybridSearchService.SearchAsync(request.Query, recallTopK, request.K1, request.B, request.Filters?.Folders, cancellationToken);
 
-            // 过滤禁用源
-            var filteredHybridResults = hybridResults.Where(r => enabledSources.Contains(r.Source));
+            // 过滤禁用源（source 为空表示旧数据未分配来源，允许通过）
+            var filteredHybridResults = hybridResults.Where(r => string.IsNullOrEmpty(r.Source) || enabledSources.Contains(r.Source));
 
             topResults = filteredHybridResults.Select(h => new SearchResult
             {
@@ -259,8 +259,8 @@ public class SearchService : ISearchService
         var modelName = _embeddingService.ModelName;
         var results = await _vectorStore.SearchAsync(queryVector, modelName, request.TopK * 2, cancellationToken);
 
-        // 首先过滤禁用源
-        results = results.Where(r => enabledSources.Contains(r.Source));
+        // 首先过滤禁用源（source 为空表示旧数据未分配来源，允许通过）
+        results = results.Where(r => string.IsNullOrEmpty(r.Source) || enabledSources.Contains(r.Source));
 
         // 应用源过滤（用户指定的源）
         if (request.Sources?.Count > 0)

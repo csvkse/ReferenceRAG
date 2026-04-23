@@ -87,6 +87,12 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     {
         var tokenizedContent = TokenizeForIndex(content);
 
+        // Upsert：先删除旧条目再插入，防止重复积累
+        using var deleteCmd = _connection.CreateCommand();
+        deleteCmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
+        deleteCmd.Parameters.AddWithValue("@id", chunkId);
+        await deleteCmd.ExecuteNonQueryAsync();
+
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = $"INSERT INTO {FtsTableName}(id, content) VALUES (@id, @content)";
         cmd.Parameters.AddWithValue("@id", chunkId);
@@ -107,6 +113,14 @@ public class Fts5BM25Store : IBM25Store, IDisposable
             foreach (var (chunkId, content) in docsList)
             {
                 var tokenizedContent = TokenizeForIndex(content);
+
+                // Upsert：先删除旧条目再插入
+                using var deleteCmd = _connection.CreateCommand();
+                deleteCmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
+                deleteCmd.Parameters.AddWithValue("@id", chunkId);
+                deleteCmd.Transaction = transaction;
+                await deleteCmd.ExecuteNonQueryAsync();
+
                 using var cmd = _connection.CreateCommand();
                 cmd.CommandText = $"INSERT INTO {FtsTableName}(id, content) VALUES (@id, @content)";
                 cmd.Parameters.AddWithValue("@id", chunkId);
@@ -136,6 +150,32 @@ public class Fts5BM25Store : IBM25Store, IDisposable
         catch (Exception ex)
         {
             _logger?.LogError(ex, "清空索引失败");
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteDocumentsByIdsAsync(IEnumerable<string> chunkIds)
+    {
+        var ids = chunkIds.ToList();
+        if (ids.Count == 0) return;
+
+        using var transaction = _connection.BeginTransaction();
+        try
+        {
+            foreach (var id in ids)
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
+                cmd.Parameters.AddWithValue("@id", id);
+                cmd.Transaction = transaction;
+                await cmd.ExecuteNonQueryAsync();
+            }
+            transaction.Commit();
+        }
+        catch
+        {
+            transaction.Rollback();
             throw;
         }
     }

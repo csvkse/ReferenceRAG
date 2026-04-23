@@ -783,10 +783,33 @@ internal class HuggingFaceModelDownloader : IDisposable
                 return false;
             }
 
-            // Sanitize path parameters: reject paths containing characters that could escape quotes
-            if (modelDir.Contains('"') || outputPath.Contains('"') || modelDir.Contains('\0') || outputPath.Contains('\0'))
+            // Sanitize path parameters: reject paths containing characters that could escape quotes or cause shell injection
+            // 危险字符：引号、反引号、美元符号、分号、管道、换行符、空字符等
+            var dangerousChars = new[] { '"', '`', '$', ';', '|', '&', '\n', '\r', '\0' };
+            if (modelDir.IndexOfAny(dangerousChars) >= 0 || outputPath.IndexOfAny(dangerousChars) >= 0)
             {
-                Console.WriteLine("[Downloader] Invalid path characters detected");
+                Console.WriteLine("[Downloader] Invalid path characters detected (potential shell injection)");
+                return false;
+            }
+
+            // 验证路径格式：必须是合法的文件系统路径
+            try
+            {
+                // 检查路径是否包含可疑的模式（如命令替换、路径遍历）
+                var normalizedModelDir = Path.GetFullPath(modelDir);
+                var normalizedOutputPath = Path.GetFullPath(outputPath);
+
+                // 确保输出路径在模型目录内或为合法路径
+                if (!normalizedOutputPath.StartsWith(normalizedModelDir, StringComparison.OrdinalIgnoreCase) &&
+                    !Path.IsPathRooted(normalizedOutputPath))
+                {
+                    Console.WriteLine("[Downloader] Output path must be within model directory or be an absolute path");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Downloader] Invalid path format: {ex.Message}");
                 return false;
             }
 
@@ -833,14 +856,33 @@ internal class HuggingFaceModelDownloader : IDisposable
 
             await process.WaitForExitAsync(cancellationToken);
 
+            // 检查输出中是否有错误信息（即使 ExitCode = 0）
+            var errorOutput = errorBuilder.ToString();
+            var standardOutput = outputBuilder.ToString();
+
             if (process.ExitCode == 0 && File.Exists(outputPath))
             {
+                // 额外检查：如果输出包含错误关键字，可能表示部分失败
+                if (errorOutput.Contains("Error", StringComparison.OrdinalIgnoreCase) ||
+                    errorOutput.Contains("Exception", StringComparison.OrdinalIgnoreCase) ||
+                    errorOutput.Contains("Traceback", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"[Downloader] 警告：转换完成但检测到错误输出:\n{errorOutput}");
+                }
                 Console.WriteLine("[Downloader] ONNX 转换成功");
                 return true;
             }
             else
             {
                 Console.WriteLine($"[Downloader] ONNX 转换失败 (ExitCode: {process.ExitCode})");
+                if (!string.IsNullOrEmpty(errorOutput))
+                {
+                    Console.WriteLine($"[Downloader] 错误输出:\n{errorOutput}");
+                }
+                if (!string.IsNullOrEmpty(standardOutput))
+                {
+                    Console.WriteLine($"[Downloader] 标准输出:\n{standardOutput}");
+                }
                 return false;
             }
         }

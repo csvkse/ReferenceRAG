@@ -237,10 +237,12 @@ public class SqliteVectorStoreTests : IDisposable
 
         await _vectorStore.UpsertVectorAsync(vector);
 
-        var retrieved = await _vectorStore.GetVectorAsync("vector-1");
+        // GetVectorAsync looks up by chunk_id, not by vector Id
+        var retrieved = await _vectorStore.GetVectorAsync("chunk-1");
 
         Assert.NotNull(retrieved);
-        Assert.Equal("vector-1", retrieved.Id);
+        // The Id is auto-generated as "vec_{chunkId}" by GetVectorByChunkIdAsync
+        Assert.Equal("vec_chunk-1", retrieved.Id);
         Assert.Equal("chunk-1", retrieved.ChunkId);
     }
 

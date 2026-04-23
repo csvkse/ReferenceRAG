@@ -22,6 +22,11 @@ public interface IBM25Store
     /// </summary>
     Task ClearIndexAsync();
 
+    /// <summary>
+    /// 删除指定 chunk ID 的文档索引
+    /// </summary>
+    Task DeleteDocumentsByIdsAsync(IEnumerable<string> chunkIds);
+
     // ==================== 搜索操作 ====================
 
     /// <summary>

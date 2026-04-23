@@ -142,6 +142,30 @@ public class StartupSyncService : IHostedService
             // 6. 修改检测：mtime 晚于 IndexedAt 的文件
             await ProcessModifiedFilesAsync(storedFilesDict, diskFiles, result, cancellationToken);
 
+            // 7. 触发增量索引：新增 + 修改文件
+            if (result.NewFiles.Count > 0 || result.ModifiedFiles.Count > 0)
+            {
+                _logger.LogInformation(
+                    "检测到 {NewCount} 个新增文件, {ModCount} 个修改文件，启动增量索引",
+                    result.NewFiles.Count, result.ModifiedFiles.Count);
+
+                // 只对有变更文件的源触发索引，避免扫描未变更的源目录
+                var changedPaths = result.NewFiles.Concat(result.ModifiedFiles).ToList();
+                var affectedSourceNames = enabledSources
+                    .Where(s => changedPaths.Any(p =>
+                        p.StartsWith(PathUtility.NormalizePath(s.Path), StringComparison.OrdinalIgnoreCase)))
+                    .Select(s => s.Name)
+                    .ToList();
+
+                if (affectedSourceNames.Count > 0)
+                {
+                    await _indexService.StartIndexAsync(new IndexRequest
+                    {
+                        Sources = affectedSourceNames
+                    });
+                }
+            }
+
             sw.Stop();
             result.EndTime = DateTime.UtcNow;
             result.Duration = sw.Elapsed;
