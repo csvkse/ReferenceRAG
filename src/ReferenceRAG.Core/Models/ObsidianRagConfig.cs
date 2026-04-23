@@ -300,9 +300,22 @@ public class ServiceConfig
     public int Port { get; set; } = 5000;
 
     /// <summary>
-    /// 监听地址
+    /// 监听地址（向后兼容字段，优先使用 AllowNetworkAccess）
     /// </summary>
     public string Host { get; set; } = "localhost";
+
+    /// <summary>
+    /// 是否允许来自局域网/外部网络的访问。
+    /// true → 绑定 0.0.0.0（全网可访问）；false → 仅绑定 localhost（默认）。
+    /// 修改后需要重启服务生效。
+    /// </summary>
+    public bool AllowNetworkAccess { get; set; } = false;
+
+    /// <summary>
+    /// 计算属性：实际生效的监听地址（AllowNetworkAccess 优先，向后兼容旧 Host 字段）
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string EffectiveHost => AllowNetworkAccess ? "0.0.0.0" : "localhost";
 
     /// <summary>
     /// 是否启用 CORS

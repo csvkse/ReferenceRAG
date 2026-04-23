@@ -991,10 +991,11 @@ public class ModelManager : IModelManager, IDisposable
             var config = await LoadConfigAsync();
             config.Embedding.ModelPath = Path.Combine(model.LocalPath ?? "", "model.onnx");
             config.Embedding.ModelName = modelName;
+            config.Embedding.MaxSequenceLength = model.MaxSequenceLength;
             await SaveConfigAsync(config);
 
             _currentModel = model;
-            Console.WriteLine($"[ModelManager] 已切换到模型: {model.DisplayName}");
+            Console.WriteLine($"[ModelManager] 已切换到模型: {model.DisplayName} (MaxSeqLen={model.MaxSequenceLength})");
 
             // 触发模型切换事件，通知外部服务重新加载
             EmbeddingModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
@@ -1199,12 +1200,9 @@ public class ModelManager : IModelManager, IDisposable
         if (File.Exists(onnxDataPath))
             return "external";
 
-        // 检查 model.onnx 文件大小，如果大于 2GB 则可能是外部格式（但 .data 被删除）
         var onnxFileInfo = new FileInfo(onnxPath);
-        if (onnxFileInfo.Length > 2L * 1024 * 1024 * 1024)
-            return "external"; // 大文件也可能是嵌入式，但概率较低
 
-        // 检测 ONNX 文件内部是否引用了外部数据
+        // 检测 ONNX 文件内部是否引用了外部数据（通过文件内容，而非文件大小推断）
         if (HasExternalDataReferences(onnxPath))
         {
             // ONNX 文件引用了外部数据，但 .data 文件不存在
@@ -1335,28 +1333,14 @@ public class ModelManager : IModelManager, IDisposable
                 if (actualFormat != targetFormat)
                 {
                     Console.WriteLine($"[ModelManager] 转换后实际格式为 {actualFormat}，未达到目标 {targetFormat}，恢复备份");
-                    if (File.Exists(backupPath))
-                    {
-                        File.Copy(backupPath, onnxPath, true);
-                        File.Delete(backupPath);
-                    }
-                    if (File.Exists(backupDataPath))
-                    {
-                        File.Copy(backupDataPath, onnxDataPath, true);
-                        File.Delete(backupDataPath);
-                    }
-                    else if (File.Exists(onnxDataPath) && actualFormat != "external")
-                    {
-                        // 转换产生了不应该存在的 .data 文件，删除
-                        File.Delete(onnxDataPath);
-                    }
-                    // 如果实际是 external 格式但目标是 embedded，保留 .data 文件
-                    if (actualFormat == "external" && File.Exists(onnxDataPath))
-                    {
-                        Console.WriteLine($"[ModelManager] 保留外部数据文件: {onnxDataPath}");
-                    }
-                    model.OnnxFormat = actualFormat;
-                    return (false, $"转换后格式仍为 {actualFormat}，模型可能过大无法嵌入（>2GB）");
+                    RestoreBackup(onnxPath, onnxDataPath, backupPath, backupDataPath);
+                    model.OnnxFormat = DetectOnnxFormat(model.LocalPath);
+
+                    var sizeGb = model.ModelSizeBytes / 1024.0 / 1024.0 / 1024.0;
+                    var hint = actualFormat == "external"
+                        ? $"模型 {modelName}（{sizeGb:F1} GB）转换后仍为 external 格式（模型过大，无法内嵌到单文件）。external 格式同样受支持，无需转换。"
+                        : $"转换后格式仍为 {actualFormat}，已恢复原始模型。";
+                    return (false, hint);
                 }
 
                 // 删除外部数据文件（仅在实际确认为嵌入式时）
@@ -1367,14 +1351,8 @@ public class ModelManager : IModelManager, IDisposable
                 }
 
                 // 清理备份文件
-                if (File.Exists(backupPath))
-                {
-                    File.Delete(backupPath);
-                }
-                if (File.Exists(backupDataPath))
-                {
-                    File.Delete(backupDataPath);
-                }
+                if (File.Exists(backupPath)) File.Delete(backupPath);
+                if (File.Exists(backupDataPath)) File.Delete(backupDataPath);
 
                 // 更新模型信息
                 model.OnnxFormat = targetFormat;
@@ -1387,22 +1365,7 @@ public class ModelManager : IModelManager, IDisposable
             }
             else
             {
-                // 恢复备份
-                if (File.Exists(backupPath))
-                {
-                    File.Copy(backupPath, onnxPath, true);
-                    File.Delete(backupPath);
-                }
-                if (File.Exists(backupDataPath))
-                {
-                    File.Copy(backupDataPath, onnxDataPath, true);
-                    File.Delete(backupDataPath);
-                }
-                else if (File.Exists(onnxDataPath))
-                {
-                    // 转换失败但产生了 .data 文件，原模型可能没有，需要清理
-                    // 但无法确定原模型是否有 .data，保守起见不删除
-                }
+                RestoreBackup(onnxPath, onnxDataPath, backupPath, backupDataPath);
                 Console.WriteLine($"[ModelManager] 已恢复原始模型");
                 return (false, "模型转换失败，已恢复原始模型");
             }
@@ -1667,6 +1630,38 @@ public class ModelManager : IModelManager, IDisposable
             Console.WriteLine($"[ModelManager] 设置模型路径失败: {ex.Message}");
             result.Error = $"设置路径失败: {ex.Message}";
             return result;
+        }
+    }
+
+    /// <summary>
+    /// 恢复转换前的备份文件。
+    /// 以备份文件是否存在为基准：若原始模型无 .data 文件（backupDataPath 不存在），
+    /// 则转换过程产生的任何 .data 文件都必须清理，避免污染模型目录。
+    /// </summary>
+    private static void RestoreBackup(string onnxPath, string onnxDataPath, string backupPath, string backupDataPath)
+    {
+        if (File.Exists(backupPath))
+        {
+            File.Copy(backupPath, onnxPath, true);
+            File.Delete(backupPath);
+            Console.WriteLine($"[ModelManager] 已恢复 ONNX 文件: {onnxPath}");
+        }
+
+        if (File.Exists(backupDataPath))
+        {
+            // 原始模型有 .data 文件，恢复它
+            File.Copy(backupDataPath, onnxDataPath, true);
+            File.Delete(backupDataPath);
+            Console.WriteLine($"[ModelManager] 已恢复外部数据文件: {onnxDataPath}");
+        }
+        else
+        {
+            // 原始模型没有 .data 文件；若转换产生了 .data，必须清理
+            if (File.Exists(onnxDataPath))
+            {
+                File.Delete(onnxDataPath);
+                Console.WriteLine($"[ModelManager] 已清理转换产生的残留 .data 文件: {onnxDataPath}");
+            }
         }
     }
 

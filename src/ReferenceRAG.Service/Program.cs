@@ -37,12 +37,16 @@ var builder = WebApplication.CreateBuilder(args);
 
 #region 配置服务端口
 // 从配置文件中读取端口设置
+// AllowNetworkAccess 优先；若旧配置仅含 host 字段（向后兼容），则直接使用
 var serviceConfig = builder.Configuration.GetSection("ReferenceRAG:Service");
-var host = serviceConfig["host"] ?? "localhost";
+var allowNetwork = bool.TryParse(serviceConfig["allowNetworkAccess"], out var _allowNet) && _allowNet;
+var legacyHost = serviceConfig["host"];
+var host = allowNetwork ? "0.0.0.0"
+    : (legacyHost is "0.0.0.0" ? "0.0.0.0" : "localhost");
 var port = serviceConfig["port"] ?? "5000";
 var urls = $"http://{host}:{port}";
 builder.WebHost.UseUrls(urls);
-Console.WriteLine($"[配置] 服务地址: {urls}");
+Console.WriteLine($"[配置] 服务地址: {urls} (AllowNetworkAccess={allowNetwork})");
 #endregion
 
 #region 服务注入：配置服务和日志
@@ -150,6 +154,17 @@ builder.Services.AddSingleton<IVectorStore>(sp =>
     var dbPath = Path.Combine(dataPath, "vectors.db");
     return new SqliteVectorStore(dbPath);
 });
+// 注册知识图谱存储（与向量存储共用同一个 DB 文件）
+builder.Services.AddSingleton<IGraphStore>(sp =>
+{
+    var config = sp.GetRequiredService<ConfigManager>();
+    var cfg = config.Load();
+    var dataPath = cfg.DataPath ?? "data";
+    var dbPath = Path.Combine(dataPath, "vectors.db");
+    return new SqliteGraphStore(dbPath);
+});
+builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.WikiLinkExtractor>();
+builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.GraphIndexingService>();
 // 注册 BM25 存储（与向量存储共用同一个数据库）
 // 根据配置选择 fts5（推荐）或 legacy（备用）实现
 builder.Services.AddSingleton<IBM25Store>(sp =>

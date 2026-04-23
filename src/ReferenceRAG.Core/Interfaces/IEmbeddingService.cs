@@ -47,9 +47,9 @@ public interface IEmbeddingService
     bool SupportsAsymmetricEncoding { get; }
 
     /// <summary>
-    /// 重新加载模型
+    /// 重新加载模型。maxSequenceLength 为 null 时保持原有配置不变。
     /// </summary>
-    Task<bool> ReloadModelAsync(string modelPath, string modelName);
+    Task<bool> ReloadModelAsync(string modelPath, string modelName, int? maxSequenceLength = null);
 
     /// <summary>
     /// 卸载模型（释放 ONNX session）

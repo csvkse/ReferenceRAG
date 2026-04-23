@@ -152,9 +152,9 @@ public class ModelsController : ControllerBase
                 return StatusCode(500, new { error = "模型切换失败" });
             }
 
-            // 重新加载 Embedding 服务的模型
+            // 重新加载 Embedding 服务的模型（传递模型的 MaxSequenceLength，修复 m3 截断问题）
             var onnxPath = Path.Combine(model.LocalPath ?? "", "model.onnx");
-            var reloadSuccess = await _embeddingService.ReloadModelAsync(onnxPath, request.ModelName);
+            var reloadSuccess = await _embeddingService.ReloadModelAsync(onnxPath, request.ModelName, model.MaxSequenceLength);
 
             if (!reloadSuccess)
             {

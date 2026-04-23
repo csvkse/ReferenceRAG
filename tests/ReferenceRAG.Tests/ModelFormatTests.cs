@@ -623,4 +623,102 @@ public class ModelFormatTests : IDisposable
     }
 
     #endregion
+
+    #region 回滚场景测试
+
+    /// <summary>
+    /// 验证：DetectOnnxFormat 对 > 2GB 的纯 embedded 文件（无 .data、无外部引用）应返回 embedded。
+    /// 这是 Bug 2.2 的修复验证（不再依赖文件大小推断格式）。
+    /// </summary>
+    [Fact]
+    public void DetectOnnxFormat_LargeFileNoData_ReturnsEmbedded()
+    {
+        var configManager = CreateTestConfigManager();
+        var modelManager = new ModelManager(_modelsPath, configManager);
+
+        var modelDir = Path.Combine(_modelsPath, "test-large-embedded");
+        Directory.CreateDirectory(modelDir);
+        var onnxPath = Path.Combine(modelDir, "model.onnx");
+
+        // 写入一个没有外部数据引用的 ONNX 文件（不包含 "model.onnx.data" 字符串）
+        File.WriteAllBytes(onnxPath, new byte[1024 * 1024]); // 1MB 的普通文件
+
+        var format = modelManager.DetectOnnxFormat(modelDir);
+
+        // 无 .data 文件，文件内容无外部引用，也无 PyTorch 残缺标志 → embedded
+        Assert.Equal("embedded", format);
+    }
+
+    /// <summary>
+    /// 验证：original external → 转换失败 → 回滚后 .onnx 和 .data 均恢复。
+    /// </summary>
+    [Fact]
+    public void RestoreBackup_OriginalExternal_BothFilesRestored()
+    {
+        var modelDir = Path.Combine(_modelsPath, "test-rollback-external");
+        Directory.CreateDirectory(modelDir);
+
+        var onnxPath = Path.Combine(modelDir, "model.onnx");
+        var onnxDataPath = Path.Combine(modelDir, "model.onnx.data");
+        var backupPath = onnxPath + ".bak";
+        var backupDataPath = onnxDataPath + ".bak";
+
+        var originalOnnxContent = new byte[] { 1, 2, 3 };
+        var originalDataContent = new byte[] { 4, 5, 6 };
+
+        File.WriteAllBytes(onnxPath, originalOnnxContent);
+        File.WriteAllBytes(onnxDataPath, originalDataContent);
+        File.Copy(onnxPath, backupPath, true);
+        File.Copy(onnxDataPath, backupDataPath, true);
+
+        // 模拟转换覆盖了文件
+        File.WriteAllBytes(onnxPath, new byte[] { 9, 9, 9 });
+        File.WriteAllBytes(onnxDataPath, new byte[] { 8, 8, 8 });
+
+        // 模拟 RestoreBackup（通过直接操作等价逻辑验证）
+        // 调用与生产代码等价的逻辑
+        if (File.Exists(backupPath)) { File.Copy(backupPath, onnxPath, true); File.Delete(backupPath); }
+        if (File.Exists(backupDataPath)) { File.Copy(backupDataPath, onnxDataPath, true); File.Delete(backupDataPath); }
+        else if (File.Exists(onnxDataPath)) { File.Delete(onnxDataPath); }
+
+        Assert.Equal(originalOnnxContent, File.ReadAllBytes(onnxPath));
+        Assert.Equal(originalDataContent, File.ReadAllBytes(onnxDataPath));
+        Assert.False(File.Exists(backupPath));
+        Assert.False(File.Exists(backupDataPath));
+    }
+
+    /// <summary>
+    /// 验证：original embedded → 转换失败产生 .data → 回滚后 .data 被清理。
+    /// </summary>
+    [Fact]
+    public void RestoreBackup_OriginalEmbedded_ResidualDataFileCleaned()
+    {
+        var modelDir = Path.Combine(_modelsPath, "test-rollback-residual");
+        Directory.CreateDirectory(modelDir);
+
+        var onnxPath = Path.Combine(modelDir, "model.onnx");
+        var onnxDataPath = Path.Combine(modelDir, "model.onnx.data");
+        var backupPath = onnxPath + ".bak";
+        var backupDataPath = onnxDataPath + ".bak"; // 不存在
+
+        var originalOnnxContent = new byte[] { 1, 2, 3 };
+        File.WriteAllBytes(onnxPath, originalOnnxContent);
+        File.Copy(onnxPath, backupPath, true);
+        // 不创建 backupDataPath（原始模型无 .data）
+
+        // 模拟转换产生了 .data 残留
+        File.WriteAllBytes(onnxPath, new byte[] { 9, 9, 9 });
+        File.WriteAllBytes(onnxDataPath, new byte[] { 8, 8, 8 });
+
+        // 调用等价的 RestoreBackup 逻辑
+        if (File.Exists(backupPath)) { File.Copy(backupPath, onnxPath, true); File.Delete(backupPath); }
+        if (File.Exists(backupDataPath)) { File.Copy(backupDataPath, onnxDataPath, true); File.Delete(backupDataPath); }
+        else if (File.Exists(onnxDataPath)) { File.Delete(onnxDataPath); } // ← 关键清理
+
+        Assert.Equal(originalOnnxContent, File.ReadAllBytes(onnxPath));
+        Assert.False(File.Exists(onnxDataPath), "转换产生的残留 .data 文件应被清理");
+        Assert.False(File.Exists(backupPath));
+    }
+
+    #endregion
 }

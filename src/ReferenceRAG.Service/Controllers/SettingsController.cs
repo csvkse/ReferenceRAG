@@ -66,6 +66,12 @@ public class SettingsController : ControllerBase
             config.ModelsRootPath = modelsRoot;
         }
 
+        // 同步 AllowNetworkAccess 与旧 Host 字段（向后兼容旧配置）
+        if (config.Service.Host == "0.0.0.0" && !config.Service.AllowNetworkAccess)
+        {
+            config.Service.AllowNetworkAccess = true;
+        }
+
         return Ok(config);
     }
 
@@ -105,8 +111,14 @@ public class SettingsController : ControllerBase
     [HttpPost]
     public ActionResult Save([FromBody] ObsidianRagConfig config)
     {
+        // 保持 Host 字段与 AllowNetworkAccess 同步（双向兼容）
+        config.Service.Host = config.Service.AllowNetworkAccess ? "0.0.0.0" : "localhost";
+
         _configManager.Save(config);
-        return Ok(new { message = "配置已保存" });
+
+        // 修改监听地址需要重启才能生效
+        var requiresRestart = true;
+        return Ok(new { message = "配置已保存", requiresRestart });
     }
 
     /// <summary>

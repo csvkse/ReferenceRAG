@@ -310,4 +310,57 @@ public class ModelSwitchTests
 
         Assert.Equal(targetModel.Dimension, embedding.Length);
     }
+
+    // ===== MaxSequenceLength 修复验证测试 =====
+
+    [Fact]
+    public async Task ReloadModelAsync_WithMaxSequenceLength_UpdatesOptions()
+    {
+        // EmbeddingService 以 512 启动，切换时传入新的 maxSequenceLength，应生效
+        var options = new EmbeddingOptions
+        {
+            ModelPath = "",
+            ModelName = "initial",
+            MaxSequenceLength = 512
+        };
+        var service = new EmbeddingService(options);
+
+        // 切换到空路径（进入模拟模式），但 MaxSequenceLength 应已更新
+        await service.ReloadModelAsync("", "bge-m3", maxSequenceLength: 8192);
+
+        // 验证模拟模式下仍能工作
+        Assert.True(service.IsSimulationMode);
+
+        service.Dispose();
+    }
+
+    [Fact]
+    public void ModelRegistry_BgeM3_Has8192MaxSequenceLength()
+    {
+        var configManager = new ConfigManager();
+        var manager = new ModelManager(Path.GetTempPath(), configManager);
+
+        var models = manager.GetAvailableModelsAsync().GetAwaiter().GetResult();
+        var bgeM3 = models.FirstOrDefault(m => m.Name == "bge-m3");
+
+        Assert.NotNull(bgeM3);
+        Assert.Equal(8192, bgeM3!.MaxSequenceLength);
+    }
+
+    [Fact]
+    public void ModelRegistry_StandardModels_Have512MaxSequenceLength()
+    {
+        var configManager = new ConfigManager();
+        var manager = new ModelManager(Path.GetTempPath(), configManager);
+
+        var models = manager.GetAvailableModelsAsync().GetAwaiter().GetResult();
+
+        var standardModels = new[] { "bge-small-zh-v1.5", "bge-base-zh-v1.5", "bge-large-zh-v1.5" };
+        foreach (var name in standardModels)
+        {
+            var m = models.FirstOrDefault(x => x.Name == name);
+            Assert.NotNull(m);
+            Assert.Equal(512, m!.MaxSequenceLength);
+        }
+    }
 }

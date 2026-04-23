@@ -297,7 +297,7 @@ public class MockEmbeddingService : IEmbeddingService
         _dimension = dimension;
     }
 
-    public Task<bool> ReloadModelAsync(string modelPath, string modelName)
+    public Task<bool> ReloadModelAsync(string modelPath, string modelName, int? maxSequenceLength = null)
     {
         return Task.FromResult(true);
     }

@@ -125,8 +125,25 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             _options.ModelPath = modelPath;
             _options.ModelName = modelName;
 
+            // 从 ONNX 输入元数据自动检测 MaxSequenceLength
+            // 如果模型有固定输入形状（dim > 0），优先使用模型的真实要求
+            var inputMeta = _session.InputMetadata;
+            if (inputMeta.TryGetValue("input_ids", out var inputIdsMeta))
+            {
+                var inputDims = inputIdsMeta.Dimensions;
+                if (inputDims.Length >= 2 && inputDims[1] > 0)
+                {
+                    var modelMaxSeq = (int)inputDims[1];
+                    if (modelMaxSeq != _options.MaxSequenceLength)
+                    {
+                        Console.WriteLine($"[EmbeddingService] ONNX 固定输入形状检测到 MaxSeqLen={modelMaxSeq}，当前配置为 {_options.MaxSequenceLength}，自动对齐");
+                        _options.MaxSequenceLength = modelMaxSeq;
+                    }
+                }
+            }
+
             Console.WriteLine($"[EmbeddingService] 模型加载成功: {modelName}");
-            Console.WriteLine($"[EmbeddingService] 向量维度: {Dimension}, 输出形状: [{string.Join(", ", outputShape)}] ({(isPooled ? "已内置pooling" : "需要mean pooling")})");
+            Console.WriteLine($"[EmbeddingService] 向量维度: {Dimension}, 输出形状: [{string.Join(", ", outputShape)}] ({(isPooled ? "已内置pooling" : "需要mean pooling")}), MaxSeqLen: {_options.MaxSequenceLength}");
 
             // 加载分词器（优先使用 Microsoft.ML.Tokenizers）
             _tokenizer = LoadTokenizer(modelPath);
@@ -160,7 +177,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable
     /// <summary>
     /// 重新加载模型
     /// </summary>
-    public Task<bool> ReloadModelAsync(string modelPath, string modelName)
+    public Task<bool> ReloadModelAsync(string modelPath, string modelName, int? maxSequenceLength = null)
     {
         return Task.Run(() =>
         {
@@ -169,8 +186,13 @@ public class EmbeddingService : IEmbeddingService, IDisposable
                 try
                 {
                     Console.WriteLine($"[EmbeddingService] 正在切换模型: {modelName}");
+                    if (maxSequenceLength.HasValue)
+                    {
+                        _options.MaxSequenceLength = maxSequenceLength.Value;
+                        Console.WriteLine($"[EmbeddingService] MaxSequenceLength 更新为: {maxSequenceLength.Value}");
+                    }
                     LoadModel(modelPath, modelName);
-                    Console.WriteLine($"[EmbeddingService] 模型切换完成: {modelName}, 维度: {Dimension}");
+                    Console.WriteLine($"[EmbeddingService] 模型切换完成: {modelName}, 维度: {Dimension}, MaxSeqLen: {_options.MaxSequenceLength}");
                     return true;
                 }
                 catch (Exception ex)

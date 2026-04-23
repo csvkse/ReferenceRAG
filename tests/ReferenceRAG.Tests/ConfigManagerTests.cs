@@ -140,6 +140,44 @@ public class ConfigManagerTests : IDisposable
         Assert.Equal("Source 1", config.Sources[0].Name);
     }
 
+    [Fact]
+    public void ServiceConfig_AllowNetworkAccess_False_EffectiveHostIsLocalhost()
+    {
+        var sc = new ServiceConfig { AllowNetworkAccess = false };
+        Assert.Equal("localhost", sc.EffectiveHost);
+    }
+
+    [Fact]
+    public void ServiceConfig_AllowNetworkAccess_True_EffectiveHostIs0000()
+    {
+        var sc = new ServiceConfig { AllowNetworkAccess = true };
+        Assert.Equal("0.0.0.0", sc.EffectiveHost);
+    }
+
+    [Fact]
+    public void ServiceConfig_Default_AllowNetworkAccess_IsFalse()
+    {
+        var sc = new ServiceConfig();
+        Assert.False(sc.AllowNetworkAccess);
+        Assert.Equal("localhost", sc.EffectiveHost);
+    }
+
+    [Fact]
+    public void ServiceConfig_AllowNetworkAccess_Serialization_RoundTrip()
+    {
+        // 验证 JSON 序列化/反序列化保留 AllowNetworkAccess（不依赖文件 I/O）
+        var original = new ObsidianRagConfig();
+        original.Service.AllowNetworkAccess = true;
+        original.Service.Host = "0.0.0.0";
+
+        var json = System.Text.Json.JsonSerializer.Serialize(original);
+        var restored = System.Text.Json.JsonSerializer.Deserialize<ObsidianRagConfig>(json);
+
+        Assert.NotNull(restored);
+        Assert.True(restored!.Service.AllowNetworkAccess);
+        Assert.Equal("0.0.0.0", restored.Service.Host);
+    }
+
     public void Dispose()
     {
         try { Directory.SetCurrentDirectory(_originalDir); } catch { }
