@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Core.Services.Graph;
 using ReferenceRAG.Service.Hubs;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -420,6 +422,11 @@ public class IndexService : IHostedService
             var bm25Docs = chunks.Select(c => (c.Id, c.Content));
             await bm25Store.IndexBatchAsync(bm25Docs);
         }
+
+        // 更新知识图谱（提取 wiki-link）
+        var graphIndexing = _serviceProvider.GetService<GraphIndexingService>();
+        if (graphIndexing != null)
+            await graphIndexing.UpdateGraphAsync(fileRecord, content, chunks);
     }
 
     private static string ComputeHash(string content)

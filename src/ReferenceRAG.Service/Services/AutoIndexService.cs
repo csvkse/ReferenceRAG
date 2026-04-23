@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Core.Services.Graph;
 
 namespace ReferenceRAG.Service.Services;
 
@@ -18,6 +19,7 @@ public class AutoIndexService : IHostedService, IDisposable
     private readonly ContentHashDetector _hashDetector;
     private readonly ConfigManager _configManager;
     private readonly IBM25Store _bm25Store;
+    private readonly GraphIndexingService? _graphIndexing;
     private readonly ILogger<AutoIndexService>? _logger;
     private readonly Queue<FileChangeEventArgs> _indexQueue;
     private readonly Timer _processTimer;
@@ -34,6 +36,7 @@ public class AutoIndexService : IHostedService, IDisposable
         ContentHashDetector hashDetector,
         ConfigManager configManager,
         IBM25Store bm25Store,
+        GraphIndexingService? graphIndexing = null,
         ILogger<AutoIndexService>? logger = null)
     {
         _fileMonitor = fileMonitor;
@@ -43,6 +46,7 @@ public class AutoIndexService : IHostedService, IDisposable
         _hashDetector = hashDetector;
         _configManager = configManager;
         _bm25Store = bm25Store;
+        _graphIndexing = graphIndexing;
         _logger = logger;
         _indexQueue = new Queue<FileChangeEventArgs>();
 
@@ -148,6 +152,9 @@ public class AutoIndexService : IHostedService, IDisposable
                     await _vectorStore.DeleteFileAsync(file.Id);
                     _logger?.LogInformation("已删除索引: {FileName}", Path.GetFileName(change.FilePath));
                 }
+                // 删除图节点
+                if (_graphIndexing != null)
+                    await _graphIndexing.RemoveAsync(change.FilePath);
             }
             else
             {
@@ -256,6 +263,10 @@ public class AutoIndexService : IHostedService, IDisposable
                 // 索引新 chunks 到 BM25
                 var bm25Docs = chunks.Select(c => (c.Id, c.Content));
                 await _bm25Store.IndexBatchAsync(bm25Docs);
+
+                // 更新知识图谱（提取 wiki-link）
+                if (_graphIndexing != null)
+                    await _graphIndexing.UpdateGraphAsync(fileRecord, content, chunks);
 
                 sw.Stop();
 
