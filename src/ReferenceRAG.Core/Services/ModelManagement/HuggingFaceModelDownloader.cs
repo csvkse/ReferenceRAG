@@ -943,6 +943,11 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
+# Windows short-path fallback for onnx/onnxruntime installed to C:\py
+_short_path = r'C:\py'
+if os.path.isdir(_short_path) and _short_path not in sys.path:
+    sys.path.insert(0, _short_path)
+
 def get_model_type(model_dir):
     # 从 config.json 检测模型架构：reranker / embedding
     config_path = os.path.join(model_dir, "config.json")
