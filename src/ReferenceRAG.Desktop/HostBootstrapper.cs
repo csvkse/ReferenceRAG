@@ -298,8 +298,26 @@ public static class HostBootstrapper
         // Desktop 模式不启用 Swagger、MCP 中间件、API Key 认证
 
         // 静态文件服务（Vue SPA）
+        // index.html 禁止缓存（每次都从磁盘读），哈希资源永久缓存
         app.UseDefaultFiles();
-        app.UseStaticFiles();
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            OnPrepareResponse = ctx =>
+            {
+                var path = ctx.File.Name;
+                if (path.Equals("index.html", StringComparison.OrdinalIgnoreCase))
+                {
+                    ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+                    ctx.Context.Response.Headers["Pragma"] = "no-cache";
+                    ctx.Context.Response.Headers["Expires"] = "0";
+                }
+                else
+                {
+                    // Vite 输出带 hash 的文件名，内容不变则永久缓存
+                    ctx.Context.Response.Headers["Cache-Control"] = "public, max-age=31536000, immutable";
+                }
+            }
+        });
 
         app.UseAuthorization();
         app.MapControllers();
