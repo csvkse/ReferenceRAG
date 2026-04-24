@@ -34,12 +34,13 @@ public class IndexingPipeline : IDisposable
         _batchSize = batchSize;
         _maxConcurrency = maxConcurrency;
 
-        // 创建通道（有界，防止内存爆炸）
+        // tokenizeChannel 容量 2× → Tokenize Stage 可超前更多批次，保证 GPU 不饿等
+        // embedChannel 容量 +2 → 允许 Embed Stage write-ahead，与下一批 GPU 推理重叠
         _tokenizeChannel = Channel.CreateBounded<ChunkBatch>(
-            new BoundedChannelOptions(maxConcurrency) { FullMode = BoundedChannelFullMode.Wait });
+            new BoundedChannelOptions(maxConcurrency * 2) { FullMode = BoundedChannelFullMode.Wait });
 
         _embedChannel = Channel.CreateBounded<EmbeddedBatch>(
-            new BoundedChannelOptions(maxConcurrency) { FullMode = BoundedChannelFullMode.Wait });
+            new BoundedChannelOptions(maxConcurrency + 2) { FullMode = BoundedChannelFullMode.Wait });
 
         _cts = new CancellationTokenSource();
     }
@@ -221,18 +222,30 @@ public class IndexingPipeline : IDisposable
     }
 
     /// <summary>
-    /// Stage 2: GPU 推理
+    /// Stage 2: GPU 推理（write-ahead 预取：GPU 推理与 embedChannel 写入重叠）
+    ///
+    /// 旧流程：GPU(N) → await write(N) → read(N+1) → GPU(N+1) → ...
+    /// 新流程：GPU(N) → fire write(N) → read(N+1) → GPU(N+1) → await write(N) → fire write(N+1) → ...
+    ///
+    /// 效果：eliminates the channel-write latency gap between consecutive GPU calls.
     /// </summary>
     private async Task RunEmbedStageAsync(CancellationToken cancellationToken)
     {
         try
         {
+            Task? writeTask = null;
+
             await foreach (var chunkBatch in _tokenizeChannel.Reader.ReadAllAsync(cancellationToken))
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var texts = chunkBatch.Chunks.Select(c => c.Content).ToList();
+
+                // GPU 推理（上一批的 embedChannel.WriteAsync 在此期间后台完成）
                 var vectors = await _embeddingService.EncodeBatchAsync(texts, EmbeddingMode.Document, cancellationToken);
+
+                // 等待上一批写入完成（通常早已完成，仅在 Stage 3 背压时阻塞）
+                if (writeTask != null) await writeTask;
 
                 var embeddedBatch = new EmbeddedBatch
                 {
@@ -242,7 +255,8 @@ public class IndexingPipeline : IDisposable
                     BatchIndex = chunkBatch.BatchIndex
                 };
 
-                await _embedChannel.Writer.WriteAsync(embeddedBatch, cancellationToken);
+                // 写入操作不立即 await → 与下一批 GPU 推理重叠
+                writeTask = _embedChannel.Writer.WriteAsync(embeddedBatch, cancellationToken).AsTask();
 
                 Progress?.Invoke(this, new IndexingProgressEventArgs
                 {
@@ -250,6 +264,9 @@ public class IndexingPipeline : IDisposable
                     BatchIndex = chunkBatch.BatchIndex
                 });
             }
+
+            // 确保最后一批写入完成
+            if (writeTask != null) await writeTask;
         }
         finally
         {

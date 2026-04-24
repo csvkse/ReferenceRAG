@@ -138,7 +138,7 @@ public class BertTokenizer : ITextTokenizer
             });
         }
 
-        return (inputIds, attentionMask, tokenTypeIds);
+        return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
     }
 
     /// <summary>
@@ -606,4 +606,45 @@ internal class TokenizerConfig
 internal class TokenizerModel
 {
     public Dictionary<string, int>? Vocab { get; set; }
+}
+
+/// <summary>
+/// 共享工具：裁剪 token tensor 到批次实际最大序列长度。
+/// 长序列模型（如 BGE M3 maxLen=8192）对短文本补零到 8192 会使 ONNX 推理慢 16x。
+/// </summary>
+internal static class TokenizerUtils
+{
+    internal static (DenseTensor<long> InputIds, DenseTensor<long> AttentionMask, DenseTensor<long> TokenTypeIds)
+        TrimToActualLength(DenseTensor<long> inputIds, DenseTensor<long> attentionMask, DenseTensor<long> tokenTypeIds,
+                           int batchSize, int maxLength)
+    {
+        int actualMaxLen = 0;
+        for (int i = 0; i < batchSize; i++)
+        {
+            for (int j = maxLength - 1; j >= 0; j--)
+            {
+                if (attentionMask[i, j] != 0)
+                {
+                    if (j + 1 > actualMaxLen) actualMaxLen = j + 1;
+                    break;
+                }
+            }
+        }
+        if (actualMaxLen == 0) actualMaxLen = 1;
+        if (actualMaxLen >= maxLength) return (inputIds, attentionMask, tokenTypeIds);
+
+        var tIds   = new DenseTensor<long>(new[] { batchSize, actualMaxLen });
+        var tMask  = new DenseTensor<long>(new[] { batchSize, actualMaxLen });
+        var tTypes = new DenseTensor<long>(new[] { batchSize, actualMaxLen });
+
+        for (int i = 0; i < batchSize; i++)
+            for (int j = 0; j < actualMaxLen; j++)
+            {
+                tIds[i, j]   = inputIds[i, j];
+                tMask[i, j]  = attentionMask[i, j];
+                tTypes[i, j] = tokenTypeIds[i, j];
+            }
+
+        return (tIds, tMask, tTypes);
+    }
 }

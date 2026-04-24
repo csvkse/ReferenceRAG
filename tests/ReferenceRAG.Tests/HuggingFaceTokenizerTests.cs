@@ -90,47 +90,50 @@ public class HuggingFaceTokenizerTests : IDisposable
     public void Tokenize_SingleText_TensorShapeCorrect()
     {
         Skip.If(_tokenizer == null, "Tokenizer 文件不存在，跳过测试");
+        const int maxLength = 64;
         var (inputIds, attentionMask, tokenTypeIds) = _tokenizer!.Tokenize(
-            new List<string> { "测试文本" }, maxLength: 64);
+            new List<string> { "测试文本" }, maxLength);
 
+        // TrimToActualLength 会将 tensor 裁剪到实际 token 长度，而非 maxLength
         Assert.Equal(2, inputIds.Dimensions.Length);
         Assert.Equal(1, inputIds.Dimensions[0]);
-        Assert.Equal(64, inputIds.Dimensions[1]);
-        Assert.Equal(1, attentionMask.Dimensions[0]);
-        Assert.Equal(64, attentionMask.Dimensions[1]);
-        Assert.Equal(1, tokenTypeIds.Dimensions[0]);
-        Assert.Equal(64, tokenTypeIds.Dimensions[1]);
+        Assert.True(inputIds.Dimensions[1] >= 3 && inputIds.Dimensions[1] <= maxLength,
+            $"裁剪后长度应在 [3, {maxLength}]，实际: {inputIds.Dimensions[1]}");
+        Assert.Equal(inputIds.Dimensions[0], attentionMask.Dimensions[0]);
+        Assert.Equal(inputIds.Dimensions[1], attentionMask.Dimensions[1]);
+        Assert.Equal(inputIds.Dimensions[0], tokenTypeIds.Dimensions[0]);
+        Assert.Equal(inputIds.Dimensions[1], tokenTypeIds.Dimensions[1]);
     }
 
     [SkippableFact]
     public void Tokenize_BatchTexts_TensorShapeCorrect()
     {
         Skip.If(_tokenizer == null, "Tokenizer 文件不存在，跳过测试");
+        const int maxLength = 32;
         var texts = new List<string> { "第一句话", "第二句话", "第三句话" };
-        var (inputIds, _, _) = _tokenizer!.Tokenize(texts, maxLength: 32);
+        var (inputIds, _, _) = _tokenizer!.Tokenize(texts, maxLength);
+        // TrimToActualLength 裁剪到批次中最长序列的实际长度
         Assert.Equal(3, inputIds.Dimensions[0]);
-        Assert.Equal(32, inputIds.Dimensions[1]);
+        Assert.True(inputIds.Dimensions[1] >= 3 && inputIds.Dimensions[1] <= maxLength,
+            $"裁剪后长度应在 [3, {maxLength}]，实际: {inputIds.Dimensions[1]}");
     }
 
     [SkippableFact]
     public void Tokenize_PaddingMask_Correct()
     {
         Skip.If(_tokenizer == null, "Tokenizer 文件不存在，跳过测试");
+        const int maxLength = 64;
         var (_, attentionMask, _) = _tokenizer!.Tokenize(
-            new List<string> { "短文本" }, maxLength: 64);
+            new List<string> { "短文本" }, maxLength);
 
-        int validCount = 0;
-        for (int j = 0; j < 64; j++)
-            if (attentionMask[0, j] == 1) validCount++;
+        // TrimToActualLength 后，tensor 只保留有效 token 位置，无 padding 零值
+        var trimmedLen = attentionMask.Dimensions[1];
+        Assert.True(trimmedLen > 2, $"有效 token 数应 > 2，实际: {trimmedLen}");
+        Assert.True(trimmedLen <= maxLength, $"裁剪后长度不应超过 {maxLength}");
 
-        Assert.True(validCount > 2, $"有效 token 数应 > 2，实际: {validCount}");
-
-        bool foundPadding = false;
-        for (int j = 0; j < 64; j++)
-        {
-            if (attentionMask[0, j] == 0 && !foundPadding) foundPadding = true;
-            if (foundPadding) Assert.Equal(0, attentionMask[0, j]);
-        }
+        // 裁剪后所有位置均为有效 token（mask == 1）
+        for (int j = 0; j < trimmedLen; j++)
+            Assert.Equal(1, attentionMask[0, j]);
     }
 
     [SkippableFact]

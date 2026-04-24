@@ -112,7 +112,7 @@ public class MLBertTokenizer : ITextTokenizer
             });
         }
 
-        return (inputIds, attentionMask, tokenTypeIds);
+        return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
     }
 
     /// <summary>

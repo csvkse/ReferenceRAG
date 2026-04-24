@@ -14,11 +14,14 @@ namespace ReferenceRAG.Core.Services;
 /// </summary>
 public class EmbeddingService : IEmbeddingService, IDisposable
 {
+    private enum PoolingMode { Mean, Cls }
+
     private readonly EmbeddingOptions _options;
     private InferenceSession? _session;
     private ITextTokenizer _tokenizer;
     private bool _simulationMode;
     private bool _isEmbeddedFormat;
+    private PoolingMode _poolingMode = PoolingMode.Mean;
     private readonly object _lock = new();
     private bool _disposed;
 
@@ -82,6 +85,9 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             _session = null;
             oldSession?.Dispose();
 
+            // 模型目录路径（用于读取配置文件）
+            var modelDir = Path.GetDirectoryName(modelPath) ?? "";
+
             // 加载 ONNX 模型
             var sessionOptions = new SessionOptions();
             sessionOptions.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
@@ -90,17 +96,12 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             {
                 try
                 {
-                    // CUDA 执行提供程序在动态 batch size 时有缓冲区重用问题
-                    // 嵌入式格式模型关闭内存模式以支持动态 batch
-                    var modelDir2 = Path.GetDirectoryName(modelPath);
-                    var isEmbedded = modelDir2 != null && !File.Exists(Path.Combine(modelDir2, "model.onnx.data"));
-                    if (isEmbedded)
-                    {
-                        sessionOptions.EnableMemoryPattern = false;
-                    }
+                    // 始终关闭内存模式以支持动态 batch size
+                    // 对 embedded 和 external 两种格式均有效，消除逐条推理退化
+                    sessionOptions.EnableMemoryPattern = false;
                     sessionOptions.AppendExecutionProvider_CUDA(_options.CudaDeviceId);
                     sessionOptions.AppendExecutionProvider_CPU();
-                    Console.WriteLine($"[EmbeddingService] 使用 CUDA GPU: {_options.CudaDeviceId} (动态batch: {isEmbedded})");
+                    Console.WriteLine($"[EmbeddingService] 使用 CUDA GPU: {_options.CudaDeviceId} (动态batch已启用)");
                 }
                 catch (Exception ex)
                 {
@@ -116,14 +117,93 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             _session = new InferenceSession(modelPath, sessionOptions);
 
             // 获取输出形状信息
+            // 优先使用 sentence_embedding 输出（BGE M3 等内置 CLS pooling 的模型）
             var outputMeta = _session.OutputMetadata;
-            var outputInfo = outputMeta.First();
-            var outputShape = outputInfo.Value.Dimensions;
+            var hasSentenceEmbedding = outputMeta.ContainsKey("sentence_embedding");
+            var outputInfo = hasSentenceEmbedding
+                ? outputMeta["sentence_embedding"]
+                : outputMeta.First().Value;
+            var outputShape = outputInfo.Dimensions;
             Dimension = outputShape[^1];
             var isPooled = outputShape.Length == 2; // 2D = 已 pooling, 3D = 需要 mean pooling
 
+            // ONNX 元数据中的符号维度会返回 0（如 ?(Divsentence_embedding_dim_1)）
+            // 按优先级依次读取：1_Pooling/config.json → config.json hidden_size
+            if (Dimension == 0)
+            {
+                var poolingConfig = Path.Combine(modelDir, "1_Pooling", "config.json");
+                if (File.Exists(poolingConfig))
+                {
+                    try
+                    {
+                        var json = File.ReadAllText(poolingConfig);
+                        using var doc = System.Text.Json.JsonDocument.Parse(json);
+                        if (doc.RootElement.TryGetProperty("word_embedding_dimension", out var dimProp))
+                        {
+                            Dimension = dimProp.GetInt32();
+                            Console.WriteLine($"[EmbeddingService] 从 1_Pooling/config.json 读取维度: {Dimension}");
+                        }
+                    }
+                    catch
+                    {
+                        Console.WriteLine("[EmbeddingService] 无法从 1_Pooling/config.json 读取维度，尝试 config.json");
+                    }
+                }
+            }
+
+            // 终极 fallback：从 config.json 读取 hidden_size（多数 HuggingFace 模型均包含此文件）
+            if (Dimension == 0)
+            {
+                var modelConfig = Path.Combine(modelDir, "config.json");
+                if (File.Exists(modelConfig))
+                {
+                    try
+                    {
+                        var json = File.ReadAllText(modelConfig);
+                        using var doc = System.Text.Json.JsonDocument.Parse(json);
+                        if (doc.RootElement.TryGetProperty("hidden_size", out var hiddenProp))
+                        {
+                            Dimension = hiddenProp.GetInt32();
+                            Console.WriteLine($"[EmbeddingService] 从 config.json hidden_size 读取维度: {Dimension}");
+                        }
+                    }
+                    catch { }
+                }
+            }
+
             _options.ModelPath = modelPath;
             _options.ModelName = modelName;
+            if (hasSentenceEmbedding)
+                Console.WriteLine("[EmbeddingService] 检测到 sentence_embedding 输出，使用内置 CLS pooling");
+
+            // 读取 1_Pooling/config.json 确定 pooling 策略（Sentence Transformers 标准约定）
+            // sentence_embedding 输出已是 2D，无需再走 pooling 分支，此处仅针对 3D 输出
+            _poolingMode = PoolingMode.Mean; // 默认 mean pooling
+            if (!hasSentenceEmbedding)
+            {
+                var poolingConfig = Path.Combine(modelDir, "1_Pooling", "config.json");
+                if (File.Exists(poolingConfig))
+                {
+                    try
+                    {
+                        var json = File.ReadAllText(poolingConfig);
+                        using var doc = System.Text.Json.JsonDocument.Parse(json);
+                        if (doc.RootElement.TryGetProperty("pooling_mode_cls_token", out var clsProp) && clsProp.GetBoolean())
+                        {
+                            _poolingMode = PoolingMode.Cls;
+                            Console.WriteLine("[EmbeddingService] 1_Pooling/config.json: 使用 CLS token pooling");
+                        }
+                        else
+                        {
+                            Console.WriteLine("[EmbeddingService] 1_Pooling/config.json: 使用 mean pooling");
+                        }
+                    }
+                    catch
+                    {
+                        Console.WriteLine("[EmbeddingService] 1_Pooling/config.json 解析失败，回退到 mean pooling");
+                    }
+                }
+            }
 
             // 从 ONNX 输入元数据自动检测 MaxSequenceLength
             // 如果模型有固定输入形状（dim > 0），优先使用模型的真实要求
@@ -159,8 +239,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             _simulationMode = false;
 
             // 检测 ONNX 格式：存在 .data 文件为外部格式，否则为嵌入式
-            var modelDir = Path.GetDirectoryName(modelPath);
-            _isEmbeddedFormat = modelDir != null && !File.Exists(Path.Combine(modelDir, "model.onnx.data"));
+            _isEmbeddedFormat = !File.Exists(Path.Combine(modelDir, "model.onnx.data"));
             var formatLabel = _isEmbeddedFormat ? "embedded" : "external";
             Console.WriteLine($"[EmbeddingService] ONNX 格式: {formatLabel}");
         }
@@ -295,26 +374,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable
         var textList = texts.ToList();
         if (textList.Count == 0) return Array.Empty<float[]>();
 
-        // 嵌入式格式模型使用动态 batch 推理（走下方通用路径）
-        if (_options.UseCuda && !_isEmbeddedFormat)
-        {
-            return await Task.Run(() =>
-            {
-                // 在 lock 内检查 _session 状态，避免竞态条件
-                lock (_lock)
-                {
-                    if (_session == null || _simulationMode)
-                    {
-                        Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
-                        return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
-                    }
-
-                    return textList.Select(text => EncodeSingleInternal(text)).ToArray();
-                }
-            }, cancellationToken);
-        }
-
-        // 非 CUDA 外部格式 路径：包在 Task.Run 中避免阻塞 async 调用方
+        // 统一走批量推理路径（CUDA 已设置 EnableMemoryPattern=false，支持动态 batch）
         return await Task.Run(() =>
         {
             // 在 lock 内检查 _session 状态，避免竞态条件
@@ -352,7 +412,11 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             }
 
             using var results = session.Run(inputs);
-            var outputTensor = results.First().AsTensor<float>();
+            // 优先使用 sentence_embedding（内置 CLS pooling），回退到第一个输出
+            var hasSentEmbedding = session.OutputMetadata.ContainsKey("sentence_embedding");
+            var outputTensor = hasSentEmbedding
+                ? results.First(r => r.Name == "sentence_embedding").AsTensor<float>()
+                : results.First().AsTensor<float>();
             var outputShape = outputTensor.Dimensions;
 
             var inferenceMs = sw.ElapsedMilliseconds;
@@ -364,6 +428,9 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             if (outputShape.Length == 2)
             {
                 // 模型已内置 pooling，直接按 batch 维度切片
+                // Dimension 为 0 时（符号维度未能在 LoadModel 阶段静态解析），从实际输出后验更新
+                if (Dimension == 0)
+                    Dimension = outputShape[1];
                 Debug.Assert(outputShape[1] == Dimension,
                     $"输出维度不匹配：期望 {Dimension}，实际 {outputShape[1]}");
 
@@ -379,40 +446,47 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             }
             else if (outputShape.Length == 3)
             {
-                // 原始 last_hidden_state [batch, seq_len, dim] — 需要 mean pooling
+                // last_hidden_state [batch, seq_len, dim]
                 var seqLen = outputShape[1];
+                if (Dimension == 0)
+                    Dimension = outputShape[2];
                 Debug.Assert(outputShape[2] == Dimension,
                     $"隐藏层维度不匹配：期望 {Dimension}，实际 {outputShape[2]}");
 
-                var attentionMask = tokens.AttentionMask;
-
-                for (int i = 0; i < batchSize; i++)
+                if (_poolingMode == PoolingMode.Cls)
                 {
-                    var embedding = new float[Dimension];
-                    float maskSum = 0;
-
-                    for (int s = 0; s < seqLen; s++)
+                    // CLS token pooling: 取 seq 位置 0
+                    for (int i = 0; i < batchSize; i++)
                     {
-                        // AttentionMask 通常是 DenseTensor<long>，显式转换为 float
-                        var maskVal = (float)attentionMask[i, s];
-                        if (maskVal == 0) continue;
-                        maskSum += maskVal;
-
+                        var embedding = new float[Dimension];
                         for (int d = 0; d < Dimension; d++)
-                        {
-                            embedding[d] += outputTensor[i, s, d] * maskVal;
-                        }
+                            embedding[d] = outputTensor[i, 0, d];
+                        Normalize(embedding);
+                        batchEmbeddings[i] = embedding;
                     }
-
-                    if (maskSum > 0)
+                }
+                else
+                {
+                    // Mean pooling（masked average）
+                    var attentionMask = tokens.AttentionMask;
+                    for (int i = 0; i < batchSize; i++)
                     {
-                        for (int d = 0; d < Dimension; d++)
+                        var embedding = new float[Dimension];
+                        float maskSum = 0;
+                        for (int s = 0; s < seqLen; s++)
                         {
-                            embedding[d] /= maskSum;
+                            var maskVal = (float)attentionMask[i, s];
+                            if (maskVal == 0) continue;
+                            maskSum += maskVal;
+                            for (int d = 0; d < Dimension; d++)
+                                embedding[d] += outputTensor[i, s, d] * maskVal;
                         }
+                        if (maskSum > 0)
+                            for (int d = 0; d < Dimension; d++)
+                                embedding[d] /= maskSum;
+                        Normalize(embedding);
+                        batchEmbeddings[i] = embedding;
                     }
-                    Normalize(embedding);
-                    batchEmbeddings[i] = embedding;
                 }
             }
             else
@@ -491,8 +565,15 @@ public class EmbeddingService : IEmbeddingService, IDisposable
         }
 
         using var results = _session.Run(inputs);
-        var outputTensor = results.First().AsTensor<float>();
+        var hasSentEmb = _session.OutputMetadata.ContainsKey("sentence_embedding");
+        var outputTensor = hasSentEmb
+            ? results.First(r => r.Name == "sentence_embedding").AsTensor<float>()
+            : results.First().AsTensor<float>();
         var outputShape = outputTensor.Dimensions;
+
+        // 后验更新 Dimension（应对 LoadModel 阶段符号维度为 0 的情况）
+        if (Dimension == 0)
+            Dimension = outputShape.Length == 2 ? outputShape[1] : outputShape[2];
 
         var embedding = new float[Dimension];
 
@@ -507,31 +588,33 @@ public class EmbeddingService : IEmbeddingService, IDisposable
         }
         else if (outputShape.Length == 3)
         {
-            // 3D [1, seq_len, dim] - 需要 mean pooling
+            // 3D [1, seq_len, dim]
             var seqLen = outputShape[1];
-            var attentionMask = tokens.AttentionMask;
-            float maskSum = 0;
-
-            for (int s = 0; s < seqLen; s++)
+            if (_poolingMode == PoolingMode.Cls)
             {
-                var maskVal = attentionMask[0, s];
-                if (maskVal == 0) continue;
-                maskSum += maskVal;
-
+                // CLS token pooling
                 for (int d = 0; d < Dimension; d++)
-                {
-                    embedding[d] += outputTensor[0, s, d] * maskVal;
-                }
+                    embedding[d] = outputTensor[0, 0, d];
+                Normalize(embedding);
             }
-
-            if (maskSum > 0)
+            else
             {
-                for (int d = 0; d < Dimension; d++)
+                // Mean pooling
+                var attentionMask = tokens.AttentionMask;
+                float maskSum = 0;
+                for (int s = 0; s < seqLen; s++)
                 {
-                    embedding[d] /= maskSum;
+                    var maskVal = attentionMask[0, s];
+                    if (maskVal == 0) continue;
+                    maskSum += maskVal;
+                    for (int d = 0; d < Dimension; d++)
+                        embedding[d] += outputTensor[0, s, d] * maskVal;
                 }
+                if (maskSum > 0)
+                    for (int d = 0; d < Dimension; d++)
+                        embedding[d] /= maskSum;
+                Normalize(embedding);
             }
-            Normalize(embedding);
         }
         else
         {

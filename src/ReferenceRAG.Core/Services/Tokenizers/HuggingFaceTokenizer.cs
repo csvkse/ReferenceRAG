@@ -47,7 +47,7 @@ public class HuggingFaceTokenizer : ITextTokenizer
             TokenizeSingle(texts[i], maxLength, inputIds, attentionMask, tokenTypeIds, i);
         }
 
-        return (inputIds, attentionMask, tokenTypeIds);
+        return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
     }
 
     private void TokenizeSingle(string text, int maxLength,

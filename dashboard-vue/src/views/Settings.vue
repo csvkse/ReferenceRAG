@@ -88,6 +88,37 @@
                   :options="sourceNameOptions"
                 />
               </n-form-item>
+
+              <n-divider>知识图谱扩展召回</n-divider>
+
+              <n-form-item label="启用图扩展">
+                <n-space align="center">
+                  <n-switch v-model:value="config.search.enableGraphExpansion" />
+                  <n-text depth="3" style="font-size: 12px">
+                    {{ config.search.enableGraphExpansion
+                      ? '检索时自动补充 wiki-link 关联文档（需先完成索引建图）'
+                      : '不使用知识图谱扩展' }}
+                  </n-text>
+                </n-space>
+              </n-form-item>
+
+              <template v-if="config.search.enableGraphExpansion">
+                <n-form-item label="遍历深度">
+                  <n-input-number
+                    v-model:value="config.search.graphExpansionDepth"
+                    :min="1" :max="2" style="width: 120px"
+                  />
+                  <n-text depth="3" style="margin-left:8px;font-size:12px">层（推荐 1）</n-text>
+                </n-form-item>
+                <n-form-item label="最大邻居节点数">
+                  <n-input-number
+                    v-model:value="config.search.graphExpansionMaxNodes"
+                    :min="1" :max="10" style="width: 120px"
+                  />
+                  <n-text depth="3" style="margin-left:8px;font-size:12px">个/结果（推荐 3）</n-text>
+                </n-form-item>
+              </template>
+
             </n-form>
           </n-card>
         </n-tab-pane>
@@ -246,7 +277,10 @@ const defaultConfig: ReferenceRAGConfig = {
     similarityThreshold: 0.5,
     enableMmr: true,
     mmrLambda: 0.7,
-    defaultSources: []
+    defaultSources: [],
+    enableGraphExpansion: false,
+    graphExpansionDepth: 1,
+    graphExpansionMaxNodes: 3
   },
   service: {
     port: 5000,

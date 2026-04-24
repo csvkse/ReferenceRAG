@@ -199,6 +199,9 @@ export interface SearchConfig {
   enableMmr: boolean
   mmrLambda: number
   defaultSources?: string[]
+  enableGraphExpansion: boolean
+  graphExpansionDepth: number
+  graphExpansionMaxNodes: number
 }
 
 export interface ServiceConfig {

@@ -888,17 +888,24 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             }
         }
 
-        // 删除所有模型表中的向量
-        foreach (var modelName in _modelDimensions.Keys.ToList())
+        // 批量删除所有模型表中的向量（IN 子句，每批 500 避免 SQLite 参数上限）
+        if (chunkIds.Count > 0)
         {
-            var tableName = ModelToTableName(modelName);
-            foreach (var chunkId in chunkIds)
+            const int deleteBatchSize = 500;
+            foreach (var modelName in _modelDimensions.Keys.ToList())
             {
-                var deleteVectorSql = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
-                using var cmd = _connection.CreateCommand();
-                cmd.CommandText = deleteVectorSql;
-                cmd.Parameters.AddWithValue("@chunkId", chunkId);
-                await cmd.ExecuteNonQueryAsync(cancellationToken);
+                var tableName = ModelToTableName(modelName);
+                for (int i = 0; i < chunkIds.Count; i += deleteBatchSize)
+                {
+                    var batch = chunkIds.Skip(i).Take(deleteBatchSize).ToList();
+                    var placeholders = string.Join(",", batch.Select((_, idx) => $"@did{idx}"));
+                    var deleteVectorSql = $"DELETE FROM {tableName} WHERE chunk_id IN ({placeholders})";
+                    using var cmd = _connection.CreateCommand();
+                    cmd.CommandText = deleteVectorSql;
+                    for (int j = 0; j < batch.Count; j++)
+                        cmd.Parameters.AddWithValue($"@did{j}", batch[j]);
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
             }
         }
 
@@ -959,19 +966,13 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
                 var tableName = ModelToTableName(modelName);
 
-                // 使用参数化查询插入向量
-                foreach (var vector in group)
+                // 分批事务插入，每批 500 条（对齐 UpsertChunkBatchAsync 策略）
+                var batchList = group.ToList();
+                const int vectorBatchSize = 500;
+                for (int i = 0; i < batchList.Count; i += vectorBatchSize)
                 {
-                    var sql = $@"
-                        INSERT OR REPLACE INTO {tableName} (chunk_id, embedding)
-                        VALUES (@chunkId, @embedding)
-                    ";
-
-                    using var command = _connection.CreateCommand();
-                    command.CommandText = sql;
-                    AddParameter(command, "@chunkId", vector.ChunkId);
-                    AddParameter(command, "@embedding", VectorToJson(vector.Vector));
-                    await command.ExecuteNonQueryAsync(cancellationToken);
+                    var batch = batchList.Skip(i).Take(vectorBatchSize).ToList();
+                    await UpsertVectorBatchInternalAsync(tableName, batch, cancellationToken);
                 }
             }
 
@@ -984,6 +985,36 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         finally
         {
             _writeLock.Release();
+        }
+    }
+
+    private async Task UpsertVectorBatchInternalAsync(string tableName, List<VectorRecord> batch, CancellationToken cancellationToken)
+    {
+        using var transaction = _connection.BeginTransaction();
+        try
+        {
+            var sql = $@"
+                INSERT OR REPLACE INTO {tableName} (chunk_id, embedding)
+                VALUES (@chunkId, @embedding)
+            ";
+            using var command = _connection.CreateCommand();
+            command.CommandText = sql;
+            command.Transaction = transaction;
+
+            foreach (var vector in batch)
+            {
+                command.Parameters.Clear();
+                AddParameter(command, "@chunkId", vector.ChunkId);
+                AddParameter(command, "@embedding", VectorToJson(vector.Vector));
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            transaction.Commit();
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
         }
     }
 
@@ -1217,19 +1248,31 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
         var tableName = ModelToTableName(modelName);
         var queryJson = VectorToJson(queryVector);
-        var limitValue = topK * 3; // 多取一些用于过滤
+        var limitValue = topK * 3; // 多取一些用于内存过滤
 
-        // 向量搜索后过滤ID
-        // 注意: sqlite-vec 要求 LIMIT 在解析时已知，因此直接嵌入整数值而非使用参数
+        // 单次 JOIN 查询消除 N+1（对齐 SearchAsync 实现）
+        // vec0 子查询先取 limitValue 个最近邻，外层 JOIN 补充 chunk/file 信息，最终在内存按 idSet 过滤
         var sql = $@"
-            SELECT v.chunk_id, v.embedding, v.distance
-            FROM {tableName} v
-            WHERE v.embedding MATCH @query
-            ORDER BY v.distance
-            LIMIT {limitValue}
+            SELECT
+                knn.chunk_id,
+                c.id AS c_id, c.file_id AS c_file_id, c.content, c.token_count,
+                c.start_line, c.end_line, c.start_column, c.end_column,
+                c.heading_path, c.level, c.weight, c.chunk_type,
+                c.aggregate_type, c.child_chunk_count,
+                f.id AS f_id, f.path, f.title, f.source,
+                knn.distance
+            FROM (
+                SELECT chunk_id, distance
+                FROM {tableName}
+                WHERE embedding MATCH @query
+                ORDER BY distance
+                LIMIT {limitValue}
+            ) knn
+            LEFT JOIN chunks c ON knn.chunk_id = c.id
+            LEFT JOIN files  f ON c.file_id = f.id
         ";
 
-        var results = new List<(string ChunkId, float Distance)>();
+        var searchResults = new List<SearchResult>();
 
         try
         {
@@ -1240,50 +1283,39 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var chunkId = reader.GetString(0);
-                var distance = reader.GetFloat(2);
+                var chunkId = reader.GetString(reader.GetOrdinal("chunk_id"));
+                if (!idSet.Contains(chunkId)) continue;
 
-                if (idSet.Contains(chunkId))
+                var cId = reader.IsDBNull(reader.GetOrdinal("c_id")) ? null : reader.GetString(reader.GetOrdinal("c_id"));
+                if (string.IsNullOrEmpty(cId)) continue;
+
+                var distance = reader.GetFloat(reader.GetOrdinal("distance"));
+                var score = 1f / (1f + distance);
+
+                searchResults.Add(new SearchResult
                 {
-                    results.Add((chunkId, distance));
-                }
+                    ChunkId = cId,
+                    FileId = reader.GetString(reader.GetOrdinal("c_file_id")),
+                    FilePath = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("path")),
+                    Source = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("source")),
+                    Title = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("title")),
+                    Content = reader.GetString(reader.GetOrdinal("content")),
+                    Score = score,
+                    StartLine = reader.GetInt32(reader.GetOrdinal("start_line")),
+                    EndLine = reader.GetInt32(reader.GetOrdinal("end_line")),
+                    HeadingPath = reader.GetString(reader.GetOrdinal("heading_path")),
+                    Level = reader.GetInt32(reader.GetOrdinal("level")),
+                    AggregateType = (AggregateType)reader.GetInt32(reader.GetOrdinal("aggregate_type")),
+                    ChildChunkCount = reader.GetInt32(reader.GetOrdinal("child_chunk_count"))
+                });
 
-                if (results.Count >= topK) break;
+                if (searchResults.Count >= topK) break;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "SearchInIdsAsync 失败: {Message}", ex.Message);
             return Enumerable.Empty<SearchResult>();
-        }
-
-        // 获取分段和文件信息
-        var searchResults = new List<SearchResult>();
-        foreach (var (chunkId, distance) in results)
-        {
-            var chunk = await GetChunkAsync(chunkId, cancellationToken);
-            if (chunk == null) continue;
-
-            var file = await GetFileAsync(chunk.FileId, cancellationToken);
-            if (file == null) continue;
-
-            var score = 1f / (1f + distance);
-
-            searchResults.Add(new SearchResult
-            {
-                ChunkId = chunk.Id,
-                FileId = chunk.FileId,
-                FilePath = file.Path,
-                Source = file.Source,
-                Title = file.Title,
-                Content = chunk.Content,
-                Score = score,
-                StartLine = chunk.StartLine,
-                EndLine = chunk.EndLine,
-                HeadingPath = chunk.HeadingPath,
-                Level = chunk.Level,
-                AggregateType = chunk.AggregateType,
-                ChildChunkCount = chunk.ChildChunkCount
-            });
         }
 
         return searchResults;
