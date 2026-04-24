@@ -78,7 +78,7 @@ public class MLBertTokenizer : ITextTokenizer
     /// 批量分词（高性能实现）
     /// </summary>
     public (DenseTensor<long> InputIds, DenseTensor<long> AttentionMask, DenseTensor<long> TokenTypeIds)
-        Tokenize(List<string> texts, int maxLength)
+        Tokenize(List<string> texts, int maxLength, bool trimToActualLength = true)
     {
         var batchSize = texts.Count;
         if (batchSize == 0)
@@ -112,7 +112,9 @@ public class MLBertTokenizer : ITextTokenizer
             });
         }
 
-        return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
+        if (trimToActualLength)
+            return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
+        return (inputIds, attentionMask, tokenTypeIds);
     }
 
     /// <summary>

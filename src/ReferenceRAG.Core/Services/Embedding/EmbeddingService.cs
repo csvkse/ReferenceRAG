@@ -22,6 +22,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable
     private bool _simulationMode;
     private bool _isEmbeddedFormat;
     private PoolingMode _poolingMode = PoolingMode.Mean;
+    private bool _hasDynamicSeqLen = true; // false = fixed-shape ONNX，不裁剪 padding
     private readonly object _lock = new();
     private bool _disposed;
 
@@ -206,19 +207,23 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             }
 
             // 从 ONNX 输入元数据自动检测 MaxSequenceLength
-            // 如果模型有固定输入形状（dim > 0），优先使用模型的真实要求
+            // 如果模型有固定输入形状（dim > 0），优先使用模型的真实要求，并禁用 TrimToActualLength
             var inputMeta = _session.InputMetadata;
+            _hasDynamicSeqLen = true; // 默认动态
             if (inputMeta.TryGetValue("input_ids", out var inputIdsMeta))
             {
                 var inputDims = inputIdsMeta.Dimensions;
                 if (inputDims.Length >= 2 && inputDims[1] > 0)
                 {
+                    // 固定形状：模型只接受固定长度 tensor，裁剪会导致推理失败
+                    _hasDynamicSeqLen = false;
                     var modelMaxSeq = (int)inputDims[1];
                     if (modelMaxSeq != _options.MaxSequenceLength)
                     {
                         Console.WriteLine($"[EmbeddingService] ONNX 固定输入形状检测到 MaxSeqLen={modelMaxSeq}，当前配置为 {_options.MaxSequenceLength}，自动对齐");
                         _options.MaxSequenceLength = modelMaxSeq;
                     }
+                    Console.WriteLine($"[EmbeddingService] 检测到固定输入形状，禁用 TrimToActualLength（padding 保留至 {_options.MaxSequenceLength}）");
                 }
             }
 
@@ -391,8 +396,8 @@ public class EmbeddingService : IEmbeddingService, IDisposable
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
-            // Tokenize
-            var tokens = _tokenizer.Tokenize(textList, _options.MaxSequenceLength);
+            // Tokenize（固定形状模型不裁剪 padding，避免 tensor 尺寸与 ONNX 期望不符）
+            var tokens = _tokenizer.Tokenize(textList, _options.MaxSequenceLength, _hasDynamicSeqLen);
             var tokenizeMs = sw.ElapsedMilliseconds;
             sw.Restart();
 
@@ -546,8 +551,8 @@ public class EmbeddingService : IEmbeddingService, IDisposable
             return CreateRandomVector(Dimension);
         }
 
-        // Tokenize 单条文本
-        var tokens = _tokenizer.Tokenize(new List<string> { text }, _options.MaxSequenceLength);
+        // Tokenize 单条文本（固定形状模型不裁剪 padding）
+        var tokens = _tokenizer.Tokenize(new List<string> { text }, _options.MaxSequenceLength, _hasDynamicSeqLen);
 
         // ONNX 推理
         var inputNames = _session.InputNames;
@@ -748,7 +753,7 @@ internal class FallbackTokenizer : ITextTokenizer
     public int UnkTokenId => 100;
 
     public (DenseTensor<long> InputIds, DenseTensor<long> AttentionMask, DenseTensor<long> TokenTypeIds)
-        Tokenize(List<string> texts, int maxLength)
+        Tokenize(List<string> texts, int maxLength, bool trimToActualLength = true)
     {
         var batchSize = texts.Count;
         var inputIds = new DenseTensor<long>(new[] { batchSize, maxLength });
@@ -773,6 +778,8 @@ internal class FallbackTokenizer : ITextTokenizer
             attentionMask[i, chars.Count + 1] = 1;
         }
 
+        if (trimToActualLength)
+            return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
         return (inputIds, attentionMask, tokenTypeIds);
     }
 

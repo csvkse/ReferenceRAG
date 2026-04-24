@@ -35,7 +35,7 @@ public class HuggingFaceTokenizer : ITextTokenizer
     }
 
     public (DenseTensor<long> InputIds, DenseTensor<long> AttentionMask, DenseTensor<long> TokenTypeIds)
-        Tokenize(List<string> texts, int maxLength)
+        Tokenize(List<string> texts, int maxLength, bool trimToActualLength = true)
     {
         var batchSize = texts.Count;
         var inputIds = new DenseTensor<long>(new[] { batchSize, maxLength });
@@ -47,7 +47,9 @@ public class HuggingFaceTokenizer : ITextTokenizer
             TokenizeSingle(texts[i], maxLength, inputIds, attentionMask, tokenTypeIds, i);
         }
 
-        return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
+        if (trimToActualLength)
+            return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
+        return (inputIds, attentionMask, tokenTypeIds);
     }
 
     private void TokenizeSingle(string text, int maxLength,

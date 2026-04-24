@@ -26,17 +26,18 @@ public class TokenizeSingleDebugTests
         var text = "how to improve programming skills";
         var result = tokenizer.Tokenize(new List<string> { text }, 512);
 
+        var actualLen = result.InputIds.Dimensions[1]; // TrimToActualLength 可能已裁剪
         var ids = new List<long>();
         var masks = new List<long>();
-        for (int j = 0; j < 512; j++)
+        for (int j = 0; j < actualLen; j++)
         {
             ids.Add(result.InputIds[0, j]);
             masks.Add(result.AttentionMask[0, j]);
         }
 
-        // 找到 attention_mask 的最后一个 1
-        int lastTokenPos = -1;
-        for (int j = 0; j < 512; j++)
+        // 找到 attention_mask 的最后一个 1（裁剪后所有位置均为有效 token）
+        int lastTokenPos = actualLen - 1;
+        for (int j = 0; j < actualLen; j++)
         {
             if (masks[j] == 0) { lastTokenPos = j - 1; break; }
         }
@@ -63,8 +64,9 @@ public class TokenizeSingleDebugTests
         var text = "skills";
         var result = tokenizer.Tokenize(new List<string> { text }, 512);
 
+        var actualLen = result.InputIds.Dimensions[1]; // TrimToActualLength 可能已裁剪
         var ids = new List<long>();
-        for (int j = 0; j < 20; j++)
+        for (int j = 0; j < Math.Min(20, actualLen); j++)
         {
             if (result.AttentionMask[0, j] == 0) break;
             ids.Add(result.InputIds[0, j]);

@@ -104,7 +104,7 @@ public class BertTokenizer : ITextTokenizer
     /// 批量分词
     /// </summary>
     public (DenseTensor<long> InputIds, DenseTensor<long> AttentionMask, DenseTensor<long> TokenTypeIds)
-        Tokenize(List<string> texts, int maxLength)
+        Tokenize(List<string> texts, int maxLength, bool trimToActualLength = true)
     {
         var batchSize = texts.Count;
         if (batchSize == 0)
@@ -138,7 +138,9 @@ public class BertTokenizer : ITextTokenizer
             });
         }
 
-        return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
+        if (trimToActualLength)
+            return TokenizerUtils.TrimToActualLength(inputIds, attentionMask, tokenTypeIds, batchSize, maxLength);
+        return (inputIds, attentionMask, tokenTypeIds);
     }
 
     /// <summary>

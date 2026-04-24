@@ -42,9 +42,10 @@ public interface ITextTokenizer
     /// </summary>
     /// <param name="texts">待分词的文本列表</param>
     /// <param name="maxLength">最大序列长度</param>
+    /// <param name="trimToActualLength">是否裁剪到批次实际最大 token 长度（动态形状模型适用）</param>
     /// <returns>包含 input_ids, attention_mask, token_type_ids 的元组</returns>
     (DenseTensor<long> InputIds, DenseTensor<long> AttentionMask, DenseTensor<long> TokenTypeIds)
-        Tokenize(List<string> texts, int maxLength);
+        Tokenize(List<string> texts, int maxLength, bool trimToActualLength = true);
 
     /// <summary>
     /// 对单个文本进行分词，返回 token ID 列表
