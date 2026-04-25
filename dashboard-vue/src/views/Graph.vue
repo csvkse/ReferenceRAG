@@ -2,17 +2,32 @@
   <div class="graph-view">
     <n-space vertical size="large">
       <!-- 顶部统计 -->
-      <n-grid :cols="3" :x-gap="12">
-        <n-grid-item>
-          <n-statistic label="节点数" :value="stats.nodeCount" />
-        </n-grid-item>
-        <n-grid-item>
-          <n-statistic label="边数" :value="stats.edgeCount" />
-        </n-grid-item>
-        <n-grid-item>
-          <n-statistic label="当前查询深度" :value="depth" />
-        </n-grid-item>
-      </n-grid>
+      <n-card :bordered="false" style="padding: 0">
+        <n-space justify="space-between" align="center">
+          <n-grid :cols="3" :x-gap="12" style="flex:1">
+            <n-grid-item>
+              <n-statistic label="节点数" :value="stats.nodeCount" />
+            </n-grid-item>
+            <n-grid-item>
+              <n-statistic label="边数" :value="stats.edgeCount" />
+            </n-grid-item>
+            <n-grid-item>
+              <n-statistic label="当前查询深度" :value="depth" />
+            </n-grid-item>
+          </n-grid>
+          <n-button
+            circle
+            :loading="statsLoading"
+            @click="loadStats"
+            title="刷新统计"
+          >
+            <template #icon><n-icon :component="RefreshOutline" /></template>
+          </n-button>
+        </n-space>
+        <n-text v-if="indexStore.isIndexing" type="warning" style="font-size:12px;margin-top:4px">
+          索引正在进行，完成后将自动刷新…
+        </n-text>
+      </n-card>
 
       <!-- 搜索 / 遍历面板 -->
       <n-card title="节点查找与遍历">
@@ -91,21 +106,25 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, h } from 'vue'
-import { useMessage, NTag } from 'naive-ui'
+import { ref, onMounted, watch, h } from 'vue'
+import { useMessage, NTag, NIcon } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
+import { RefreshOutline } from '@vicons/ionicons5'
 import { graphApi } from '@/api'
+import { useIndexStore } from '@/stores'
 
 interface GraphNode { id: string; title: string; type: string }
 interface GraphEdge { fromId: string; toId: string; type: string; lineNumber: number }
 interface TraversalResult { rootId: string; depth: number; nodes: GraphNode[]; edges: GraphEdge[] }
 
 const message = useMessage()
+const indexStore = useIndexStore()
 const searchQuery = ref('')
 const nodeId = ref('')
 const depth = ref(1)
 const searching = ref(false)
 const traversing = ref(false)
+const statsLoading = ref(false)
 const searchResults = ref<GraphNode[]>([])
 const traversalResult = ref<TraversalResult | null>(null)
 const stats = ref({ nodeCount: 0, edgeCount: 0 })
@@ -175,13 +194,25 @@ const loadNeighbors = async (id: string) => {
 }
 
 const loadStats = async () => {
+  statsLoading.value = true
   try {
     const res = await graphApi.stats()
     stats.value = res.data as { nodeCount: number; edgeCount: number }
   } catch { /* ignore */ }
+  finally { statsLoading.value = false }
 }
 
-onMounted(loadStats)
+// 索引完成时自动刷新统计（isIndexing: true → false）
+watch(() => indexStore.isIndexing, (now, prev) => {
+  if (prev === true && now === false) {
+    loadStats()
+  }
+})
+
+onMounted(async () => {
+  await indexStore.connect()
+  loadStats()
+})
 </script>
 
 <style scoped>
