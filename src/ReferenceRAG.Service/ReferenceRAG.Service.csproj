@@ -43,7 +43,7 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);$(SpaRoot)node_modules\**</DefaultItemExcludes>
   </PropertyGroup>
 
-  <Target Name="PublishRunWebpack" AfterTargets="ComputeFilesToPublish">
+  <Target Name="PublishRunWebpack" AfterTargets="ComputeFilesToPublish" Condition="'$(DOTNET_RUNNING_IN_CONTAINER)' != 'true'">
     <Message Importance="high" Text="Restoring dependencies using 'npm'..." />
     <Exec WorkingDirectory="$(SpaRoot)" Command="npm install" />
     <Message Importance="high" Text="Building the Vue frontend..." />
