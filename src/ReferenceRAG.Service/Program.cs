@@ -37,12 +37,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 #region 配置服务端口
 // 从配置文件中读取端口设置
-// AllowNetworkAccess 优先；若旧配置仅含 host 字段（向后兼容），则直接使用
 var serviceConfig = builder.Configuration.GetSection("ReferenceRAG:Service");
 var allowNetwork = bool.TryParse(serviceConfig["allowNetworkAccess"], out var _allowNet) && _allowNet;
-var legacyHost = serviceConfig["host"];
-var host = allowNetwork ? "0.0.0.0"
-    : (legacyHost is "0.0.0.0" ? "0.0.0.0" : "localhost");
+var host = allowNetwork ? "0.0.0.0" : "localhost";
 var port = serviceConfig["port"] ?? "5000";
 var urls = $"http://{host}:{port}";
 builder.WebHost.UseUrls(urls);

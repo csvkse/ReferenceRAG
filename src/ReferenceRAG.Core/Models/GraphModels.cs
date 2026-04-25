@@ -30,5 +30,7 @@ public class GraphStats
     public int NodeCount { get; set; }
     public int DocCount { get; set; }
     public int TagCount { get; set; }
+    public int HeadingCount { get; set; }
+    public int ExternalCount { get; set; }
     public int EdgeCount { get; set; }
 }

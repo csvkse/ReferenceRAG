@@ -143,6 +143,32 @@ public class JsonVectorStore : IVectorStore, IDisposable
         return _chunks.Values.Where(c => c.FileId == fileId).AsEnumerable();
     }
 
+    public async Task<IEnumerable<ChunkRecord>> GetAdjacentChunksByFileAsync(
+        string fileId,
+        string chunkId,
+        int windowSize,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+
+        if (windowSize < 0) windowSize = 0;
+
+        var orderedChunks = _chunks.Values
+            .Where(c => c.FileId == fileId)
+            .OrderBy(c => c.ChunkIndex)
+            .ToList();
+
+        var hitIndex = orderedChunks.FindIndex(c => c.Id == chunkId);
+        if (hitIndex < 0)
+        {
+            return Array.Empty<ChunkRecord>();
+        }
+
+        var startIndex = Math.Max(0, hitIndex - windowSize);
+        var endIndex = Math.Min(orderedChunks.Count - 1, hitIndex + windowSize);
+        return orderedChunks.Skip(startIndex).Take(endIndex - startIndex + 1).ToList();
+    }
+
     public async Task DeleteChunksByFileAsync(string fileId, CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
@@ -194,6 +220,24 @@ public class JsonVectorStore : IVectorStore, IDisposable
         await EnsureInitializedAsync(cancellationToken);
         _vectors.TryGetValue(chunkId, out var vector);
         return vector;
+    }
+
+    public async Task<IReadOnlyDictionary<string, VectorRecord>> GetVectorsByChunkIdsAsync(
+        IEnumerable<string> chunkIds,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        var result = new Dictionary<string, VectorRecord>();
+
+        foreach (var chunkId in chunkIds.Distinct())
+        {
+            if (_vectors.TryGetValue(chunkId, out var vector))
+            {
+                result[chunkId] = vector;
+            }
+        }
+
+        return result;
     }
 
     public async Task DeleteVectorAsync(string id, CancellationToken cancellationToken = default)
@@ -463,33 +507,4 @@ public class JsonVectorStore : IVectorStore, IDisposable
         }
     }
 
-    public async Task<int> BackfillSourceAsync(IDictionary<string, string> sourceNameToPath, CancellationToken cancellationToken = default)
-    {
-        await EnsureInitializedAsync(cancellationToken);
-        var orphaned = _files.Values.Where(f => string.IsNullOrEmpty(f.Source)).ToList();
-        var updated = 0;
-        foreach (var file in orphaned)
-        {
-            var normalizedPath = file.Path.Replace('\\', '/');
-            var match = sourceNameToPath.FirstOrDefault(kvp =>
-                normalizedPath.StartsWith(kvp.Value.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase));
-            if (match.Key != null)
-            {
-                file.Source = match.Key;
-                updated++;
-            }
-        }
-        return updated;
-    }
-
-    public async Task<int> UpdateSourceNameAsync(string oldName, string newName, CancellationToken cancellationToken = default)
-    {
-        await EnsureInitializedAsync(cancellationToken);
-        var files = _files.Values.Where(f => f.Source == oldName).ToList();
-        foreach (var file in files)
-        {
-            file.Source = newName;
-        }
-        return files.Count;
-    }
 }

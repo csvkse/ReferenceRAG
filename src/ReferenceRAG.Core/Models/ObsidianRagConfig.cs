@@ -50,24 +50,6 @@ public class ObsidianRagConfig
     /// </summary>
     public IndexingConfig Indexing { get; set; } = new();
 
-    /// <summary>
-    /// 获取所有源路径（兼容旧配置）
-    /// </summary>
-    [Obsolete("Use Sources instead")]
-    public string? VaultPath 
-    { 
-        get => Sources.FirstOrDefault()?.Path;
-        set
-        {
-            if (!string.IsNullOrEmpty(value))
-            {
-                if (Sources.Count == 0)
-                    Sources.Add(new SourceFolder { Path = value });
-                else
-                    Sources[0].Path = value;
-            }
-        }
-    }
 }
 
 /// <summary>
@@ -208,11 +190,6 @@ public class EmbeddingConfig
     /// </summary>
     public int BatchSize { get; set; } = 32;
 
-    /// <summary>
-    /// 模型保存根目录（已废弃，请使用顶层 ModelsRootPath）
-    /// </summary>
-    [Obsolete("Use ObsidianRagConfig.ModelsRootPath instead")]
-    public string ModelsPath { get; set; } = "models";
 }
 
 /// <summary>
@@ -282,9 +259,7 @@ public class SearchConfig
     public List<string> DefaultSources { get; set; } = new();
 
     /// <summary>
-    /// BM25 提供者类型：fts5 或 legacy
-    /// fts5: 使用 SQLite FTS5 内置 BM25（推荐，性能更好）
-    /// legacy: 使用手动倒排索引实现（备用）
+    /// BM25 提供者类型：fts5
     /// </summary>
     public string BM25Provider { get; set; } = "fts5";
 
@@ -315,22 +290,11 @@ public class ServiceConfig
     public int Port { get; set; } = 5000;
 
     /// <summary>
-    /// 监听地址（向后兼容字段，优先使用 AllowNetworkAccess）
-    /// </summary>
-    public string Host { get; set; } = "localhost";
-
-    /// <summary>
     /// 是否允许来自局域网/外部网络的访问。
     /// true → 绑定 0.0.0.0（全网可访问）；false → 仅绑定 localhost（默认）。
     /// 修改后需要重启服务生效。
     /// </summary>
     public bool AllowNetworkAccess { get; set; } = false;
-
-    /// <summary>
-    /// 计算属性：实际生效的监听地址（AllowNetworkAccess 优先，向后兼容旧 Host 字段）
-    /// </summary>
-    [System.Text.Json.Serialization.JsonIgnore]
-    public string EffectiveHost => AllowNetworkAccess ? "0.0.0.0" : "localhost";
 
     /// <summary>
     /// 是否启用 CORS
@@ -374,7 +338,7 @@ public class RerankConfig
     public string? CurrentModel { get; set; }
 
     /// <summary>
-    /// 模型路径（相对于 ModelsPath）
+    /// 模型路径（相对于 ModelsRootPath）
     /// </summary>
     public string? ModelPath { get; set; }
 

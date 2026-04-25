@@ -252,6 +252,7 @@ const loading = ref(false)
 const saving = ref(false)
 const sourceNames = ref<string[]>([])
 const cudaAvailable = ref(true)
+const originalModelsRootPath = ref('models')
 
 const defaultConfig: ReferenceRAGConfig = {
   dataPath: 'data',
@@ -338,6 +339,7 @@ const loadConfig = async () => {
     if (!config.value.modelsRootPath) {
       config.value.modelsRootPath = 'models'
     }
+    originalModelsRootPath.value = config.value.modelsRootPath
   } catch (error) {
     message.error('加载配置失败，使用默认值')
   } finally {
@@ -370,14 +372,24 @@ const onNetworkAccessChange = () => {
   networkAccessChanged.value = true
 }
 
+const normalizeModelsRootPath = (path?: string) =>
+  (path || '')
+    .trim()
+    .replace(/\//g, '\\')
+    .replace(/\\+$/g, '')
+
 const handleSave = async () => {
   saving.value = true
   try {
-    const modelsPath = config.value.modelsRootPath
-    if (modelsPath && modelsPath !== 'models') {
+    const modelsPath = config.value.modelsRootPath?.trim()
+    const modelsPathChanged =
+      normalizeModelsRootPath(modelsPath) !== normalizeModelsRootPath(originalModelsRootPath.value)
+
+    if (modelsPathChanged && modelsPath) {
       await settingsApi.updateModelsPath(modelsPath)
     }
     await settingsApi.save(config.value)
+    originalModelsRootPath.value = config.value.modelsRootPath || 'models'
     if (networkAccessChanged.value) {
       message.warning('配置已保存 — 监听地址已变更，需要重启服务才能生效')
       networkAccessChanged.value = false

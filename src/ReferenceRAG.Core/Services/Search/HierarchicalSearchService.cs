@@ -304,26 +304,17 @@ public class HierarchicalSearchService
         int expandContext,
         CancellationToken cancellationToken)
     {
-        var result = new List<ChunkRecord> { chunk };
+        var chunks = (await _vectorStore.GetAdjacentChunksByFileAsync(
+            chunk.FileId,
+            chunk.Id,
+            expandContext,
+            cancellationToken)).ToList();
 
-        var allChunks = (await _vectorStore.GetChunksByFileAsync(chunk.FileId, cancellationToken)).ToList();
-        var currentIndex = allChunks.FindIndex(c => c.Id == chunk.Id);
-
-        if (currentIndex >= 0)
+        if (chunks.Count > 0)
         {
-            // 获取前面的分段
-            for (int i = Math.Max(0, currentIndex - expandContext); i < currentIndex; i++)
-            {
-                result.Add(allChunks[i]);
-            }
-
-            // 获取后面的分段
-            for (int i = currentIndex + 1; i <= Math.Min(allChunks.Count - 1, currentIndex + expandContext); i++)
-            {
-                result.Add(allChunks[i]);
-            }
+            return chunks.OrderBy(c => c.StartLine).ToList();
         }
 
-        return result.OrderBy(c => c.StartLine).ToList();
+        return new List<ChunkRecord> { chunk };
     }
 }

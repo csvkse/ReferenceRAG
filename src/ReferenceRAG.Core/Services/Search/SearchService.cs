@@ -65,12 +65,18 @@ public class SearchService : ISearchService
         // 如果配置中没有源，从数据库获取所有存在的源作为回退
         if (enabledSources.Count == 0)
         {
-            var allFiles = await _vectorStore.GetAllFilesAsync();
-            enabledSources = allFiles
-                .Select(f => f.Source)
-                .Where(s => !string.IsNullOrEmpty(s))
-                .Distinct()
-                .ToHashSet();
+            var sources = new HashSet<string>();
+            var allFiles = await _vectorStore.StreamAllFilesAsync();
+
+            await foreach (var file in allFiles)
+            {
+                if (!string.IsNullOrEmpty(file.Source))
+                {
+                    sources.Add(file.Source);
+                }
+            }
+
+            enabledSources = sources;
 
             _logger.LogDebug("配置中没有源，从数据库获取 {Count} 个源: {Sources}",
                 enabledSources.Count, string.Join(", ", enabledSources));
@@ -99,6 +105,41 @@ public class SearchService : ISearchService
             && request.Sources.Count!=0)
         {
             enabledSources = enabledSources.Where(m => request.Sources.Contains(m)).ToHashSet();
+        }
+
+        // 标题优先路径：短查询先查文件标题 / 图节点标题，命中就直接返回
+        if (ShouldPreferTitleSearch(request.Query))
+        {
+            var titleResults = await TryTitleFirstSearchAsync(request, enabledSources, cancellationToken);
+            if (titleResults.Count > 0)
+            {
+                var titleChunks = BuildChunkResults(titleResults);
+                var titleFiles = BuildFileSummaries(titleResults);
+                var titleContext = BuildContext(titleChunks, request.MaxTokens);
+                var titlePrompt = BuildPrompt(request.Query, titleContext);
+
+                sw.Stop();
+
+                return new AIQueryResponse
+                {
+                    Query = request.Query,
+                    Mode = request.Mode,
+                    Context = titleContext,
+                    Prompt = titlePrompt,
+                    Chunks = titleChunks,
+                    Files = titleFiles,
+                    Stats = new SearchStats
+                    {
+                        TotalMatches = titleResults.Count,
+                        DurationMs = sw.ElapsedMilliseconds,
+                        EstimatedTokens = TokenEstimator.EstimateTokens(titleContext)
+                    },
+                    HasMore = false,
+                    Suggestion = null,
+                    RerankApplied = false,
+                    RerankStats = null
+                };
+            }
         }
         
 
@@ -158,6 +199,15 @@ public class SearchService : ISearchService
         if (shouldRerank && _rerankService != null && topResults.Count > 0)
         {
             var rerankSw = Stopwatch.StartNew();
+            var topN = request.RerankTopN ?? rerankConfig.TopN;
+            var rerankCandidateLimit = Math.Clamp(topN * Math.Max(2, rerankConfig.RecallFactor), topN, 50);
+
+            if (topResults.Count > rerankCandidateLimit)
+            {
+                topResults = topResults
+                    .Take(rerankCandidateLimit)
+                    .ToList();
+            }
 
             _logger.LogInformation("开始重排: 候选数={Count}, Query={Query}", topResults.Count, request.Query);
 
@@ -169,8 +219,6 @@ public class SearchService : ISearchService
                 cancellationToken);
 
             // 获取 TopN
-            int topN = request.RerankTopN ?? rerankConfig.TopN;
-
             // 构建重排后的结果
             var rerankedResults = new List<SearchResult>();
             foreach (var doc in rerankResult.Documents.Take(topN))
@@ -248,6 +296,161 @@ public class SearchService : ISearchService
             RerankApplied = shouldRerank && _rerankService != null && topResults.Count > 0,
             RerankStats = rerankStats
         };
+    }
+
+    /// <summary>
+    /// 判断是否应该优先走标题检索
+    /// </summary>
+    private static bool ShouldPreferTitleSearch(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return false;
+
+        var trimmed = query.Trim();
+        if (trimmed.Length <= 32) return true;
+
+        var tokens = trimmed.Split(
+            new[] { ' ', '\t', '\r', '\n', '/', '\\', '-', '_', ':', '|', '，', '。', '？', '！', '?', '!' },
+            StringSplitOptions.RemoveEmptyEntries);
+
+        return tokens.Length <= 4;
+    }
+
+    /// <summary>
+    /// 标题优先检索：先查图节点标题，再回到对应文件的首个命中 chunk
+    /// </summary>
+    private async Task<List<SearchResult>> TryTitleFirstSearchAsync(
+        AIQueryRequest request,
+        HashSet<string> enabledSources,
+        CancellationToken cancellationToken)
+    {
+        if (_graphStore == null || string.IsNullOrWhiteSpace(request.Query))
+            return new List<SearchResult>();
+
+        var nodes = await _graphStore.SearchNodesAsync(
+            request.Query.Trim(),
+            Math.Max(request.TopK * 3, 10),
+            cancellationToken);
+
+        if (nodes.Count == 0)
+            return new List<SearchResult>();
+
+        var results = new List<SearchResult>();
+        var seenChunkIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenFileIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var node in nodes)
+        {
+            if (results.Count >= request.TopK)
+                break;
+
+            var filePath = ExtractFilePathFromNodeId(node.Id);
+            if (string.IsNullOrWhiteSpace(filePath))
+                continue;
+
+            var file = await _vectorStore.GetFileByPathAsync(filePath, cancellationToken);
+            if (file == null)
+                continue;
+
+            if (!string.IsNullOrEmpty(file.Source) && !enabledSources.Contains(file.Source))
+                continue;
+
+            var chunks = (await _vectorStore.GetChunksByFileAsync(file.Id, cancellationToken)).ToList();
+            if (chunks.Count == 0)
+                continue;
+
+            var chosenChunk = ChooseBestTitleChunk(node, request.Query, chunks);
+            if (chosenChunk == null)
+                continue;
+
+            if (!seenChunkIds.Add(chosenChunk.Id))
+                continue;
+
+            if (node.Type.Equals("document", StringComparison.OrdinalIgnoreCase) && !seenFileIds.Add(file.Id))
+                continue;
+
+            results.Add(new SearchResult
+            {
+                ChunkId = chosenChunk.Id,
+                FileId = file.Id,
+                FilePath = file.Path,
+                Source = file.Source,
+                Title = file.Title ?? file.FileName,
+                Content = chosenChunk.Content,
+                Score = ComputeTitlePriorityScore(node, file, request.Query),
+                StartLine = chosenChunk.StartLine,
+                EndLine = chosenChunk.EndLine,
+                HeadingPath = chosenChunk.HeadingPath,
+                Level = chosenChunk.Level,
+                AggregateType = chosenChunk.AggregateType,
+                ChildChunkCount = chosenChunk.ChildChunkCount
+            });
+        }
+
+        return results
+            .OrderByDescending(r => r.Score)
+            .ThenBy(r => r.FilePath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string? ExtractFilePathFromNodeId(string nodeId)
+    {
+        if (string.IsNullOrWhiteSpace(nodeId)) return null;
+
+        var hashIndex = nodeId.IndexOf('#');
+        return hashIndex >= 0 ? nodeId[..hashIndex] : nodeId;
+    }
+
+    private static ChunkRecord? ChooseBestTitleChunk(GraphNode node, string query, List<ChunkRecord> chunks)
+    {
+        if (chunks.Count == 0) return null;
+
+        if (node.Type.Equals("heading", StringComparison.OrdinalIgnoreCase))
+        {
+            var headingChunk = chunks.FirstOrDefault(c =>
+                !string.IsNullOrEmpty(c.HeadingPath) &&
+                c.HeadingPath.Contains(node.Title, StringComparison.OrdinalIgnoreCase));
+
+            if (headingChunk != null)
+                return headingChunk;
+        }
+
+        var exactHeading = chunks.FirstOrDefault(c =>
+            !string.IsNullOrEmpty(c.HeadingPath) &&
+            c.HeadingPath.Contains(query, StringComparison.OrdinalIgnoreCase));
+        if (exactHeading != null)
+            return exactHeading;
+
+        return chunks.OrderBy(c => c.ChunkIndex).FirstOrDefault();
+    }
+
+    private static float ComputeTitlePriorityScore(GraphNode node, FileRecord file, string query)
+    {
+        var normalizedQuery = query.Trim();
+        var fileTitle = file.Title ?? string.Empty;
+        var fileName = Path.GetFileNameWithoutExtension(file.FileName ?? file.Path ?? string.Empty);
+
+        if (fileTitle.Equals(normalizedQuery, StringComparison.OrdinalIgnoreCase) ||
+            fileName.Equals(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+        {
+            return 1.0f;
+        }
+
+        if (node.Type.Equals("heading", StringComparison.OrdinalIgnoreCase))
+        {
+            if (node.Title.Equals(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+                return 0.98f;
+
+            if (node.Title.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+                return 0.92f;
+        }
+
+        if (fileTitle.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ||
+            fileName.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+        {
+            return 0.95f;
+        }
+
+        return 0.85f;
     }
 
     /// <summary>
@@ -466,18 +669,18 @@ public class SearchService : ISearchService
     /// </summary>
     private async Task<List<ChunkResult>> GetAdjacentChunksAsync(ChunkRecord chunk, int expandContext)
     {
-        var chunks = await _vectorStore.GetChunksByFileAsync(chunk.FileId);
-        var chunkList = chunks.OrderBy(c => c.ChunkIndex).ToList();
+        var chunks = await _vectorStore.GetAdjacentChunksByFileAsync(
+            chunk.FileId,
+            chunk.Id,
+            expandContext);
 
-        var index = chunkList.FindIndex(c => c.Id == chunk.Id);
-        if (index < 0) return new List<ChunkResult>();
-
-        var start = Math.Max(0, index - expandContext);
-        var end = Math.Min(chunkList.Count - 1, index + expandContext);
+        var chunkList = chunks.ToList();
+        if (chunkList.Count == 0)
+        {
+            return new List<ChunkResult>();
+        }
 
         return chunkList
-            .Skip(start)
-            .Take(end - start + 1)
             .Select(c => new ChunkResult
             {
                 RefId = c.Id,
@@ -509,18 +712,30 @@ public class SearchService : ISearchService
         var existingChunkIds = results.Select(r => r.ChunkId).ToHashSet();
         var existingFileIds  = results.Select(r => r.FileId).ToHashSet();
         var additions = new List<SearchResult>();
+        var traversalCache = new Dictionary<string, GraphTraversalResult>(StringComparer.OrdinalIgnoreCase);
 
         // 保底分：向量全零（模拟模式）时退回固定衰减值
         var fallbackScore = results.Min(r => r.Score) * 0.6f;
 
-        foreach (var result in results)
+        // 先对同一文件去重，避免同一文档的多个 chunk 反复做图遍历
+        var seedResults = results
+            .Where(r => !string.IsNullOrEmpty(r.FilePath))
+            .OrderByDescending(r => r.Score)
+            .GroupBy(r => r.FilePath.Replace('\\', '/').TrimStart('/'), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
+
+        foreach (var result in seedResults)
         {
-            if (string.IsNullOrEmpty(result.FilePath)) continue;
             var nodeId = result.FilePath.Replace('\\', '/').TrimStart('/');
 
             try
             {
-                var traversal = await _graphStore.GetNeighborsAsync(nodeId, depth, ct: ct);
+                if (!traversalCache.TryGetValue(nodeId, out var traversal))
+                {
+                    traversal = await _graphStore.GetNeighborsAsync(nodeId, depth, ct: ct);
+                    traversalCache[nodeId] = traversal;
+                }
 
                 var neighborNodes = traversal.Nodes
                     .Where(n => n.Id != nodeId)
@@ -531,26 +746,33 @@ public class SearchService : ISearchService
                 {
                     if (existingFileIds.Contains(neighbor.Id)) continue;
 
-                    // 遍历邻居所有 chunk，用向量相似度选最相关的那个
-                    ChunkRecord? bestChunk = null;
+                    // 一次性拉取候选 chunk 的向量，避免 N+1 查询
+                    var candidateIds = neighbor.ChunkIds
+                        .Where(cId => !existingChunkIds.Contains(cId))
+                        .Take(10)
+                        .ToList();
+
+                    if (candidateIds.Count == 0) continue;
+
+                    var candidateVectors = await _vectorStore.GetVectorsByChunkIdsAsync(candidateIds, ct);
+                    string? bestChunkId = null;
                     float bestSim = -1;
 
-                    foreach (var cId in neighbor.ChunkIds.Take(10)) // 最多检查前 10 个
+                    foreach (var cId in candidateIds)
                     {
-                        if (existingChunkIds.Contains(cId)) continue;
-
-                        var vec = await _vectorStore.GetVectorByChunkIdAsync(cId, ct);
-                        if (vec == null) continue;
+                        if (!candidateVectors.TryGetValue(cId, out var vec)) continue;
 
                         var sim = ReferenceRAG.Core.Helpers.MathHelper.CosineSimilarity(queryVector, vec.Vector);
                         if (sim > bestSim)
                         {
                             bestSim = sim;
-                            var c = await _vectorStore.GetChunkAsync(cId, ct);
-                            if (c != null) bestChunk = c;
+                            bestChunkId = cId;
                         }
                     }
 
+                    if (bestChunkId == null) continue;
+
+                    var bestChunk = await _vectorStore.GetChunkAsync(bestChunkId, ct);
                     if (bestChunk == null) continue;
 
                     var file = await _vectorStore.GetFileAsync(bestChunk.FileId, ct);

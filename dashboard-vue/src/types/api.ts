@@ -543,10 +543,6 @@ export interface RebuildRequest {
   deleteExisting?: boolean
 }
 
-export interface MigrateResult {
-  success: boolean
-  message: string
-}
 
 export interface IndexSummary {
   currentModel: string

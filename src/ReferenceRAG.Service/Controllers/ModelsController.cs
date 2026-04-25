@@ -617,7 +617,7 @@ public async Task<ActionResult> SwitchRerankModel([FromBody] SwitchModelRequest 
     if (_rerankService != null)
     {
         var config = _configManager.Load();
-        var modelsPath = config.Embedding.ModelsPath;
+        var modelsPath = config.ModelsRootPath;
         var onnxPath = Path.Combine(modelsPath, request.ModelName, "model.onnx");
         if (!System.IO.File.Exists(onnxPath))
         {

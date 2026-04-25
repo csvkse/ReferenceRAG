@@ -436,9 +436,14 @@ public class OnnxRerankService : IRerankService, IDisposable
     /// 对 Query-Document 对进行分词
     /// </summary>
     private (DenseTensor<long> InputIds, DenseTensor<long> AttentionMask, DenseTensor<long> TokenTypeIds)
-        TokenizeQueryDocument(string query, string document)
+    TokenizeQueryDocument(string query, string document)
     {
         var maxLength = _options.MaxSequenceLength;
+        var docCharLimit = Math.Max(maxLength * 8, maxLength);
+        if (document.Length > docCharLimit)
+        {
+            document = document[..docCharLimit];
+        }
 
         // 构建输入文本: [CLS] query [SEP] document [SEP]
         // 使用分词器编码
@@ -464,19 +469,19 @@ public class OnnxRerankService : IRerankService, IDisposable
             if (tokens.Count >= maxLength - 1) break;
             tokens.Add(t);
         }
-        
+
         tokens.Add(_tokenizer.SepTokenId);
 
         // 填充到 maxLength
         var attentionMask = new List<long>();
         var tokenTypeIds = new List<long>();
-        
+        var sepIndex = tokens.Count - 1;
+
         var actualLength = tokens.Count;
         for (int i = 0; i < actualLength; i++)
         {
             attentionMask.Add(1);
             // Query 部分 token_type_id = 0，Document 部分 = 1
-            var sepIndex = tokens.IndexOf(_tokenizer.SepTokenId);
             tokenTypeIds.Add(i <= sepIndex ? 0 : 1);
         }
 

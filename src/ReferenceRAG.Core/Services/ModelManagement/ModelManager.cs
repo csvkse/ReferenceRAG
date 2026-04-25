@@ -747,19 +747,6 @@ public class ModelManager : IModelManager, IDisposable
         {
             ScanModelDirectory(rerankerPath, "reranker");
         }
-
-        // 兼容旧结构：扫描根目录下的模型（未分类的模型）
-        foreach (var dir in Directory.GetDirectories(_modelsPath))
-        {
-            var dirName = Path.GetFileName(dir);
-            // 跳过已处理的新结构目录
-            if (dirName == "Embedding" || dirName == "Reranker")
-                continue;
-
-            // 尝试检测模型类型
-            var modelType = DetectModelType(dir);
-            ScanModelDirectory(_modelsPath, modelType, new[] { dirName });
-        }
     }
 
     /// <summary>
@@ -879,52 +866,6 @@ public class ModelManager : IModelManager, IDisposable
                     }
                 }
             }
-        }
-    }
-
-    /// <summary>
-    /// 检测模型类型（基于目录名或配置文件）
-    /// </summary>
-    private string DetectModelType(string modelDir)
-    {
-        try
-        {
-            var configPath = Path.Combine(modelDir, "config.json");
-            if (File.Exists(configPath))
-            {
-                var json = File.ReadAllText(configPath);
-                var config = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(json);
-
-                // 检查模型类型标识
-                if (config.TryGetProperty("model_type", out var modelType))
-                {
-                    var typeStr = modelType.GetString()?.ToLower();
-                    if (typeStr?.Contains("rerank") == true)
-                        return "reranker";
-                }
-
-                // 检查架构类型
-                if (config.TryGetProperty("architectures", out var architectures))
-                {
-                    var archList = architectures.EnumerateArray()
-                        .Select(a => a.GetString() ?? "")
-                        .ToList();
-
-                    if (archList.Any(a => a.ToLower().Contains("rerank")))
-                        return "reranker";
-                }
-            }
-
-            // 根据目录名称推断
-            var dirName = Path.GetFileName(modelDir).ToLower();
-            if (dirName.Contains("rerank"))
-                return "reranker";
-
-            return "embedding";
-        }
-        catch
-        {
-            return "embedding"; // 默认为嵌入模型
         }
     }
 
@@ -1525,6 +1466,13 @@ public class ModelManager : IModelManager, IDisposable
 
         // 2. 规范化路径
         var normalizedPath = Path.GetFullPath(newPath);
+
+        // 如果路径没有变化，直接返回，避免误触发模型状态重置
+        if (string.Equals(normalizedPath, _modelsPath, StringComparison.OrdinalIgnoreCase))
+        {
+            result.Success = true;
+            return result;
+        }
 
         // 3. 禁止根目录
         if (normalizedPath == Path.GetPathRoot(normalizedPath))

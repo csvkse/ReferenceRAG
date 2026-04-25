@@ -280,7 +280,8 @@ public class QueryOptimizer
         var chars = text.Where(c => !char.IsWhiteSpace(c)).ToArray();
         for (int i = 0; i < chars.Length - 1; i++)
         {
-            var bg = string.Intern(new string(chars, i, 2));
+            // 不要使用 string.Intern：高频搜索会把海量 bigram 永久留在 intern pool 里
+            var bg = new string(chars, i, 2);
             result[bg] = result.GetValueOrDefault(bg, 0) + 1;
         }
         return result;

@@ -14,21 +14,15 @@ public class SettingsController : ControllerBase
 {
     private readonly ConfigManager _configManager;
     private readonly IModelManager _modelManager;
-    private readonly IEmbeddingService _embeddingService;
-    private readonly IRerankService _rerankService;
     private readonly ILogger<SettingsController> _logger;
 
     public SettingsController(
         ConfigManager configManager,
         IModelManager modelManager,
-        IEmbeddingService embeddingService,
-        IRerankService rerankService,
         ILogger<SettingsController> logger)
     {
         _configManager = configManager;
         _modelManager = modelManager;
-        _embeddingService = embeddingService;
-        _rerankService = rerankService;
         _logger = logger;
     }
 
@@ -64,12 +58,6 @@ public class SettingsController : ControllerBase
         if (string.IsNullOrEmpty(config.ModelsRootPath))
         {
             config.ModelsRootPath = modelsRoot;
-        }
-
-        // 同步 AllowNetworkAccess 与旧 Host 字段（向后兼容旧配置）
-        if (config.Service.Host == "0.0.0.0" && !config.Service.AllowNetworkAccess)
-        {
-            config.Service.AllowNetworkAccess = true;
         }
 
         return Ok(config);
@@ -111,9 +99,6 @@ public class SettingsController : ControllerBase
     [HttpPost]
     public ActionResult Save([FromBody] ObsidianRagConfig config)
     {
-        // 保持 Host 字段与 AllowNetworkAccess 同步（双向兼容）
-        config.Service.Host = config.Service.AllowNetworkAccess ? "0.0.0.0" : "localhost";
-
         _configManager.Save(config);
 
         // 修改监听地址需要重启才能生效

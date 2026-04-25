@@ -69,21 +69,17 @@ public class ContextBuilder
             return FormatSingleResult(result);
         }
 
-        // 获取相邻分段
-        var chunks = await _vectorStore.GetChunksByFileAsync(result.FileId, cancellationToken);
-        var chunkList = chunks.ToList();
-        var currentChunk = chunkList.FirstOrDefault(c => c.Id == result.ChunkId);
+        // 只获取命中 chunk 周围的窗口，避免整文件分段全量装载
+        var expandedChunks = (await _vectorStore.GetAdjacentChunksByFileAsync(
+            result.FileId,
+            result.ChunkId,
+            contextWindow,
+            cancellationToken)).ToList();
 
-        if (currentChunk == null)
+        if (expandedChunks.Count == 0)
         {
             return FormatSingleResult(result);
         }
-
-        var currentIndex = chunkList.IndexOf(currentChunk);
-        var startIndex = Math.Max(0, currentIndex - contextWindow);
-        var endIndex = Math.Min(chunkList.Count - 1, currentIndex + contextWindow);
-
-        var expandedChunks = chunkList.Skip(startIndex).Take(endIndex - startIndex + 1).ToList();
 
         // 组装内容
         var sb = new System.Text.StringBuilder();

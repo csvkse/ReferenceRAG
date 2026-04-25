@@ -209,8 +209,13 @@ public class AIQueryController : ControllerBase
             };
 
             // 获取文件总数
-            var files = await _vectorStore.GetAllFilesAsync();
-            response.TotalFiles = files.Count();
+            var fileCount = 0;
+            var fileStream = await _vectorStore.StreamAllFilesAsync();
+            await foreach (var _ in fileStream)
+            {
+                fileCount++;
+            }
+            response.TotalFiles = fileCount;
 
             return Ok(response);
         }

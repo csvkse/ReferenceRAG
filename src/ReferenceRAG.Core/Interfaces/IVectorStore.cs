@@ -65,6 +65,15 @@ public interface IVectorStore
     /// 获取文件的所有分段
     /// </summary>
     Task<IEnumerable<ChunkRecord>> GetChunksByFileAsync(string fileId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 获取指定分段前后窗口范围内的分段
+    /// </summary>
+    Task<IEnumerable<ChunkRecord>> GetAdjacentChunksByFileAsync(
+        string fileId,
+        string chunkId,
+        int windowSize,
+        CancellationToken cancellationToken = default);
     
     /// <summary>
     /// 删除文件的所有分段
@@ -97,6 +106,13 @@ public interface IVectorStore
     /// 根据分段ID获取向量
     /// </summary>
     Task<VectorRecord?> GetVectorByChunkIdAsync(string chunkId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 批量根据分段ID获取向量
+    /// </summary>
+    Task<IReadOnlyDictionary<string, VectorRecord>> GetVectorsByChunkIdsAsync(
+        IEnumerable<string> chunkIds,
+        CancellationToken cancellationToken = default);
     
     /// <summary>
     /// 删除向量
@@ -167,15 +183,6 @@ public interface IVectorStore
     /// </summary>
     Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// 根据源路径匹配回填文件的 source 字段（修复旧数据 source 为空的记录）
-    /// </summary>
-    Task<int> BackfillSourceAsync(IDictionary<string, string> sourceNameToPath, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// 更新源名称（同步更新 files 表中的 source 字段）
-    /// </summary>
-    Task<int> UpdateSourceNameAsync(string oldName, string newName, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

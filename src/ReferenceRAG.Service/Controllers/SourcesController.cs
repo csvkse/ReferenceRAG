@@ -241,7 +241,7 @@ public class SourcesController : ControllerBase
     /// 更新源
     /// </summary>
     [HttpPut("{name}")]
-    public async Task<ActionResult> Update(string name, [FromBody] UpdateSourceRequest request)
+    public ActionResult Update(string name, [FromBody] UpdateSourceRequest request)
     {
         var config = _configManager.Load();
         var source = config.Sources.FirstOrDefault(s => s.Name == name);
@@ -251,21 +251,9 @@ public class SourcesController : ControllerBase
             return NotFound(new { error = $"源 '{name}' 不存在" });
         }
 
-        // 如果要修改名称，需要同步更新数据库中的 source 字段
         if (request.Name != null && request.Name != name)
         {
-            // 检查新名称是否已存在
-            if (config.Sources.Any(s => s.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase)))
-            {
-                return Conflict(new { error = $"源名称 '{request.Name}' 已存在" });
-            }
-
-            var oldName = source.Name;
-            source.Name = request.Name;
-
-            // 更新数据库中的 source 字段
-            await _vectorStore.UpdateSourceNameAsync(oldName, request.Name);
-            _logger.LogInformation("源名称已更新: {OldName} -> {NewName}", oldName, request.Name);
+            return BadRequest(new { error = "不支持重命名源，请删除后重新添加" });
         }
 
         if (request.Enabled.HasValue)

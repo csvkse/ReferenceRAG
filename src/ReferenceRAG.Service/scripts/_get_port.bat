@@ -7,9 +7,9 @@ REM ============================================
 
 set SERVICE_PORT=5000
 
-REM 尝试从 referencerag.json 读取端口
-if exist "%~dp0..\referencerag.json" (
-    for /f "tokens=2 delims=:" %%a in ('findstr /i "port" "%~dp0..\referencerag.json" 2^>nul') do (
+REM 尝试从 appsettings.json 读取端口
+if exist "%~dp0..\appsettings.json" (
+    for /f "tokens=2 delims=:" %%a in ('findstr /i "port" "%~dp0..\appsettings.json" 2^>nul') do (
         for /f "tokens=1" %%b in ("%%a") do (
             set SERVICE_PORT=%%b
             REM 移除可能的逗号

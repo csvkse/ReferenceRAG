@@ -488,21 +488,6 @@ public class VectorIndexController : ControllerBase
         });
     }
 
-    // ==================== 数据迁移 ====================
-
-    /// <summary>
-    /// 迁移旧版向量数据到新结构
-    /// </summary>
-    [HttpPost("migrate")]
-    public ActionResult<MigrateResult> MigrateLegacyData()
-    {
-        // 迁移逻辑已在 SqliteVectorStore 初始化时自动执行
-        return Ok(new MigrateResult
-        {
-            Success = true,
-            Message = "数据迁移在服务启动时已自动完成，如需重新迁移请重启服务"
-        });
-    }
 }
 
 // ==================== 响应模型 ====================
@@ -605,14 +590,6 @@ public class RebuildRequest
     public bool DeleteExisting { get; set; } = true;
 }
 
-/// <summary>
-/// 迁移结果
-/// </summary>
-public class MigrateResult
-{
-    public bool Success { get; set; }
-    public string Message { get; set; } = "";
-}
 
 /// <summary>
 /// 索引摘要

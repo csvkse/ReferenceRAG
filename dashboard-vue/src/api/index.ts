@@ -36,7 +36,6 @@ import type {
   CleanupResult,
   RebuildJob,
   RebuildRequest,
-  MigrateResult,
   IndexSummary,
   IndexJobRequest,
   IndexJobResponse,
@@ -251,7 +250,6 @@ export const vectorIndexApi = {
   cleanup: () => api.post<CleanupResult>('/VectorIndex/cleanup'),
 
   // 数据迁移
-  migrate: () => api.post<MigrateResult>('/VectorIndex/migrate')
 }
 
 // System

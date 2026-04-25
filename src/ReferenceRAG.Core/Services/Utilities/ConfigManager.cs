@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 using Microsoft.Extensions.Logging;
 
@@ -8,16 +9,12 @@ using ReferenceRAG.Core.Models;
 namespace ReferenceRAG.Core.Services;
 
 /// <summary>
-/// 配置管理器 - 从 appsettings.json 读取 ReferenceRAG 配置
-/// 支持独立配置文件以保留 appsettings.json 中的注释
+/// 配置管理器 - 统一从 appsettings.json 读取和保存 ReferenceRAG 配置
 /// </summary>
 public class ConfigManager
 {
     private ObsidianRagConfig? _config;
     private static readonly ILogger _logger = StaticLogger.GetLogger("ConfigManager");
-
-    // 独立配置文件路径（优先使用，避免修改 appsettings.json 导致注释丢失）
-    private static readonly string RagConfigFileName = "referencerag.json";
 
     private static readonly JsonSerializerOptions _readOptions = new()
     {
@@ -33,57 +30,16 @@ public class ConfigManager
 
     private static string GetAppSettingsPath()
     {
-        var currentDir = Directory.GetCurrentDirectory();
-        var path = Path.Combine(currentDir, "appsettings.json");
-        if (File.Exists(path)) return path;
-
-        path = Path.Combine(currentDir, "appsettings.Development.json");
-#if DEBUG
-        return path;
-#else
-        return File.Exists(path) ? path : Path.Combine(currentDir, "appsettings.json");
-#endif
+        return Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
     }
 
     /// <summary>
-    /// 获取独立配置文件路径
-    /// </summary>
-    private static string GetRagConfigPath()
-    {
-        var currentDir = Directory.GetCurrentDirectory();
-        return Path.Combine(currentDir, RagConfigFileName);
-    }
-
-    /// <summary>
-    /// 加载配置 - 优先从独立配置文件读取，其次从 appsettings.json 读取 ReferenceRAG 节
+    /// 加载配置 - 仅从 appsettings.json 的 ReferenceRAG 节读取
     /// </summary>
     public ObsidianRagConfig Load()
     {
         if (_config != null) return _config;
 
-        // 优先尝试从独立配置文件加载
-        var ragConfigPath = GetRagConfigPath();
-        if (File.Exists(ragConfigPath))
-        {
-            try
-            {
-                var json = File.ReadAllText(ragConfigPath);
-                _config = JsonSerializer.Deserialize<ObsidianRagConfig>(json, _readOptions);
-                if (_config != null)
-                {
-                    _logger.LogInformation($"[ConfigManager] 已从 {RagConfigFileName} 加载配置");
-                    ApplyEnvironmentVariables(_config);
-                    MigrateOldConfig(_config);
-                    return _config;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning($"[ConfigManager] 独立配置文件解析失败: {ex.Message}，尝试从 appsettings.json 加载");
-            }
-        }
-
-        // 回退到 appsettings.json
         var appSettingsPath = GetAppSettingsPath();
         if (File.Exists(appSettingsPath))
         {
@@ -94,13 +50,11 @@ public class ConfigManager
                 if (doc.RootElement.TryGetProperty("ReferenceRAG", out var ragConfig))
                 {
                     _config = ragConfig.Deserialize<ObsidianRagConfig>(_readOptions);
-                    _logger.LogInformation($"[ConfigManager] 已从 appsettings.json 加载配置");
-
-                    // 迁移到独立配置文件
                     if (_config != null)
                     {
-                        Save(_config);
-                        _logger.LogInformation($"[ConfigManager] 已迁移配置到 {RagConfigFileName}");
+                        _logger.LogInformation("[ConfigManager] 已从 appsettings.json 加载配置");
+                        ApplyEnvironmentVariables(_config);
+                        return _config;
                     }
                 }
             }
@@ -112,46 +66,35 @@ public class ConfigManager
 
         _config ??= new ObsidianRagConfig();
         ApplyEnvironmentVariables(_config);
-        MigrateOldConfig(_config);
 
         return _config;
     }
 
     /// <summary>
-    /// 迁移旧配置格式
-    /// </summary>
-    private void MigrateOldConfig(ObsidianRagConfig config)
-    {
-#pragma warning disable CS0618
-        var oldPath = config.VaultPath;
-        if (!string.IsNullOrEmpty(oldPath) && config.Sources.Count == 0)
-        {
-            config.Sources.Add(new SourceFolder
-            {
-                Path = oldPath,
-                Name = "Default",
-                Type = SourceType.Markdown
-            });
-            _logger.LogInformation($"[ConfigManager] 已迁移旧配置 VaultPath -> Sources[0]");
-        }
-#pragma warning restore CS0618
-    }
-
-    /// <summary>
-    /// 保存配置 - 保存到独立配置文件，避免修改 appsettings.json 导致注释丢失
+    /// 保存配置 - 写回 appsettings.json 的 ReferenceRAG 节
     /// </summary>
     public void Save(ObsidianRagConfig config)
     {
-        var ragConfigPath = GetRagConfigPath();
+        var appSettingsPath = GetAppSettingsPath();
 
         try
         {
-            // 保存到独立配置文件（保留 appsettings.json 中的注释）
-            var json = JsonSerializer.Serialize(config, _writeOptions);
-            File.WriteAllText(ragConfigPath, json);
+            JsonObject root;
+            if (File.Exists(appSettingsPath))
+            {
+                var json = File.ReadAllText(appSettingsPath);
+                root = JsonNode.Parse(json)?.AsObject() ?? new JsonObject();
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            root["ReferenceRAG"] = JsonSerializer.SerializeToNode(config, _writeOptions) ?? new JsonObject();
+            File.WriteAllText(appSettingsPath, root.ToJsonString(_writeOptions));
 
             _config = config;
-            _logger.LogInformation($"[ConfigManager] 配置已保存到: {ragConfigPath}");
+            _logger.LogInformation($"[ConfigManager] 配置已保存到: {appSettingsPath}");
         }
         catch (Exception ex)
         {

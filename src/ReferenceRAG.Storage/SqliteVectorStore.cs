@@ -45,7 +45,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         OptimizeSqlitePerformance();
         LoadVectorExtension();
         InitializeDatabase();
-        MigrateLegacyData();
         LoadModelDimensions(dimension);
     }
 
@@ -71,7 +70,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         OptimizeSqlitePerformance();
         LoadVectorExtension();
         InitializeDatabase();
-        MigrateLegacyData();
         LoadModelDimensions(dimension);
     }
 
@@ -259,6 +257,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 chunk_type INTEGER,
                 aggregate_type INTEGER,
                 child_chunk_count INTEGER,
+                chunk_order REAL DEFAULT 1.0,
+                content_hash TEXT DEFAULT '',
                 FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
@@ -279,33 +279,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         ";
 
         ExecuteNonQuery(createModelsTable, transaction);
-
-        // 向后兼容：为已有 files 表添加缺失的列
-        var fileMigrations = new[]
-        {
-            "ALTER TABLE files ADD COLUMN file_name TEXT DEFAULT ''",
-            "ALTER TABLE files ADD COLUMN content_length INTEGER DEFAULT 0",
-            "ALTER TABLE files ADD COLUMN source TEXT DEFAULT ''",
-            "ALTER TABLE files ADD COLUMN chunk_count INTEGER DEFAULT 0",
-            "ALTER TABLE files ADD COLUMN total_tokens INTEGER DEFAULT 0",
-        };
-        foreach (var migration in fileMigrations)
-        {
-            try { ExecuteNonQuery(migration, transaction); }
-            catch { /* 列已存在，忽略 */ }
-        }
-
-        // 向后兼容：为已有 chunks 表添加 chunk_order 和 content_hash 字段
-        var chunkMigrations = new[]
-        {
-            "ALTER TABLE chunks ADD COLUMN chunk_order REAL DEFAULT 1.0",
-            "ALTER TABLE chunks ADD COLUMN content_hash TEXT DEFAULT ''"
-        };
-        foreach (var migration in chunkMigrations)
-        {
-            try { ExecuteNonQuery(migration, transaction); }
-            catch { /* 列已存在，忽略 */ }
-        }
 
         transaction.Commit();
 
@@ -362,134 +335,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         if (_modelDimensions.Count == 0)
         {
             _modelDimensions["default"] = defaultDimension;
-        }
-    }
-
-    /// <summary>
-    /// 迁移旧版数据（Semantic Kernel SqliteVec 结构）
-    /// </summary>
-    private void MigrateLegacyData()
-    {
-        // 检查是否存在旧的 document_chunks 表
-        var checkOldTable = "SELECT name FROM sqlite_master WHERE type='table' AND name='document_chunks'";
-        using (var cmd = _connection.CreateCommand())
-        {
-            cmd.CommandText = checkOldTable;
-            var exists = cmd.ExecuteScalar() != null;
-            if (!exists) return; // 没有旧数据需要迁移
-        }
-
-        _logger?.LogInformation("检测到旧版数据结构，开始迁移...");
-
-        try
-        {
-            // 1. 检查旧向量表是否存在并获取维度
-            var oldVecTableExists = false;
-            var oldDimension = 384; // 默认维度
-            var checkOldVec = "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_document_chunks'";
-            using (var cmd = _connection.CreateCommand())
-            {
-                cmd.CommandText = checkOldVec;
-                oldVecTableExists = cmd.ExecuteScalar() != null;
-            }
-
-            // 2. 迁移分段数据 document_chunks -> chunks
-            var migrateChunks = @"
-                INSERT OR IGNORE INTO chunks 
-                (id, file_id, chunk_index, content, token_count, start_line, end_line, 
-                 start_column, end_column, heading_path, level, weight, chunk_type, 
-                 aggregate_type, child_chunk_count)
-                SELECT Key, FileId, ChunkIndex, Content, TokenCount, StartLine, EndLine,
-                       StartColumn, EndColumn, HeadingPath, Level, Weight, ChunkType,
-                       AggregateType, ChildChunkCount
-                FROM document_chunks
-            ";
-            using (var cmd = _connection.CreateCommand())
-            {
-                cmd.CommandText = migrateChunks;
-                var rows = cmd.ExecuteNonQuery();
-                _logger?.LogInformation("迁移了 {Rows} 条分段记录", rows);
-            }
-
-            // 3. 注册默认模型（使用旧向量表的维度）
-            const string defaultModel = "default";
-            var registerModel = @"
-                INSERT OR IGNORE INTO models (name, dimension, created_at, updated_at)
-                VALUES (@name, @dimension, @createdAt, @updatedAt)
-            ";
-            using (var cmd = _connection.CreateCommand())
-            {
-                cmd.CommandText = registerModel;
-                cmd.Parameters.AddWithValue("@name", defaultModel);
-                cmd.Parameters.AddWithValue("@dimension", oldDimension);
-                cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("O"));
-                cmd.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow.ToString("O"));
-                cmd.ExecuteNonQuery();
-            }
-
-            // 4. 创建新的向量表并迁移向量数据
-            if (oldVecTableExists)
-            {
-                var newTableName = ModelToTableName(defaultModel);
-                
-                // 创建新向量表
-                var createNewVec = $@"
-                    CREATE VIRTUAL TABLE IF NOT EXISTS {newTableName} USING vec0(
-                        chunk_id TEXT PRIMARY KEY,
-                        embedding FLOAT[{oldDimension}]
-                    );
-                ";
-                using (var cmd = _connection.CreateCommand())
-                {
-                    cmd.CommandText = createNewVec;
-                    cmd.ExecuteNonQuery();
-                }
-
-                // 迁移向量数据（vec_document_chunks -> vec_default）
-                var migrateVectors = $@"
-                    INSERT OR IGNORE INTO {newTableName} (chunk_id, embedding)
-                    SELECT Key, ContentEmbedding FROM vec_document_chunks
-                    WHERE ContentEmbedding IS NOT NULL
-                ";
-                using (var cmd = _connection.CreateCommand())
-                {
-                    cmd.CommandText = migrateVectors;
-                    var rows = cmd.ExecuteNonQuery();
-                    _logger?.LogInformation("迁移了 {Rows} 条向量记录", rows);
-                }
-            }
-
-            // 5. 更新模型统计
-            using (var cmd = _connection.CreateCommand())
-            {
-                cmd.CommandText = "UPDATE models SET updated_at = @updatedAt WHERE name = 'default'";
-                cmd.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow.ToString("O"));
-                cmd.ExecuteNonQuery();
-            }
-
-            // 6. 重命名旧表（保留备份，不删除）
-            try
-            {
-                using var transaction = _connection.BeginTransaction();
-                ExecuteNonQuery("ALTER TABLE document_chunks RENAME TO _legacy_document_chunks", transaction);
-                if (oldVecTableExists)
-                {
-                    ExecuteNonQuery("ALTER TABLE vec_document_chunks RENAME TO _legacy_vec_document_chunks", transaction);
-                }
-                transaction.Commit();
-                _logger?.LogInformation("旧表已重命名为 _legacy_* 前缀保留");
-            }
-            catch
-            {
-                // 忽略重命名错误
-            }
-
-            _logger?.LogInformation("数据迁移完成");
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "数据迁移失败: {Message}", ex.Message);
-            // 不抛出异常，允许继续使用
         }
     }
 
@@ -859,6 +704,58 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         finally { _writeLock.Release(); }
     }
 
+    public async Task<IEnumerable<ChunkRecord>> GetAdjacentChunksByFileAsync(
+        string fileId,
+        string chunkId,
+        int windowSize,
+        CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (windowSize < 0) windowSize = 0;
+
+            using var indexCommand = _connection.CreateCommand();
+            indexCommand.CommandText = @"
+                SELECT chunk_index
+                FROM chunks
+                WHERE id = @chunkId AND file_id = @fileId
+            ";
+            AddParameter(indexCommand, "@chunkId", chunkId);
+            AddParameter(indexCommand, "@fileId", fileId);
+
+            var currentIndexObj = await indexCommand.ExecuteScalarAsync(cancellationToken);
+            if (currentIndexObj == null || currentIndexObj == DBNull.Value)
+            {
+                return Array.Empty<ChunkRecord>();
+            }
+
+            var currentIndex = Convert.ToInt32(currentIndexObj);
+            var startIndex = Math.Max(0, currentIndex - windowSize);
+            var endIndex = currentIndex + windowSize;
+
+            var chunks = new List<ChunkRecord>();
+            using var command = _connection.CreateCommand();
+            command.CommandText = @"
+                SELECT *
+                FROM chunks
+                WHERE file_id = @fileId
+                  AND chunk_index BETWEEN @startIndex AND @endIndex
+                ORDER BY chunk_index
+            ";
+            AddParameter(command, "@fileId", fileId);
+            AddParameter(command, "@startIndex", startIndex);
+            AddParameter(command, "@endIndex", endIndex);
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                chunks.Add(ReadChunkRecord(reader));
+
+            return chunks;
+        }
+        finally { _writeLock.Release(); }
+    }
+
     public async Task DeleteChunkAsync(string id, CancellationToken cancellationToken = default)
     {
         await _writeLock.WaitAsync(cancellationToken);
@@ -1076,6 +973,68 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         return null;
     }
 
+    public async Task<IReadOnlyDictionary<string, VectorRecord>> GetVectorsByChunkIdsAsync(
+        IEnumerable<string> chunkIds,
+        CancellationToken cancellationToken = default)
+    {
+        var idList = chunkIds.Distinct().ToList();
+        var result = new Dictionary<string, VectorRecord>();
+        if (idList.Count == 0 || _modelDimensions.Count == 0)
+        {
+            return result;
+        }
+
+        foreach (var modelName in _modelDimensions.Keys)
+        {
+            var tableName = ModelToTableName(modelName);
+            var dimension = _modelDimensions[modelName];
+
+            const int batchSize = 200;
+            for (int offset = 0; offset < idList.Count; offset += batchSize)
+            {
+                var batch = idList.Skip(offset).Take(batchSize).ToList();
+                if (batch.Count == 0) continue;
+
+                var placeholders = string.Join(",", batch.Select((_, idx) => $"@id{idx}"));
+                var sql = $@"SELECT chunk_id, embedding FROM {tableName} WHERE chunk_id IN ({placeholders})";
+
+                try
+                {
+                    using var command = _connection.CreateCommand();
+                    command.CommandText = sql;
+                    for (int i = 0; i < batch.Count; i++)
+                    {
+                        AddParameter(command, $"@id{i}", batch[i]);
+                    }
+
+                    using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        var foundChunkId = reader.GetString(0);
+                        if (result.ContainsKey(foundChunkId)) continue;
+
+                        var embeddingBytes = reader.GetFieldValue<byte[]>(1);
+                        result[foundChunkId] = new VectorRecord
+                        {
+                            Id = $"vec_{foundChunkId}",
+                            ChunkId = foundChunkId,
+                            Vector = BlobToVector(embeddingBytes),
+                            ModelName = modelName,
+                            Dimension = dimension,
+                            CreatedAt = DateTime.UtcNow
+                        };
+                    }
+                }
+                catch
+                {
+                    // 某些模型表可能不存在，继续尝试下一个
+                }
+            }
+        }
+
+        return result;
+    }
+
     public async Task DeleteVectorAsync(string id, CancellationToken cancellationToken = default)
     {
         var chunkId = id.StartsWith("vec_") ? id[4..] : id;
@@ -1183,11 +1142,28 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 var filePath = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("path"));
                 var fileSource = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("source"));
                 var fileTitle = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("title"));
+                var fileId = reader.GetString(reader.GetOrdinal("c_file_id"));
+
+                if (string.IsNullOrEmpty(fileId) || string.IsNullOrEmpty(filePath))
+                {
+                var chunk = await GetChunkAsync(chunkId, cancellationToken);
+                if (chunk != null)
+                {
+                    fileId = chunk.FileId;
+                    var file = await GetFileAsync(chunk.FileId, cancellationToken);
+                    if (file != null)
+                    {
+                        filePath = file.Path;
+                        fileSource = file.Source ?? string.Empty;
+                        fileTitle = file.Title ?? string.Empty;
+                    }
+                }
+                }
 
                 searchResults.Add(new SearchResult
                 {
                     ChunkId = chunkId,
-                    FileId = reader.GetString(reader.GetOrdinal("c_file_id")),
+                    FileId = fileId,
                     FilePath = filePath,
                     Source = fileSource,
                     Title = fileTitle,
@@ -1300,14 +1276,34 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
                 var distance = reader.GetFloat(reader.GetOrdinal("distance"));
                 var score = 1f / (1f + distance);
+                var fileId = reader.GetString(reader.GetOrdinal("c_file_id"));
+                var filePath = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("path"));
+                var fileSource = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("source"));
+                var fileTitle = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("title"));
+
+                if (string.IsNullOrEmpty(fileId) || string.IsNullOrEmpty(filePath))
+                {
+                var chunk = await GetChunkAsync(cId, cancellationToken);
+                if (chunk != null)
+                {
+                    fileId = chunk.FileId;
+                    var file = await GetFileAsync(chunk.FileId, cancellationToken);
+                    if (file != null)
+                    {
+                        filePath = file.Path;
+                        fileSource = file.Source ?? string.Empty;
+                        fileTitle = file.Title ?? string.Empty;
+                    }
+                }
+                }
 
                 searchResults.Add(new SearchResult
                 {
                     ChunkId = cId,
-                    FileId = reader.GetString(reader.GetOrdinal("c_file_id")),
-                    FilePath = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("path")),
-                    Source = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("source")),
-                    Title = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("title")),
+                    FileId = fileId,
+                    FilePath = filePath,
+                    Source = fileSource,
+                    Title = fileTitle,
                     Content = reader.GetString(reader.GetOrdinal("content")),
                     Score = score,
                     StartLine = reader.GetInt32(reader.GetOrdinal("start_line")),
@@ -1519,60 +1515,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         return totalDeleted;
     }
 
-    public async Task<int> BackfillSourceAsync(IDictionary<string, string> sourceNameToPath, CancellationToken cancellationToken = default)
-    {
-        var sql = "SELECT id, path FROM files WHERE source = '' OR source IS NULL";
-        var orphanedFiles = new List<(string Id, string Path)>();
-
-        using (var command = _connection.CreateCommand())
-        {
-            command.CommandText = sql;
-            using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                orphanedFiles.Add((reader.GetString(0), reader.GetString(1)));
-            }
-        }
-
-        var updated = 0;
-        foreach (var (id, path) in orphanedFiles)
-        {
-            var normalizedPath = path.Replace('\\', '/');
-            var matchedSource = sourceNameToPath.FirstOrDefault(kvp =>
-            {
-                var normalizedSourcePath = kvp.Value.Replace('\\', '/');
-                return normalizedPath.StartsWith(normalizedSourcePath, StringComparison.OrdinalIgnoreCase);
-            });
-
-            if (matchedSource.Key != null)
-            {
-                using var updateCommand = _connection.CreateCommand();
-                updateCommand.CommandText = "UPDATE files SET source = @source WHERE id = @id";
-                AddParameter(updateCommand, "@source", matchedSource.Key);
-                AddParameter(updateCommand, "@id", id);
-                updated += await updateCommand.ExecuteNonQueryAsync(cancellationToken);
-            }
-        }
-
-        return updated;
-    }
-
-    /// <summary>
-    /// 更新源名称（同步更新 files 表中的 source 字段）
-    /// </summary>
-    public async Task<int> UpdateSourceNameAsync(string oldName, string newName, CancellationToken cancellationToken = default)
-    {
-        var sql = "UPDATE files SET source = @newSource WHERE source = @oldSource";
-
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@newSource", newName);
-        AddParameter(command, "@oldSource", oldName);
-
-        var updated = await command.ExecuteNonQueryAsync(cancellationToken);
-        return updated;
-    }
-
     /// <summary>
     /// 更新模型统计信息
     /// </summary>
@@ -1607,43 +1549,19 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         {
             Id = reader.GetString(reader.GetOrdinal("id")),
             Path = reader.GetString(reader.GetOrdinal("path")),
-            FileName = TryGetString(reader, "file_name") ?? "",
+            FileName = reader.GetString(reader.GetOrdinal("file_name")),
             Title = reader.GetString(reader.GetOrdinal("title")),
             ContentHash = reader.GetString(reader.GetOrdinal("content_hash")),
-            ContentLength = TryGetLong(reader, "content_length"),
+            ContentLength = reader.GetInt64(reader.GetOrdinal("content_length")),
             Tags = JsonSerializer.Deserialize<List<string>>(reader.GetString(reader.GetOrdinal("tags"))) ?? new List<string>(),
             ParentFolder = reader.GetString(reader.GetOrdinal("parent_folder")),
-            Source = TryGetString(reader, "source"),
-            ChunkCount = TryGetInt(reader, "chunk_count"),
-            TotalTokens = TryGetLong(reader, "total_tokens"),
+            Source = reader.GetString(reader.GetOrdinal("source")),
+            ChunkCount = reader.GetInt32(reader.GetOrdinal("chunk_count")),
+            TotalTokens = reader.GetInt64(reader.GetOrdinal("total_tokens")),
             CreatedAt = DateTime.TryParse(reader.GetString(reader.GetOrdinal("created_at")), out var createdAt) ? createdAt : null,
             ModifiedAt = DateTime.TryParse(reader.GetString(reader.GetOrdinal("updated_at")), out var modifiedAt) ? modifiedAt : null,
             IndexedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("indexed_at")))
         };
-    }
-
-    private static string? TryGetString(SqliteDataReader reader, string columnName)
-    {
-        try { return reader.GetString(reader.GetOrdinal(columnName)); }
-        catch { return null; }
-    }
-
-    private static int TryGetInt(SqliteDataReader reader, string columnName)
-    {
-        try { return reader.GetInt32(reader.GetOrdinal(columnName)); }
-        catch { return 0; }
-    }
-
-    private static long TryGetLong(SqliteDataReader reader, string columnName)
-    {
-        try { return reader.GetInt64(reader.GetOrdinal(columnName)); }
-        catch { return 0; }
-    }
-
-    private static double? TryGetDouble(SqliteDataReader reader, string columnName)
-    {
-        try { return reader.GetDouble(reader.GetOrdinal(columnName)); }
-        catch { return null; }
     }
 
     private ChunkRecord ReadChunkRecord(SqliteDataReader reader)
@@ -1665,8 +1583,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             ChunkType = (ChunkType)reader.GetInt32(reader.GetOrdinal("chunk_type")),
             AggregateType = (AggregateType)reader.GetInt32(reader.GetOrdinal("aggregate_type")),
             ChildChunkCount = reader.GetInt32(reader.GetOrdinal("child_chunk_count")),
-            ChunkOrder = TryGetDouble(reader, "chunk_order") ?? 1.0,
-            ContentHash = TryGetString(reader, "content_hash")
+            ChunkOrder = reader.GetDouble(reader.GetOrdinal("chunk_order")),
+            ContentHash = reader.GetString(reader.GetOrdinal("content_hash"))
         };
     }
 

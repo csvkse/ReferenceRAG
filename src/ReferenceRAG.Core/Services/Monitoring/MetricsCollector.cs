@@ -174,18 +174,42 @@ public class MetricsCollector : IDisposable
     /// </summary>
     public async Task<IndexMetrics> CollectIndexMetricsAsync()
     {
-        var files = await _vectorStore.GetAllFilesAsync();
-        var fileList = files.ToList();
+        var fileStream = await _vectorStore.StreamAllFilesAsync();
+
+        int totalFiles = 0;
+        long totalSize = 0;
+        int totalChunks = 0;
+        long totalTokens = 0;
+        DateTime? oldestIndex = null;
+        DateTime? newestIndex = null;
+
+        await foreach (var file in fileStream)
+        {
+            totalFiles++;
+            totalSize += file.ContentLength;
+            totalChunks += file.ChunkCount;
+            totalTokens += file.TotalTokens;
+
+            if (oldestIndex == null || file.IndexedAt < oldestIndex)
+            {
+                oldestIndex = file.IndexedAt;
+            }
+
+            if (newestIndex == null || file.IndexedAt > newestIndex)
+            {
+                newestIndex = file.IndexedAt;
+            }
+        }
 
         var metrics = new IndexMetrics
         {
             Timestamp = DateTime.UtcNow,
-            TotalFiles = fileList.Count,
-            TotalSize = fileList.Sum(f => f.ContentLength),
-            TotalChunks = fileList.Sum(f => f.ChunkCount),
-            TotalTokens = fileList.Sum(f => f.TotalTokens),
-            OldestIndex = fileList.Count > 0 ? fileList.Min(f => f.IndexedAt) : null,
-            NewestIndex = fileList.Count > 0 ? fileList.Max(f => f.IndexedAt) : null
+            TotalFiles = totalFiles,
+            TotalSize = totalSize,
+            TotalChunks = totalChunks,
+            TotalTokens = totalTokens,
+            OldestIndex = oldestIndex,
+            NewestIndex = newestIndex
         };
 
         return metrics;
