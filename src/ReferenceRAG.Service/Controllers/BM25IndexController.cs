@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Service.Services;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -14,29 +15,39 @@ public class BM25IndexController : ControllerBase
     private readonly IBM25Store _bm25Store;
     private readonly IVectorStore _vectorStore;
     private readonly ConfigManager _configManager;
+    private readonly IndexService _indexService;
     private readonly ILogger<BM25IndexController> _logger;
 
     public BM25IndexController(
         IBM25Store bm25Store,
         IVectorStore vectorStore,
         ConfigManager configManager,
+        IndexService indexService,
         ILogger<BM25IndexController> logger)
     {
         _bm25Store = bm25Store;
         _vectorStore = vectorStore;
         _configManager = configManager;
+        _indexService = indexService;
         _logger = logger;
     }
 
     // ==================== 索引操作 ====================
 
     /// <summary>
-    /// 索引所有文档
+    /// 独立重建 BM25 索引（仅限向量索引空闲时使用，用于恢复损坏的 BM25 表）
     /// </summary>
     [HttpPost("index")]
     public async Task<ActionResult<IndexProgressResponse>> IndexAllDocuments()
     {
-        _logger.LogInformation("开始索引所有文档");
+        // 互斥保护：向量索引正在运行时拒绝独立 BM25 重建，防止读到不完整的 chunks
+        var activeJobs = _indexService.ActiveJobs;
+        if (activeJobs.Any(j => j.Value.Status == IndexStatus.Running || j.Value.Status == IndexStatus.Pending))
+        {
+            return Conflict(new { error = "向量索引任务正在进行，请等待完成后再执行 BM25 独立重建，以避免数据不一致。" });
+        }
+
+        _logger.LogInformation("开始独立重建 BM25 索引");
 
         // 获取所有文档
         var files = await _vectorStore.GetAllFilesAsync();
