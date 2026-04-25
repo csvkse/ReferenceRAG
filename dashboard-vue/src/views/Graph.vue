@@ -15,16 +15,34 @@
               <n-statistic label="当前查询深度" :value="depth" />
             </n-grid-item>
           </n-grid>
-          <n-button
-            circle
-            :loading="statsLoading"
-            @click="loadStats"
-            title="刷新统计"
-          >
-            <template #icon><n-icon :component="RefreshOutline" /></template>
-          </n-button>
+          <n-space>
+            <n-button
+              circle
+              :loading="statsLoading"
+              @click="loadStats"
+              title="刷新统计"
+            >
+              <template #icon><n-icon :component="RefreshOutline" /></template>
+            </n-button>
+            <n-popconfirm @positive-click="startRebuild">
+              <template #trigger>
+                <n-button
+                  type="warning"
+                  size="small"
+                  :loading="rebuilding"
+                  :disabled="rebuilding"
+                >
+                  {{ rebuilding ? '重建中…' : '重建图谱' }}
+                </n-button>
+              </template>
+              重建将重新扫描所有文档的 wiki-link，无需 GPU，通常需要几十秒。确认吗？
+            </n-popconfirm>
+          </n-space>
         </n-space>
-        <n-text v-if="indexStore.isIndexing" type="warning" style="font-size:12px;margin-top:4px">
+        <n-text v-if="rebuilding" type="warning" style="font-size:12px;margin-top:4px">
+          图谱重建中，完成后自动刷新统计…
+        </n-text>
+        <n-text v-else-if="indexStore.isIndexing" type="warning" style="font-size:12px;margin-top:4px">
           索引正在进行，完成后将自动刷新…
         </n-text>
       </n-card>
@@ -106,8 +124,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, h } from 'vue'
-import { useMessage, NTag, NIcon } from 'naive-ui'
+import { ref, onMounted, onUnmounted, watch, h } from 'vue'
+import { useMessage, NTag, NIcon, NPopconfirm } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { RefreshOutline } from '@vicons/ionicons5'
 import { graphApi } from '@/api'
@@ -125,6 +143,8 @@ const depth = ref(1)
 const searching = ref(false)
 const traversing = ref(false)
 const statsLoading = ref(false)
+const rebuilding = ref(false)
+let rebuildPollTimer: ReturnType<typeof setInterval> | null = null
 const searchResults = ref<GraphNode[]>([])
 const traversalResult = ref<TraversalResult | null>(null)
 const stats = ref({ nodeCount: 0, edgeCount: 0 })
@@ -202,16 +222,42 @@ const loadStats = async () => {
   finally { statsLoading.value = false }
 }
 
+const startRebuild = async () => {
+  rebuilding.value = true
+  try {
+    await graphApi.rebuild()
+    message.info('图谱重建已启动')
+    // 每 3 秒轮询后台是否完成
+    rebuildPollTimer = setInterval(async () => {
+      try {
+        const res = await graphApi.rebuildStatus()
+        if (!res.data.isRebuilding) {
+          clearInterval(rebuildPollTimer!)
+          rebuildPollTimer = null
+          rebuilding.value = false
+          await loadStats()
+          message.success('图谱重建完成')
+        }
+      } catch { /* ignore poll errors */ }
+    }, 3000)
+  } catch (err: any) {
+    rebuilding.value = false
+    message.error(err.response?.data?.error || '重建失败')
+  }
+}
+
 // 索引完成时自动刷新统计（isIndexing: true → false）
 watch(() => indexStore.isIndexing, (now, prev) => {
-  if (prev === true && now === false) {
-    loadStats()
-  }
+  if (prev === true && now === false) loadStats()
 })
 
 onMounted(async () => {
   await indexStore.connect()
   loadStats()
+})
+
+onUnmounted(() => {
+  if (rebuildPollTimer) clearInterval(rebuildPollTimer)
 })
 </script>
 
