@@ -5,6 +5,7 @@ obj/
 *.exe
 *.pdb
 dist/
+publish/
 
 # Excluded from public repo
 docs/
