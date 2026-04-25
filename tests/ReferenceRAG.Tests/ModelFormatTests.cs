@@ -18,7 +18,7 @@ public class ModelFormatTests : IDisposable
     {
         _testDir = Path.Combine(Path.GetTempPath(), $"model-format-tests-{Guid.NewGuid():N}");
         _modelsPath = Path.Combine(_testDir, "models");
-        _originalDir = Directory.GetCurrentDirectory();
+        try { _originalDir = Directory.GetCurrentDirectory(); } catch { _originalDir = _testDir; }
 
         Directory.CreateDirectory(_modelsPath);
     }
