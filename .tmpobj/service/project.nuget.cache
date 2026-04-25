@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "dgSpecHash": "2hNj24Ybygc=",
+  "success": true,
+  "projectFilePath": "E:\\WorkProject\\CSharp\\PrivateProject\\Web\\ReferenceRAG\\src\\ReferenceRAG.Storage\\ReferenceRAG.Storage.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\hlr\\.nuget\\packages\\berttokenizers\\1.2.0\\berttokenizers.1.2.0.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\google.protobuf\\3.30.2\\google.protobuf.3.30.2.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\markdig\\1.1.2\\markdig.1.1.2.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.data.sqlite\\10.0.5\\microsoft.data.sqlite.10.0.5.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.data.sqlite.core\\10.0.5\\microsoft.data.sqlite.core.10.0.5.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.extensions.ai.abstractions\\10.4.0\\microsoft.extensions.ai.abstractions.10.4.0.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.extensions.dependencyinjection.abstractions\\10.0.5\\microsoft.extensions.dependencyinjection.abstractions.10.0.5.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\10.0.5\\microsoft.extensions.logging.abstractions.10.0.5.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.extensions.vectordata.abstractions\\10.1.0\\microsoft.extensions.vectordata.abstractions.10.1.0.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.ml.onnxruntime.gpu\\1.24.4\\microsoft.ml.onnxruntime.gpu.1.24.4.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.ml.onnxruntime.gpu.linux\\1.24.4\\microsoft.ml.onnxruntime.gpu.linux.1.24.4.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.ml.onnxruntime.gpu.windows\\1.24.4\\microsoft.ml.onnxruntime.gpu.windows.1.24.4.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.ml.onnxruntime.managed\\1.24.4\\microsoft.ml.onnxruntime.managed.1.24.4.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.ml.tokenizers\\1.0.1\\microsoft.ml.tokenizers.1.0.1.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\microsoft.semantickernel.connectors.sqlitevec\\1.74.0-preview\\microsoft.semantickernel.connectors.sqlitevec.1.74.0-preview.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\sqlite-vec\\0.1.7-alpha.2.1\\sqlite-vec.0.1.7-alpha.2.1.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\sqlitepclraw.bundle_e_sqlite3\\2.1.11\\sqlitepclraw.bundle_e_sqlite3.2.1.11.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\sqlitepclraw.core\\2.1.11\\sqlitepclraw.core.2.1.11.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\sqlitepclraw.lib.e_sqlite3\\2.1.11\\sqlitepclraw.lib.e_sqlite3.2.1.11.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\sqlitepclraw.provider.e_sqlite3\\2.1.11\\sqlitepclraw.provider.e_sqlite3.2.1.11.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\system.numerics.tensors\\10.0.4\\system.numerics.tensors.10.0.4.nupkg.sha512",
+    "C:\\Users\\hlr\\.nuget\\packages\\tokenizers.huggingface\\1.21.4\\tokenizers.huggingface.1.21.4.nupkg.sha512"
+  ],
+  "logs": []
+}

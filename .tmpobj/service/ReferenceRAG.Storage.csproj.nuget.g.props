@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <RestoreSuccess Condition=" '$(RestoreSuccess)' == '' ">True</RestoreSuccess>
+    <RestoreTool Condition=" '$(RestoreTool)' == '' ">NuGet</RestoreTool>
+    <ProjectAssetsFile Condition=" '$(ProjectAssetsFile)' == '' ">$(MSBuildThisFileDirectory)project.assets.json</ProjectAssetsFile>
+    <NuGetPackageRoot Condition=" '$(NuGetPackageRoot)' == '' ">$(UserProfile)\.nuget\packages\</NuGetPackageRoot>
+    <NuGetPackageFolders Condition=" '$(NuGetPackageFolders)' == '' ">C:\Users\hlr\.nuget\packages\;E:\Content\Microsoft\Microsoft Visual Studio\Shared\NuGetPackages</NuGetPackageFolders>
+    <NuGetProjectStyle Condition=" '$(NuGetProjectStyle)' == '' ">PackageReference</NuGetProjectStyle>
+    <NuGetToolVersion Condition=" '$(NuGetToolVersion)' == '' ">7.0.0</NuGetToolVersion>
+  </PropertyGroup>
+  <ItemGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <SourceRoot Include="C:\Users\hlr\.nuget\packages\" />
+    <SourceRoot Include="E:\Content\Microsoft\Microsoft Visual Studio\Shared\NuGetPackages\" />
+  </ItemGroup>
+  <ImportGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <Import Project="$(NuGetPackageRoot)microsoft.ml.onnxruntime.gpu.windows\1.24.4\buildTransitive\netstandard2.1\Microsoft.ML.OnnxRuntime.Gpu.Windows.props" Condition="Exists('$(NuGetPackageRoot)microsoft.ml.onnxruntime.gpu.windows\1.24.4\buildTransitive\netstandard2.1\Microsoft.ML.OnnxRuntime.Gpu.Windows.props')" />
+    <Import Project="$(NuGetPackageRoot)microsoft.ml.onnxruntime.gpu.linux\1.24.4\buildTransitive\netstandard2.1\Microsoft.ML.OnnxRuntime.Gpu.Linux.props" Condition="Exists('$(NuGetPackageRoot)microsoft.ml.onnxruntime.gpu.linux\1.24.4\buildTransitive\netstandard2.1\Microsoft.ML.OnnxRuntime.Gpu.Linux.props')" />
+    <Import Project="$(NuGetPackageRoot)microsoft.ml.onnxruntime.gpu\1.24.4\buildTransitive\netstandard2.1\Microsoft.ML.OnnxRuntime.Gpu.props" Condition="Exists('$(NuGetPackageRoot)microsoft.ml.onnxruntime.gpu\1.24.4\buildTransitive\netstandard2.1\Microsoft.ML.OnnxRuntime.Gpu.props')" />
+  </ImportGroup>
+</Project>

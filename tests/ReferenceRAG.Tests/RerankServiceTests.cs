@@ -135,7 +135,7 @@ public class RerankServiceTests
 
     #region TC-RS-003: 批量重排测试
 
-    [Fact]
+    [Fact(Skip = "CI 环境缺少本地模型文件")]
     public async Task TC_RS_003_BatchRerank_ReturnsCorrectCount()
     {
         Console.WriteLine("=== TC-RS-003: 批量重排测试 ===");
