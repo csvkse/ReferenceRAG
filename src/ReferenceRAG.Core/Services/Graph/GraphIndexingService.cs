@@ -29,11 +29,11 @@ public class GraphIndexingService
             ChunkIds = chunks.Select(c => c.Id).ToList()
         };
 
+        // Upsert 节点（保留节点本身和其他文件指向本节点的入边）
         await _graphStore.UpsertNodeAsync(node, ct);
 
-        // 删除该节点的旧出边，重建
-        await _graphStore.DeleteNodeAsync(nodeId, ct);
-        await _graphStore.UpsertNodeAsync(node, ct);
+        // 仅删除本节点的出边，然后用最新链接重建
+        await _graphStore.DeleteOutgoingEdgesAsync(nodeId, ct);
 
         var links = _extractor.Extract(markdownContent);
         var edges = new List<GraphEdge>();

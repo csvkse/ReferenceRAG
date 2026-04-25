@@ -132,6 +132,19 @@ public class SqliteGraphStore : IGraphStore, IDisposable
         finally { _lock.Release(); }
     }
 
+    public async Task DeleteOutgoingEdgesAsync(string nodeId, CancellationToken ct = default)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "DELETE FROM graph_edges WHERE from_id = @id";
+            cmd.Parameters.AddWithValue("@id", nodeId);
+            cmd.ExecuteNonQuery();
+        }
+        finally { _lock.Release(); }
+    }
+
     public async Task<GraphNode?> GetNodeAsync(string nodeId, CancellationToken ct = default)
     {
         await _lock.WaitAsync(ct);
