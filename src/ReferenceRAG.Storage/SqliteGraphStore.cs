@@ -145,6 +145,24 @@ public class SqliteGraphStore : IGraphStore, IDisposable
         finally { _lock.Release(); }
     }
 
+    public async Task DeleteHeadingNodesAsync(string fileNodeId, CancellationToken ct = default)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            // 删除 id 以 "fileNodeId#" 开头的所有 heading 节点及其关联边
+            var prefix = fileNodeId + "#%";
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                DELETE FROM graph_edges WHERE from_id LIKE @p OR to_id LIKE @p;
+                DELETE FROM graph_nodes WHERE id LIKE @p;
+            ";
+            cmd.Parameters.AddWithValue("@p", prefix);
+            cmd.ExecuteNonQuery();
+        }
+        finally { _lock.Release(); }
+    }
+
     public async Task<GraphNode?> GetNodeAsync(string nodeId, CancellationToken ct = default)
     {
         await _lock.WaitAsync(ct);

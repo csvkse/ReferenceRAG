@@ -163,8 +163,8 @@ const nodeColumns: DataTableColumns<GraphNode> = [
     key: 'type',
     width: 100,
     render: (row) => {
-      const typeMap: Record<string, 'info' | 'success' | 'default'> = {
-        document: 'info', tag: 'success'
+      const typeMap: Record<string, 'info' | 'success' | 'warning' | 'error' | 'default'> = {
+        document: 'info', tag: 'success', heading: 'warning', external: 'error'
       }
       return h(NTag, { size: 'small', type: typeMap[row.type] ?? 'default' }, () => row.type)
     }
