@@ -105,7 +105,6 @@ public class ConfigManagerTests : IDisposable
         Assert.Empty(config.Sources);
     }
 
-    [Fact]
     [Fact(Skip = "CI 环境文件系统隔离问题")]
     public void ToggleSource_TogglesEnabledState()
     {
