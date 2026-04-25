@@ -328,9 +328,9 @@ export const pathsApi = {
 // Knowledge Graph
 export const graphApi = {
   stats: () => api.get('/graph/stats'),
-  node: (nodeId: string) => api.get(`/graph/node/${encodeURIComponent(nodeId)}`),
+  node: (nodeId: string) => api.get('/graph/node', { params: { nodeId } }),
   neighbors: (nodeId: string, depth = 1, edgeTypes?: string) =>
-    api.get(`/graph/neighbors/${encodeURIComponent(nodeId)}`, { params: { depth, edgeTypes } }),
+    api.get('/graph/neighbors', { params: { nodeId, depth, edgeTypes } }),
   search: (q: string, limit = 10) => api.get('/graph/search', { params: { q, limit } }),
   subgraph: (rootIds: string[], depth = 1) => api.post('/graph/subgraph', { rootIds, depth }),
   rebuild: () => api.post('/graph/rebuild'),

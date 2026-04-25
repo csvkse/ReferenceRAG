@@ -50,9 +50,10 @@
       </n-space>
     </n-card>
 
-    <!-- Search Input -->
+    <!-- Search Input + Options -->
     <n-card>
-      <div style="display: flex; flex-direction: column; gap: 8px">
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <!-- Textarea + Button -->
         <div style="display: flex; align-items: flex-start; gap: 12px">
           <n-input
             v-model:value="searchQuery"
@@ -77,102 +78,72 @@
             </template>
           </n-input>
           <n-button type="primary" :loading="loading" @click="handleSearch" :disabled="!searchQuery.trim()">
-              <template #icon><n-icon :component="SearchOutline" /></template>
-              搜索
-            </n-button>
+            <template #icon><n-icon :component="SearchOutline" /></template>
+            搜索
+          </n-button>
         </div>
-        <n-text depth="3" style="font-size: 12px">
-          Enter 搜索 | Shift+Enter 换行
-        </n-text>
+
+        <!-- Mode toggle + Advanced -->
+        <div style="display: flex; align-items: center; justify-content: space-between">
+          <n-radio-group v-model:value="searchOptions.mode" size="small">
+            <n-radio-button value="Quick" label="快速" />
+            <n-radio-button value="HybridRerank" label="平衡" />
+            <n-radio-button value="Deep" label="深度" />
+          </n-radio-group>
+          <n-button text size="small" @click="showAdvanced = !showAdvanced">
+            <template #icon>
+              <n-icon :component="OptionsOutline" />
+            </template>
+            {{ showAdvanced ? '收起' : '高级' }}
+          </n-button>
+        </div>
+
+        <!-- Advanced collapse -->
+        <n-collapse-transition :show="showAdvanced">
+          <n-divider style="margin: 0 0 12px" />
+          <n-grid :cols="3" :x-gap="20">
+            <n-gi>
+              <n-form-item label="返回数量">
+                <n-input-number v-model:value="searchOptions.topK" :min="1" :max="50" style="width: 100%" />
+              </n-form-item>
+            </n-gi>
+            <n-gi>
+              <n-form-item label="源筛选">
+                <n-select
+                  v-model:value="searchOptions.sources"
+                  :options="sourceOptions"
+                  multiple
+                  placeholder="全部源"
+                  clearable
+                />
+              </n-form-item>
+            </n-gi>
+            <n-gi>
+              <n-form-item label="路径过滤">
+                <n-tree
+                  v-model:selected-keys="selectedPaths"
+                  :data="pathTreeData"
+                  :loading="pathsLoading"
+                  selectable
+                  multiple
+                  clearable
+                  placeholder="全部路径"
+                  style="max-height: 200px; overflow-y: auto"
+                  @update:selected-keys="handlePathSelect"
+                />
+              </n-form-item>
+            </n-gi>
+          </n-grid>
+          <div style="text-align: right; margin-top: -8px">
+            <n-button text size="small" @click="handleReset" :disabled="isDefaultOptions">
+              <template #icon><n-icon :component="RefreshOutline" /></template>
+              重置为默认
+            </n-button>
+          </div>
+        </n-collapse-transition>
+
+        <n-text depth="3" style="font-size: 12px">Enter 搜索 | Shift+Enter 换行</n-text>
       </div>
-    </n-card>
-
-    <!-- Search Options -->
-    <n-card title="搜索选项">
-      <template #header-extra>
-        <n-space align="center" :size="12">
-          <n-button text size="small" @click="showModeHelp = !showModeHelp">
-            <template #icon><n-icon :component="HelpCircleOutline" /></template>
-            模式说明
-          </n-button>
-          <n-button text size="small" @click="handleReset" :disabled="isDefaultOptions">
-            <template #icon><n-icon :component="RefreshOutline" /></template>
-            重置为默认
-          </n-button>
-        </n-space>
-      </template>
-
-      <!-- Mode Help Collapse -->
-      <n-collapse-transition :show="showModeHelp">
-        <n-card size="small" style="margin-bottom: 16px; background: var(--help-card-bg, rgba(255,255,255,0.02))">
-          <n-tabs type="line" size="small">
-            <n-tab-pane name="mode" tab="查询模式">
-              <n-descriptions label-placement="left" :column="1" size="small">
-                <n-descriptions-item label="快速">
-                  <n-text depth="3">纯向量搜索，适合快速试探</n-text>
-                </n-descriptions-item>
-                <n-descriptions-item label="平衡">
-                  <n-text depth="3">BM25 + 向量 + 重排，默认推荐</n-text>
-                </n-descriptions-item>
-                <n-descriptions-item label="深度">
-                  <n-text depth="3">更大召回范围，适合复杂问题</n-text>
-                </n-descriptions-item>
-              </n-descriptions>
-            </n-tab-pane>
-            <n-tab-pane name="params" tab="参数说明">
-              <n-descriptions label-placement="left" :column="1" size="small">
-                <n-descriptions-item label="返回数量">
-                  <n-text depth="3">最终返回的结果数量。后端会根据模式自动决定召回和重排策略</n-text>
-                </n-descriptions-item>
-                <n-descriptions-item label="源筛选">
-                  <n-text depth="3">限定搜索范围到指定的知识库源</n-text>
-                </n-descriptions-item>
-                <n-descriptions-item label="路径过滤">
-                  <n-text depth="3">限定搜索范围到指定的文件夹路径</n-text>
-                </n-descriptions-item>
-              </n-descriptions>
-            </n-tab-pane>
-          </n-tabs>
-        </n-card>
-      </n-collapse-transition>
-      <n-grid :cols="4" :x-gap="20">
-        <n-gi>
-          <n-form-item label="查询模式">
-            <n-select v-model:value="searchOptions.mode" :options="modeOptions" />
-          </n-form-item>
-        </n-gi>
-        <n-gi>
-          <n-form-item :label="(searchOptions.enableRerank === true || searchOptions.mode === 'HybridRerank') ? '重排返回数' : '返回数量 (Top K)'">
-            <n-input-number v-model:value="searchOptions.topK" :min="1" :max="50" style="width: 100%" />
-          </n-form-item>
-        </n-gi>
-        <n-gi>
-          <n-form-item label="源筛选">
-            <n-select
-              v-model:value="searchOptions.sources"
-              :options="sourceOptions"
-              multiple
-              placeholder="全部源"
-              clearable
-            />
-          </n-form-item>
-        </n-gi>
-        <n-gi>
-          <n-form-item label="路径过滤">
-            <n-tree
-              v-model:selected-keys="selectedPaths"
-              :data="pathTreeData"
-              :loading="pathsLoading"
-              selectable
-              multiple
-              clearable
-              placeholder="全部路径"
-              style="max-height: 200px; overflow-y: auto"
-              @update:selected-keys="handlePathSelect"
-            />
-          </n-form-item>
-        </n-gi>
-      </n-grid>
     </n-card>
 
     <!-- Search Stats -->
@@ -306,7 +277,7 @@ import {
   CubeOutline,
   GitMergeOutline,
   LayersOutline,
-  HelpCircleOutline
+  OptionsOutline
 } from '@vicons/ionicons5'
 import { aiQueryApi, sourcesApi, pathsApi, type SearchStatusResponse } from '@/api'
 import type { SourceDetail, AIQueryResponse, ChunkResult, DrilldownResponse, QueryMode, SourcePathInfo } from '@/types/api'
@@ -314,7 +285,7 @@ import type { SourceDetail, AIQueryResponse, ChunkResult, DrilldownResponse, Que
 const searchQuery = ref('')
 const loading = ref(false)
 const searched = ref(false)
-const showModeHelp = ref(false)
+const showAdvanced = ref(false)
 const searchResponse = ref<AIQueryResponse | null>(null)
 const sources = ref<SourceDetail[]>([])
 const paths = ref<SourcePathInfo[]>([])
@@ -366,12 +337,6 @@ const isDefaultOptions = computed(() => {
   )
 })
 
-const modeOptions = [
-    { label: '快速', value: 'Quick' },
-    { label: '平衡', value: 'HybridRerank' },
-    { label: '深度', value: 'Deep' }
-]
-
 const sourceOptions = computed(() =>
   sources.value.map(s => ({ label: s.name, value: s.name }))
 )
@@ -419,10 +384,8 @@ const truncateContent = (content: string, maxLen = 300) => {
 // Handle Enter key: Shift+Enter for newline, Enter for search
 const handleKeyDown = (e: KeyboardEvent) => {
   if (e.shiftKey) {
-    // Shift+Enter: allow default behavior (newline)
     return
   }
-  // Enter (without Shift): prevent newline and search
   e.preventDefault()
   handleSearch()
 }
@@ -446,7 +409,6 @@ const handleSearch = async () => {
   loading.value = true
   searched.value = true
   try {
-    // 由后端根据 mode 自动补默认参数；前端只传少量必要参数
     const response = await aiQueryApi.query({
       query: searchQuery.value,
       mode: searchOptions.value.mode,
@@ -517,10 +479,3 @@ onMounted(() => {
   loadSearchStatus()
 })
 </script>
-
-<style scoped>
-/* 浅色模式适配 */
-:global(body.light-theme) .n-card[style*="background"] {
-  --help-card-bg: rgba(0, 0, 0, 0.02);
-}
-</style>

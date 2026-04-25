@@ -97,20 +97,24 @@ public class GraphController : ControllerBase
     public ActionResult<object> GetRebuildStatus()
         => Ok(new { isRebuilding = _isRebuilding });
 
-    [HttpGet("node/{*nodeId}")]
-    public async Task<ActionResult<GraphNode>> GetNode(string nodeId)
+    [HttpGet("node")]
+    public async Task<ActionResult<GraphNode>> GetNode([FromQuery] string nodeId)
     {
+        if (string.IsNullOrWhiteSpace(nodeId))
+            return BadRequest(new { error = "nodeId 不能为空" });
         var node = await _graphStore.GetNodeAsync(nodeId);
         if (node == null) return NotFound(new { error = $"节点不存在: {nodeId}" });
         return Ok(node);
     }
 
-    [HttpGet("neighbors/{*nodeId}")]
+    [HttpGet("neighbors")]
     public async Task<ActionResult<GraphTraversalResult>> GetNeighbors(
-        string nodeId,
+        [FromQuery] string nodeId,
         [FromQuery] int depth = 1,
         [FromQuery] string? edgeTypes = null)
     {
+        if (string.IsNullOrWhiteSpace(nodeId))
+            return BadRequest(new { error = "nodeId 不能为空" });
         depth = Math.Clamp(depth, 1, 3);
         var types = edgeTypes?.Split(',', StringSplitOptions.RemoveEmptyEntries);
         var result = await _graphStore.GetNeighborsAsync(nodeId, depth, types);

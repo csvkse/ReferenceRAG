@@ -302,32 +302,46 @@ source ~/.bashrc`" language="bash" />
           <n-card title="搜索技巧">
             <n-collapse>
               <n-collapse-item title="查询模式选择" name="query-mode">
-                <n-table :bordered="false" :single-line="false">
-                  <thead>
-                    <tr>
-                      <th>模式</th>
-                      <th>适用场景</th>
-                      <th>特点</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td><n-tag type="info">Vector</n-tag></td>
-                      <td>语义相似度搜索</td>
-                      <td>理解语义，适合概念性查询</td>
-                    </tr>
-                    <tr>
-                      <td><n-tag type="success">BM25</n-tag></td>
-                      <td>关键词精确匹配</td>
-                      <td>精确匹配，适合专业术语</td>
-                    </tr>
-                    <tr>
-                      <td><n-tag type="warning">Hybrid</n-tag></td>
-                      <td>混合搜索（推荐）</td>
-                      <td>结合两者优势，综合效果最佳</td>
-                    </tr>
-                  </tbody>
-                </n-table>
+                <n-space vertical :size="12">
+                  <n-table :bordered="false" :single-line="false">
+                    <thead>
+                      <tr>
+                        <th>模式</th>
+                        <th>召回方式</th>
+                        <th>重排</th>
+                        <th>默认返回</th>
+                        <th>适用场景</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><n-tag type="default">快速</n-tag></td>
+                        <td>纯向量搜索</td>
+                        <td><n-tag size="small">无</n-tag></td>
+                        <td>3 条</td>
+                        <td>定向查询、快速试探</td>
+                      </tr>
+                      <tr>
+                        <td><n-tag type="success">平衡</n-tag></td>
+                        <td>BM25 + 向量混合</td>
+                        <td><n-tag size="small" type="success">启用</n-tag></td>
+                        <td>10 条</td>
+                        <td>日常主力，准确率最高</td>
+                      </tr>
+                      <tr>
+                        <td><n-tag type="warning">深度</n-tag></td>
+                        <td>纯向量搜索</td>
+                        <td><n-tag size="small">无</n-tag></td>
+                        <td>20 条</td>
+                        <td>探索性查询、答案位置不确定</td>
+                      </tr>
+                    </tbody>
+                  </n-table>
+                  <n-alert type="info" :show-icon="false">
+                    <n-text strong>平衡</n-text> 模式会先用混合召回扩大候选池（TopK × 3），再由 Rerank 模型精排，关键词命中和语义相似度都考虑，综合效果最佳。<br />
+                    <n-text strong>深度</n-text> 模式返回更多结果并扩大上下文窗口，适合"尽量多给"的探索场景，但不经过重排。
+                  </n-alert>
+                </n-space>
               </n-collapse-item>
 
               <n-collapse-item title="提高搜索质量的技巧" name="search-tips">

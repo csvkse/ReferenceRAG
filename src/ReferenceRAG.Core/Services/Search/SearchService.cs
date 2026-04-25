@@ -101,53 +101,20 @@ public class SearchService : ISearchService
         var enabledSources = await GetEnabledSourceNamesAsync();
 
         // 请求源限定
-        if (request.Sources!=null
-            && request.Sources.Count!=0)
-        {
+        if (request.Sources != null && request.Sources.Count != 0)
             enabledSources = enabledSources.Where(m => request.Sources.Contains(m)).ToHashSet();
-        }
 
-        // 标题优先路径：短查询先查文件标题 / 图节点标题，命中就直接返回
-        if (ShouldPreferTitleSearch(request.Query))
-        {
-            var titleResults = await TryTitleFirstSearchAsync(request, enabledSources, cancellationToken);
-            if (titleResults.Count > 0)
-            {
-                var titleChunks = BuildChunkResults(titleResults);
-                var titleFiles = BuildFileSummaries(titleResults);
-                var titleContext = BuildContext(titleChunks, request.MaxTokens);
-                var titlePrompt = BuildPrompt(request.Query, titleContext);
-
-                sw.Stop();
-
-                return new AIQueryResponse
-                {
-                    Query = request.Query,
-                    Mode = request.Mode,
-                    Context = titleContext,
-                    Prompt = titlePrompt,
-                    Chunks = titleChunks,
-                    Files = titleFiles,
-                    Stats = new SearchStats
-                    {
-                        TotalMatches = titleResults.Count,
-                        DurationMs = sw.ElapsedMilliseconds,
-                        EstimatedTokens = TokenEstimator.EstimateTokens(titleContext)
-                    },
-                    HasMore = false,
-                    Suggestion = null,
-                    RerankApplied = false,
-                    RerankStats = null
-                };
-            }
-        }
-        
+        // 并行启动：embedding 推理（CPU/GPU）与标题搜索（SQLite）互不依赖，同时进行
+        var embeddingTask = _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
+        var titleTask = ShouldPreferTitleSearch(request.Query)
+            ? TryTitleFirstSearchAsync(request, enabledSources, cancellationToken)
+            : Task.FromResult<List<SearchResult>>(new());
 
         List<SearchResult> topResults;
         RerankStats? rerankStats = null;
 
-        // 预计算 queryVector：图扩展和 Standard 模式均需要，且只算一次
-        var queryVector = await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
+        // 等待向量完成（标题搜索在后台继续，hybrid search 依赖向量先就绪）
+        var queryVector = await embeddingTask;
 
         // ========== 第一阶段：召回 ==========
         if ((request.Mode == QueryMode.Hybrid || request.Mode == QueryMode.HybridRerank) && _hybridSearchService != null)
@@ -186,6 +153,20 @@ public class SearchService : ISearchService
         {
             // 标准向量搜索（复用预计算向量）
             topResults = await ExecuteStandardSearchAsync(request, enabledSources, cancellationToken, queryVector);
+        }
+
+        // 合并标题候选：等待标题搜索完成，去重后插入头部
+        // 标题命中高精度，rerank 有机会将其排到最前；无 rerank 时凭分数自然优先
+        var titleResults = await titleTask;
+        if (titleResults.Count > 0)
+        {
+            var existingIds = topResults.Select(r => r.ChunkId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var newFromTitle = titleResults.Where(r => existingIds.Add(r.ChunkId)).ToList();
+            if (newFromTitle.Count > 0)
+            {
+                topResults.InsertRange(0, newFromTitle);
+                _logger.LogDebug("标题候选合并: +{Count} 条（总候选 {Total}）", newFromTitle.Count, topResults.Count);
+            }
         }
 
         // ========== 图扩展：补充 wiki-link 邻居节点 ==========
@@ -334,13 +315,15 @@ public class SearchService : ISearchService
         if (nodes.Count == 0)
             return new List<SearchResult>();
 
+        // 收集 TopK*2 个候选：合并后由 rerank 决定最终排序，不再提前截断
+        var maxCandidates = request.TopK * 2;
         var results = new List<SearchResult>();
         var seenChunkIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seenFileIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var node in nodes)
         {
-            if (results.Count >= request.TopK)
+            if (results.Count >= maxCandidates)
                 break;
 
             var filePath = ExtractFilePathFromNodeId(node.Id);

@@ -74,7 +74,9 @@ public class GraphIndexingService
             else
             {
                 var rawFileId      = NormalizeNodeId(target);
-                var resolvedFileId = resolveLink?.Invoke(rawFileId);
+                // 先全路径查，找不到再用短文件名降级（兼容 [[folder/file]] 写法）
+                var resolvedFileId = resolveLink?.Invoke(rawFileId)
+                    ?? resolveLink?.Invoke(Path.GetFileName(rawFileId));
 
                 if (resolvedFileId != null)
                 {

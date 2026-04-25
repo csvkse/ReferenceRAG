@@ -355,6 +355,168 @@ public class SourcesController : ControllerBase
         return Ok(result);
     }
 
+
+    /// <summary>
+    /// 按行范围批量获取文件分段内容
+    /// </summary>
+    [HttpPost("file/lines")]
+    public async Task<ActionResult<FileLinesResponse>> GetFileLinesBatch([FromBody] FileLinesRequest request)
+    {
+        if (request.Items == null || request.Items.Count == 0)
+            return BadRequest(new { error = "items 不能为空" });
+
+        var config = _configManager.Load();
+        var sourcePaths = config.Sources
+            .Select(s => Path.GetFullPath(s.Path))
+            .ToList();
+
+        var results = new List<FileLinesResult>();
+
+        const int maxItems = 20;
+        if (request.Items.Count > maxItems)
+            return BadRequest(new { error = $"单次最多 {maxItems} 条，当前 {request.Items.Count} 条" });
+
+        foreach (var item in request.Items)
+        {
+            if (string.IsNullOrWhiteSpace(item.Path) || item.Path.Contains(".."))
+            {
+                results.Add(new FileLinesResult { Path = item.Path ?? "", Error = "路径无效" });
+                continue;
+            }
+
+            if (item.StartLine < 0 || item.EndLine < 0)
+            {
+                results.Add(new FileLinesResult { Path = item.Path, Error = "startLine / endLine 不能为负数" });
+                continue;
+            }
+
+            if (item.StartLine > 0 && item.EndLine > 0 && item.StartLine > item.EndLine)
+            {
+                results.Add(new FileLinesResult { Path = item.Path, Error = $"startLine ({item.StartLine}) 不能大于 endLine ({item.EndLine})" });
+                continue;
+            }
+
+            var normalizedPath = Path.GetFullPath(item.Path);
+
+            if (!sourcePaths.Any(sp => normalizedPath.StartsWith(sp, StringComparison.OrdinalIgnoreCase)))
+            {
+                results.Add(new FileLinesResult { Path = item.Path, Error = "路径不在任何已注册源的范围内" });
+                continue;
+            }
+
+            var file = await _vectorStore.GetFileByPathAsync(normalizedPath)
+                       ?? await _vectorStore.GetFileByPathAsync(item.Path);
+
+            if (file == null)
+            {
+                results.Add(new FileLinesResult { Path = item.Path, Error = "文件未被索引" });
+                continue;
+            }
+
+            var allChunks = await _vectorStore.GetChunksByFileAsync(file.Id);
+
+            // 行范围过滤：startLine=0 且 endLine=0 时返回全部
+            var filtered = allChunks.OrderBy(c => c.ChunkOrder);
+            var hasRange = item.StartLine > 0 || item.EndLine > 0;
+            if (hasRange)
+            {
+                var start = item.StartLine > 0 ? item.StartLine : 1;
+                var end = item.EndLine > 0 ? item.EndLine : int.MaxValue;
+                filtered = filtered.Where(c => c.StartLine <= end && c.EndLine >= start)
+                                   .OrderBy(c => c.ChunkOrder);
+            }
+
+            results.Add(new FileLinesResult
+            {
+                Path = file.Path,
+                Title = file.Title,
+                Source = file.Source,
+                RequestedRange = hasRange
+                    ? new LineRange { StartLine = item.StartLine, EndLine = item.EndLine }
+                    : null,
+                Chunks = filtered.Select(c => new FileChunkItem
+                {
+                    Index = c.ChunkIndex,
+                    HeadingPath = c.HeadingPath,
+                    StartLine = c.StartLine,
+                    EndLine = c.EndLine,
+                    Content = c.Content
+                }).ToList()
+            });
+        }
+
+        return Ok(new FileLinesResponse { Results = results });
+    }
+
+    /// <summary>
+    /// 批量获取文件结构信息（章节目录 + 行号，不含正文内容）
+    /// </summary>
+    [HttpPost("files/info")]
+    public async Task<ActionResult<FilesInfoResponse>> GetFilesInfo([FromBody] FilesInfoRequest request)
+    {
+        if (request.Paths == null || request.Paths.Count == 0)
+            return BadRequest(new { error = "paths 不能为空" });
+
+        const int maxPaths = 20;
+        if (request.Paths.Count > maxPaths)
+            return BadRequest(new { error = $"单次最多 {maxPaths} 条，当前 {request.Paths.Count} 条" });
+
+        var config = _configManager.Load();
+        var sourcePaths = config.Sources
+            .Select(s => Path.GetFullPath(s.Path))
+            .ToList();
+
+        var results = new List<FileInfoResult>();
+
+        foreach (var rawPath in request.Paths)
+        {
+            if (string.IsNullOrWhiteSpace(rawPath) || rawPath.Contains(".."))
+            {
+                results.Add(new FileInfoResult { Path = rawPath ?? "", Error = "路径无效" });
+                continue;
+            }
+
+            var normalizedPath = Path.GetFullPath(rawPath);
+
+            if (!sourcePaths.Any(sp => normalizedPath.StartsWith(sp, StringComparison.OrdinalIgnoreCase)))
+            {
+                results.Add(new FileInfoResult { Path = rawPath, Error = "路径不在任何已注册源的范围内" });
+                continue;
+            }
+
+            var file = await _vectorStore.GetFileByPathAsync(normalizedPath)
+                       ?? await _vectorStore.GetFileByPathAsync(rawPath);
+
+            if (file == null)
+            {
+                results.Add(new FileInfoResult { Path = rawPath, Error = "文件未被索引" });
+                continue;
+            }
+
+            var chunks = (await _vectorStore.GetChunksByFileAsync(file.Id))
+                .OrderBy(c => c.ChunkOrder)
+                .ToList();
+
+            results.Add(new FileInfoResult
+            {
+                Path = file.Path,
+                Title = file.Title,
+                Source = file.Source,
+                TotalChunks = chunks.Count,
+                TotalLines = chunks.Count > 0 ? chunks.Max(c => c.EndLine) : 0,
+                Sections = chunks.Select(c => new FileSectionItem
+                {
+                    Index = c.ChunkIndex,
+                    HeadingPath = c.HeadingPath,
+                    StartLine = c.StartLine,
+                    EndLine = c.EndLine
+                }).ToList()
+            });
+        }
+
+        return Ok(new FilesInfoResponse { Results = results });
+    }
+
     private static bool MatchesPattern(string filePath, string pattern)
     {
         if (pattern.StartsWith("*."))
@@ -475,3 +637,96 @@ public class SourcePathInfo
     /// </summary>
     public List<string> Folders { get; set; } = new();
 }
+
+
+/// <summary>
+/// 文件分段项
+/// </summary>
+public class FileChunkItem
+{
+    public int Index { get; set; }
+    public string? HeadingPath { get; set; }
+    public int StartLine { get; set; }
+    public int EndLine { get; set; }
+    public string Content { get; set; } = "";
+}
+
+/// <summary>
+/// 批量行范围查询请求
+/// </summary>
+public class FileLinesRequest
+{
+    public List<FileLinesItem> Items { get; set; } = new();
+}
+
+public class FileLinesItem
+{
+    public string Path { get; set; } = "";
+    /// <summary>0 表示不限起始行</summary>
+    public int StartLine { get; set; } = 0;
+    /// <summary>0 表示不限结束行</summary>
+    public int EndLine { get; set; } = 0;
+}
+
+/// <summary>
+/// 批量行范围查询响应
+/// </summary>
+public class FileLinesResponse
+{
+    public List<FileLinesResult> Results { get; set; } = new();
+}
+
+public class FileLinesResult
+{
+    public string Path { get; set; } = "";
+    public string? Title { get; set; }
+    public string? Source { get; set; }
+    public LineRange? RequestedRange { get; set; }
+    public List<FileChunkItem> Chunks { get; set; } = new();
+    public string? Error { get; set; }
+}
+
+public class LineRange
+{
+    public int StartLine { get; set; }
+    public int EndLine { get; set; }
+}
+
+/// <summary>
+/// 批量文件信息查询请求
+/// </summary>
+public class FilesInfoRequest
+{
+    public List<string> Paths { get; set; } = new();
+}
+
+/// <summary>
+/// 批量文件信息查询响应
+/// </summary>
+public class FilesInfoResponse
+{
+    public List<FileInfoResult> Results { get; set; } = new();
+}
+
+public class FileInfoResult
+{
+    public string Path { get; set; } = "";
+    public string? Title { get; set; }
+    public string? Source { get; set; }
+    public int TotalChunks { get; set; }
+    public int TotalLines { get; set; }
+    public List<FileSectionItem> Sections { get; set; } = new();
+    public string? Error { get; set; }
+}
+
+/// <summary>
+/// 文件章节项（不含正文内容）
+/// </summary>
+public class FileSectionItem
+{
+    public int Index { get; set; }
+    public string? HeadingPath { get; set; }
+    public int StartLine { get; set; }
+    public int EndLine { get; set; }
+}
+
