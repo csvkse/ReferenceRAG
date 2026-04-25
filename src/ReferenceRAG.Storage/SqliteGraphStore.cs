@@ -224,12 +224,20 @@ public class SqliteGraphStore : IGraphStore, IDisposable
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
                 SELECT
-                  (SELECT COUNT(*) FROM graph_nodes) AS node_count,
-                  (SELECT COUNT(*) FROM graph_edges) AS edge_count
+                  (SELECT COUNT(*)                            FROM graph_nodes)                    AS node_count,
+                  (SELECT COUNT(*) FROM graph_nodes WHERE type = 'document')                      AS doc_count,
+                  (SELECT COUNT(*) FROM graph_nodes WHERE type = 'tag')                           AS tag_count,
+                  (SELECT COUNT(*)                            FROM graph_edges)                   AS edge_count
                 """;
             using var r = cmd.ExecuteReader();
             r.Read();
-            return new GraphStats { NodeCount = r.GetInt32(0), EdgeCount = r.GetInt32(1) };
+            return new GraphStats
+            {
+                NodeCount = r.GetInt32(0),
+                DocCount  = r.GetInt32(1),
+                TagCount  = r.GetInt32(2),
+                EdgeCount = r.GetInt32(3)
+            };
         }
         finally { _lock.Release(); }
     }

@@ -4,9 +4,15 @@
       <!-- 顶部统计 -->
       <n-card :bordered="false" style="padding: 0">
         <n-space justify="space-between" align="center">
-          <n-grid :cols="3" :x-gap="12" style="flex:1">
+          <n-grid :cols="5" :x-gap="12" style="flex:1">
             <n-grid-item>
-              <n-statistic label="节点数" :value="stats.nodeCount" />
+              <n-statistic label="节点总数" :value="stats.nodeCount" />
+            </n-grid-item>
+            <n-grid-item>
+              <n-statistic label="文档节点" :value="stats.docCount" />
+            </n-grid-item>
+            <n-grid-item>
+              <n-statistic label="标签节点" :value="stats.tagCount" />
             </n-grid-item>
             <n-grid-item>
               <n-statistic label="边数" :value="stats.edgeCount" />
@@ -147,7 +153,7 @@ const rebuilding = ref(false)
 let rebuildPollTimer: ReturnType<typeof setInterval> | null = null
 const searchResults = ref<GraphNode[]>([])
 const traversalResult = ref<TraversalResult | null>(null)
-const stats = ref({ nodeCount: 0, edgeCount: 0 })
+const stats = ref({ nodeCount: 0, docCount: 0, tagCount: 0, edgeCount: 0 })
 
 const nodeColumns: DataTableColumns<GraphNode> = [
   { title: 'ID', key: 'id', ellipsis: { tooltip: true } },
@@ -156,7 +162,12 @@ const nodeColumns: DataTableColumns<GraphNode> = [
     title: '类型',
     key: 'type',
     width: 100,
-    render: (row) => h(NTag, { size: 'small', type: row.type === 'document' ? 'info' : 'default' }, () => row.type)
+    render: (row) => {
+      const typeMap: Record<string, 'info' | 'success' | 'default'> = {
+        document: 'info', tag: 'success'
+      }
+      return h(NTag, { size: 'small', type: typeMap[row.type] ?? 'default' }, () => row.type)
+    }
   },
   {
     title: '操作',
@@ -217,7 +228,7 @@ const loadStats = async () => {
   statsLoading.value = true
   try {
     const res = await graphApi.stats()
-    stats.value = res.data as { nodeCount: number; edgeCount: number }
+    stats.value = res.data as { nodeCount: number; docCount: number; tagCount: number; edgeCount: number }
   } catch { /* ignore */ }
   finally { statsLoading.value = false }
 }

@@ -47,10 +47,26 @@ public class GraphIndexingService
 
         foreach (var (target, type, lineNum) in links)
         {
-            // 优先用 resolveLink 把短文件名解析成完整路径节点 ID；
-            // 解析失败时保留短文件名（外链/未索引文件），确保不丢边
-            var rawId = NormalizeNodeId(target);
-            var resolvedId = resolveLink?.Invoke(rawId) ?? rawId;
+            string resolvedId;
+
+            if (type == "tag")
+            {
+                // Tag 节点：用 "#tagname" 作 ID，避免与文档路径冲突
+                resolvedId = $"#{target}";
+                await _graphStore.UpsertNodeAsync(new GraphNode
+                {
+                    Id = resolvedId,
+                    Title = resolvedId,
+                    Type = "tag",
+                    ChunkIds = new List<string>()
+                }, ct);
+            }
+            else
+            {
+                // 文档/嵌入链接：优先解析短文件名 → 完整路径节点 ID
+                var rawId = NormalizeNodeId(target);
+                resolvedId = resolveLink?.Invoke(rawId) ?? rawId;
+            }
 
             edges.Add(new GraphEdge
             {
