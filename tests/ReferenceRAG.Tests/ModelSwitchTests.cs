@@ -77,11 +77,11 @@ public class ModelSwitchTests
         Assert.True(Directory.Exists(modelDir), $"模型目录不存在: {modelDir}");
 
         var onnxPath = Path.Combine(modelDir, "model.onnx");
-        var onnxDataPath = Path.Combine(modelDir, "model.onnx.data");
+        var onnxDataPath = Path.Combine(modelDir, "model.onnx_data");
 
         Console.WriteLine($"\n文件检查:");
         Console.WriteLine($"  model.onnx: {(File.Exists(onnxPath) ? "存在" : "不存在")} ({new FileInfo(onnxPath).Length / 1024.0 / 1024.0:F2} MB)");
-        Console.WriteLine($"  model.onnx.data: {(File.Exists(onnxDataPath) ? "存在" : "不存在")} ({(File.Exists(onnxDataPath) ? new FileInfo(onnxDataPath).Length / 1024.0 / 1024.0 : 0):F2} MB)");
+        Console.WriteLine($"  model.onnx_data: {(File.Exists(onnxDataPath) ? "存在" : "不存在")} ({(File.Exists(onnxDataPath) ? new FileInfo(onnxDataPath).Length / 1024.0 / 1024.0 : 0):F2} MB)");
 
         // 列出目录所有文件
         Console.WriteLine($"\n目录内容:");

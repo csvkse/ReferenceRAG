@@ -123,7 +123,7 @@ public class ModelFormatTests : IDisposable
         
         // 创建外部数据格式模型文件
         File.WriteAllText(Path.Combine(modelDir, "model.onnx"), "fake onnx content");
-        File.WriteAllText(Path.Combine(modelDir, "model.onnx.data"), "fake external data");
+        File.WriteAllText(Path.Combine(modelDir, "model.onnx_data"), "fake external data");
         File.WriteAllText(Path.Combine(modelDir, "config.json"), "{\"hidden_size\": 768}");
         
         // Act
@@ -413,7 +413,7 @@ public class ModelFormatTests : IDisposable
         var originalOnnxContent = "original onnx header with external data reference";
         var externalDataContent = new string('D', 1000); // 模拟较大的 .data 文件
         File.WriteAllText(Path.Combine(modelDir, "model.onnx"), originalOnnxContent);
-        File.WriteAllText(Path.Combine(modelDir, "model.onnx.data"), externalDataContent);
+        File.WriteAllText(Path.Combine(modelDir, "model.onnx_data"), externalDataContent);
         File.WriteAllText(Path.Combine(modelDir, "config.json"), "{\"hidden_size\": 768}");
 
         modelManager.RefreshLocalModels();
@@ -425,7 +425,7 @@ public class ModelFormatTests : IDisposable
 
         // Assert — 初始格式应为 external（存在 .data 文件）
         Assert.Equal("external", formatBefore);
-        Assert.True(File.Exists(Path.Combine(modelDir, "model.onnx.data")));
+        Assert.True(File.Exists(Path.Combine(modelDir, "model.onnx_data")));
 
         // 验证：external 格式在 .data 文件存在时被正确检测
         // 这是 ConvertFormatAsync 格式验证修复的核心依赖
@@ -449,7 +449,7 @@ public class ModelFormatTests : IDisposable
         File.WriteAllBytes(Path.Combine(modelDir, "model.onnx"), onnxHeader);
 
         var largeData = new byte[100_000]; // 100KB 模拟 data
-        File.WriteAllBytes(Path.Combine(modelDir, "model.onnx.data"), largeData);
+        File.WriteAllBytes(Path.Combine(modelDir, "model.onnx_data"), largeData);
 
         var format = modelManager.DetectOnnxFormat(modelDir);
 
@@ -558,7 +558,7 @@ public class ModelFormatTests : IDisposable
 
         var dataContent = new string('X', 5000);
         File.WriteAllText(Path.Combine(modelDir, "model.onnx"), "small onnx header");
-        File.WriteAllText(Path.Combine(modelDir, "model.onnx.data"), dataContent);
+        File.WriteAllText(Path.Combine(modelDir, "model.onnx_data"), dataContent);
         File.WriteAllText(Path.Combine(modelDir, "config.json"), "{\"hidden_size\": 768}");
 
         modelManager.RefreshLocalModels();
@@ -569,7 +569,7 @@ public class ModelFormatTests : IDisposable
         Assert.Contains("已是目标格式", error);
 
         // .data 文件必须保持不变
-        var dataAfter = File.ReadAllText(Path.Combine(modelDir, "model.onnx.data"));
+        var dataAfter = File.ReadAllText(Path.Combine(modelDir, "model.onnx_data"));
         Assert.Equal(dataContent, dataAfter);
     }
 
@@ -640,7 +640,7 @@ public class ModelFormatTests : IDisposable
         Directory.CreateDirectory(modelDir);
         var onnxPath = Path.Combine(modelDir, "model.onnx");
 
-        // 写入一个没有外部数据引用的 ONNX 文件（不包含 "model.onnx.data" 字符串）
+        // 写入一个没有外部数据引用的 ONNX 文件（不包含 "model.onnx_data" 字符串）
         File.WriteAllBytes(onnxPath, new byte[1024 * 1024]); // 1MB 的普通文件
 
         var format = modelManager.DetectOnnxFormat(modelDir);
@@ -659,7 +659,7 @@ public class ModelFormatTests : IDisposable
         Directory.CreateDirectory(modelDir);
 
         var onnxPath = Path.Combine(modelDir, "model.onnx");
-        var onnxDataPath = Path.Combine(modelDir, "model.onnx.data");
+        var onnxDataPath = Path.Combine(modelDir, "model.onnx_data");
         var backupPath = onnxPath + ".bak";
         var backupDataPath = onnxDataPath + ".bak";
 
@@ -697,7 +697,7 @@ public class ModelFormatTests : IDisposable
         Directory.CreateDirectory(modelDir);
 
         var onnxPath = Path.Combine(modelDir, "model.onnx");
-        var onnxDataPath = Path.Combine(modelDir, "model.onnx.data");
+        var onnxDataPath = Path.Combine(modelDir, "model.onnx_data");
         var backupPath = onnxPath + ".bak";
         var backupDataPath = onnxDataPath + ".bak"; // 不存在
 

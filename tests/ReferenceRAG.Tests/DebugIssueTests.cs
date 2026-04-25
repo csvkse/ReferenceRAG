@@ -92,9 +92,9 @@ public class DebugIssueTests : IDisposable
         var fakeOnnxContent = new byte[1024]; // 模拟的 ONNX 文件
         await File.WriteAllBytesAsync(Path.Combine(onnxDir, "model.onnx"), fakeOnnxContent);
 
-        // 创建 model.onnx.data 在 onnx/ 子目录（external 格式的标志）
+        // 创建 model.onnx_data 在 onnx/ 子目录（external 格式的标志）
         var fakeDataContent = new byte[1024];
-        await File.WriteAllBytesAsync(Path.Combine(onnxDir, "model.onnx.data"), fakeDataContent);
+        await File.WriteAllBytesAsync(Path.Combine(onnxDir, "model.onnx_data"), fakeDataContent);
 
         // 创建配置文件
         File.WriteAllText(Path.Combine(modelDir, "config.json"), "{\"hidden_size\": 384}");
