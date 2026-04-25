@@ -105,18 +105,22 @@ public class SearchService : ISearchService
         List<SearchResult> topResults;
         RerankStats? rerankStats = null;
 
+        // 预计算 queryVector：图扩展和 Standard 模式均需要，且只算一次
+        var queryVector = await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
+
         // ========== 第一阶段：召回 ==========
         if ((request.Mode == QueryMode.Hybrid || request.Mode == QueryMode.HybridRerank) && _hybridSearchService != null)
         {
-            // 计算召回数量
-            int recallTopK = shouldRerank
-                ? request.TopK * rerankConfig.RecallFactor
-                : request.TopK;
+            // 始终使用 RecallFactor 扩大候选池，不管是否重排，更多候选 = 更好的融合结果
+            int recallTopK = request.TopK * rerankConfig.RecallFactor;
 
             _logger.LogDebug("混合搜索召回: TopK={TopK}, RecallFactor={Factor}, RecallTopK={RecallTopK}",
                 request.TopK, rerankConfig.RecallFactor, recallTopK);
 
-            var hybridResults = await _hybridSearchService.SearchAsync(request.Query, recallTopK, request.K1, request.B, request.Filters?.Folders, cancellationToken);
+            var hybridResults = await _hybridSearchService.SearchAsync(
+                request.Query, recallTopK, request.K1, request.B,
+                request.Filters?.Folders, cancellationToken,
+                precomputedQueryVector: queryVector);
 
             // 过滤禁用源（source 为空表示旧数据未分配来源，允许通过）
             var filteredHybridResults = hybridResults.Where(r => string.IsNullOrEmpty(r.Source) || enabledSources.Contains(r.Source));
@@ -139,15 +143,15 @@ public class SearchService : ISearchService
         }
         else
         {
-            // 标准向量搜索
-            topResults = await ExecuteStandardSearchAsync(request, enabledSources, cancellationToken);
+            // 标准向量搜索（复用预计算向量）
+            topResults = await ExecuteStandardSearchAsync(request, enabledSources, cancellationToken, queryVector);
         }
 
         // ========== 图扩展：补充 wiki-link 邻居节点 ==========
         var searchConfig = config.Search;
         if (searchConfig.EnableGraphExpansion && _graphStore != null && topResults.Count > 0)
         {
-            topResults = await ExpandWithGraphAsync(topResults, searchConfig, cancellationToken);
+            topResults = await ExpandWithGraphAsync(topResults, queryVector, searchConfig, cancellationToken);
         }
 
         // ========== 第二阶段：精排 ==========
@@ -209,6 +213,12 @@ public class SearchService : ISearchService
         else if (shouldRerank && _rerankService == null)
         {
             _logger.LogWarning("重排服务不可用，跳过第二阶段精排");
+            topResults = topResults.Take(request.TopK).ToList();
+        }
+        else
+        {
+            // 无重排：RecallFactor 扩大了候选池，最终 trim 回 TopK
+            topResults = topResults.Take(request.TopK).ToList();
         }
 
         // 构建响应
@@ -264,9 +274,11 @@ public class SearchService : ISearchService
     private async Task<List<SearchResult>> ExecuteStandardSearchAsync(
         AIQueryRequest request,
         HashSet<string> enabledSources,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        float[]? precomputedQueryVector = null)
     {
-        var queryVector = await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
+        var queryVector = precomputedQueryVector
+            ?? await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
         var modelName = _embeddingService.ModelName;
         var results = await _vectorStore.SearchAsync(queryVector, modelName, request.TopK * 2, cancellationToken);
 
@@ -486,25 +498,24 @@ public class SearchService : ISearchService
     /// </summary>
     private async Task<List<SearchResult>> ExpandWithGraphAsync(
         List<SearchResult> results,
+        float[] queryVector,
         SearchConfig config,
         CancellationToken ct)
     {
         if (_graphStore == null) return results;
 
-        var depth = Math.Clamp(config.GraphExpansionDepth, 1, 2);
+        var depth    = Math.Clamp(config.GraphExpansionDepth,    1, 2);
         var maxNodes = Math.Clamp(config.GraphExpansionMaxNodes, 1, 10);
         var existingChunkIds = results.Select(r => r.ChunkId).ToHashSet();
-        var existingFileIds = results.Select(r => r.FileId).ToHashSet();
+        var existingFileIds  = results.Select(r => r.FileId).ToHashSet();
         var additions = new List<SearchResult>();
 
-        // 邻居初始分 = 当前最低分 × 0.6（低于直接命中，精排后可能升排）
-        var minScore = results.Min(r => r.Score) * 0.6f;
+        // 保底分：向量全零（模拟模式）时退回固定衰减值
+        var fallbackScore = results.Min(r => r.Score) * 0.6f;
 
         foreach (var result in results)
         {
             if (string.IsNullOrEmpty(result.FilePath)) continue;
-
-            // 用相对路径作为节点 ID（与 GraphIndexingService.NormalizeNodeId 一致）
             var nodeId = result.FilePath.Replace('\\', '/').TrimStart('/');
 
             try
@@ -518,35 +529,52 @@ public class SearchService : ISearchService
 
                 foreach (var neighbor in neighborNodes)
                 {
-                    // 已召回的文件跳过
                     if (existingFileIds.Contains(neighbor.Id)) continue;
 
-                    // 用 chunkIds 里存的第一个 chunk
-                    var chunkId = neighbor.ChunkIds.FirstOrDefault();
-                    if (string.IsNullOrEmpty(chunkId) || existingChunkIds.Contains(chunkId)) continue;
+                    // 遍历邻居所有 chunk，用向量相似度选最相关的那个
+                    ChunkRecord? bestChunk = null;
+                    float bestSim = -1;
 
-                    var chunk = await _vectorStore.GetChunkAsync(chunkId, ct);
-                    if (chunk == null) continue;
+                    foreach (var cId in neighbor.ChunkIds.Take(10)) // 最多检查前 10 个
+                    {
+                        if (existingChunkIds.Contains(cId)) continue;
 
-                    var file = await _vectorStore.GetFileAsync(chunk.FileId, ct);
+                        var vec = await _vectorStore.GetVectorByChunkIdAsync(cId, ct);
+                        if (vec == null) continue;
+
+                        var sim = ReferenceRAG.Core.Helpers.MathHelper.CosineSimilarity(queryVector, vec.Vector);
+                        if (sim > bestSim)
+                        {
+                            bestSim = sim;
+                            var c = await _vectorStore.GetChunkAsync(cId, ct);
+                            if (c != null) bestChunk = c;
+                        }
+                    }
+
+                    if (bestChunk == null) continue;
+
+                    var file = await _vectorStore.GetFileAsync(bestChunk.FileId, ct);
                     if (file == null) continue;
+
+                    // 用实际余弦相似度作为初始分；若向量为空则退回保底分
+                    var score = bestSim > 0 ? bestSim : fallbackScore;
 
                     additions.Add(new SearchResult
                     {
-                        ChunkId = chunk.Id,
-                        FileId = chunk.FileId,
-                        FilePath = file.Path,
-                        Title = file.Title ?? file.FileName,
-                        Content = chunk.Content,
-                        Score = minScore,
-                        Source = file.Source ?? string.Empty,
-                        StartLine = chunk.StartLine,
-                        EndLine = chunk.EndLine,
-                        HeadingPath = chunk.HeadingPath
+                        ChunkId    = bestChunk.Id,
+                        FileId     = bestChunk.FileId,
+                        FilePath   = file.Path,
+                        Title      = file.Title ?? file.FileName,
+                        Content    = bestChunk.Content,
+                        Score      = score,
+                        Source     = file.Source ?? string.Empty,
+                        StartLine  = bestChunk.StartLine,
+                        EndLine    = bestChunk.EndLine,
+                        HeadingPath = bestChunk.HeadingPath
                     });
 
-                    existingChunkIds.Add(chunk.Id);
-                    existingFileIds.Add(chunk.FileId);
+                    existingChunkIds.Add(bestChunk.Id);
+                    existingFileIds.Add(bestChunk.FileId);
                 }
             }
             catch (Exception ex)
@@ -556,7 +584,8 @@ public class SearchService : ISearchService
         }
 
         if (additions.Count > 0)
-            _logger.LogInformation("图扩展: +{Count} 个邻居 chunks（共 {Total} 个候选）", additions.Count, results.Count + additions.Count);
+            _logger.LogInformation("图扩展: +{Count} 个邻居 chunks（共 {Total} 个候选）",
+                additions.Count, results.Count + additions.Count);
 
         return results.Concat(additions).ToList();
     }

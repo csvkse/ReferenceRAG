@@ -14,6 +14,7 @@ public class HybridSearchService
     private readonly IEmbeddingService _embeddingService;
     private readonly IBM25Store _bm25Store;
     private readonly HybridSearchOptions _options;
+    private readonly SynonymService? _synonymService;
     private readonly ILogger<HybridSearchService>? _logger;
 
     public HybridSearchService(
@@ -21,12 +22,14 @@ public class HybridSearchService
         IEmbeddingService embeddingService,
         IBM25Store bm25Store,
         HybridSearchOptions? options = null,
-        ILogger<HybridSearchService>? logger = null)
+        ILogger<HybridSearchService>? logger = null,
+        SynonymService? synonymService = null)
     {
         _vectorStore = vectorStore;
         _embeddingService = embeddingService;
         _bm25Store = bm25Store;
         _options = options ?? new HybridSearchOptions();
+        _synonymService = synonymService;
         _logger = logger;
     }
 
@@ -56,12 +59,14 @@ public class HybridSearchService
         float k1 = 1.5f,
         float b = 0.75f,
         IEnumerable<string>? folders = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        float[]? precomputedQueryVector = null)
     {
         var results = new List<HybridSearchResult>();
 
-        // 1. BM25 关键词搜索
-        var bm25Results = await _bm25Store.SearchAsync(query, topK * 2, k1, b);
+        // 1. BM25 关键词搜索（先做同义词扩展，提升关键词 miss 召回率）
+        var bm25Query = _synonymService?.ExpandQuery(query) ?? query;
+        var bm25Results = await _bm25Store.SearchAsync(bm25Query, topK * 2, k1, b);
         var bm25RankMap = CreateRankMap(bm25Results.Select(r => r.ChunkId).ToList());
         // 使用 GroupBy 处理可能的重复 ChunkId，取第一个结果
         var bm25Dict = bm25Results
@@ -72,8 +77,9 @@ public class HybridSearchService
         var maxBm25Score = bm25Results.Count > 0 ? bm25Results.Max(r => r.Score) : 1.0;
         if (maxBm25Score <= 0) maxBm25Score = 1.0;
 
-        // 2. Embedding 语义搜索
-        var queryVector = await _embeddingService.EncodeAsync(query, EmbeddingMode.Query, cancellationToken);
+        // 2. Embedding 语义搜索（复用调用方预计算的向量，避免重复推理）
+        var queryVector = precomputedQueryVector
+            ?? await _embeddingService.EncodeAsync(query, EmbeddingMode.Query, cancellationToken);
         var modelName = _embeddingService.ModelName;
         var embeddingResults = await _vectorStore.SearchAsync(queryVector, modelName, topK * 2, cancellationToken);
         // 使用 GroupBy 处理可能的重复 ChunkId，取第一个结果

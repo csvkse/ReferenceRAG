@@ -301,7 +301,8 @@ builder.Services.AddSingleton<HybridSearchService>(sp =>
         sp.GetRequiredService<IEmbeddingService>(),
         sp.GetRequiredService<IBM25Store>(),
         options,
-        sp.GetRequiredService<ILogger<HybridSearchService>>());
+        sp.GetRequiredService<ILogger<HybridSearchService>>(),
+        synonymService: new ReferenceRAG.Core.Services.SynonymService());
 });
 
 // 注册索引服务（后台服务）

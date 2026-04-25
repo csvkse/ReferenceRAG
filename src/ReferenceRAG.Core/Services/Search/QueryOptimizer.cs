@@ -259,18 +259,31 @@ public class QueryOptimizer
     }
 
     /// <summary>
-    /// 计算内容相似度（简化版）
+    /// 计算内容相似度（字符 bigram，对中文有效）
     /// </summary>
-    private float ComputeContentSimilarity(string a, string b)
+    private static float ComputeContentSimilarity(string a, string b)
     {
-        // 使用 Jaccard 相似度
-        var wordsA = a.Split(' ', '　', '\n', '\t').ToHashSet();
-        var wordsB = b.Split(' ', '　', '\n', '\t').ToHashSet();
+        var bigramsA = GetCharBigrams(a);
+        var bigramsB = GetCharBigrams(b);
+        if (bigramsA.Count == 0 || bigramsB.Count == 0) return 0;
 
-        var intersection = wordsA.Intersect(wordsB).Count();
-        var union = wordsA.Union(wordsB).Count();
-
+        var intersection = bigramsA.Keys
+            .Where(k => bigramsB.ContainsKey(k))
+            .Sum(k => Math.Min(bigramsA[k], bigramsB[k]));
+        var union = bigramsA.Values.Sum() + bigramsB.Values.Sum() - intersection;
         return union == 0 ? 0 : (float)intersection / union;
+    }
+
+    private static Dictionary<string, int> GetCharBigrams(string text)
+    {
+        var result = new Dictionary<string, int>();
+        var chars = text.Where(c => !char.IsWhiteSpace(c)).ToArray();
+        for (int i = 0; i < chars.Length - 1; i++)
+        {
+            var bg = string.Intern(new string(chars, i, 2));
+            result[bg] = result.GetValueOrDefault(bg, 0) + 1;
+        }
+        return result;
     }
 
     /// <summary>
