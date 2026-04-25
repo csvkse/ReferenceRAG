@@ -150,7 +150,6 @@ public class SqliteGraphStore : IGraphStore, IDisposable
         await _lock.WaitAsync(ct);
         try
         {
-            // 删除 id 以 "fileNodeId#" 开头的所有 heading 节点及其关联边
             var prefix = fileNodeId + "#%";
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
@@ -160,6 +159,97 @@ public class SqliteGraphStore : IGraphStore, IDisposable
             cmd.Parameters.AddWithValue("@p", prefix);
             cmd.ExecuteNonQuery();
         }
+        finally { _lock.Release(); }
+    }
+
+    public async Task UpsertFileGraphAsync(
+        string fileNodeId,
+        GraphNode fileNode,
+        IEnumerable<GraphNode> extraNodes,
+        IEnumerable<GraphEdge> edges,
+        CancellationToken ct = default)
+    {
+        var nodeList = extraNodes.ToList();
+        var edgeList = edges.ToList();
+        var prefix   = fileNodeId + "#%";
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            using var tx = _connection.BeginTransaction();
+
+            // ── 清理旧数据 ──
+            void Exec(string sql, Action<SqliteCommand>? bind = null)
+            {
+                using var c = _connection.CreateCommand();
+                c.CommandText = sql;
+                c.Transaction = tx;
+                bind?.Invoke(c);
+                c.ExecuteNonQuery();
+            }
+
+            Exec("DELETE FROM graph_edges WHERE from_id = @id",
+                c => c.Parameters.AddWithValue("@id", fileNodeId));
+            Exec("DELETE FROM graph_edges WHERE from_id LIKE @p OR to_id LIKE @p",
+                c => c.Parameters.AddWithValue("@p", prefix));
+            Exec("DELETE FROM graph_nodes WHERE id LIKE @p",
+                c => c.Parameters.AddWithValue("@p", prefix));
+
+            // ── 写节点（文件节点 + heading/tag/external 节点）──
+            const string upsertNodeSql = """
+                INSERT INTO graph_nodes (id, title, type, chunk_ids, metadata)
+                VALUES (@id, @title, @type, @chunkIds, @metadata)
+                ON CONFLICT(id) DO UPDATE SET
+                    title     = excluded.title,
+                    type      = excluded.type,
+                    chunk_ids = excluded.chunk_ids,
+                    metadata  = excluded.metadata
+                """;
+
+            void UpsertNode(GraphNode node)
+            {
+                using var c = _connection.CreateCommand();
+                c.CommandText = upsertNodeSql;
+                c.Transaction = tx;
+                c.Parameters.AddWithValue("@id",       node.Id);
+                c.Parameters.AddWithValue("@title",    node.Title);
+                c.Parameters.AddWithValue("@type",     node.Type);
+                c.Parameters.AddWithValue("@chunkIds", JsonSerializer.Serialize(node.ChunkIds));
+                c.Parameters.AddWithValue("@metadata", JsonSerializer.Serialize(node.Metadata));
+                c.ExecuteNonQuery();
+            }
+
+            UpsertNode(fileNode);
+            foreach (var n in nodeList) UpsertNode(n);
+
+            // ── 写边 ──
+            if (edgeList.Count > 0)
+            {
+                const string upsertEdgeSql = """
+                    INSERT INTO graph_edges (from_id, to_id, type, line_number)
+                    VALUES (@from, @to, @type, @line)
+                    ON CONFLICT(from_id, to_id, type) DO UPDATE SET line_number = excluded.line_number
+                    """;
+                using var ec = _connection.CreateCommand();
+                ec.CommandText = upsertEdgeSql;
+                ec.Transaction = tx;
+                var pFrom = ec.Parameters.Add("@from", SqliteType.Text);
+                var pTo   = ec.Parameters.Add("@to",   SqliteType.Text);
+                var pType = ec.Parameters.Add("@type", SqliteType.Text);
+                var pLine = ec.Parameters.Add("@line", SqliteType.Integer);
+                foreach (var e in edgeList)
+                {
+                    pFrom.Value = e.FromId;
+                    pTo.Value   = e.ToId;
+                    pType.Value = e.Type;
+                    pLine.Value = e.LineNumber;
+                    ec.ExecuteNonQuery();
+                }
+            }
+
+            tx.Commit();
+        }
+        catch { throw; }
         finally { _lock.Release(); }
     }
 

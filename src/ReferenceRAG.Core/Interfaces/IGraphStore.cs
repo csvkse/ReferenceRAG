@@ -12,6 +12,17 @@ public interface IGraphStore
     Task DeleteOutgoingEdgesAsync(string nodeId, CancellationToken ct = default);
     /// <summary>删除属于某文档的所有 heading 子节点（id 以 fileNodeId# 开头）。</summary>
     Task DeleteHeadingNodesAsync(string fileNodeId, CancellationToken ct = default);
+    /// <summary>
+    /// 原子性更新一个文件的完整图数据（单次锁 + 单个事务）：
+    /// 删旧出边 → 删旧 heading 子节点 → upsert 所有节点 → 写所有边。
+    /// 替代多次独立调用，消除 N×锁获取开销。
+    /// </summary>
+    Task UpsertFileGraphAsync(
+        string fileNodeId,
+        GraphNode fileNode,
+        IEnumerable<GraphNode> extraNodes,
+        IEnumerable<GraphEdge> edges,
+        CancellationToken ct = default);
     Task<GraphNode?> GetNodeAsync(string nodeId, CancellationToken ct = default);
     Task<GraphTraversalResult> GetNeighborsAsync(string nodeId, int depth = 1, string[]? edgeTypes = null, CancellationToken ct = default);
     Task<List<GraphNode>> SearchNodesAsync(string query, int limit = 10, CancellationToken ct = default);

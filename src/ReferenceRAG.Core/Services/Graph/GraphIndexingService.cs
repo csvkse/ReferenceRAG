@@ -37,92 +37,70 @@ public class GraphIndexingService
             ChunkIds = chunks.Select(c => c.Id).ToList()
         };
 
-        // 1. Upsert 文档节点
-        await _graphStore.UpsertNodeAsync(node, ct);
-
-        // 2. 删除旧出边 + 旧 heading 子节点（重建时刷新）
-        await _graphStore.DeleteOutgoingEdgesAsync(nodeId, ct);
-        await _graphStore.DeleteHeadingNodesAsync(nodeId, ct);
-
-        // 3. 为文档内所有 ## 标题创建 heading 节点
         var chunkList = chunks.ToList();
+
+        // ── CPU 侧：收集所有节点和边，不触碰 DB ──
+        var extraNodes  = new List<GraphNode>();
+        var seenNodeIds = new HashSet<string>();  // 去重，避免同文件多次 upsert 同一 tag
+        var edges       = new List<GraphEdge>();
+
+        // heading 节点（主动扫描文档标题）
         foreach (var (heading, _) in ExtractHeadings(markdownContent))
         {
             var headingNodeId = $"{nodeId}#{heading}";
-            var headingChunks = chunkList
-                .Where(c => c.HeadingPath != null && c.HeadingPath.Contains(heading))
-                .Select(c => c.Id)
-                .ToList();
-            await _graphStore.UpsertNodeAsync(new GraphNode
+            if (seenNodeIds.Add(headingNodeId))
             {
-                Id    = headingNodeId,
-                Title = heading,
-                Type  = "heading",
-                ChunkIds = headingChunks
-            }, ct);
+                var headingChunks = chunkList
+                    .Where(c => c.HeadingPath != null && c.HeadingPath.Contains(heading))
+                    .Select(c => c.Id).ToList();
+                extraNodes.Add(new GraphNode
+                {
+                    Id = headingNodeId, Title = heading, Type = "heading", ChunkIds = headingChunks
+                });
+            }
         }
 
-        // 4. 处理链接，构建边
-        var links = _extractor.Extract(markdownContent);
-        var edges = new List<GraphEdge>();
-
-        foreach (var (target, heading, type, lineNum) in links)
+        // 链接处理：tag / heading-ref / external
+        foreach (var (target, heading, type, lineNum) in _extractor.Extract(markdownContent))
         {
             string resolvedId;
 
             if (type == "tag")
             {
                 resolvedId = $"#{target}";
-                await _graphStore.UpsertNodeAsync(new GraphNode
-                {
-                    Id = resolvedId, Title = resolvedId, Type = "tag", ChunkIds = new List<string>()
-                }, ct);
+                if (seenNodeIds.Add(resolvedId))
+                    extraNodes.Add(new GraphNode { Id = resolvedId, Title = resolvedId, Type = "tag", ChunkIds = new() });
             }
             else
             {
-                var rawFileId = NormalizeNodeId(target);
+                var rawFileId      = NormalizeNodeId(target);
                 var resolvedFileId = resolveLink?.Invoke(rawFileId);
 
                 if (resolvedFileId != null)
                 {
-                    // 已解析到已索引文件
-                    if (!string.IsNullOrEmpty(heading))
-                    {
-                        // 指向目标文件的某个 heading
-                        resolvedId = $"{resolvedFileId}#{heading}";
-                        // 占位 upsert：目标文件重建时会用真实 ChunkIds 覆盖
-                        await _graphStore.UpsertNodeAsync(new GraphNode
-                        {
-                            Id = resolvedId, Title = heading, Type = "heading", ChunkIds = new List<string>()
-                        }, ct);
-                    }
-                    else
-                    {
-                        resolvedId = resolvedFileId;
-                    }
+                    resolvedId = string.IsNullOrEmpty(heading)
+                        ? resolvedFileId
+                        : $"{resolvedFileId}#{heading}";
+
+                    if (!string.IsNullOrEmpty(heading) && seenNodeIds.Add(resolvedId))
+                        extraNodes.Add(new GraphNode { Id = resolvedId, Title = heading, Type = "heading", ChunkIds = new() });
                 }
                 else
                 {
-                    // 未解析（未索引文件 / 外部引用）
                     resolvedId = string.IsNullOrEmpty(heading) ? rawFileId : $"{rawFileId}#{heading}";
-                    if (resolveLink != null) // 提供了解析器但找不到 → 真正的外部链接
-                    {
-                        await _graphStore.UpsertNodeAsync(new GraphNode
+                    if (resolveLink != null && seenNodeIds.Add(resolvedId))
+                        extraNodes.Add(new GraphNode
                         {
-                            Id    = resolvedId,
-                            Title = resolvedId.Replace(".md", ""),
-                            Type  = "external",
-                            ChunkIds = new List<string>()
-                        }, ct);
-                    }
+                            Id = resolvedId, Title = resolvedId.Replace(".md", ""), Type = "external", ChunkIds = new()
+                        });
                 }
             }
 
             edges.Add(new GraphEdge { FromId = nodeId, ToId = resolvedId, Type = type, LineNumber = lineNum });
         }
 
-        if (edges.Count > 0)
-            await _graphStore.UpsertEdgesAsync(edges, ct);
+        // ── 单次锁 + 单个事务写入所有图数据 ──
+        await _graphStore.UpsertFileGraphAsync(nodeId, node, extraNodes, edges, ct);
     }
 
     /// <summary>
