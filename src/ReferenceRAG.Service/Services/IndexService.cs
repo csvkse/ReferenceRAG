@@ -180,9 +180,10 @@ public class IndexService : IHostedService
                 }
 
                 // ── Phase 3: CPU 并行 ── BM25 + 知识图谱后处理
-                // 建立 filename→fullNodeId 映射，用于 wiki-link 解析
-                var filenameMap = GraphIndexingService.BuildFilenameMap(
-                    contexts.Select(c => c!.FileRecord));
+                // filename→fullNodeId 映射：必须用全量文件（含本次未变化的文件），
+                // 否则增量索引时本批次文件指向旧文件的 wiki-link 无法解析
+                var allIndexedFiles = await vectorStore.GetAllFilesAsync(cts.Token);
+                var filenameMap = GraphIndexingService.BuildFilenameMap(allIndexedFiles);
 
                 const int maxFinalizeParallelism = 4;
                 using var finSemaphore = new SemaphoreSlim(maxFinalizeParallelism);
