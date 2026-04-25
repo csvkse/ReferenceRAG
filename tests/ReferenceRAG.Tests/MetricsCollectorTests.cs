@@ -61,7 +61,7 @@ public class MetricsCollectorTests
         var mockVectorStore = new Mock<IVectorStore>();
         // Mock StreamAllFilesAsync which is what CollectIndexMetricsAsync actually uses
         mockVectorStore.Setup(x => x.StreamAllFilesAsync(default))
-            .Returns(AsyncEnumerable.Empty<FileRecord>());
+            .ReturnsAsync(AsyncEnumerable<FileRecord>.Empty());
         var collector = new MetricsCollector(mockVectorStore.Object);
 
         var metrics = await collector.CollectIndexMetricsAsync();
@@ -70,9 +70,9 @@ public class MetricsCollectorTests
         Assert.Equal(0, metrics.TotalChunks);
     }
 
-    private static class AsyncEnumerable
+    private static class AsyncEnumerable<T>
     {
-        public static async IAsyncEnumerable<T> Empty<T>()
+        public static async IAsyncEnumerable<T> Empty()
         {
             await Task.CompletedTask;
             yield break;
