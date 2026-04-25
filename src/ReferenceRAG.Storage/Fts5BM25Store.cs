@@ -17,7 +17,8 @@ namespace ReferenceRAG.Storage;
 public class Fts5BM25Store : IBM25Store, IDisposable
 {
     private readonly SqliteConnection _connection;
-    private readonly string _dbPath;
+    private readonly SemaphoreSlim _lock;
+    private readonly bool _ownsResources;
     private readonly ILogger<Fts5BM25Store>? _logger;
     private bool _disposed;
 
@@ -38,20 +39,30 @@ public class Fts5BM25Store : IBM25Store, IDisposable
         "very", "just", "as", "if", "then", "because", "while", "although"
     };
 
+    /// <summary>生产用：接受共享连接，与其他 Store 共用同一连接和锁。</summary>
+    public Fts5BM25Store(SharedSqliteConnection sharedDb, ILogger<Fts5BM25Store>? logger = null)
+    {
+        _logger = logger;
+        _connection = sharedDb.Connection;
+        _lock = sharedDb.Lock;
+        _ownsResources = false;
+        InitializeDatabase();
+    }
+
+    /// <summary>兼容构造函数（测试 / 独立使用）。</summary>
     public Fts5BM25Store(string dbPath, ILogger<Fts5BM25Store>? logger = null)
     {
-        _dbPath = dbPath;
         _logger = logger;
+        _lock = new SemaphoreSlim(1, 1);
+        _ownsResources = true;
 
         var builder = new SqliteConnectionStringBuilder
         {
             DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate
         };
-
         _connection = new SqliteConnection(builder.ConnectionString);
         _connection.Open();
-
         InitializeDatabase();
     }
 
@@ -86,56 +97,57 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     public async Task IndexDocumentAsync(string chunkId, string content)
     {
         var tokenizedContent = TokenizeForIndex(content);
+        await _lock.WaitAsync();
+        try
+        {
+            using var deleteCmd = _connection.CreateCommand();
+            deleteCmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
+            deleteCmd.Parameters.AddWithValue("@id", chunkId);
+            await deleteCmd.ExecuteNonQueryAsync();
 
-        // Upsert：先删除旧条目再插入，防止重复积累
-        using var deleteCmd = _connection.CreateCommand();
-        deleteCmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
-        deleteCmd.Parameters.AddWithValue("@id", chunkId);
-        await deleteCmd.ExecuteNonQueryAsync();
-
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = $"INSERT INTO {FtsTableName}(id, content) VALUES (@id, @content)";
-        cmd.Parameters.AddWithValue("@id", chunkId);
-        cmd.Parameters.AddWithValue("@content", tokenizedContent);
-        await cmd.ExecuteNonQueryAsync();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = $"INSERT INTO {FtsTableName}(id, content) VALUES (@id, @content)";
+            cmd.Parameters.AddWithValue("@id", chunkId);
+            cmd.Parameters.AddWithValue("@content", tokenizedContent);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        finally { _lock.Release(); }
     }
 
     /// <inheritdoc />
     public async Task IndexBatchAsync(IEnumerable<(string chunkId, string content)> documents, IProgress<int>? progress = null)
     {
         progress?.Report(10);
-
         var docsList = documents.ToList();
 
-        using var transaction = _connection.BeginTransaction();
+        await _lock.WaitAsync();
         try
         {
-            foreach (var (chunkId, content) in docsList)
+            using var transaction = _connection.BeginTransaction();
+            try
             {
-                var tokenizedContent = TokenizeForIndex(content);
+                foreach (var (chunkId, content) in docsList)
+                {
+                    var tokenizedContent = TokenizeForIndex(content);
 
-                // Upsert：先删除旧条目再插入
-                using var deleteCmd = _connection.CreateCommand();
-                deleteCmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
-                deleteCmd.Parameters.AddWithValue("@id", chunkId);
-                deleteCmd.Transaction = transaction;
-                await deleteCmd.ExecuteNonQueryAsync();
+                    using var deleteCmd = _connection.CreateCommand();
+                    deleteCmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
+                    deleteCmd.Parameters.AddWithValue("@id", chunkId);
+                    deleteCmd.Transaction = transaction;
+                    await deleteCmd.ExecuteNonQueryAsync();
 
-                using var cmd = _connection.CreateCommand();
-                cmd.CommandText = $"INSERT INTO {FtsTableName}(id, content) VALUES (@id, @content)";
-                cmd.Parameters.AddWithValue("@id", chunkId);
-                cmd.Parameters.AddWithValue("@content", tokenizedContent);
-                cmd.Transaction = transaction;
-                await cmd.ExecuteNonQueryAsync();
+                    using var cmd = _connection.CreateCommand();
+                    cmd.CommandText = $"INSERT INTO {FtsTableName}(id, content) VALUES (@id, @content)";
+                    cmd.Parameters.AddWithValue("@id", chunkId);
+                    cmd.Parameters.AddWithValue("@content", tokenizedContent);
+                    cmd.Transaction = transaction;
+                    await cmd.ExecuteNonQueryAsync();
+                }
+                transaction.Commit();
             }
-
-            transaction.Commit();
+            catch { transaction.Rollback(); throw; }
         }
-        catch
-        {
-            transaction.Rollback();
-            throw;
-        }
+        finally { _lock.Release(); }
 
         progress?.Report(100);
     }
@@ -143,15 +155,15 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     /// <inheritdoc />
     public async Task ClearIndexAsync()
     {
+        await _lock.WaitAsync();
         try
         {
-            ExecuteNonQuery($"DELETE FROM {FtsTableName}");
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = $"DELETE FROM {FtsTableName}";
+            cmd.ExecuteNonQuery();
         }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "清空索引失败");
-            throw;
-        }
+        catch (Exception ex) { _logger?.LogError(ex, "清空索引失败"); throw; }
+        finally { _lock.Release(); }
     }
 
     /// <inheritdoc />
@@ -160,50 +172,44 @@ public class Fts5BM25Store : IBM25Store, IDisposable
         var ids = chunkIds.ToList();
         if (ids.Count == 0) return;
 
-        using var transaction = _connection.BeginTransaction();
+        await _lock.WaitAsync();
         try
         {
-            foreach (var id in ids)
+            using var transaction = _connection.BeginTransaction();
+            try
             {
-                using var cmd = _connection.CreateCommand();
-                cmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
-                cmd.Parameters.AddWithValue("@id", id);
-                cmd.Transaction = transaction;
-                await cmd.ExecuteNonQueryAsync();
+                foreach (var id in ids)
+                {
+                    using var cmd = _connection.CreateCommand();
+                    cmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
+                    cmd.Parameters.AddWithValue("@id", id);
+                    cmd.Transaction = transaction;
+                    await cmd.ExecuteNonQueryAsync();
+                }
+                transaction.Commit();
             }
-            transaction.Commit();
+            catch { transaction.Rollback(); throw; }
         }
-        catch
-        {
-            transaction.Rollback();
-            throw;
-        }
+        finally { _lock.Release(); }
     }
 
     /// <inheritdoc />
     public async Task<List<BM25SearchResult>> SearchAsync(string query, int topK = 10, float k1 = 1.5f, float b = 0.75f)
     {
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            return new List<BM25SearchResult>();
-        }
+        if (string.IsNullOrWhiteSpace(query)) return new List<BM25SearchResult>();
 
-        // 使用 FTS5 的 bm25() 函数进行搜索
-        var sql = $@"
-            SELECT
-                id,
-                content,
-                bm25({FtsTableName}, {k1}, {b}) as score
-            FROM {FtsTableName}
-            WHERE {FtsTableName} MATCH @query
-            ORDER BY bm25({FtsTableName}, {k1}, {b})
-            LIMIT @topK";
-
-        var results = new List<BM25SearchResult>();
-        int rank = 1;
-
+        await _lock.WaitAsync();
         try
         {
+            var sql = $@"
+                SELECT id, content, bm25({FtsTableName}, {k1}, {b}) as score
+                FROM {FtsTableName}
+                WHERE {FtsTableName} MATCH @query
+                ORDER BY bm25({FtsTableName}, {k1}, {b})
+                LIMIT @topK";
+
+            var results = new List<BM25SearchResult>();
+            int rank = 1;
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = sql;
             cmd.Parameters.AddWithValue("@query", EscapeFtsQuery(query));
@@ -216,47 +222,50 @@ public class Fts5BM25Store : IBM25Store, IDisposable
                 {
                     ChunkId = reader.GetString(0),
                     Content = reader.GetString(1),
-                    Score = Math.Abs(reader.GetFloat(2)), // 取绝对值，因为 bm25() 返回负值
-                    Rank = rank++
+                    Score   = Math.Abs(reader.GetFloat(2)),
+                    Rank    = rank++
                 });
             }
+            return results;
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "搜索失败: {Query}", query);
             return new List<BM25SearchResult>();
         }
-
-        return results;
+        finally { _lock.Release(); }
     }
 
     /// <inheritdoc />
     public async Task<BM25IndexStats> GetStatsAsync()
     {
-        long totalDocs = 0;
-        using (var cmd = _connection.CreateCommand())
+        await _lock.WaitAsync();
+        try
         {
-            cmd.CommandText = $"SELECT COUNT(*) FROM {FtsTableName}";
-            totalDocs = Convert.ToInt64(await cmd.ExecuteScalarAsync());
-        }
-
-        double avgDocLength = 0;
-        using (var cmd = _connection.CreateCommand())
-        {
-            cmd.CommandText = $"SELECT AVG(LENGTH(content)) FROM {FtsTableName}";
-            var result = await cmd.ExecuteScalarAsync();
-            if (result != null && result != DBNull.Value)
+            long totalDocs = 0;
+            using (var cmd = _connection.CreateCommand())
             {
-                avgDocLength = Convert.ToDouble(result);
+                cmd.CommandText = $"SELECT COUNT(*) FROM {FtsTableName}";
+                totalDocs = Convert.ToInt64(await cmd.ExecuteScalarAsync());
             }
-        }
 
-        return new BM25IndexStats
-        {
-            TotalDocuments = (int)totalDocs,
-            AverageDocLength = avgDocLength,
-            VocabularySize = (int)totalDocs
-        };
+            double avgDocLength = 0;
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = $"SELECT AVG(LENGTH(content)) FROM {FtsTableName}";
+                var result = await cmd.ExecuteScalarAsync();
+                if (result != null && result != DBNull.Value)
+                    avgDocLength = Convert.ToDouble(result);
+            }
+
+            return new BM25IndexStats
+            {
+                TotalDocuments  = (int)totalDocs,
+                AverageDocLength = avgDocLength,
+                VocabularySize  = (int)totalDocs
+            };
+        }
+        finally { _lock.Release(); }
     }
 
     #endregion
@@ -379,11 +388,13 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-
-        _connection?.Close();
-        _connection?.Dispose();
+        if (_ownsResources)
+        {
+            _lock.Dispose();
+            _connection?.Close();
+            _connection?.Dispose();
+        }
         _disposed = true;
-
         GC.SuppressFinalize(this);
     }
 }

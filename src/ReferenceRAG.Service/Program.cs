@@ -145,45 +145,40 @@ builder.Services.AddSingleton<IModelManager>(sp =>
 builder.Services.AddSingleton<ITokenizer, SimpleTokenizer>();
 builder.Services.AddSingleton<ITextEnhancer, TextEnhancer>();
 builder.Services.AddSingleton<IMarkdownChunker, MarkdownChunker>();
-// 注册向量存储（支持多模型维度兼容）
+// 共享 SQLite 连接 — VectorStore / GraphStore / BM25Store 共用同一连接和锁
+// 消除多连接 WAL 序列化开销，并通过统一锁保证 SqliteConnection 线程安全
+builder.Services.AddSingleton<ReferenceRAG.Storage.SharedSqliteConnection>(sp =>
+{
+    var cfg = sp.GetRequiredService<ConfigManager>().Load();
+    var dbPath = Path.Combine(cfg.DataPath ?? "data", "vectors.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+    return new ReferenceRAG.Storage.SharedSqliteConnection(dbPath);
+});
+
+// 注册向量存储
 builder.Services.AddSingleton<IVectorStore>(sp =>
 {
-    var config = sp.GetRequiredService<ConfigManager>();
-    var cfg = config.Load();
-    var dataPath = cfg.DataPath ?? "data";
-    var dbPath = Path.Combine(dataPath, "vectors.db");
-    return new SqliteVectorStore(dbPath);
+    var shared = sp.GetRequiredService<ReferenceRAG.Storage.SharedSqliteConnection>();
+    return new SqliteVectorStore(shared);
 });
-// 注册知识图谱存储（与向量存储共用同一个 DB 文件）
+
+// 注册知识图谱存储（与向量存储共用同一连接）
 builder.Services.AddSingleton<IGraphStore>(sp =>
 {
-    var config = sp.GetRequiredService<ConfigManager>();
-    var cfg = config.Load();
-    var dataPath = cfg.DataPath ?? "data";
-    var dbPath = Path.Combine(dataPath, "vectors.db");
-    return new SqliteGraphStore(dbPath);
+    var shared = sp.GetRequiredService<ReferenceRAG.Storage.SharedSqliteConnection>();
+    return new SqliteGraphStore(shared);
 });
 builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.WikiLinkExtractor>();
 builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.GraphIndexingService>();
-// 注册 BM25 存储（与向量存储共用同一个数据库）
-// 根据配置选择 fts5（推荐）或 legacy（备用）实现
+
+// 注册 BM25 存储（与向量存储共用同一连接）
 builder.Services.AddSingleton<IBM25Store>(sp =>
 {
-    var config = sp.GetRequiredService<ConfigManager>();
-    var cfg = config.Load();
-    var dataPath = cfg.DataPath ?? "data";
-    var dbPath = Path.Combine(dataPath, "vectors.db");
-
+    var shared = sp.GetRequiredService<ReferenceRAG.Storage.SharedSqliteConnection>();
+    var cfg = sp.GetRequiredService<ConfigManager>().Load();
     var bm25Provider = cfg.Search?.BM25Provider?.ToLowerInvariant() ?? "fts5";
-
-    // 记录选择的 BM25 provider
-    Console.WriteLine($"[BM25 Provider] Config bm25Provider='{bm25Provider}', selecting implementation...");
-
-    return bm25Provider switch
-    {
-        "fts5" => new Fts5BM25Store(dbPath),
-        _ => new Fts5BM25Store(dbPath) // 默认使用 FTS5
-    };
+    Console.WriteLine($"[BM25 Provider] bm25Provider='{bm25Provider}'");
+    return new Fts5BM25Store(shared);
 });
 builder.Services.AddSingleton<IEmbeddingService>(sp =>
 {

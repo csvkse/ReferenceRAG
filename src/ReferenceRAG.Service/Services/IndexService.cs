@@ -141,79 +141,76 @@ public class IndexService : IHostedService
                 var errors = new ConcurrentBag<string>();
                 var processedCount = 0;
                 var errorsCount = 0;
-                var currentFileLock = new object();
-                string currentFile = "";
 
-                // 使用 SemaphoreSlim 限制并发文件处理数量 (避免同时打开过多文件/连接)
-                const int maxDegreeOfParallelism = 4;
-                using var semaphore = new SemaphoreSlim(maxDegreeOfParallelism);
+                // ── Phase 1: CPU 并行 ── 读文件、hash 检测、分块（无 GPU 调用）
+                const int maxPrepParallelism = 8;
+                using var prepSemaphore = new SemaphoreSlim(maxPrepParallelism);
 
-                // 并行处理文件
-                var tasks = allFiles.Select(async file =>
+                var prepTasks = allFiles.Select(async file =>
                 {
-                    // 检查取消状态
-                    if (cts.Token.IsCancellationRequested)
-                    {
-                        return;
-                    }
-
-                    await semaphore.WaitAsync(cts.Token);
+                    if (cts.Token.IsCancellationRequested) return null;
+                    await prepSemaphore.WaitAsync(cts.Token);
                     try
                     {
-                        // 再次检查取消状态
-                        if (cts.Token.IsCancellationRequested)
-                        {
-                            return;
-                        }
+                        return await PrepareFileAsync(file, chunker, vectorStore, sources, request.Force, cts.Token);
+                    }
+                    catch (OperationCanceledException) { return null; }
+                    catch (Exception ex)
+                    {
+                        errors.Add($"{file}: {ex.Message}");
+                        Interlocked.Increment(ref errorsCount);
+                        _logger.LogWarning(ex, "Failed to prepare file: {File}", file);
+                        return null;
+                    }
+                    finally { prepSemaphore.Release(); }
+                }).ToList();
 
-                        var fileName = Path.GetFileName(file);
+                var prepResults = await Task.WhenAll(prepTasks);
+                var contexts = prepResults.Where(c => c != null).ToList()!;
 
-                        // 线程安全地更新当前文件
-                        lock (currentFileLock)
-                        {
-                            currentFile = fileName;
-                        }
+                // ── Phase 2: GPU 统一大批次推理 ── 所有文件 chunks 合并，一次性过 GPU
+                var allChunks = contexts.SelectMany(c => c!.Chunks).ToList();
+                if (allChunks.Count > 0)
+                {
+                    cts.Token.ThrowIfCancellationRequested();
+                    using var pipeline = new IndexingPipeline(
+                        embeddingService, vectorStore,
+                        batchSize: config.Embedding.BatchSize);
+                    await pipeline.ExecuteAsync(allChunks, "batch", cts.Token);
+                }
 
-                        await ProcessFileAsync(
-                            file,
-                            embeddingService,
-                            chunker,
-                            vectorStore,
-                            sources,
-                            _bm25Store,
-                            request.Force);
+                // ── Phase 3: CPU 并行 ── BM25 + 知识图谱后处理
+                const int maxFinalizeParallelism = 4;
+                using var finSemaphore = new SemaphoreSlim(maxFinalizeParallelism);
 
-                        // 线程安全地递增计数器
+                var finalizeTasks = contexts.Select(async ctx =>
+                {
+                    if (cts.Token.IsCancellationRequested) return;
+                    await finSemaphore.WaitAsync(cts.Token);
+                    try
+                    {
+                        await FinalizeFileAsync(ctx!, _bm25Store, cts.Token);
                         var count = Interlocked.Increment(ref processedCount);
-
-                        // 广播进度
                         await IndexHub.BroadcastIndexProgress(_hubContext, new IndexProgressEvent
                         {
                             IndexId = indexId,
                             ProcessedFiles = count,
                             TotalFiles = job.TotalFiles,
-                            CurrentFile = fileName,
+                            CurrentFile = ctx!.FileRecord.FileName,
                             Timestamp = DateTime.UtcNow
                         });
                     }
-                    catch (OperationCanceledException)
-                    {
-                        // 任务被取消，正常退出
-                        return;
-                    }
+                    catch (OperationCanceledException) { }
                     catch (Exception ex)
                     {
-                        errors.Add($"{file}: {ex.Message}");
+                        errors.Add($"{ctx!.FileRecord.Path}: {ex.Message}");
                         Interlocked.Increment(ref errorsCount);
-                        _logger.LogWarning(ex, "Failed to index file: {File}", file);
+                        _logger.LogWarning(ex, "Failed to finalize file: {File}", ctx!.FileRecord.Path);
                     }
-                    finally
-                    {
-                        semaphore.Release();
-                    }
+                    finally { finSemaphore.Release(); }
                 }).ToList();
 
-                await Task.WhenAll(tasks);
+                await Task.WhenAll(finalizeTasks);
 
                 // 更新最终状态
                 job.ProcessedFiles = processedCount;
@@ -322,60 +319,45 @@ public class IndexService : IHostedService
         return _activeJobs.TryGetValue(indexId, out var job) ? job : null;
     }
 
-    private async Task ProcessFileAsync(
+    /// <summary>
+    /// Phase 1: 读文件、hash 检测、分块 — 纯 CPU，无 GPU 调用。
+    /// 返回 null 表示文件无需重建。
+    /// </summary>
+    private async Task<FileProcessContext?> PrepareFileAsync(
         string filePath,
-        IEmbeddingService embeddingService,
         IMarkdownChunker chunker,
         IVectorStore vectorStore,
         List<SourceFolder> sources,
-        IBM25Store? bm25Store = null,
-        bool forceReindex = false)
+        bool forceReindex,
+        CancellationToken cancellationToken)
     {
-        var content = await File.ReadAllTextAsync(filePath);
+        var content = await File.ReadAllTextAsync(filePath, cancellationToken);
 
-        // 按路径长度降序排序，确保更长的路径（更精确的匹配）优先匹配
-        // 这样 test-vault-english 会先于 test-vault 匹配
-        var sortedSources = sources
-            .OrderByDescending(s => s.Path.Length)
-            .ToList();
-
-        // 尝试用原始路径和标准化路径匹配 source，确保匹配的是完整目录
+        var sortedSources = sources.OrderByDescending(s => s.Path.Length).ToList();
         var source = sortedSources.FirstOrDefault(s =>
             filePath.StartsWith(s.Path + Path.DirectorySeparatorChar) ||
             filePath.Equals(s.Path) ||
             filePath.StartsWith(PathUtility.NormalizePath(s.Path) + Path.DirectorySeparatorChar) ||
             filePath.Equals(PathUtility.NormalizePath(s.Path)));
 
-        // 使用标准化路径计算相对路径
-        var sourcePathForRelative = source != null
-            ? (filePath.StartsWith(PathUtility.NormalizePath(source.Path))
-                ? PathUtility.NormalizePath(source.Path)
-                : source.Path)
-            : filePath;
-        var relativePath = source != null ? Path.GetRelativePath(sourcePathForRelative, filePath) : Path.GetFileName(filePath);
-
-        // 提前计算 hash，未变化时直接跳过，避免执行后续切块和向量化
         var contentHash = ComputeHash(content);
-        var existingFile = await vectorStore.GetFileByPathAsync(filePath);
+        var existingFile = await vectorStore.GetFileByPathAsync(filePath, cancellationToken);
         var fileId = existingFile?.Id ?? Guid.NewGuid().ToString();
 
         if (!forceReindex && existingFile != null && existingFile.ContentHash == contentHash)
         {
             _logger.LogDebug("内容未变化，跳过: {FileName}", Path.GetFileName(filePath));
-            return;
+            return null;
         }
 
-        // 分段
         var chunks = chunker.Chunk(content, new ChunkingOptions
         {
             MaxTokens = 512,
             MinTokens = 50,
             OverlapTokens = 50
         });
+        if (chunks.Count == 0) return null;
 
-        if (chunks.Count == 0) return;
-
-        // 创建或更新文件记录
         var fileRecord = new FileRecord
         {
             Id = fileId,
@@ -391,42 +373,49 @@ public class IndexService : IHostedService
             IndexedAt = DateTime.UtcNow
         };
 
-        await vectorStore.UpsertFileAsync(fileRecord);
+        await vectorStore.UpsertFileAsync(fileRecord, cancellationToken);
 
-        // 获取旧 chunk ID，用于清理 BM25 旧条目
-        var oldChunks = await vectorStore.GetChunksByFileAsync(fileId);
+        var oldChunks = await vectorStore.GetChunksByFileAsync(fileId, cancellationToken);
         var oldChunkIds = oldChunks.Select(c => c.Id).ToList();
 
-        // 删除该文件关联的旧chunks和vectors（防止重复索引）
-        await vectorStore.DeleteChunksByFileAsync(fileId);
+        await vectorStore.DeleteChunksByFileAsync(fileId, cancellationToken);
 
-        // 同步清理 BM25 中的旧条目
-        if (bm25Store != null && oldChunkIds.Count > 0)
-            await bm25Store.DeleteDocumentsByIdsAsync(oldChunkIds);
-
-        // 为每个 chunk 设置文件信息
         foreach (var chunk in chunks)
         {
             chunk.FileId = fileId;
             chunk.Id = Guid.NewGuid().ToString();
+            chunk.Source = source?.Name ?? "unknown";
         }
 
-        // 使用 Pipeline 进行向量化和存储（从配置读取 BatchSize）
-        var config = _configManager.Load();
-        using var pipeline = new IndexingPipeline(embeddingService, vectorStore, batchSize: config.Embedding.BatchSize);
-        await pipeline.ExecuteAsync(chunks, source?.Name ?? "unknown");
+        return new FileProcessContext
+        {
+            FileRecord = fileRecord,
+            Content = content,
+            Chunks = chunks,
+            OldChunkIds = oldChunkIds
+        };
+    }
 
-        // 索引新 chunks 到 BM25
+    /// <summary>
+    /// Phase 3: BM25 索引 + 知识图谱更新 — GPU 推理已完成，纯 CPU 后处理。
+    /// </summary>
+    private async Task FinalizeFileAsync(
+        FileProcessContext ctx,
+        IBM25Store? bm25Store,
+        CancellationToken cancellationToken)
+    {
+        if (bm25Store != null && ctx.OldChunkIds.Count > 0)
+            await bm25Store.DeleteDocumentsByIdsAsync(ctx.OldChunkIds);
+
         if (bm25Store != null)
         {
-            var bm25Docs = chunks.Select(c => (c.Id, c.Content));
+            var bm25Docs = ctx.Chunks.Select(c => (c.Id, c.Content));
             await bm25Store.IndexBatchAsync(bm25Docs);
         }
 
-        // 更新知识图谱（提取 wiki-link）
         var graphIndexing = _serviceProvider.GetService<GraphIndexingService>();
         if (graphIndexing != null)
-            await graphIndexing.UpdateGraphAsync(fileRecord, content, chunks);
+            await graphIndexing.UpdateGraphAsync(ctx.FileRecord, ctx.Content, ctx.Chunks);
     }
 
     private static string ComputeHash(string content)
@@ -498,4 +487,15 @@ public enum IndexStatus
     Completed,
     Failed,
     Cancelled
+}
+
+/// <summary>
+/// Phase 1 → Phase 2 → Phase 3 之间传递的文件上下文
+/// </summary>
+internal class FileProcessContext
+{
+    public FileRecord FileRecord { get; set; } = null!;
+    public string Content { get; set; } = "";
+    public List<ChunkRecord> Chunks { get; set; } = new();
+    public List<string> OldChunkIds { get; set; } = new();
 }

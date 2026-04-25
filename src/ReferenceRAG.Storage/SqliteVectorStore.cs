@@ -23,17 +23,41 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     private readonly string _dbPath;
     private readonly ILogger<SqliteVectorStore>? _logger;
     private bool _disposed;
+    private readonly bool _ownsResources; // 只有独立构造时才负责 Dispose
 
     // 缓存已创建的向量表维度
     private readonly Dictionary<string, int> _modelDimensions = new();
 
-    // 用于序列化写事务的锁 (SQLite不支持同一连接的并行事务)
-    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    // 全局顺序锁（可与其他 Store 共享，通过 SharedSqliteConnection 注入）
+    private readonly SemaphoreSlim _writeLock;
 
+    /// <summary>
+    /// 生产用构造函数：接受共享连接，与 SqliteGraphStore / Fts5BM25Store 共用同一连接 + 同一把锁。
+    /// </summary>
+    public SqliteVectorStore(SharedSqliteConnection sharedDb, int dimension = 384, ILogger<SqliteVectorStore>? logger = null)
+    {
+        _dbPath = sharedDb.Connection.DataSource;
+        _logger = logger;
+        _connection = sharedDb.Connection;
+        _writeLock = sharedDb.Lock;
+        _ownsResources = false;
+
+        OptimizeSqlitePerformance();
+        LoadVectorExtension();
+        InitializeDatabase();
+        MigrateLegacyData();
+        LoadModelDimensions(dimension);
+    }
+
+    /// <summary>
+    /// 兼容构造函数（测试 / 独立使用）：自建连接和锁。
+    /// </summary>
     public SqliteVectorStore(string dbPath, int dimension = 384, ILogger<SqliteVectorStore>? logger = null)
     {
         _dbPath = dbPath;
         _logger = logger;
+        _writeLock = new SemaphoreSlim(1, 1);
+        _ownsResources = true;
 
         var builder = new SqliteConnectionStringBuilder
         {
@@ -44,12 +68,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         _connection = new SqliteConnection(builder.ConnectionString);
         _connection.Open();
 
-        // SQLite 性能优化
         OptimizeSqlitePerformance();
-
-        // 加载 sqlite-vec 扩展
         LoadVectorExtension();
-
         InitializeDatabase();
         MigrateLegacyData();
         LoadModelDimensions(dimension);
@@ -587,84 +607,76 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
     public async Task<FileRecord?> GetFileAsync(string id, CancellationToken cancellationToken = default)
     {
-        var sql = "SELECT * FROM files WHERE id = @id";
-
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@id", id);
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            return ReadFileRecord(reader);
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT * FROM files WHERE id = @id";
+            AddParameter(command, "@id", id);
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await reader.ReadAsync(cancellationToken) ? ReadFileRecord(reader) : null;
         }
-
-        return null;
+        finally { _writeLock.Release(); }
     }
 
     public async Task<FileRecord?> GetFileByPathAsync(string path, CancellationToken cancellationToken = default)
     {
-        var sql = "SELECT * FROM files WHERE path = @path";
-
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@path", path);
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            return ReadFileRecord(reader);
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT * FROM files WHERE path = @path";
+            AddParameter(command, "@path", path);
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await reader.ReadAsync(cancellationToken) ? ReadFileRecord(reader) : null;
         }
-
-        return null;
+        finally { _writeLock.Release(); }
     }
 
     public async Task<FileRecord?> GetFileByHashAsync(string contentHash, CancellationToken cancellationToken = default)
     {
-        var sql = "SELECT * FROM files WHERE content_hash = @hash";
-
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@hash", contentHash);
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            return ReadFileRecord(reader);
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT * FROM files WHERE content_hash = @hash";
+            AddParameter(command, "@hash", contentHash);
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await reader.ReadAsync(cancellationToken) ? ReadFileRecord(reader) : null;
         }
-
-        return null;
+        finally { _writeLock.Release(); }
     }
 
     public async Task DeleteFileAsync(string id, CancellationToken cancellationToken = default)
     {
-        // 删除关联的分段（会级联删除向量）
-        await DeleteChunksByFileAsync(id, cancellationToken);
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            // 内部方法：不重新获取锁，避免死锁
+            await DeleteChunksByFileInternalAsync(id, cancellationToken);
 
-        var sql = "DELETE FROM files WHERE id = @id";
-
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@id", id);
-
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            using var command = _connection.CreateCommand();
+            command.CommandText = "DELETE FROM files WHERE id = @id";
+            AddParameter(command, "@id", id);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally { _writeLock.Release(); }
     }
 
     public async Task<IEnumerable<FileRecord>> GetAllFilesAsync(CancellationToken cancellationToken = default)
     {
-        var sql = "SELECT * FROM files ORDER BY path";
-        var files = new List<FileRecord>();
-
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            files.Add(ReadFileRecord(reader));
+            var files = new List<FileRecord>();
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT * FROM files ORDER BY path";
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                files.Add(ReadFileRecord(reader));
+            return files;
         }
-
-        return files;
+        finally { _writeLock.Release(); }
     }
 
     public async Task<IAsyncEnumerable<FileRecord>> StreamAllFilesAsync(CancellationToken cancellationToken = default)
@@ -818,77 +830,77 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
     public async Task<ChunkRecord?> GetChunkAsync(string id, CancellationToken cancellationToken = default)
     {
-        var sql = "SELECT * FROM chunks WHERE id = @id";
-
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@id", id);
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            return ReadChunkRecord(reader);
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT * FROM chunks WHERE id = @id";
+            AddParameter(command, "@id", id);
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await reader.ReadAsync(cancellationToken) ? ReadChunkRecord(reader) : null;
         }
-
-        return null;
+        finally { _writeLock.Release(); }
     }
 
     public async Task<IEnumerable<ChunkRecord>> GetChunksByFileAsync(string fileId, CancellationToken cancellationToken = default)
     {
-        var sql = "SELECT * FROM chunks WHERE file_id = @fileId ORDER BY chunk_index";
-        var chunks = new List<ChunkRecord>();
-
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@fileId", fileId);
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            chunks.Add(ReadChunkRecord(reader));
+            var chunks = new List<ChunkRecord>();
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT * FROM chunks WHERE file_id = @fileId ORDER BY chunk_index";
+            AddParameter(command, "@fileId", fileId);
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                chunks.Add(ReadChunkRecord(reader));
+            return chunks;
         }
-
-        return chunks;
+        finally { _writeLock.Release(); }
     }
 
     public async Task DeleteChunkAsync(string id, CancellationToken cancellationToken = default)
     {
-        // 删除所有模型表中的向量
-        foreach (var modelName in _modelDimensions.Keys.ToList())
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            var tableName = ModelToTableName(modelName);
-            var deleteVectorSql = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = deleteVectorSql;
-            cmd.Parameters.AddWithValue("@chunkId", id);
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
+            foreach (var modelName in _modelDimensions.Keys.ToList())
+            {
+                var tableName = ModelToTableName(modelName);
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
+                cmd.Parameters.AddWithValue("@chunkId", id);
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+            using var command = _connection.CreateCommand();
+            command.CommandText = "DELETE FROM chunks WHERE id = @id";
+            AddParameter(command, "@id", id);
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
-
-        // 删除分段
-        var sql = "DELETE FROM chunks WHERE id = @id";
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@id", id);
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        finally { _writeLock.Release(); }
     }
 
+    // 公共方法：获取锁后调用内部实现
     public async Task DeleteChunksByFileAsync(string fileId, CancellationToken cancellationToken = default)
     {
-        // 获取文件的所有分段ID
+        await _writeLock.WaitAsync(cancellationToken);
+        try { await DeleteChunksByFileInternalAsync(fileId, cancellationToken); }
+        finally { _writeLock.Release(); }
+    }
+
+    // 内部实现：调用方已持有 _writeLock（避免 DeleteFileAsync 重入死锁）
+    private async Task DeleteChunksByFileInternalAsync(string fileId, CancellationToken cancellationToken)
+    {
         var chunkIds = new List<string>();
-        var getChunksSql = "SELECT id FROM chunks WHERE file_id = @fileId";
         using (var cmd = _connection.CreateCommand())
         {
-            cmd.CommandText = getChunksSql;
+            cmd.CommandText = "SELECT id FROM chunks WHERE file_id = @fileId";
             cmd.Parameters.AddWithValue("@fileId", fileId);
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
-            {
                 chunkIds.Add(reader.GetString(0));
-            }
         }
 
-        // 批量删除所有模型表中的向量（IN 子句，每批 500 避免 SQLite 参数上限）
         if (chunkIds.Count > 0)
         {
             const int deleteBatchSize = 500;
@@ -899,9 +911,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 {
                     var batch = chunkIds.Skip(i).Take(deleteBatchSize).ToList();
                     var placeholders = string.Join(",", batch.Select((_, idx) => $"@did{idx}"));
-                    var deleteVectorSql = $"DELETE FROM {tableName} WHERE chunk_id IN ({placeholders})";
                     using var cmd = _connection.CreateCommand();
-                    cmd.CommandText = deleteVectorSql;
+                    cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id IN ({placeholders})";
                     for (int j = 0; j < batch.Count; j++)
                         cmd.Parameters.AddWithValue($"@did{j}", batch[j]);
                     await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -909,10 +920,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             }
         }
 
-        // 删除分段
-        var sql = "DELETE FROM chunks WHERE file_id = @fileId";
         using var command = _connection.CreateCommand();
-        command.CommandText = sql;
+        command.CommandText = "DELETE FROM chunks WHERE file_id = @fileId";
         AddParameter(command, "@fileId", fileId);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -1392,112 +1401,94 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
     public async Task<List<VectorStats>> GetVectorStatsAsync(CancellationToken cancellationToken = default)
     {
-        var stats = new List<VectorStats>();
-
-        // 先构建新缓存，避免 Clear() 在并发搜索时导致模型查找失败
-        var freshDimensions = new Dictionary<string, int>();
-
-        var sql = "SELECT name, dimension, updated_at FROM models";
-        using (var cmd = _connection.CreateCommand())
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            cmd.CommandText = sql;
-            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            var stats = new List<VectorStats>();
+            var freshDimensions = new Dictionary<string, int>();
 
-            while (await reader.ReadAsync(cancellationToken))
+            using (var cmd = _connection.CreateCommand())
             {
-                var modelName = reader.GetString(0);
-                var dimension = reader.GetInt32(1);
-                var updatedAtStr = reader.IsDBNull(2) ? null : reader.GetString(2);
-                DateTime? updatedAt = updatedAtStr != null ? DateTime.Parse(updatedAtStr) : null;
-
-                freshDimensions[modelName] = dimension;
-
-                var tableName = ModelToTableName(modelName);
-                long count = 0;
-
-                try
+                cmd.CommandText = "SELECT name, dimension, updated_at FROM models";
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
                 {
-                    var countSql = $"SELECT COUNT(*) FROM {tableName}";
-                    using var countCmd = _connection.CreateCommand();
-                    countCmd.CommandText = countSql;
-                    count = (long)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                    var modelName = reader.GetString(0);
+                    var dimension = reader.GetInt32(1);
+                    var updatedAtStr = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    DateTime? updatedAt = updatedAtStr != null ? DateTime.Parse(updatedAtStr) : null;
+                    freshDimensions[modelName] = dimension;
+
+                    long count = 0;
+                    try
+                    {
+                        using var countCmd = _connection.CreateCommand();
+                        countCmd.CommandText = $"SELECT COUNT(*) FROM {ModelToTableName(modelName)}";
+                        count = (long)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                    }
+                    catch { }
+
+                    stats.Add(new VectorStats
+                    {
+                        ModelName = modelName,
+                        Dimension = dimension,
+                        VectorCount = (int)count,
+                        StorageBytes = count * dimension * sizeof(float),
+                        ModelExists = count > 0,
+                        LastUpdated = updatedAt
+                    });
                 }
-                catch
-                {
-                    // 向量表可能不存在，count 保持 0
-                }
-
-                stats.Add(new VectorStats
-                {
-                    ModelName = modelName,
-                    Dimension = dimension,
-                    VectorCount = (int)count,
-                    StorageBytes = count * dimension * sizeof(float),
-                    ModelExists = count > 0,
-                    LastUpdated = updatedAt
-                });
             }
+
+            foreach (var kv in freshDimensions)
+                _modelDimensions[kv.Key] = kv.Value;
+            foreach (var key in _modelDimensions.Keys.Except(freshDimensions.Keys).ToList())
+                _modelDimensions.Remove(key);
+
+            return stats;
         }
-
-        // 增量同步：新增/更新条目，移除已不存在的模型（避免 Clear 导致并发窗口期）
-        foreach (var kv in freshDimensions)
-            _modelDimensions[kv.Key] = kv.Value;
-        foreach (var key in _modelDimensions.Keys.Except(freshDimensions.Keys).ToList())
-            _modelDimensions.Remove(key);
-
-        return stats;
+        finally { _writeLock.Release(); }
     }
 
     public async Task<int> DeleteVectorsByModelAsync(string modelName, CancellationToken cancellationToken = default)
     {
-        // 先从数据库检查模型是否存在
-        var checkSql = "SELECT COUNT(*) FROM models WHERE name = @name";
-        using (var checkCmd = _connection.CreateCommand())
-        {
-            checkCmd.CommandText = checkSql;
-            checkCmd.Parameters.AddWithValue("@name", modelName);
-            var exists = (long)await checkCmd.ExecuteScalarAsync(cancellationToken) > 0;
-            if (!exists) return 0;
-        }
-
-        var tableName = ModelToTableName(modelName);
-        var count = 0;
-
+        await _writeLock.WaitAsync(cancellationToken);
         try
         {
-            // 获取数量
-            var countSql = $"SELECT COUNT(*) FROM {tableName}";
-            using (var cmd = _connection.CreateCommand())
+            using (var checkCmd = _connection.CreateCommand())
             {
-                cmd.CommandText = countSql;
-                count = (int)((long?)await cmd.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                checkCmd.CommandText = "SELECT COUNT(*) FROM models WHERE name = @name";
+                checkCmd.Parameters.AddWithValue("@name", modelName);
+                var exists = (long)await checkCmd.ExecuteScalarAsync(cancellationToken) > 0;
+                if (!exists) return 0;
             }
 
-            // 删除表
-            var dropSql = $"DROP TABLE IF EXISTS {tableName}";
-            using (var cmd = _connection.CreateCommand())
+            var tableName = ModelToTableName(modelName);
+            var count = 0;
+            try
             {
-                cmd.CommandText = dropSql;
-                await cmd.ExecuteNonQueryAsync(cancellationToken);
+                using (var cmd = _connection.CreateCommand())
+                {
+                    cmd.CommandText = $"SELECT COUNT(*) FROM {tableName}";
+                    count = (int)((long?)await cmd.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                }
+                using (var cmd = _connection.CreateCommand())
+                {
+                    cmd.CommandText = $"DROP TABLE IF EXISTS {tableName}";
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+                using (var cmd = _connection.CreateCommand())
+                {
+                    cmd.CommandText = "DELETE FROM models WHERE name = @name";
+                    cmd.Parameters.AddWithValue("@name", modelName);
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+                _modelDimensions.Remove(modelName);
             }
-
-            // 从元数据表删除
-            var deleteModelSql = "DELETE FROM models WHERE name = @name";
-            using (var cmd = _connection.CreateCommand())
-            {
-                cmd.CommandText = deleteModelSql;
-                cmd.Parameters.AddWithValue("@name", modelName);
-                await cmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            _modelDimensions.Remove(modelName);
+            catch { }
+            return count;
         }
-        catch
-        {
-            // 忽略错误
-        }
-
-        return count;
+        finally { _writeLock.Release(); }
     }
 
     public async Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default)
@@ -1713,9 +1704,12 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     {
         if (!_disposed)
         {
-            _connection.Close();
-            _connection.Dispose();
-            _writeLock.Dispose();
+            if (_ownsResources)
+            {
+                _connection.Close();
+                _connection.Dispose();
+                _writeLock.Dispose();
+            }
             _disposed = true;
         }
     }
