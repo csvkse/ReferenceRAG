@@ -368,7 +368,6 @@ public class ModelFormatTests : IDisposable
         Assert.Contains("未下载", error);
     }
 
-    [Fact]
     [Fact(Skip = "CI 环境缺少本地模型文件")]
     public async Task ConvertFormat_SameFormat_ReturnsError()
     {
@@ -523,7 +522,6 @@ public class ModelFormatTests : IDisposable
     /// 场景：模型只有 .onnx 文件，没有 .data 文件（embedded 格式）。
     /// 验证：从 embedded 尝试转换为 embedded 时返回错误（已是目标格式）。
     /// </summary>
-    [Fact]
     [Fact(Skip = "CI 环境缺少本地模型文件")]
     public async Task ConvertFormat_AlreadyEmbedded_NoDataFile_ReturnsError()
     {
@@ -549,7 +547,6 @@ public class ModelFormatTests : IDisposable
     /// 场景：external 格式模型（有 .data 文件），尝试转换为 external。
     /// 验证：返回错误（已是目标格式），且 .data 文件未被触及。
     /// </summary>
-    [Fact]
     [Fact(Skip = "CI 环境缺少本地模型文件")]
     public async Task ConvertFormat_AlreadyExternal_WithExternalData_ReturnsError()
     {
