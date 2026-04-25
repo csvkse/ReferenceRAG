@@ -9,7 +9,28 @@
         MinHeight="600"
         Loaded="MainWindow_Loaded">
     <Grid>
-        <!-- WebView2 充满整个窗口 -->
-        <wv2:WebView2 x:Name="webView" />
+        <!-- WebView2 初始隐藏，等后端就绪后再显示 -->
+        <wv2:WebView2 x:Name="webView" Visibility="Hidden" />
+
+        <!-- 启动加载面板（后端就绪后隐藏） -->
+        <Grid x:Name="loadingPanel" Background="#1E1E2E">
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                <TextBlock Text="ReferenceRAG"
+                           FontSize="32" FontWeight="Bold"
+                           Foreground="#E0E0E0"
+                           HorizontalAlignment="Center" />
+                <TextBlock x:Name="loadingText"
+                           Text="正在启动服务..."
+                           FontSize="14" Foreground="#888888"
+                           HorizontalAlignment="Center"
+                           Margin="0,16,0,0" />
+                <ProgressBar x:Name="loadingProgress"
+                             IsIndeterminate="True"
+                             Width="240" Height="3"
+                             Margin="0,20,0,0"
+                             Foreground="#4A9EFF"
+                             Background="Transparent" />
+            </StackPanel>
+        </Grid>
     </Grid>
 </Window>

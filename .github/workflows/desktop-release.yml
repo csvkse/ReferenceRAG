@@ -3,8 +3,8 @@ name: Desktop Release
 on:
   push:
     tags:
-      - "v*" # 当推送形如 v1.0.0 的 tag 时自动触发打包并发布 Release
-  workflow_dispatch: # 允许在 GitHub Actions 面板手动点击运行
+      - "v*" # 推送 v1.0.0 格式的 tag 时自动触发
+  workflow_dispatch: # 允许在 GitHub Actions 面板手动触发
     inputs:
       version:
         description: 'Release version (e.g., v1.0.0) - Leave empty to build only without creating release'
@@ -13,7 +13,7 @@ on:
 
 jobs:
   build:
-    name: Build Windows x64
+    name: Build Windows x64 Desktop
     runs-on: windows-latest
 
     steps:
@@ -29,12 +29,26 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "dashboard-vue/package-lock.json"
+
+      - name: Build Vue Frontend
+        working-directory: dashboard-vue
+        run: |
+          npm ci
+          npm run build
 
       - name: Restore dependencies
         run: dotnet restore ReferenceRAG.sln
 
-      - name: Publish
-        run: dotnet publish src/ReferenceRAG.Service/ReferenceRAG.Service.csproj -c Release -r win-x64 --self-contained true -o publish_output
+      - name: Publish Desktop App
+        run: >
+          dotnet publish src/ReferenceRAG.Desktop/ReferenceRAG.Desktop.csproj
+          -c Release
+          -r win-x64
+          --self-contained true
+          -p:Platform=x64
+          -o publish_output
 
       - name: Archive production artifacts
         run: Compress-Archive -Path publish_output\* -DestinationPath ReferenceRAG-win-x64.zip
@@ -67,17 +81,18 @@ jobs:
           body: |
             🎉 **ReferenceRAG Windows 桌面版更新发布**
 
-            本次发布包含适用于 Windows x64 的独立运行程序。
+            本次发布包含适用于 Windows x64 的独立运行桌面程序。
             **无需安装 .NET 运行时**，下载解压即可直接运行！
 
             ### 📦 下载与运行指南
 
             * **🪟 Windows x64**:
-                * 下载对应的 `.zip` 文件。
-                * 解压后直接双击运行 `ReferenceRAG.Service.exe`。
+                * 下载 `ReferenceRAG-win-x64.zip`。
+                * 解压后双击运行 `ReferenceRAG.Desktop.exe`。
+                * 首次运行需安装 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2)（Edge 浏览器已含此组件）。
 
             ---
 
-            *💡 详细的代码更新日志请参考下方自动生成的 Release Notes 👇*
+            *💡 详细代码更新日志请参考下方自动生成的 Release Notes 👇*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

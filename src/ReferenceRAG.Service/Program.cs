@@ -205,10 +205,15 @@ builder.Services.AddSingleton<IRerankService>(sp =>
 
     if (string.IsNullOrEmpty(modelPath))
     {
-        // 如果没有指定路径，从模型管理器获取
-        var dataPath = cfg.DataPath ?? "data";
-        var modelsPath = Path.Combine(dataPath, "models");
-        modelPath = Path.Combine(modelsPath, rerankConfig.ModelName, "model.onnx");
+        // 没有指定路径时，按子目录结构推断（CurrentModel 优先，回退 ModelName）
+        var cfgModelsPath = cfg.ModelsRootPath
+            ?? Path.Combine(cfg.DataPath ?? "data", "models");
+        var targetName = !string.IsNullOrEmpty(rerankConfig.CurrentModel)
+            ? rerankConfig.CurrentModel
+            : rerankConfig.ModelName;
+        modelPath = Path.Combine(cfgModelsPath, "Reranker", targetName, "model.onnx");
+        if (!File.Exists(modelPath))
+            modelPath = Path.Combine(cfgModelsPath, targetName, "model.onnx"); // 旧扁平结构兜底
     }
 
     return new OnnxRerankService(new RerankOptions

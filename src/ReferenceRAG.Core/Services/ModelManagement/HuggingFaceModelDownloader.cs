@@ -503,11 +503,12 @@ internal class HuggingFaceModelDownloader : IDisposable
                 if (dataFile != null)
                 {
                     var sourceDataPath = Path.Combine(targetDir, dataFile.Path);
-                    var rootDataPath = Path.Combine(targetDir, "model.onnx.data");
+                    // ONNX Runtime 期望外部数据文件名为 model.onnx_data（下划线，而非点号）
+                    var rootDataPath = Path.Combine(targetDir, "model.onnx_data");
 
                     if (File.Exists(sourceDataPath) && sourceDataPath != rootDataPath)
                     {
-                        Console.WriteLine($"[Downloader] 移动外部数据文件: {dataFile.Path} -> model.onnx.data");
+                        Console.WriteLine($"[Downloader] 移动外部数据文件: {dataFile.Path} -> model.onnx_data");
                         if (File.Exists(rootDataPath))
                         {
                             File.Delete(rootDataPath);

@@ -175,6 +175,22 @@ export const performanceApi = {
 }
 
 // Semantic Test
+export interface ModelProbeResult {
+  modelName: string
+  isSimulationMode: boolean
+  dimension: number
+  supportsAsymmetric: boolean
+  selfSimilarity: number
+  highSimilarityActual: number
+  highSimilarityExpected: number
+  lowSimilarityActual: number
+  lowSimilarityExpected: number
+  vectorSample: number[]
+  healthy: boolean
+  error?: string
+  timestamp: string
+}
+
 export const semanticTestApi = {
   shortText: (data: ShortTextTestRequest) => api.post<SemanticTestResult>('/SemanticTest/short-text', data),
   longText: (data: LongTextTestRequest) => api.post<LongTextTestResult>('/SemanticTest/long-text', data),
@@ -182,7 +198,8 @@ export const semanticTestApi = {
   clearRecords: () => api.delete('/SemanticTest/records'),
   getPresets: () => api.get('/SemanticTest/presets'),
   runPreset: (suiteName: string) => api.post(`/SemanticTest/preset/${suiteName}`),
-  getStatistics: () => api.get('/SemanticTest/statistics')
+  getStatistics: () => api.get('/SemanticTest/statistics'),
+  modelProbe: () => api.get<ModelProbeResult>('/SemanticTest/model-probe')
 }
 
 // Models
@@ -193,6 +210,7 @@ export const modelsApi = {
   download: (modelName: string, onnxFilePath?: string) =>
     api.post(`/Models/download/${modelName}`, onnxFilePath ? { onnxFilePath } : {}),
   getDownloadProgress: (modelName: string) => api.get(`/Models/download/${modelName}/progress`),
+  getActiveDownloads: () => api.get<Array<{ key: string; progress: import('@/types/api').DownloadProgress }>>('/Models/downloads/active'),
   convert: (modelName: string, targetFormat: 'embedded' | 'external') =>
     api.post(`/Models/${modelName}/convert`, { targetFormat }),
   getConvertProgress: (modelName: string) => api.get(`/Models/${modelName}/convert/progress`),

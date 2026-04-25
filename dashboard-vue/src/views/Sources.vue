@@ -66,6 +66,9 @@
 
           <!-- Actions -->
           <n-space>
+            <n-button type="success" :loading="quickIndexing" @click="handleQuickIndexAll">
+              快速增量索引（全局）
+            </n-button>
             <n-popconfirm @positive-click="handleRebuildAll">
               <template #trigger>
                 <n-button type="primary" :loading="rebuilding">
@@ -135,6 +138,8 @@ const loadingIndex = ref(false)
 const rebuilding = ref(false)
 const cleaning = ref(false)
 const deletingAll = ref(false)
+const quickIndexing = ref(false)
+const sourceQuickIndexing = ref<Set<string>>(new Set())
 const indexSummary = ref<IndexSummary | null>(null)
 
 const newSource = ref({
@@ -188,7 +193,7 @@ const columns = [
   {
     title: '操作',
     key: 'actions',
-    width: 320,
+    width: 380,
     render: (row: SourceDetail) =>
       h(NSpace, { size: 'small' }, {
         default: () => [
@@ -204,6 +209,14 @@ const columns = [
             onClick: () => handleToggle(row)
           }, {
             default: () => row.enabled ? '停用' : '启用'
+          }),
+          h(NButton, {
+            size: 'small',
+            type: 'success',
+            loading: sourceQuickIndexing.value.has(row.name),
+            onClick: () => handleQuickIndexSource(row)
+          }, {
+            default: () => '增量索引'
           }),
           h(NButton, {
             size: 'small',
@@ -390,6 +403,34 @@ const handleDelete = async (source: SourceDetail) => {
     await loadSources()
   } catch (error) {
     message.error('删除失败')
+  }
+}
+
+const handleQuickIndexAll = async () => {
+  quickIndexing.value = true
+  try {
+    const response = await vectorIndexApi.startIndex({ force: false })
+    message.success(response.data.message || '增量索引任务已启动（跳过未变更文件）')
+    await loadVectorIndex()
+  } catch (error) {
+    message.error('启动增量索引失败')
+  } finally {
+    quickIndexing.value = false
+  }
+}
+
+const handleQuickIndexSource = async (source: SourceDetail) => {
+  sourceQuickIndexing.value.add(source.name)
+  sourceQuickIndexing.value = new Set(sourceQuickIndexing.value)
+  try {
+    await vectorIndexApi.startIndex({ sources: [source.name], force: false })
+    message.success(`${source.name} 增量索引已启动（跳过未变更文件）`)
+    await loadVectorIndex()
+  } catch (error) {
+    message.error(`${source.name} 增量索引启动失败`)
+  } finally {
+    sourceQuickIndexing.value.delete(source.name)
+    sourceQuickIndexing.value = new Set(sourceQuickIndexing.value)
   }
 }
 

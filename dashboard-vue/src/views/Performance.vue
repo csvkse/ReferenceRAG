@@ -61,6 +61,94 @@
     <n-tabs type="line" animated>
       <!-- Semantic Similarity Test -->
       <n-tab-pane name="semantic" tab="语义相似度测试">
+
+        <!-- 模型诊断卡片 -->
+        <n-card size="small" style="margin-bottom: 12px">
+          <template #header>
+            <n-space align="center" :size="8">
+              <span>模型诊断</span>
+              <n-tag v-if="probe" :type="probe.healthy ? 'success' : (probe.isSimulationMode ? 'error' : 'warning')" size="small">
+                {{ probe.isSimulationMode ? '⚠ 模拟模式' : (probe.healthy ? '✓ 正常' : '⚠ 异常') }}
+              </n-tag>
+              <n-tag v-else-if="probeLoading" type="default" size="small">检测中…</n-tag>
+            </n-space>
+          </template>
+          <template #header-extra>
+            <n-button text size="small" :loading="probeLoading" @click="runProbe">刷新</n-button>
+          </template>
+
+          <n-spin :show="probeLoading" style="min-height: 48px">
+            <div v-if="probe">
+              <!-- 模拟模式警告 -->
+              <n-alert v-if="probe.isSimulationMode" type="error" style="margin-bottom: 10px">
+                <template #header>模型未加载 — 正在使用随机向量</template>
+                当前嵌入服务运行在<strong>模拟模式</strong>，所有相似度均为随机值，测试结果无意义。
+                请在「模型管理」页切换到已下载的模型。
+              </n-alert>
+              <n-alert v-else-if="!probe.healthy && !probe.error" type="warning" style="margin-bottom: 10px">
+                <template #header>向量质量异常</template>
+                自相似度 {{ probe.selfSimilarity.toFixed(3) }} / 高相似对 {{ probe.highSimilarityActual.toFixed(3) }}（期望 &gt;0.4）/ 低相似对 {{ probe.lowSimilarityActual.toFixed(3) }}（期望 &lt;0.35）。
+                可能原因：ONNX 格式不兼容、模型未完整转换、或该模型的相似度量程天然偏低。
+              </n-alert>
+              <n-alert v-if="probe.error" type="error" style="margin-bottom: 10px">
+                探针失败：{{ probe.error }}
+              </n-alert>
+
+              <n-grid :cols="6" :x-gap="12">
+                <n-gi>
+                  <n-statistic label="模型">
+                    <template #default>
+                      <n-text style="font-size: 12px; word-break: break-all">{{ probe.modelName || '—' }}</n-text>
+                    </template>
+                  </n-statistic>
+                </n-gi>
+                <n-gi>
+                  <n-statistic label="维度" :value="probe.dimension" />
+                </n-gi>
+                <n-gi>
+                  <n-statistic label="自相似度">
+                    <template #default>
+                      <n-tag :type="probe.selfSimilarity > 0.99 ? 'success' : 'error'" size="small">
+                        {{ probe.selfSimilarity.toFixed(4) }}
+                      </n-tag>
+                    </template>
+                  </n-statistic>
+                </n-gi>
+                <n-gi>
+                  <n-statistic label="同义词对">
+                    <template #default>
+                      <n-tag :type="probe.highSimilarityActual >= 0.4 ? 'success' : 'warning'" size="small">
+                        {{ probe.highSimilarityActual.toFixed(3) }}
+                        <n-text depth="3" style="font-size: 10px"> / {{ probe.highSimilarityExpected.toFixed(2) }}</n-text>
+                      </n-tag>
+                    </template>
+                  </n-statistic>
+                </n-gi>
+                <n-gi>
+                  <n-statistic label="无关词对">
+                    <template #default>
+                      <n-tag :type="probe.lowSimilarityActual <= 0.35 ? 'success' : 'warning'" size="small">
+                        {{ probe.lowSimilarityActual.toFixed(3) }}
+                        <n-text depth="3" style="font-size: 10px"> / {{ probe.lowSimilarityExpected.toFixed(2) }}</n-text>
+                      </n-tag>
+                    </template>
+                  </n-statistic>
+                </n-gi>
+                <n-gi>
+                  <n-statistic label="向量采样（前8维）">
+                    <template #default>
+                      <n-text style="font-size: 10px; font-family: monospace; word-break: break-all">
+                        [{{ probe.vectorSample.map(v => v.toFixed(3)).join(', ') }}]
+                      </n-text>
+                    </template>
+                  </n-statistic>
+                </n-gi>
+              </n-grid>
+            </div>
+            <n-text v-else-if="!probeLoading" depth="3">点击「刷新」运行诊断</n-text>
+          </n-spin>
+        </n-card>
+
         <n-card>
           <n-space vertical>
             <n-text depth="3">测试模型的语义理解能力：同义词、反义词、多义词、跨语言、小数、特殊符号、非中英文等。中文测试 64 个用例（14 分类），英文测试 36 个用例（8 分类）。</n-text>
@@ -798,7 +886,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, h, computed } from 'vue'
+import { ref, h, computed, onMounted } from 'vue'
 import { NTag, NCode, NDivider, type DataTableColumns } from 'naive-ui'
 import { performanceApi, semanticTestApi, rerankTestApi } from '@/api'
 import type {
@@ -810,8 +898,28 @@ import type {
   MemoryTestResult,
   RerankTestResult,
   RerankDocumentResult,
-  RerankBenchmarkResult
+  RerankBenchmarkResult,
 } from '@/types/api'
+import type { ModelProbeResult } from '@/api'
+
+// ==================== Model Probe ====================
+
+const probe = ref<ModelProbeResult | null>(null)
+const probeLoading = ref(false)
+
+const runProbe = async () => {
+  probeLoading.value = true
+  try {
+    const res = await semanticTestApi.modelProbe()
+    probe.value = res.data
+  } catch (e) {
+    console.error('[ModelProbe]', e)
+  } finally {
+    probeLoading.value = false
+  }
+}
+
+onMounted(() => { runProbe() })
 
 // ==================== Semantic Test ====================
 
@@ -1194,7 +1302,7 @@ const runSemanticTest = async () => {
 
       semanticResult.value = {
         testType: 'comprehensive',
-        modelName: 'bge-small-zh-v1.5',
+        modelName: probe.value?.modelName ?? 'unknown',
         timestamp: new Date().toISOString(),
         candidates: allCandidates,
         meanAbsoluteError: totalDeviation / n,

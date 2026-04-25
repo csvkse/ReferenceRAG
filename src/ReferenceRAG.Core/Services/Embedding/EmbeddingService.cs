@@ -243,8 +243,9 @@ public class EmbeddingService : IEmbeddingService, IDisposable
 
             _simulationMode = false;
 
-            // 检测 ONNX 格式：存在 .data 文件为外部格式，否则为嵌入式
-            _isEmbeddedFormat = !File.Exists(Path.Combine(modelDir, "model.onnx.data"));
+            // 检测 ONNX 格式：存在 _data 文件为外部格式，否则为嵌入式
+            // ONNX Runtime 期望外部数据文件名为 model.onnx_data（下划线）
+            _isEmbeddedFormat = !File.Exists(Path.Combine(modelDir, "model.onnx_data"));
             var formatLabel = _isEmbeddedFormat ? "embedded" : "external";
             Console.WriteLine($"[EmbeddingService] ONNX 格式: {formatLabel}");
         }

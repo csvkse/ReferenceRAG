@@ -35,6 +35,63 @@ public class SemanticTestController : ControllerBase
     }
 
     /// <summary>
+    /// 模型健康诊断探针 —— 用 3 个固定文本对验证向量质量
+    /// </summary>
+    [HttpGet("model-probe")]
+    public async Task<ActionResult<ModelProbeResult>> ProbeModel()
+    {
+        var probe = new ModelProbeResult
+        {
+            ModelName          = _embeddingService.ModelName,
+            IsSimulationMode   = _embeddingService.IsSimulationMode,
+            Dimension          = _embeddingService.Dimension,
+            SupportsAsymmetric = _embeddingService.SupportsAsymmetricEncoding,
+            Timestamp          = DateTime.UtcNow
+        };
+
+        try
+        {
+            // 1. 自相似度（应 ≈ 1.0）
+            var v1 = await _embeddingService.EncodeAsync("机器学习是人工智能的子领域");
+            var v2 = await _embeddingService.EncodeAsync("机器学习是人工智能的子领域");
+            probe.SelfSimilarity = (float)MathHelper.CosineSimilarity(v1, v2);
+
+            // 2. 高相似对（期望 ≥ 0.5）
+            var qH = await _embeddingService.EncodeAsync("我喜欢吃苹果");
+            var tH = await _embeddingService.EncodeAsync("我爱吃苹果");
+            probe.HighSimilarityActual   = (float)MathHelper.CosineSimilarity(qH, tH);
+            probe.HighSimilarityExpected = 0.85f;
+
+            // 3. 低相似对（期望 ≤ 0.15）
+            var qL = await _embeddingService.EncodeAsync("今天天气很热");
+            var tL = await _embeddingService.EncodeAsync("如何做红烧肉");
+            probe.LowSimilarityActual   = (float)MathHelper.CosineSimilarity(qL, tL);
+            probe.LowSimilarityExpected = 0.10f;
+
+            // 向量采样（前 8 维，用于判断是否为随机值）
+            probe.VectorSample = v1.Take(8).Select(f => (double)f).ToArray();
+
+            // 健康判断：自相似≈1、高相似>0.4、低相似<0.5（高质量模型语义不相关句子通常 0.3-0.5）
+            probe.Healthy = !probe.IsSimulationMode
+                && probe.SelfSimilarity   > 0.990f
+                && probe.HighSimilarityActual > 0.40f
+                && probe.LowSimilarityActual  < 0.50f;
+
+            _logger.LogInformation(
+                "[ModelProbe] 模型={Model} 仿真={Sim} 维度={Dim} 自相似={Self:F3} 高相似={Hi:F3} 低相似={Lo:F3} 健康={Healthy}",
+                probe.ModelName, probe.IsSimulationMode, probe.Dimension,
+                probe.SelfSimilarity, probe.HighSimilarityActual, probe.LowSimilarityActual, probe.Healthy);
+        }
+        catch (Exception ex)
+        {
+            probe.Error = ex.Message;
+            _logger.LogError(ex, "[ModelProbe] 探针失败");
+        }
+
+        return Ok(probe);
+    }
+
+    /// <summary>
     /// 短文本语义相似度测试
     /// </summary>
     [HttpPost("short-text")]
@@ -42,10 +99,17 @@ public class SemanticTestController : ControllerBase
     {
         var result = new SemanticTestResult
         {
-            TestType = "short-text",
-            ModelName = request.ModelName ?? "bge-small-zh-v1.5",
+            TestType  = "short-text",
+            ModelName = _embeddingService.ModelName,
             Timestamp = DateTime.UtcNow
         };
+
+        _logger.LogDebug(
+            "[SemanticTest] short-text | 模型={Model} 仿真={Sim} 维度={Dim} | Query={Query}",
+            _embeddingService.ModelName,
+            _embeddingService.IsSimulationMode,
+            _embeddingService.Dimension,
+            request.Query.Length > 30 ? request.Query[..30] + "…" : request.Query);
 
         try
         {
@@ -54,12 +118,12 @@ public class SemanticTestController : ControllerBase
             // 分离编码：query 用 Query 模式，candidates 用 Document 模式（支持非对称编码模型）
             var queryVectors = await _embeddingService.EncodeBatchAsync(
                 new[] { request.Query }, EmbeddingMode.Query);
+            result.QueryEmbeddingMs = sw.ElapsedMilliseconds;  // 只计 query 编码耗时
             var queryVector = queryVectors[0];
 
             var candidateTexts = request.Candidates.Select(c => c.Text).ToArray();
             var candidateVectors = await _embeddingService.EncodeBatchAsync(
                 candidateTexts, EmbeddingMode.Document);
-            result.QueryEmbeddingMs = sw.ElapsedMilliseconds;
             result.QueryTokenCount = _tokenizer.CountTokens(request.Query);
 
             // 测试每个候选文本
@@ -397,8 +461,14 @@ public class SemanticTestController : ControllerBase
         var sumY2 = actual.Sum(y => y * y);
 
         var numerator = n * sumXY - sumX * sumY;
-        var denominator = Math.Sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
+        var varX = n * sumX2 - sumX * sumX;
+        var varY = n * sumY2 - sumY * sumY;
 
+        // 高精度模型（如 BGE-M3）可能导致所有相似度值近乎相等，方差趋近于 0
+        // 浮点精度误差会使 varX/varY 变为微小负数，导致 Math.Sqrt 返回 NaN
+        if (varX <= 0 || varY <= 0) return 0;
+
+        var denominator = Math.Sqrt(varX * varY);
         return denominator < 1e-10 ? 0 : numerator / denominator;
     }
 
@@ -709,13 +779,22 @@ public class TestRecordStore
         await SaveRecordsAsync();
     }
 
+    private static readonly System.Text.Json.JsonSerializerOptions _jsonOptions = new()
+    {
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = true,
+        // 允许 NaN/Infinity — 高质量模型（如 BGE-M3）的相似度分布集中时
+        // CalculateCorrelation 的浮点精度误差可能产生 NaN，避免序列化异常
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals
+    };
+
     private async Task LoadRecordsAsync()
     {
         var file = Path.Combine(_dataPath, "records.json");
         if (File.Exists(file))
         {
             var json = await File.ReadAllTextAsync(file);
-            var records = System.Text.Json.JsonSerializer.Deserialize<List<TestRecord>>(json);
+            var records = System.Text.Json.JsonSerializer.Deserialize<List<TestRecord>>(json, _jsonOptions);
             if (records != null)
             {
                 lock (_lock)
@@ -729,10 +808,7 @@ public class TestRecordStore
     private async Task SaveRecordsAsync()
     {
         var file = Path.Combine(_dataPath, "records.json");
-        var json = System.Text.Json.JsonSerializer.Serialize(_records, new System.Text.Json.JsonSerializerOptions
-        {
-            WriteIndented = true
-        });
+        var json = System.Text.Json.JsonSerializer.Serialize(_records, _jsonOptions);
         await File.WriteAllTextAsync(file, json);
     }
 }
@@ -773,4 +849,35 @@ public class TestTypeStatistics
     public string TestType { get; set; } = "";
     public int Count { get; set; }
     public double AvgEmbeddingMs { get; set; }
+}
+
+/// <summary>
+/// 模型健康诊断结果
+/// </summary>
+public class ModelProbeResult
+{
+    public string ModelName { get; set; } = "";
+    public bool IsSimulationMode { get; set; }
+    public int Dimension { get; set; }
+    public bool SupportsAsymmetric { get; set; }
+
+    /// <summary>同一文本编两次的余弦相似度，健康模型应 ≈ 1.0</summary>
+    public float SelfSimilarity { get; set; }
+
+    /// <summary>同义词对实际相似度</summary>
+    public float HighSimilarityActual { get; set; }
+    public float HighSimilarityExpected { get; set; }
+
+    /// <summary>无关词对实际相似度</summary>
+    public float LowSimilarityActual { get; set; }
+    public float LowSimilarityExpected { get; set; }
+
+    /// <summary>向量采样（前 8 维），用于判断是否为随机值</summary>
+    public double[] VectorSample { get; set; } = [];
+
+    /// <summary>综合判断：模型是否正常工作</summary>
+    public bool Healthy { get; set; }
+
+    public string? Error { get; set; }
+    public DateTime Timestamp { get; set; }
 }

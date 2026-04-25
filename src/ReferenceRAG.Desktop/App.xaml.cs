@@ -19,7 +19,6 @@ public partial class App : Application
     private Task? _hostTask;
     private MainWindow? _mainWindow;
 
-    // 托盘菜单中需要动态更新 IsChecked 的项
     private MenuItem? _autoStartMenuItem;
     private MenuItem? _startMinimizedMenuItem;
 
@@ -27,7 +26,6 @@ public partial class App : Application
 
     private async void Application_Startup(object sender, StartupEventArgs e)
     {
-        // 全局异常处理：捕获 Dispatcher 未处理异常，写日志后报错
         DispatcherUnhandledException += (_, ex) =>
         {
             WriteCrashLog(ex.Exception);
@@ -46,9 +44,13 @@ public partial class App : Application
         catch (Exception ex)
         {
             WriteCrashLog(ex);
-            MessageBox.Show($"启动失败：{ex.Message}\n\n详情见 crash.log",
-                "ReferenceRAG 启动失败", MessageBoxButton.OK, MessageBoxImage.Error);
-            Shutdown(1);
+            _mainWindow?.ShowError(ex.Message);
+            if (_mainWindow == null)
+            {
+                MessageBox.Show($"启动失败：{ex.Message}\n\n详情见 crash.log",
+                    "ReferenceRAG 启动失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                Shutdown(1);
+            }
         }
     }
 
@@ -67,15 +69,23 @@ public partial class App : Application
             return;
         }
 
-        // 构建托盘菜单（在服务启动前先显示图标）
         BuildTrayContextMenu();
 
         ServicePort = ResolvePort();
         Console.WriteLine($"[Desktop] 分配端口: {ServicePort}");
 
+        // 提前创建窗口：让用户立即看到加载界面，托盘"打开"也能响应
+        bool startMinimized = e.Args.Contains("--minimized") || StartupManager.GetStartMinimized();
+        _mainWindow = new MainWindow(ServicePort);
+        if (!startMinimized)
+            _mainWindow.Show();
+
+        // 后端初始化（BM25 + Kestrel），期间窗口显示加载状态
+        _mainWindow.UpdateLoadingStatus("正在初始化搜索索引...");
         _webApp = HostBootstrapper.Build(ServicePort);
         await HostBootstrapper.InitializeSearchAsync(_webApp);
 
+        _mainWindow.UpdateLoadingStatus("正在启动服务...");
         _hostTask = Task.Run(() => _webApp.RunAsync(_cts.Token));
 
         try
@@ -84,22 +94,13 @@ public partial class App : Application
         }
         catch (TimeoutException)
         {
-            MessageBox.Show(
-                $"服务启动超时（端口 {ServicePort}），请重试或检查防火墙设置。",
-                "启动失败",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            _mainWindow.ShowError($"服务启动超时（端口 {ServicePort}）。\n请重试或检查防火墙设置。");
             _cts.Cancel();
-            Shutdown();
             return;
         }
 
-        _mainWindow = new MainWindow(ServicePort);
-
-        // --minimized 参数由注册表自启动传入，或用户开启了"最小化启动"设置
-        bool startMinimized = e.Args.Contains("--minimized") || StartupManager.GetStartMinimized();
-        if (!startMinimized)
-            _mainWindow.Show();
+        // 后端就绪，通知窗口导航到应用
+        await _mainWindow.OnBackendReady();
     }
 
     private static void WriteCrashLog(Exception? ex)
@@ -118,11 +119,13 @@ public partial class App : Application
         _cts.Cancel();
         if (_hostTask != null)
         {
-            try { await _hostTask.WaitAsync(TimeSpan.FromSeconds(5)); }
+            try { await _hostTask.WaitAsync(TimeSpan.FromSeconds(3)); }
             catch (OperationCanceledException) { }
             catch (TimeoutException) { }
         }
-        _webApp?.DisposeAsync().AsTask().Wait(2000);
+
+        // 不阻塞等待 DisposeAsync —— 进程即将退出，OS 会释放资源
+        _ = _webApp?.DisposeAsync();
 
         var trayIcon = TryFindResource("TrayIcon") as TaskbarIcon;
         trayIcon?.Dispose();
@@ -211,7 +214,6 @@ public partial class App : Application
             .AddJsonFile("appsettings.json", optional: true)
             .Build();
 
-        // 与独立服务使用同一端口配置，因为两者不会同时运行
         int configured = config.GetValue("ReferenceRAG:Service:port", 7897);
 
         if (PortHelper.IsPortFree(configured))

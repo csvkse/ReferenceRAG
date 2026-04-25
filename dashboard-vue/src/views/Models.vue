@@ -1146,12 +1146,25 @@ const stopProgressPolling = () => {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   loadModelsPath()
   loadModels()
   loadCurrentModel()
   loadRerankModels()
   loadCurrentRerankModel()
+
+  // 恢复页面导航前正在进行的下载（前端内存被清空，从后端重建）
+  try {
+    const res = await modelsApi.getActiveDownloads()
+    if (res.data.length > 0) {
+      for (const item of res.data) {
+        downloadProgress.value.set(item.key, item.progress)
+      }
+      startProgressPolling()
+    }
+  } catch {
+    // 忽略恢复失败，不影响正常使用
+  }
 
   // 监听模型路径变化事件（来自 Settings.vue）
   const handleStorageChange = (e: StorageEvent) => {

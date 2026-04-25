@@ -30,9 +30,6 @@
               <n-form-item label="批处理大小">
                 <n-input-number v-model:value="config.embedding.batchSize" :min="1" :max="256" style="width: 100%" />
               </n-form-item>
-              <n-form-item label="模型存储路径">
-                <n-input v-model:value="config.modelsRootPath" placeholder="默认: models" />
-              </n-form-item>
             </n-form>
           </n-card>
         </n-tab-pane>
@@ -222,16 +219,21 @@
             <n-text depth="3">重排模型配置未加载</n-text>
           </n-card>
         </n-tab-pane>
-      </n-tabs>
 
-      <!-- Data Path -->
-      <n-card title="数据路径" style="margin-top: 16px">
-        <n-form label-placement="left" label-width="140">
-          <n-form-item label="数据存储路径">
-            <n-input v-model:value="config.dataPath" placeholder="data" />
-          </n-form-item>
-        </n-form>
-      </n-card>
+        <!-- Data Path -->
+        <n-tab-pane name="data" tab="数据路径">
+          <n-card>
+            <n-form label-placement="left" label-width="140">
+              <n-form-item label="数据存储路径">
+                <n-input v-model:value="config.dataPath" placeholder="data" />
+              </n-form-item>
+              <n-form-item label="模型存储路径">
+                <n-input v-model:value="config.modelsRootPath" placeholder="默认: models" />
+              </n-form-item>
+            </n-form>
+          </n-card>
+        </n-tab-pane>
+      </n-tabs>
 
       <!-- Save Button -->
       <n-space style="margin-top: 16px; justify-content: flex-end">

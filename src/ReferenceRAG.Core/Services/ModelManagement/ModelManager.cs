@@ -649,61 +649,39 @@ public class ModelManager : IModelManager, IDisposable
 
     private void InitializeRegistry()
     {
-        // 加载预定义模型
         foreach (var model in PredefinedModels)
-        {
             _modelRegistry[model.Name] = model;
-        }
 
-        // 从配置文件检查当前模型路径（先执行，确保_currentModel和_currentRerankModel被设置）
-        CheckConfiguredModel();
-
-        // 扫描本地模型目录（后执行，更新IsDownloaded等状态）
+        // 先扫描目录，填充 IsDownloaded + LocalPath
         ScanLocalModels();
+
+        // 再根据配置设置 _currentModel / _currentRerankModel（此时 LocalPath 已正确）
+        CheckConfiguredModel();
     }
 
     /// <summary>
-    /// 检查配置文件中的模型路径，标记已下载的模型
+    /// 根据配置设置当前模型（在 ScanLocalModels 之后调用，LocalPath 已由扫描正确填充）
     /// </summary>
     private void CheckConfiguredModel()
     {
         try
         {
             var config = LoadConfigAsync().GetAwaiter().GetResult();
-            
-            // 检查 Embedding 模型（使用 ModelName + _modelsPath 拼接，而非完整路径）
-            if (!string.IsNullOrEmpty(config.Embedding?.ModelName))
-            {
-                var modelName = config.Embedding.ModelName;
-                var modelDir = Path.Combine(_modelsPath, modelName);
-                var onnxPath = Path.Combine(modelDir, "model.onnx");
 
-                if (File.Exists(onnxPath))
-                {
-                    if (_modelRegistry.TryGetValue(modelName, out var model))
-                    {
-                        model.IsDownloaded = true;
-                        model.LocalPath = modelDir;
-                        _currentModel = model;
-                        Console.WriteLine($"[ModelManager] 从配置加载当前模型: {modelName}, 路径: {modelDir}");
-                    }
-                }
+            if (!string.IsNullOrEmpty(config.Embedding?.ModelName) &&
+                _modelRegistry.TryGetValue(config.Embedding.ModelName, out var embModel) &&
+                embModel.IsDownloaded)
+            {
+                _currentModel = embModel;
+                Console.WriteLine($"[ModelManager] 当前嵌入模型: {embModel.Name}, 路径: {embModel.LocalPath}");
             }
-            
-            // 检查 Rerank 模型（使用 CurrentModel + _modelsPath 拼接）
-            if (!string.IsNullOrEmpty(config.Rerank?.CurrentModel))
-            {
-                var rerankModelName = config.Rerank.CurrentModel;
-                var rerankModelDir = Path.Combine(_modelsPath, rerankModelName);
-                var rerankOnnxPath = Path.Combine(rerankModelDir, "model.onnx");
 
-                if (File.Exists(rerankOnnxPath) && _modelRegistry.TryGetValue(rerankModelName, out var rerankModel))
-                {
-                    rerankModel.IsDownloaded = true;
-                    rerankModel.LocalPath = rerankModelDir;
-                    _currentRerankModel = rerankModel;
-                    Console.WriteLine($"[ModelManager] 从配置加载当前重排模型: {rerankModelName}, 路径: {rerankModelDir}");
-                }
+            if (!string.IsNullOrEmpty(config.Rerank?.CurrentModel) &&
+                _modelRegistry.TryGetValue(config.Rerank.CurrentModel, out var rerankModel) &&
+                rerankModel.IsDownloaded)
+            {
+                _currentRerankModel = rerankModel;
+                Console.WriteLine($"[ModelManager] 当前重排模型: {rerankModel.Name}, 路径: {rerankModel.LocalPath}");
             }
         }
         catch (Exception ex)
@@ -734,18 +712,22 @@ public class ModelManager : IModelManager, IDisposable
             model.LocalPath = null;
         }
 
-        // 扫描 Embedding 子目录
+        // 扫描子目录结构（新结构）
         var embeddingPath = Path.Combine(_modelsPath, "Embedding");
         if (Directory.Exists(embeddingPath))
-        {
             ScanModelDirectory(embeddingPath, "embedding");
-        }
 
-        // 扫描 Reranker 子目录
         var rerankerPath = Path.Combine(_modelsPath, "Reranker");
         if (Directory.Exists(rerankerPath))
-        {
             ScanModelDirectory(rerankerPath, "reranker");
+
+        // 兼容扫描：扁平结构（旧版下载直接放在 _modelsPath/modelName/）
+        // 仅处理尚未被子目录扫描命中的已注册模型
+        foreach (var model in _modelRegistry.Values.Where(m => !m.IsDownloaded))
+        {
+            var flatDir = Path.Combine(_modelsPath, model.Name);
+            if (Directory.Exists(flatDir))
+                ScanModelDirectory(_modelsPath, model.ModelType, new[] { model.Name });
         }
     }
 
@@ -968,8 +950,10 @@ public class ModelManager : IModelManager, IDisposable
             return (true, null);
         }
 
-        var modelDir = Path.Combine(_modelsPath, modelName);
-        
+        // 新下载写入子目录（Embedding/ 或 Reranker/），与 ScanLocalModels 保持一致
+        var subDir = model.ModelType == "reranker" ? "Reranker" : "Embedding";
+        var modelDir = Path.Combine(_modelsPath, subDir, modelName);
+
         try
         {
             Console.WriteLine($"[ModelManager] 开始下载模型: {model.DisplayName}");
@@ -1006,11 +990,12 @@ public class ModelManager : IModelManager, IDisposable
                     var srcDir = Path.GetDirectoryName(srcOnnx)!;
                     Console.WriteLine($"[ModelManager] 在子目录中找到 ONNX 文件: {srcOnnx}");
                     File.Copy(srcOnnx, onnxPath, true);
-                    // 如果有配套的 .data 文件也一并复制
-                    var srcData = Path.Combine(srcDir, "model.onnx.data");
+                    // 如果有配套的 _data 文件也一并复制
+                    // ONNX Runtime 期望外部数据文件名为 model.onnx_data（下划线）
+                    var srcData = Path.Combine(srcDir, "model.onnx_data");
                     if (File.Exists(srcData))
                     {
-                        File.Copy(srcData, Path.Combine(modelDir, "model.onnx.data"), true);
+                        File.Copy(srcData, Path.Combine(modelDir, "model.onnx_data"), true);
                     }
                     // 如果有 1_Pooling 配置也复制（sentence-transformers 模型需要）
                     var srcPoolingDir = Path.Combine(Path.GetDirectoryName(srcDir)!, "1_Pooling");
@@ -1118,7 +1103,8 @@ public class ModelManager : IModelManager, IDisposable
             return "unknown";
 
         var onnxPath = Path.Combine(modelDir, "model.onnx");
-        var onnxDataPath = Path.Combine(modelDir, "model.onnx.data");
+        // ONNX Runtime 期望外部数据文件名为 model.onnx_data（下划线）
+        var onnxDataPath = Path.Combine(modelDir, "model.onnx_data");
 
         // 首先检查根目录的 ONNX 文件
         if (!File.Exists(onnxPath))
@@ -1129,7 +1115,7 @@ public class ModelManager : IModelManager, IDisposable
             {
                 onnxPath = subOnnxFiles[0];
                 // 对于 subdirectory 的情况，data 文件通常也在同一目录
-                onnxDataPath = Path.Combine(Path.GetDirectoryName(onnxPath)!, "model.onnx.data");
+                onnxDataPath = Path.Combine(Path.GetDirectoryName(onnxPath)!, "model.onnx_data");
             }
             else
             {
@@ -1137,7 +1123,7 @@ public class ModelManager : IModelManager, IDisposable
             }
         }
 
-        // 如果存在 .onnx.data 文件，则为外部数据格式
+        // 如果存在 _data 文件，则为外部数据格式
         if (File.Exists(onnxDataPath))
             return "external";
 
@@ -1240,9 +1226,10 @@ public class ModelManager : IModelManager, IDisposable
         try
         {
             var onnxPath = Path.Combine(model.LocalPath, "model.onnx");
-            var onnxDataPath = Path.Combine(model.LocalPath, "model.onnx.data");
+            // ONNX Runtime 期望外部数据文件名为 model.onnx_data（下划线）
+            var onnxDataPath = Path.Combine(model.LocalPath, "model.onnx_data");
             var backupPath = Path.Combine(model.LocalPath, "model.onnx.bak");
-            var backupDataPath = Path.Combine(model.LocalPath, "model.onnx.data.bak");
+            var backupDataPath = Path.Combine(model.LocalPath, "model.onnx_data.bak");
 
             // 备份原始文件
             progress?.Report(5);
@@ -1685,6 +1672,7 @@ public class ModelManager : IModelManager, IDisposable
                 config.Rerank = new RerankConfig();
             }
             config.Rerank.CurrentModel = modelName;
+            config.Rerank.ModelPath = Path.Combine(model.LocalPath ?? "", "model.onnx");
             await SaveConfigAsync(config);
 
             Console.WriteLine($"[ModelManager] 已切换重排模型: {model.DisplayName}");

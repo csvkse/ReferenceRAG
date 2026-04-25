@@ -9,6 +9,7 @@ public partial class MainWindow : Window
 {
     private readonly int _port;
     private bool _webView2Initialized = false;
+    private bool _backendReady = false;
 
     public MainWindow(int port)
     {
@@ -17,8 +18,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Loaded 事件：窗口可见后初始化 WebView2。
-    /// 必须在 Loaded（而非构造函数）中调用——WebView2 需要控件可见。
+    /// Loaded 事件：初始化 WebView2 环境。
+    /// 初始化完成后若后端已就绪则立即导航，否则等待 <see cref="OnBackendReady"/> 触发。
     /// </summary>
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
@@ -33,21 +34,56 @@ public partial class MainWindow : Window
 
             await webView.EnsureCoreWebView2Async(env);
 
-            // 每次启动清除 HTTP 磁盘缓存，确保加载最新前端资源
-            await webView.CoreWebView2.Profile.ClearBrowsingDataAsync(
-                CoreWebView2BrowsingDataKinds.DiskCache);
-
-            webView.CoreWebView2.Navigate($"http://localhost:{_port}/");
+            if (_backendReady)
+                await ShowAppAsync();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
-                $"WebView2 初始化失败：{ex.Message}\n\n请确认 WebView2 Runtime 已安装。",
-                "WebView2 错误",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            ShowError($"WebView2 初始化失败：{ex.Message}\n\n请确认 WebView2 Runtime 已安装。");
         }
     }
+
+    /// <summary>
+    /// 后端就绪时由 App.xaml.cs 调用（UI 线程）。
+    /// 若 WebView2 已初始化则立即导航，否则等待 Loaded 事件中检测标志后导航。
+    /// </summary>
+    public async Task OnBackendReady()
+    {
+        _backendReady = true;
+
+        if (_webView2Initialized && webView.CoreWebView2 != null)
+            await ShowAppAsync();
+        // else: MainWindow_Loaded 完成后会检查 _backendReady 并调用 ShowAppAsync
+    }
+
+    /// <summary>
+    /// 清除缓存、隐藏加载面板、显示 WebView2 并导航到本地服务。
+    /// </summary>
+    private async Task ShowAppAsync()
+    {
+        await webView.CoreWebView2.Profile.ClearBrowsingDataAsync(
+            CoreWebView2BrowsingDataKinds.DiskCache);
+
+        loadingPanel.Visibility = Visibility.Collapsed;
+        webView.Visibility = Visibility.Visible;
+        webView.CoreWebView2.Navigate($"http://localhost:{_port}/");
+    }
+
+    /// <summary>
+    /// 更新加载状态文字（可从任意线程调用）。
+    /// </summary>
+    public void UpdateLoadingStatus(string message) =>
+        Dispatcher.Invoke(() => loadingText.Text = message);
+
+    /// <summary>
+    /// 在加载面板显示错误信息并隐藏进度条（不弹窗，保持窗口可见）。
+    /// </summary>
+    public void ShowError(string message) =>
+        Dispatcher.Invoke(() =>
+        {
+            loadingText.Text = $"启动失败：{message}";
+            loadingProgress.Visibility = Visibility.Collapsed;
+        });
 
     /// <summary>
     /// 最小化按钮：隐藏窗口并从任务栏移除。
@@ -78,7 +114,11 @@ public partial class MainWindow : Window
     /// </summary>
     public void RestoreFromTray()
     {
-        Show();
+        if (IsVisible && WindowState == WindowState.Normal)
+            return; // 已显示且正常状态，无需操作
+
+        if (!IsVisible)
+            Show();
         WindowState = WindowState.Normal;
         ShowInTaskbar = true;
         Activate();

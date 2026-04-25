@@ -307,6 +307,19 @@ public class ModelsController : ControllerBase
     }
 
     /// <summary>
+    /// 获取所有活跃下载任务（含 rerank_ / convert_ 前缀 key，用于前端页面恢复）
+    /// </summary>
+    [HttpGet("downloads/active")]
+    public ActionResult<List<ActiveDownloadItem>> GetActiveDownloads()
+    {
+        var items = _downloadProgress
+            .Where(kvp => kvp.Value.Status == "downloading")
+            .Select(kvp => new ActiveDownloadItem { Key = kvp.Key, Progress = kvp.Value })
+            .ToList();
+        return Ok(items);
+    }
+
+    /// <summary>
     /// 取消下载
     /// </summary>
     [HttpDelete("download/{modelName}")]
@@ -613,22 +626,29 @@ public async Task<ActionResult> SwitchRerankModel([FromBody] SwitchModelRequest 
         return StatusCode(500, new { error = "重排模型切换失败" });
     }
 
-    // 重新加载 Rerank 服务的模型
+    // 重新加载 Rerank 服务的模型（优先用 LocalPath，兼容子目录与扁平结构）
     if (_rerankService != null)
     {
-        var config = _configManager.Load();
-        var modelsPath = config.ModelsRootPath;
-        var onnxPath = Path.Combine(modelsPath, request.ModelName, "model.onnx");
-        if (!System.IO.File.Exists(onnxPath))
+        var localDir = model.LocalPath;
+        string onnxPath;
+        if (!string.IsNullOrEmpty(localDir))
         {
-            onnxPath = Path.Combine(modelsPath, request.ModelName, "onnx", "model.onnx");
+            onnxPath = Path.Combine(localDir, "model.onnx");
+            if (!System.IO.File.Exists(onnxPath))
+                onnxPath = Path.Combine(localDir, "onnx", "model.onnx");
         }
-        
+        else
+        {
+            var config = _configManager.Load();
+            var modelsPath = config.ModelsRootPath;
+            onnxPath = Path.Combine(modelsPath, "Reranker", request.ModelName, "model.onnx");
+            if (!System.IO.File.Exists(onnxPath))
+                onnxPath = Path.Combine(modelsPath, "Reranker", request.ModelName, "onnx", "model.onnx");
+        }
+
         var reloadSuccess = await _rerankService.ReloadModelAsync(onnxPath, request.ModelName);
         if (!reloadSuccess)
-        {
             _logger.LogWarning("Rerank 服务重新加载模型失败: {ModelName}", request.ModelName);
-        }
     }
 
     _logger.LogInformation("重排模型切换成功: {ModelName}", request.ModelName);
@@ -830,4 +850,13 @@ public class AddCustomModelRequest
     /// 显示名称（可选）
     /// </summary>
     public string? DisplayName { get; set; }
+}
+
+public class ActiveDownloadItem
+{
+    /// <summary>
+    /// 进度字典 key（含 rerank_ / convert_ 前缀），前端用于重建状态 Map
+    /// </summary>
+    public string Key { get; set; } = string.Empty;
+    public DownloadProgress Progress { get; set; } = new();
 }
