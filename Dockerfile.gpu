@@ -39,15 +39,24 @@ RUN dotnet publish -c Release -o /app/publish \
 # ============================================================
 # Stage 3: Runtime (GPU / CUDA)
 # ============================================================
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-cuda12.6-rockchip AS runtime
+# Use NVIDIA CUDA base image for GPU support
+FROM nvidia/cuda:12.6.0-runtime-ubuntu24.04 AS runtime
 WORKDIR /app
 
-# Install runtime dependencies
+# Install .NET runtime and dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     unzip \
     libgomp1 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Install .NET ASP.NET Core runtime
+RUN wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh \
+    && chmod +x dotnet-install.sh \
+    && ./dotnet-install.sh --channel 10.0 --aspnet-runtime --install-dir /usr/share/dotnet \
+    && rm dotnet-install.sh \
+    && ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
 
 # Create directories and user
 RUN mkdir -p /app/data /app/models /app/logs \
