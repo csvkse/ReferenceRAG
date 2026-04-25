@@ -1,6 +1,7 @@
 using Microsoft.ML.OnnxRuntime.Tensors;
 using ReferenceRAG.Core.Services.Tokenizers;
 using Xunit;
+using static Xunit.Skip;
 
 namespace ReferenceRAG.Tests;
 
@@ -9,19 +10,26 @@ namespace ReferenceRAG.Tests;
 /// </summary>
 public class TokenizeSingleDebugTests
 {
-    [Fact]
+    private static readonly string? TokenizerPath = ResolveTokenizerPath();
+
+    private static string? ResolveTokenizerPath()
+    {
+        var paths = new[]
+        {
+            "E:/LinuxWork/Obsidian/resource/data/models/bge-small-zh-v1.5/tokenizer.json",
+            Path.Combine(Environment.CurrentDirectory, "..", "..", "..", "..",
+                "resource", "data", "models", "bge-small-zh-v1.5", "tokenizer.json")
+        };
+
+        return paths.FirstOrDefault(File.Exists);
+    }
+
+    [SkippableFact]
     public void Debug_EnglishWordPiece_Positions()
     {
-        var tokenizerPath = "E:/LinuxWork/Obsidian/resource/data/models/bge-small-zh-v1.5/tokenizer.json";
-        if (!File.Exists(tokenizerPath))
-        {
-            // 尝试相对路径
-            tokenizerPath = Path.Combine(
-                Environment.CurrentDirectory, "..", "..", "..", "..",
-                "resource", "data", "models", "bge-small-zh-v1.5", "tokenizer.json");
-        }
+        Skip.If(TokenizerPath == null, "Tokenizer 文件不存在，跳过测试");
 
-        var tokenizer = new BertTokenizer(tokenizerPath);
+        var tokenizer = new BertTokenizer(TokenizerPath!);
 
         var text = "how to improve programming skills";
         var result = tokenizer.Tokenize(new List<string> { text }, 512);
@@ -52,14 +60,12 @@ public class TokenizeSingleDebugTests
             $"Mismatch for \"{text}\":\n  expected: [{string.Join(", ", expected)}]\n  actual:   [{output}]\n  len: expected={expected.Count}, actual={activeIds.Count}");
     }
 
-    [Fact]
+    [SkippableFact]
     public void Debug_SingleWord_Skills()
     {
-        var tokenizerPath = "E:/LinuxWork/Obsidian/resource/data/models/bge-small-zh-v1.5/tokenizer.json";
-        if (!File.Exists(tokenizerPath))
-            tokenizerPath = Path.Combine(Environment.CurrentDirectory, "..", "..", "..", "..", "resource", "data", "models", "bge-small-zh-v1.5", "tokenizer.json");
+        Skip.If(TokenizerPath == null, "Tokenizer 文件不存在，跳过测试");
 
-        var tokenizer = new BertTokenizer(tokenizerPath);
+        var tokenizer = new BertTokenizer(TokenizerPath!);
 
         var text = "skills";
         var result = tokenizer.Tokenize(new List<string> { text }, 512);

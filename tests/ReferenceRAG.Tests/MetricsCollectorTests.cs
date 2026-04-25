@@ -59,14 +59,24 @@ public class MetricsCollectorTests
     public async Task CollectIndexMetricsAsync_WithNoFiles_ReturnsZeroCounts()
     {
         var mockVectorStore = new Mock<IVectorStore>();
-        mockVectorStore.Setup(x => x.GetAllFilesAsync(default))
-            .ReturnsAsync(new List<FileRecord>());
+        // Mock StreamAllFilesAsync which is what CollectIndexMetricsAsync actually uses
+        mockVectorStore.Setup(x => x.StreamAllFilesAsync(default))
+            .Returns(AsyncEnumerable.Empty<FileRecord>());
         var collector = new MetricsCollector(mockVectorStore.Object);
 
         var metrics = await collector.CollectIndexMetricsAsync();
 
         Assert.Equal(0, metrics.TotalFiles);
         Assert.Equal(0, metrics.TotalChunks);
+    }
+
+    private static class AsyncEnumerable
+    {
+        public static async IAsyncEnumerable<T> Empty<T>()
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
     }
 
     [Fact]

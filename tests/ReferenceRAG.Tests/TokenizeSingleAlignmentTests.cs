@@ -2,6 +2,7 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 using ReferenceRAG.Core.Services.Tokenizers;
 using Xunit;
 using System.Text.Json;
+using static Xunit.Skip;
 
 namespace ReferenceRAG.Tests;
 
@@ -11,18 +12,23 @@ namespace ReferenceRAG.Tests;
 /// </summary>
 public class TokenizeSingleAlignmentTests
 {
-    private readonly BertTokenizer _tokenizer;
-    private readonly List<TokenizeSingleCase> _referenceCases;
+    private static readonly string? TokenizerPath = ResolveTokenizerPath();
+    private static readonly List<TokenizeSingleCase> ReferenceCases = LoadReferenceCases();
 
-    public TokenizeSingleAlignmentTests()
+    private static string? ResolveTokenizerPath()
     {
-        var tokenizerPath = Path.Combine(
-            Environment.CurrentDirectory, "..", "..", "..", "..",
-            "resource", "data", "models", "bge-small-zh-v1.5", "tokenizer.json");
-        if (!File.Exists(tokenizerPath))
-            tokenizerPath = "E:/LinuxWork/Obsidian/resource/data/models/bge-small-zh-v1.5/tokenizer.json";
-        _tokenizer = new BertTokenizer(tokenizerPath);
+        var paths = new[]
+        {
+            Path.Combine(Environment.CurrentDirectory, "..", "..", "..", "..",
+                "resource", "data", "models", "bge-small-zh-v1.5", "tokenizer.json"),
+            "E:/LinuxWork/Obsidian/resource/data/models/bge-small-zh-v1.5/tokenizer.json"
+        };
 
+        return paths.FirstOrDefault(File.Exists);
+    }
+
+    private static List<TokenizeSingleCase> LoadReferenceCases()
+    {
         var referencePath = Path.Combine(
             Environment.CurrentDirectory, "..", "..", "..", "..",
             "tests", "tokenize_single_reference.json");
@@ -32,27 +38,28 @@ public class TokenizeSingleAlignmentTests
         if (File.Exists(referencePath))
         {
             var json = File.ReadAllText(referencePath);
-            _referenceCases = JsonSerializer.Deserialize<List<TokenizeSingleCase>>(json,
+            return JsonSerializer.Deserialize<List<TokenizeSingleCase>>(json,
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
         }
-        else
-        {
-            _referenceCases = new();
-        }
+
+        return new();
     }
 
-    [Fact]
+    [SkippableFact]
     public void TokenizeSingle_MatchesHuggingFace()
     {
-        if (_referenceCases.Count == 0) return;
+        Skip.If(TokenizerPath == null, "Tokenizer 文件不存在，跳过测试");
+        Skip.If(ReferenceCases.Count == 0, "参考用例文件不存在，跳过测试");
+
+        var tokenizer = new BertTokenizer(TokenizerPath!);
 
         var mismatches = new List<string>();
         int matched = 0;
 
-        foreach (var tc in _referenceCases)
+        foreach (var tc in ReferenceCases)
         {
             // 调用 Tokenize 方法（内部使用 TokenizeSingle）
-            var result = _tokenizer.Tokenize(new List<string> { tc.Text }, 512);
+            var result = tokenizer.Tokenize(new List<string> { tc.Text }, 512);
             var inputIds = result.InputIds;
 
             // 提取第一个 batch 的 IDs
@@ -91,7 +98,7 @@ public class TokenizeSingleAlignmentTests
 
         if (mismatches.Count > 0)
         {
-            Assert.Fail($"Matched {matched}/{_referenceCases.Count}, {mismatches.Count} mismatched:\n" +
+            Assert.Fail($"Matched {matched}/{ReferenceCases.Count}, {mismatches.Count} mismatched:\n" +
                          string.Join("\n", mismatches));
         }
     }
