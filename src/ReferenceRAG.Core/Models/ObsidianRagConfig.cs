@@ -297,6 +297,16 @@ public class ServiceConfig
     public bool AllowNetworkAccess { get; set; } = false;
 
     /// <summary>
+    /// 绑定的主机地址（可选，优先于 AllowNetworkAccess）
+    /// </summary>
+    public string? Host { get; set; }
+
+    /// <summary>
+    /// 实际绑定的主机地址
+    /// </summary>
+    public string EffectiveHost => Host ?? (AllowNetworkAccess ? "0.0.0.0" : "localhost");
+
+    /// <summary>
     /// 是否启用 CORS
     /// </summary>
     public bool EnableCors { get; set; } = true;
