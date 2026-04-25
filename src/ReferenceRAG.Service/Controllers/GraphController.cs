@@ -49,7 +49,13 @@ public class GraphController : ControllerBase
 
             try
             {
-                var files = await _vectorStore.GetAllFilesAsync();
+                var files = (await _vectorStore.GetAllFilesAsync()).ToList();
+
+                // 建立 filename→fullNodeId 映射（解析 Obsidian wiki-link 短文件名）
+                var filenameMap = GraphIndexingService.BuildFilenameMap(files);
+                Func<string, string?> resolver = shortId =>
+                    filenameMap.TryGetValue(shortId, out var full) ? full : null;
+
                 foreach (var file in files)
                 {
                     try
@@ -57,7 +63,7 @@ public class GraphController : ControllerBase
                         if (!System.IO.File.Exists(file.Path)) continue;
                         var content = await System.IO.File.ReadAllTextAsync(file.Path);
                         var chunks = await _vectorStore.GetChunksByFileAsync(file.Id);
-                        await _graphIndexingService.UpdateGraphAsync(file, content, chunks);
+                        await _graphIndexingService.UpdateGraphAsync(file, content, chunks, default, resolver);
                         rebuilt++;
                     }
                     catch (Exception ex)

@@ -16,8 +16,15 @@ public class GraphIndexingService
 
     /// <summary>
     /// 根据文件记录和内容更新图节点及边。
+    /// resolveLink：将 wiki-link 短文件名（如 "foo.md"）解析为完整路径节点 ID，
+    ///   Obsidian 使用 filename-based resolution，需要由调用方提供映射。
     /// </summary>
-    public async Task UpdateGraphAsync(FileRecord file, string markdownContent, IEnumerable<ChunkRecord> chunks, CancellationToken ct = default)
+    public async Task UpdateGraphAsync(
+        FileRecord file,
+        string markdownContent,
+        IEnumerable<ChunkRecord> chunks,
+        CancellationToken ct = default,
+        Func<string, string?>? resolveLink = null)
     {
         var nodeId = NormalizeNodeId(file.Path);
 
@@ -40,11 +47,15 @@ public class GraphIndexingService
 
         foreach (var (target, type, lineNum) in links)
         {
-            var targetId = NormalizeNodeId(target);
+            // 优先用 resolveLink 把短文件名解析成完整路径节点 ID；
+            // 解析失败时保留短文件名（外链/未索引文件），确保不丢边
+            var rawId = NormalizeNodeId(target);
+            var resolvedId = resolveLink?.Invoke(rawId) ?? rawId;
+
             edges.Add(new GraphEdge
             {
                 FromId = nodeId,
-                ToId = targetId,
+                ToId = resolvedId,
                 Type = type,
                 LineNumber = lineNum
             });
@@ -52,6 +63,35 @@ public class GraphIndexingService
 
         if (edges.Count > 0)
             await _graphStore.UpsertEdgesAsync(edges, ct);
+    }
+
+    /// <summary>
+    /// 从已索引的文件列表构建 filename→fullNodeId 映射表。
+    /// 同名文件（路径不同）记为模糊，不加入映射（保持短名不解析）。
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> BuildFilenameMap(IEnumerable<FileRecord> files)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var ambiguous = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var file in files)
+        {
+            var filename = Path.GetFileName(file.Path);   // "foo.md"
+            if (ambiguous.Contains(filename)) continue;
+
+            var nodeId = NormalizeNodeId(file.Path);
+            if (map.ContainsKey(filename))
+            {
+                map.Remove(filename);
+                ambiguous.Add(filename);
+            }
+            else
+            {
+                map[filename] = nodeId;
+            }
+        }
+
+        return map;
     }
 
     /// <summary>

@@ -180,6 +180,10 @@ public class IndexService : IHostedService
                 }
 
                 // ── Phase 3: CPU 并行 ── BM25 + 知识图谱后处理
+                // 建立 filename→fullNodeId 映射，用于 wiki-link 解析
+                var filenameMap = GraphIndexingService.BuildFilenameMap(
+                    contexts.Select(c => c!.FileRecord));
+
                 const int maxFinalizeParallelism = 4;
                 using var finSemaphore = new SemaphoreSlim(maxFinalizeParallelism);
 
@@ -189,7 +193,7 @@ public class IndexService : IHostedService
                     await finSemaphore.WaitAsync(cts.Token);
                     try
                     {
-                        await FinalizeFileAsync(ctx!, _bm25Store, cts.Token);
+                        await FinalizeFileAsync(ctx!, _bm25Store, filenameMap, cts.Token);
                         var count = Interlocked.Increment(ref processedCount);
                         await IndexHub.BroadcastIndexProgress(_hubContext, new IndexProgressEvent
                         {
@@ -402,6 +406,7 @@ public class IndexService : IHostedService
     private async Task FinalizeFileAsync(
         FileProcessContext ctx,
         IBM25Store? bm25Store,
+        IReadOnlyDictionary<string, string> filenameMap,
         CancellationToken cancellationToken)
     {
         if (bm25Store != null && ctx.OldChunkIds.Count > 0)
@@ -415,7 +420,11 @@ public class IndexService : IHostedService
 
         var graphIndexing = _serviceProvider.GetService<GraphIndexingService>();
         if (graphIndexing != null)
-            await graphIndexing.UpdateGraphAsync(ctx.FileRecord, ctx.Content, ctx.Chunks);
+        {
+            Func<string, string?> resolver = shortId =>
+                filenameMap.TryGetValue(shortId, out var full) ? full : null;
+            await graphIndexing.UpdateGraphAsync(ctx.FileRecord, ctx.Content, ctx.Chunks, cancellationToken, resolver);
+        }
     }
 
     private static string ComputeHash(string content)
