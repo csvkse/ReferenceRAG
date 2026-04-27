@@ -1,214 +1,224 @@
 # ReferenceRAG
 
-> 本地优先、高召回率、低延迟的知识库 RAG 系统 - **支持多源文件夹，不限于 Obsidian**
+ReferenceRAG 是一个面向本地知识库的 RAG 系统，目标是把本地文件夹、笔记库和代码文档接入统一的检索增强流程。
 
-基于 ASP.NET Core + ONNX Runtime + SQLite 向量存储构建，集成 MCP 工具集，支持 Claude/CherryStudio 等多种 AI 客户端。
-
----
-
-## 🎯 核心痛点与解决
-
-AI 大模型无法直接使用本地笔记库作为外挂知识库进行检索增强。
-
-**ReferenceRAG 将本地笔记库索引为向量，支持多种检索方式和模型切换，让 AI 在对话中实时查询本地知识。**
+当前仓库已经包含后端服务、桌面端壳、Vue 仪表盘、存储层、核心检索逻辑、测试工程和部署脚本，整体更接近一个可运行的完整项目，而不是单纯的概念验证。
 
 ---
 
-## ⭐ 特色功能
+## 当前状态
 
-| 功能 | 说明 |
-|------|------|
-| **限定查询** | 支持限定笔记源（Sources）和文件夹路径，精准控制检索范围 |
-| **混合检索** | 向量查询 + BM25 全文检索 + Rerank 重排，多种组合方式 |
-| **模型切换** | 一键切换 Embedding/Reranker 模型，支持本地 ONNX 加速 |
-| **多源支持** | 同时索引 Obsidian/Markdown/代码文档等多个文件夹 |
-| **自动后台同步** | 监控文件夹变化，自动后台执行向量索引，无需手动触发 |
+仓库当前具备以下内容：
 
-![向量搜索](images/preview/页面-搜索1.png)
+- `ReferenceRAG.Service`：ASP.NET Core 后端服务，提供 REST API、MCP 工具、Swagger、SignalR 和索引服务
+- `ReferenceRAG.Desktop`：WPF + WebView2 桌面壳，用来启动和托管本地 Web 界面
+- `dashboard-vue`：Vue 3 + Vite 前端仪表盘，作为服务的 Web UI
+- `ReferenceRAG.Core`：核心检索、索引、重排、文本处理和模型管理逻辑
+- `ReferenceRAG.Storage`：SQLite 向量存储、BM25 以及知识图谱相关存储实现
+- `tests`：单元测试、集成测试和性能测试
+- `src/ReferenceRAG.Service/scripts`：Windows 管理脚本
 
----
+当前配置和代码说明：
 
-> **模型下载依赖**：
-> 模型来源为 HuggingFace，下载模型需自行解决网络问题（如使用代理）
-> ```bash
-> pip install torch transformers optimum onnx numpy
-> ```
-
-> **优先推荐**：部分模型（如 `Multilingual E5 Small`）提供原生 ONNX 支持，无需手动转换，下载后可直接使用，可大幅降低配置复杂度。
+- 默认本地服务端口由 `ReferenceRAG:Service:port` 控制，仓库内生产配置默认是 `7897`
+- 桌面端已支持发布包分发，推荐直接下载发布包使用
+- 桌面端默认打开本地服务地址，使用同一套服务端配置
+- 仪表盘前端由后端服务托管，发布时会被打包进服务输出目录
 
 ---
 
-## 🖼️ 功能预览
+## 目录结构
 
-> 📸 完整截图预览：**[PREVIEW.md](PREVIEW.md)**
+```text
+ReferenceRAG/
+├── src/
+│   ├── ReferenceRAG.Core/        # 索引、检索、模型、文本处理等核心逻辑
+│   ├── ReferenceRAG.Storage/     # SQLite 向量库、BM25、图谱存储
+│   ├── ReferenceRAG.Service/     # Web API、MCP、SignalR、后台任务、部署脚本
+│   └── ReferenceRAG.Desktop/     # WPF 桌面端壳
+├── dashboard-vue/                # Vue 3 前端仪表盘
+├── tests/                        # 单元测试、集成测试、性能测试
+├── config/                       # 容器运行时配置
+├── data/                         # 本地索引与运行时数据
+├── docs/                         # 项目文档
+└── skill/                        # 面向 Claude Code 的使用技能
+```
 
 ---
 
-## 🔌 使用方式
+## 使用方式
 
-| 方案 | 客户端 | 说明 |
-|------|--------|------|
-| 方案一 | Obsidian + claudian | Obsidian 内直接 RAG 问答 |
-| 方案二 | CherryStudio + MCP | CherryStudio 通过 MCP 调用 |
-| 方案三 | Claude Code + Skills | Claude Code 对话中查询 |
-| 方案四 | 直接调用 API | curl 直接查询（无需配置） |
+ReferenceRAG 目前支持四种常见接入方式：
 
-详细配置请查看 **[PREVIEW.md](PREVIEW.md)**
+| 方式 | 适用场景 | 说明 |
+|------|----------|------|
+| Obsidian + claudian | 在笔记软件内直接问答 | 通过本地服务接入知识库 |
+| CherryStudio + MCP | 支持 MCP 的客户端 | 通过 MCP 工具调用检索能力 |
+| Claude Code + Skills | 在 Claude Code 中查询 | 使用仓库内 `skill/ReferenceRAG` |
+| 直接调用 API | 脚本、调试、集成测试 | 适合自动化调用 |
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
-### 环境要求
+### 1. 推荐方式：使用已发布的桌面端
 
-- .NET 10.0 Runtime（下载 Release 版本无需安装 SDK）
-- SQLite（自动包含）
-- CUDA 12.x（可选，GPU 加速）
+使用步骤：
 
-### 下载 Release（推荐）
+1. 打开发布页，下载 `ReferenceRAG-win-x64.zip`
+2. 解压后运行 `ReferenceRAG.Desktop.exe`
+3. 首次启动时，确保系统已安装 WebView2 Runtime
+4. 如果你想修改默认端口或数据路径，可以编辑程序目录下的 `appsettings.json`
 
-直接下载 Release 程序包，双击即可运行：
+桌面端特点：
 
-- **Windows**: 下载 `ReferenceRAG-win-x64.zip`，解压后运行
+- 启动后会自动拉起本地服务并打开界面
+- 关闭窗口不会直接退出，默认最小化到托盘
+- 支持单实例运行
+- 支持托盘菜单中的「打开」「退出」「开机自启动」「最小化启动」
 
-Release 下载地址：[GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)
+默认访问地址通常是：
 
-### 常用配置参数
+```text
+http://localhost:7897
+```
 
-| 配置项 | 路径 | 默认值 | 说明 |
-|--------|------|--------|------|
-| **程序端口** | `ReferenceRAG.service.port` | `7897` | 服务监听端口 |
-| **API Key** | `ReferenceRAG.service.apiKey` | 空 | 接口认证密钥，为空则不启用 |
-| **向量数据目录** | `ReferenceRAG.dataPath` | - | SQLite 向量库存储路径 |
-| **模型存放目录** | `ReferenceRAG.modelsRootPath` | - | Embedding/Reranker 模型文件根目录 |
+如果默认端口被占用，桌面端会自动回退到一个可用端口，并在启动日志中输出实际端口。
 
-### Windows 脚本管理
+### 2. 本地开发运行
 
-项目提供 Windows 批处理脚本，方便管理服务：
+如果你需要修改代码或本地调试，再使用源码方式启动：
 
-```batch
+```bash
+dotnet run --project src/ReferenceRAG.Service
+dotnet run --project src/ReferenceRAG.Desktop
+```
+
+前提：
+
+- .NET 10 SDK
+- Node.js 和 npm
+- SQLite 运行环境由项目自动处理
+
+### 3. Windows 脚本管理
+
+如果你更习惯使用脚本，可以进入服务脚本目录：
+
+```bat
 cd src/ReferenceRAG.Service/scripts
 menu.bat
 ```
 
-> **构建说明**：构建（Build）需要安装 .NET 10.0 SDK，只能通过源码编译
+常用功能包括：
 
-**menu.bat 交互式菜单**：
-| 选项 | 功能 |
-|------|------|
-| 1 | 构建 (Build) |
-| 2 | 安装服务 (Install) |
-| 3 | 启动服务 (Start) |
-| 4 | 停止服务 (Stop) |
-| 5 | 查看状态 (Status) |
-| 6 | 卸载服务 (Uninstall) |
-| 7 | 控制台运行 (Run as Console) |
-| 8 | 打开浏览器 |
+- 构建
+- 安装服务
+- 启动 / 停止 / 卸载服务
+- 查看状态
+- 以控制台方式运行
+- 打开浏览器
+- 查看日志
 
-### Docker 部署
+## 核心能力
 
-```bash
-# 构建并启动
-docker-compose up -d
+### 检索
 
-# 查看日志
-docker-compose logs -f
-```
+- 向量检索
+- BM25 全文检索
+- 混合检索
+- 可选重排
+- 可选上下文扩展
 
-> **配置持久化**：容器内配置文件挂载到宿主 `config/` 目录，配置修改后重启容器不丢失。
-> GPU 版本使用 `Dockerfile.gpu` 构建即可。
+### 索引
 
-### 编译运行
+- 自动后台索引
+- 启动时同步
+- 文件变更监控
+- Markdown 分块
+- 知识图谱更新
 
-```bash
-git clone https://github.com/your-repo/ReferenceRAG.git
-cd ReferenceRAG
-dotnet run --project src/ReferenceRAG.Service
-```
+### 模型管理
 
-服务启动后访问 `http://localhost:7897`
+- Embedding 模型管理
+- Reranker 模型管理
+- ONNX 推理
+- CUDA 加速支持
 
-### 快速查询
+### 服务能力
 
-```bash
-curl -X POST http://localhost:7897/api/ai/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "如何在 C# 中使用异步编程？"}'
-```
+- REST API
+- MCP 工具集
+- Swagger 文档
+- SignalR 实时通知
+- Windows Service 适配
 
 ---
 
-## 📖 API 概览
+## 主要 API
 
 | 接口 | 说明 |
 |------|------|
-| `POST /api/ai/query` | 知识库语义查询 |
-| `POST /api/ai/drill-down` | 深入查询（上下文扩展） |
-| `POST /api/index/all` | 触发全量索引 |
+| `POST /api/ai/query` | 语义查询 / 混合查询 |
+| `POST /api/ai/drill-down` | 深入查询 |
+| `POST /api/index/all` | 全量索引 |
 | `GET /api/index/status` | 索引状态 |
 | `GET /api/models` | 模型列表 |
 | `POST /api/models/switch` | 切换模型 |
+| `GET /api/system/health` | 健康检查 |
+| `GET /api/system/status` | 系统状态 |
 
-详细 API 文档请查看 **[PREVIEW.md](PREVIEW.md)**
+Swagger 在开发环境通常可直接访问：
 
----
-
-## 🌐 前端仪表板
-
-启动服务后访问 `http://localhost:7897`，支持：
-
-- 系统概览与实时指标
-- 交互式搜索与结果展示
-- 数据源管理与索引控制
-- 模型下载与切换
-- 性能监控与告警
-
----
-
-## 🔗 相关项目
-
-| 项目 | 说明 |
-|------|------|
-| [claudian](https://github.com/YishenTu/claudian) | Obsidian RAG 插件 |
-| [sqlite-vec](https://github.com/asg017/sqlite-vec) | SQLite 向量扩展 |
-| [ONNX Runtime](https://onnxruntime.ai/) | 跨平台 ML 推理加速器 |
-
----
-
-## ❓ 常见问题（FAQ）
-
-### 模型下载/转换失败，提示 `ModuleNotFoundError: No module named 'transformers'`
-
-这是因为 Python 环境缺少必要的依赖包。运行以下命令安装：
-
-```bash
-pip install torch transformers optimum onnx numpy
+```text
+http://localhost:7897/swagger
 ```
 
-> 模型来源为 **HuggingFace**，如遇网络问题，请使用国内镜像：
-> ```bash
-> pip install torch transformers optimum onnx numpy -i https://pypi.tuna.tsinghua.edu.cn/simple
-> ```
+---
 
-### ONNX 转换失败，提示 `cublasLt64_12.dll is missing`
+## 配置要点
 
-这是 CUDA cuBLAS 库未加入系统 PATH 导致的。找到 `cublasLt64_12.dll` 所在目录（通常在 `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin\`），将其添加到系统环境变量 `Path` 中，然后**重启命令行/服务**。
+| 配置项 | 说明 |
+|--------|------|
+| `ReferenceRAG:Service:port` | 服务监听端口 |
+| `ReferenceRAG:Service:apiKey` | 接口鉴权密钥，留空则关闭鉴权 |
+| `ReferenceRAG:dataPath` | SQLite 与运行数据目录 |
+| `ReferenceRAG:modelsRootPath` | 模型文件根目录 |
+| `Cors:AllowedOrigins` | 允许跨域的前端地址 |
 
-### 模型下载缓慢或失败
+仓库内与运行相关的配置文件主要有：
 
-推荐使用 `huggingface_hub` 下载模型到本地，再指定本地路径加载：
-
-```bash
-pip install huggingface_hub
-huggingface-cli download BAAI/bge-small-zh-v1.5 --local-dir "模型本地目录"
-```
-
-### 前端跨域（CORS）报错
-
-确保后端 `appsettings.json` 中的 `Cors.AllowedOrigins` 包含前端地址（如 `http://localhost:3000`），重启服务后生效。
+- `src/ReferenceRAG.Service/appsettings.Development.Exsample.json`
+- 桌面端发布目录下的 `appsettings.json`
 
 ---
 
-## 📄 许可证
+## 数据与存储
 
-MIT License - 详见 [LICENSE](LICENSE) 文件
+默认运行时会在数据目录下维护这些内容：
+
+- `vectors.db`：向量、BM25 和图谱相关数据
+- `query_stats.db`：查询统计
+- 模型文件目录
+- 索引日志和运行日志
+
+这意味着本项目不是纯无状态服务，迁移环境时要一起带上 `data/` 和 `models/`。
+
+---
+
+## 相关文档
+
+- [项目介绍](docs/introduction.md)
+- [索引架构](docs/index-architecture.md)
+- [启动预览](PREVIEW.md)
+
+---
+
+## 说明
+
+仓库当前 README 以“当前项目状态”为主，后续如果新增模块，建议同步更新：
+
+- 启动方式
+- 默认端口
+- 配置文件位置
+- API 列表
+- 部署脚本说明
