@@ -242,11 +242,12 @@ const columns = [
           }, {
             default: () => '重建索引'
           }),
-          h(NPopconfirm, {
-            onPositiveClick: () => handleDelete(row)
+          h(NButton, {
+            size: 'small',
+            type: 'error',
+            onClick: () => handleDelete(row)
           }, {
-            trigger: () => h(NButton, { size: 'small', type: 'error' }, { default: () => '删除' }),
-            default: () => '确定要删除此源吗？'
+            default: () => '删除'
           })
         ]
       })
@@ -414,14 +415,32 @@ const handleReindex = (source: SourceDetail) => {
   })
 }
 
-const handleDelete = async (source: SourceDetail) => {
-  try {
-    await sourcesApi.delete(source.name)
-    message.success('源已删除')
-    await loadSources()
-  } catch (error) {
-    message.error('删除失败')
-  }
+const handleDelete = (source: SourceDetail) => {
+  dialog.warning({
+    title: `删除源 "${source.name}"`,
+    content: '删除后无法恢复配置。\n选择是否同时清除该源的全部索引数据（chunks / 向量 / BM25 / 图谱）。',
+    positiveText: '删除配置 + 索引数据',
+    negativeText: '仅删除配置',
+    onPositiveClick: async () => {
+      try {
+        await sourcesApi.delete(source.name, true)
+        message.success(`"${source.name}" 及其索引数据已全部删除`)
+        await loadSources()
+        await loadVectorIndex()
+      } catch {
+        message.error('删除失败')
+      }
+    },
+    onNegativeClick: async () => {
+      try {
+        await sourcesApi.delete(source.name, false)
+        message.success(`"${source.name}" 配置已删除（索引数据保留）`)
+        await loadSources()
+      } catch {
+        message.error('删除失败')
+      }
+    }
+  })
 }
 
 const handleQuickIndexAll = async () => {

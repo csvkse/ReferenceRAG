@@ -480,6 +480,55 @@ public class VectorIndexController : ControllerBase
     }
 
     /// <summary>
+    /// 清空所有索引数据（files + chunks + 向量 + BM25 + 图谱）。
+    /// 用于源配置已全部删除但 DB 数据残留的场景。
+    /// </summary>
+    [HttpDelete("all-data")]
+    public async Task<ActionResult> DeleteAllData()
+    {
+        _logger.LogWarning("清空全部索引数据（files/chunks/vectors/BM25/graph）");
+
+        var config = _configManager.Load();
+        var existingSourceNames = config.Sources.Select(s => s.Name).ToHashSet();
+
+        // 找出 DB 中不在当前 sources 配置里的 source 名（孤立 source）
+        var allFiles = await _vectorStore.GetAllFilesAsync();
+        var dbSources = allFiles
+            .Select(f => f.Source)
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Distinct()
+            .ToList();
+
+        var orphanSources = dbSources.Where(s => !existingSourceNames.Contains(s)).ToList();
+
+        var deleted = 0;
+        foreach (var source in orphanSources)
+        {
+            await _pipeline.DeleteSourceAsync(source);
+            deleted++;
+            _logger.LogInformation("已清除孤立源数据: {Source}", source);
+        }
+
+        // 兜底：清除仍属于现有 sources 但用户想一并清空的数据
+        // （若调用此接口说明用户明确要清空全部）
+        foreach (var source in existingSourceNames)
+        {
+            await _pipeline.DeleteSourceAsync(source);
+        }
+
+        // 清空 BM25 + 图谱残留
+        await _bm25Store.ClearIndexAsync();
+        await _graphStore.ClearAllAsync();
+
+        return Ok(new
+        {
+            message = $"已清空全部索引数据（处理 {orphanSources.Count + existingSourceNames.Count} 个源）",
+            orphanSources,
+            clearedSources = existingSourceNames.ToList()
+        });
+    }
+
+    /// <summary>
     /// 清理孤立的向量索引（模型已不存在的索引）
     /// </summary>
     [HttpPost("cleanup")]
