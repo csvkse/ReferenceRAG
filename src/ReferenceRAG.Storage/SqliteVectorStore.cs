@@ -1555,6 +1555,21 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         return totalDeleted;
     }
 
+    public async Task<Dictionary<string, int>> GetChunkCountsBySourceAsync(CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            SELECT f.source, COUNT(c.id)
+            FROM files f
+            LEFT JOIN chunks c ON c.file_id = f.id
+            GROUP BY f.source";
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            result[reader.GetString(0)] = reader.GetInt32(1);
+        return result;
+    }
+
     /// <summary>
     /// 更新模型统计信息
     /// </summary>

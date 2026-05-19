@@ -39,10 +39,13 @@ public class SourcesController : ControllerBase
         var config = _configManager.Load();
         var files = await _vectorStore.GetAllFilesAsync();
         var fileList = files.ToList();
+        // 从 chunks 表实时统计，反映向量删除/重建后的真实状态
+        var chunkCounts = await _vectorStore.GetChunkCountsBySourceAsync();
 
         var sources = config.Sources.Select(s =>
         {
             var sourceFiles = fileList.Where(f => f.Source == s.Name).ToList();
+            chunkCounts.TryGetValue(s.Name, out var realChunkCount);
             return new SourceDetail
             {
                 Name = s.Name,
@@ -52,7 +55,7 @@ public class SourcesController : ControllerBase
                 Recursive = s.Recursive,
                 FilePatterns = s.FilePatterns,
                 FileCount = sourceFiles.Count,
-                ChunkCount = sourceFiles.Sum(f => f.ChunkCount),
+                ChunkCount = realChunkCount,
                 LastIndexed = sourceFiles.Max(f => f.ModifiedAt)
             };
         }).ToList();

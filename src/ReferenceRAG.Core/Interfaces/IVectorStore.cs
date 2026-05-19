@@ -188,6 +188,11 @@ public interface IVectorStore
     /// </summary>
     Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 从 chunks 表实时统计各 source 的分块数（key=source名, value=chunk数）
+    /// </summary>
+    Task<Dictionary<string, int>> GetChunkCountsBySourceAsync(CancellationToken cancellationToken = default);
+
 }
 
 /// <summary>
