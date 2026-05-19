@@ -68,7 +68,8 @@ public class VectorIndexController : ControllerBase
         var job = await _indexService.StartIndexAsync(new IndexRequest
         {
             Sources = sources,
-            Force = request?.Force ?? false
+            Force = request?.Force ?? false,
+            VectorOnly = request?.VectorOnly ?? false
         });
 
         return Accepted(new IndexJobResponse
@@ -675,6 +676,11 @@ public class IndexJobRequest
     /// 是否强制重新索引（忽略内容哈希检测）
     /// </summary>
     public bool Force { get; set; }
+
+    /// <summary>
+    /// 仅重建向量（跳过分块/BM25/图谱），用于补全缺失向量或切换嵌入模型后重推
+    /// </summary>
+    public bool VectorOnly { get; set; }
 }
 
 /// <summary>
