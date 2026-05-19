@@ -472,18 +472,23 @@ public class VectorIndexController : ControllerBase
     {
         _logger.LogInformation("清理孤立的向量索引");
 
-        // 获取当前可用的模型列表
         var existingModels = new List<string> { _embeddingService.ModelName };
 
-        var deletedCount = await _vectorStore.DeleteOrphanedVectorsAsync(existingModels);
+        // 1. 删除整模型级孤儿（模型已移除的向量表）
+        var modelDeleted = await _vectorStore.DeleteOrphanedVectorsAsync(existingModels);
 
-        _logger.LogInformation("已清理 {Count} 条孤立向量", deletedCount);
+        // 2. 删除 chunk 级孤儿（chunk_id 不在 chunks 表的向量行）
+        var chunkDeleted = await _vectorStore.CleanupOrphanChunkVectorsAsync();
+
+        var totalDeleted = modelDeleted + chunkDeleted;
+        _logger.LogInformation("已清理 {Total} 条孤立向量（模型级: {M}, chunk级: {C}）",
+            totalDeleted, modelDeleted, chunkDeleted);
 
         return Ok(new CleanupResult
         {
-            DeletedCount = deletedCount,
-            Message = deletedCount > 0
-                ? $"已清理 {deletedCount} 条孤立向量"
+            DeletedCount = totalDeleted,
+            Message = totalDeleted > 0
+                ? $"已清理 {totalDeleted} 条孤立向量（模型级: {modelDeleted}, chunk级: {chunkDeleted}）"
                 : "没有发现孤立向量"
         });
     }

@@ -24,6 +24,9 @@ public class IndexService : IHostedService
 
     private readonly ConcurrentDictionary<string, IndexJob> _activeJobs = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _jobCancellationTokens = new();
+    // 正在处理的文件路径集合：防止多 Job 并发处理同一文件导致向量重复
+    private readonly ConcurrentDictionary<string, byte> _fileInProgress =
+        new(StringComparer.OrdinalIgnoreCase);
 
     // 已完成任务记录（最多保留20条）
     private readonly ConcurrentQueue<IndexJob> _completedJobs = new();
@@ -127,6 +130,11 @@ public class IndexService : IHostedService
                     allFiles.AddRange(files);
                 }
 
+                // 去重：防止 sources 路径重叠导致同一文件出现多次
+                allFiles = allFiles
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
                 job.TotalFiles = allFiles.Count;
 
                 // 更新开始事件的总文件数
@@ -149,6 +157,8 @@ public class IndexService : IHostedService
                 var prepTasks = allFiles.Select(async file =>
                 {
                     if (cts.Token.IsCancellationRequested) return null;
+                    // 跨 Job 文件级互斥：若另一 Job 正在处理同一文件则跳过，避免向量重复
+                    if (!_fileInProgress.TryAdd(file, 0)) return null;
                     await prepSemaphore.WaitAsync(cts.Token);
                     try
                     {
@@ -162,7 +172,11 @@ public class IndexService : IHostedService
                         _logger.LogWarning(ex, "Failed to prepare file: {File}", file);
                         return null;
                     }
-                    finally { prepSemaphore.Release(); }
+                    finally
+                    {
+                        prepSemaphore.Release();
+                        _fileInProgress.TryRemove(file, out _);
+                    }
                 }).ToList();
 
                 var prepResults = await Task.WhenAll(prepTasks);
