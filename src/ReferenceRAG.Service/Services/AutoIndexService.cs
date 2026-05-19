@@ -20,6 +20,7 @@ public class AutoIndexService : IHostedService, IDisposable
     private readonly ConfigManager _configManager;
     private readonly IBM25Store _bm25Store;
     private readonly GraphIndexingService? _graphIndexing;
+    private readonly IndexCleaner _indexCleaner;
     private readonly ILogger<AutoIndexService>? _logger;
     private readonly Queue<FileChangeEventArgs> _indexQueue;
     private readonly Timer _processTimer;
@@ -36,6 +37,7 @@ public class AutoIndexService : IHostedService, IDisposable
         ContentHashDetector hashDetector,
         ConfigManager configManager,
         IBM25Store bm25Store,
+        IndexCleaner indexCleaner,
         GraphIndexingService? graphIndexing = null,
         ILogger<AutoIndexService>? logger = null)
     {
@@ -46,6 +48,7 @@ public class AutoIndexService : IHostedService, IDisposable
         _hashDetector = hashDetector;
         _configManager = configManager;
         _bm25Store = bm25Store;
+        _indexCleaner = indexCleaner;
         _graphIndexing = graphIndexing;
         _logger = logger;
         _indexQueue = new Queue<FileChangeEventArgs>();
@@ -145,16 +148,12 @@ public class AutoIndexService : IHostedService, IDisposable
         {
             if (change.ChangeType == ChangeType.Deleted)
             {
-                // 删除索引
                 var file = await _vectorStore.GetFileByPathAsync(change.FilePath);
                 if (file != null)
                 {
-                    await _vectorStore.DeleteFileAsync(file.Id);
+                    await _indexCleaner.DeleteFileAsync(file.Id, change.FilePath);
                     _logger?.LogInformation("已删除索引: {FileName}", Path.GetFileName(change.FilePath));
                 }
-                // 删除图节点
-                if (_graphIndexing != null)
-                    await _graphIndexing.RemoveAsync(change.FilePath);
             }
             else
             {

@@ -310,6 +310,7 @@ builder.Services.AddSingleton<HybridSearchService>(sp =>
 // 注册索引服务（后台服务）
 builder.Services.AddSingleton<IndexService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<IndexService>());
+builder.Services.AddSingleton<IndexCleaner>();
 
 // 注册文件监控和自动索引服务
 builder.Services.AddSingleton<IFileMonitorService>(sp =>

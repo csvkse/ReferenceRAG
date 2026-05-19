@@ -14,6 +14,7 @@ public class StartupSyncService : IHostedService
     private readonly IVectorStore _vectorStore;
     private readonly ConfigManager _configManager;
     private readonly IndexService _indexService;
+    private readonly IndexCleaner _indexCleaner;
     private readonly ILogger<StartupSyncService> _logger;
 
     // 分批处理常量
@@ -39,11 +40,13 @@ public class StartupSyncService : IHostedService
         IVectorStore vectorStore,
         ConfigManager configManager,
         IndexService indexService,
+        IndexCleaner indexCleaner,
         ILogger<StartupSyncService> logger)
     {
         _vectorStore = vectorStore;
         _configManager = configManager;
         _indexService = indexService;
+        _indexCleaner = indexCleaner;
         _logger = logger;
     }
 
@@ -243,7 +246,7 @@ public class StartupSyncService : IHostedService
 
             try
             {
-                await _vectorStore.DeleteFileAsync(file.Id, cancellationToken);
+                await _indexCleaner.DeleteFileAsync(file.Id, file.Path, cancellationToken);
                 result.OrphanedSourceFiles.Add(file.Path);
                 processedCount++;
 
@@ -314,7 +317,7 @@ public class StartupSyncService : IHostedService
                     continue;
                 }
 
-                await _vectorStore.DeleteFileAsync(fileRecord.Id, cancellationToken);
+                await _indexCleaner.DeleteFileAsync(fileRecord.Id, fileRecord.Path, cancellationToken);
                 result.DeletedFiles.Add(filePath);
 
                 _logger.LogDebug("已删除文件索引: {FilePath}", filePath);

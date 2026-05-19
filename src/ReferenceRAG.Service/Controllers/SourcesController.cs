@@ -15,15 +15,18 @@ public class SourcesController : ControllerBase
 {
     private readonly ConfigManager _configManager;
     private readonly IVectorStore _vectorStore;
+    private readonly IndexCleaner _indexCleaner;
     private readonly ILogger<SourcesController> _logger;
 
     public SourcesController(
         ConfigManager configManager,
         IVectorStore vectorStore,
+        IndexCleaner indexCleaner,
         ILogger<SourcesController> logger)
     {
         _configManager = configManager;
         _vectorStore = vectorStore;
+        _indexCleaner = indexCleaner;
         _logger = logger;
     }
 
@@ -294,8 +297,7 @@ public class SourcesController : ControllerBase
 
         if (deleteData)
         {
-            // 删除相关的向量数据
-            await _vectorStore.DeleteBySourceAsync(name);
+            await _indexCleaner.DeleteBySourceAsync(name);
         }
 
         return NoContent();
