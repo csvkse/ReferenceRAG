@@ -270,6 +270,42 @@ public class Fts5BM25Store : IBM25Store, IDisposable
 
     #endregion
 
+    /// <inheritdoc />
+    public async Task<int> CleanupOrphanDocumentsAsync(CancellationToken cancellationToken = default)
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            var orphanIds = new List<string>();
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = $"SELECT id FROM {FtsTableName} WHERE id NOT IN (SELECT id FROM chunks)";
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                    orphanIds.Add(reader.GetString(0));
+            }
+            if (orphanIds.Count == 0) return 0;
+
+            using var tx = _connection.BeginTransaction();
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = $"DELETE FROM {FtsTableName} WHERE id = @id";
+                var param = cmd.Parameters.Add("@id", SqliteType.Text);
+                foreach (var id in orphanIds)
+                {
+                    param.Value = id;
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+                tx.Commit();
+            }
+            catch { tx.Rollback(); throw; }
+            return orphanIds.Count;
+        }
+        finally { _lock.Release(); }
+    }
+
     #region 分词方法
 
     /// <summary>

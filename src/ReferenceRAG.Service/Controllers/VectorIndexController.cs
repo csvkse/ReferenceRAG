@@ -17,6 +17,9 @@ public class VectorIndexController : ControllerBase
     private readonly IEmbeddingService _embeddingService;
     private readonly IndexService _indexService;
     private readonly ConfigManager _configManager;
+    private readonly IBM25Store _bm25Store;
+    private readonly IGraphStore _graphStore;
+    private readonly IndexCleaner _indexCleaner;
     private readonly ILogger<VectorIndexController> _logger;
 
     public VectorIndexController(
@@ -24,12 +27,18 @@ public class VectorIndexController : ControllerBase
         IEmbeddingService embeddingService,
         IndexService indexService,
         ConfigManager configManager,
+        IBM25Store bm25Store,
+        IGraphStore graphStore,
+        IndexCleaner indexCleaner,
         ILogger<VectorIndexController> logger)
     {
         _vectorStore = vectorStore;
         _embeddingService = embeddingService;
         _indexService = indexService;
         _configManager = configManager;
+        _bm25Store = bm25Store;
+        _graphStore = graphStore;
+        _indexCleaner = indexCleaner;
         _logger = logger;
     }
 
@@ -241,10 +250,12 @@ public class VectorIndexController : ControllerBase
         _logger.LogInformation("开始使用模型 '{Model}' (维度: {Dimension}) 重建向量索引", 
             currentModel, currentDimension);
 
-        // 先删除当前模型的旧向量（如果存在）
+        // 先删除当前模型的旧向量（如果存在）并清空 BM25 / 图谱
         if (request?.DeleteExisting ?? true)
         {
             await _vectorStore.DeleteVectorsByModelAsync(currentModel);
+            await _bm25Store.ClearIndexAsync();
+            await _graphStore.ClearAllAsync();
         }
 
         // 获取所有源
@@ -293,8 +304,11 @@ public class VectorIndexController : ControllerBase
         var currentModel = _embeddingService.ModelName;
         var currentDimension = _embeddingService.Dimension;
 
-        _logger.LogInformation("开始使用模型 '{Model}' (维度: {Dimension}) 重建源 '{Source}' 的向量索引", 
+        _logger.LogInformation("开始使用模型 '{Model}' (维度: {Dimension}) 重建源 '{Source}' 的向量索引",
             currentModel, currentDimension, sourceName);
+
+        // 重建前清理该源的所有存储（向量 + BM25 + 图谱）
+        await _indexCleaner.DeleteBySourceAsync(sourceName);
 
         // 启动重新索引任务
         var job = await _indexService.StartIndexAsync(new IndexRequest
@@ -432,7 +446,7 @@ public class VectorIndexController : ControllerBase
     }
 
     /// <summary>
-    /// 删除所有向量索引及分段数据（完全清空，需重新索引）
+    /// 删除所有向量索引（保留分段数据）
     /// </summary>
     [HttpDelete("all")]
     public async Task<ActionResult<BulkDeleteResult>> DeleteAllIndexes()
@@ -454,9 +468,6 @@ public class VectorIndexController : ControllerBase
             });
             totalCount += deleted;
         }
-
-        // 向量删完后同步清空 chunks，保持数据一致
-        await _vectorStore.ClearAllChunksAsync();
 
         _logger.LogInformation("已删除所有向量索引，共 {Count} 条", totalCount);
 
@@ -483,16 +494,22 @@ public class VectorIndexController : ControllerBase
         // 2. 删除 chunk 级孤儿（chunk_id 不在 chunks 表的向量行）
         var chunkDeleted = await _vectorStore.CleanupOrphanChunkVectorsAsync();
 
-        var totalDeleted = modelDeleted + chunkDeleted;
-        _logger.LogInformation("已清理 {Total} 条孤立向量（模型级: {M}, chunk级: {C}）",
-            totalDeleted, modelDeleted, chunkDeleted);
+        // 3. 删除 BM25 孤儿（chunk_id 不在 chunks 表的 FTS 条目）
+        var bm25Deleted = await _bm25Store.CleanupOrphanDocumentsAsync();
+
+        // 4. 删除图谱孤儿（document 节点 id 不在 files 表的节点及其边）
+        var graphDeleted = await _graphStore.CleanupOrphanNodesAsync();
+
+        var totalDeleted = modelDeleted + chunkDeleted + bm25Deleted + graphDeleted;
+        _logger.LogInformation("已清理孤立数据（模型级向量: {M}, chunk级向量: {C}, BM25: {B}, 图谱: {G}）",
+            modelDeleted, chunkDeleted, bm25Deleted, graphDeleted);
 
         return Ok(new CleanupResult
         {
             DeletedCount = totalDeleted,
             Message = totalDeleted > 0
-                ? $"已清理 {totalDeleted} 条孤立向量（模型级: {modelDeleted}, chunk级: {chunkDeleted}）"
-                : "没有发现孤立向量"
+                ? $"已清理孤立数据（向量: {modelDeleted + chunkDeleted}, BM25: {bm25Deleted}, 图谱: {graphDeleted}）"
+                : "没有发现孤立数据"
         });
     }
 

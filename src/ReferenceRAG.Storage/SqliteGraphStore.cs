@@ -354,6 +354,62 @@ public class SqliteGraphStore : IGraphStore, IDisposable
         finally { _lock.Release(); }
     }
 
+    public async Task ClearAllAsync(CancellationToken ct = default)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "DELETE FROM graph_edges; DELETE FROM graph_nodes;";
+            cmd.ExecuteNonQuery();
+        }
+        finally { _lock.Release(); }
+    }
+
+    public async Task<int> CleanupOrphanNodesAsync(CancellationToken ct = default)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            var orphanIds = new List<string>();
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT id FROM graph_nodes
+                    WHERE type = 'document'
+                      AND id NOT IN (SELECT id FROM files)
+                    """;
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) orphanIds.Add(r.GetString(0));
+            }
+            if (orphanIds.Count == 0) return 0;
+
+            using var tx = _connection.BeginTransaction();
+            try
+            {
+                using var edgeCmd = _connection.CreateCommand();
+                edgeCmd.Transaction = tx;
+                edgeCmd.CommandText = "DELETE FROM graph_edges WHERE from_id = @id OR to_id = @id";
+                var ep = edgeCmd.Parameters.Add("@id", SqliteType.Text);
+
+                using var nodeCmd = _connection.CreateCommand();
+                nodeCmd.Transaction = tx;
+                nodeCmd.CommandText = "DELETE FROM graph_nodes WHERE id = @id";
+                var np = nodeCmd.Parameters.Add("@id", SqliteType.Text);
+
+                foreach (var id in orphanIds)
+                {
+                    ep.Value = id; edgeCmd.ExecuteNonQuery();
+                    np.Value = id; nodeCmd.ExecuteNonQuery();
+                }
+                tx.Commit();
+            }
+            catch { tx.Rollback(); throw; }
+            return orphanIds.Count;
+        }
+        finally { _lock.Release(); }
+    }
+
     // 内部方法（调用方已持锁）
     private GraphNode? GetNodeInternal(string nodeId)
     {

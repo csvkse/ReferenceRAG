@@ -40,6 +40,11 @@ public interface IBM25Store
     /// 获取索引统计信息
     /// </summary>
     Task<BM25IndexStats> GetStatsAsync();
+
+    /// <summary>
+    /// 删除 BM25 索引中 chunk_id 不在 chunks 表的孤儿记录。
+    /// </summary>
+    Task<int> CleanupOrphanDocumentsAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>

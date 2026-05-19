@@ -1326,64 +1326,93 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
     public async Task DeleteBySourceAsync(string source, CancellationToken cancellationToken = default)
     {
-        // 获取指定源的所有分段ID
-        var chunkIds = new List<string>();
-        var getChunksSql = @"
-            SELECT c.id FROM chunks c
-            JOIN files f ON c.file_id = f.id
-            WHERE f.source = @source
-        ";
-
-        using (var cmd = _connection.CreateCommand())
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            cmd.CommandText = getChunksSql;
-            cmd.Parameters.AddWithValue("@source", source);
-            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            // 获取指定源的所有分段ID
+            var chunkIds = new List<string>();
+            var getChunksSql = @"
+                SELECT c.id FROM chunks c
+                JOIN files f ON c.file_id = f.id
+                WHERE f.source = @source
+            ";
+
+            using (var cmd = _connection.CreateCommand())
             {
-                chunkIds.Add(reader.GetString(0));
+                cmd.CommandText = getChunksSql;
+                cmd.Parameters.AddWithValue("@source", source);
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                    chunkIds.Add(reader.GetString(0));
             }
-        }
 
-        // 删除所有模型表中的向量
-        foreach (var modelName in _modelDimensions.Keys.ToList())
-        {
-            var tableName = ModelToTableName(modelName);
-            foreach (var chunkId in chunkIds)
+            // 删除所有模型表中的向量（vec0 不支持 IN(...)，逐条 = ? 删除）
+            foreach (var modelName in _modelDimensions.Keys.ToList())
             {
+                var tableName = ModelToTableName(modelName);
                 try
                 {
-                    var deleteVectorSql = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
                     using var cmd = _connection.CreateCommand();
-                    cmd.CommandText = deleteVectorSql;
-                    cmd.Parameters.AddWithValue("@chunkId", chunkId);
-                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                    cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
+                    var param = cmd.Parameters.Add("@chunkId", SqliteType.Text);
+                    foreach (var chunkId in chunkIds)
+                    {
+                        param.Value = chunkId;
+                        await cmd.ExecuteNonQueryAsync(cancellationToken);
+                    }
                 }
                 catch { /* 忽略表不存在 */ }
             }
-        }
 
-        // 删除分段
-        var deleteChunksSql = @"
-            DELETE FROM chunks WHERE file_id IN (
-                SELECT id FROM files WHERE source = @source
-            )
-        ";
+            // 删除分段
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = "DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE source = @source)";
+                cmd.Parameters.AddWithValue("@source", source);
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 删除文件
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = "DELETE FROM files WHERE source = @source";
+                cmd.Parameters.AddWithValue("@source", source);
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task DeleteVectorsByFileAsync(string fileId, CancellationToken cancellationToken = default)
+    {
+        var chunkIds = new List<string>();
         using (var cmd = _connection.CreateCommand())
         {
-            cmd.CommandText = deleteChunksSql;
-            cmd.Parameters.AddWithValue("@source", source);
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
+            cmd.CommandText = "SELECT id FROM chunks WHERE file_id = @fileId";
+            cmd.Parameters.AddWithValue("@fileId", fileId);
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                chunkIds.Add(reader.GetString(0));
         }
+        if (chunkIds.Count == 0) return;
 
-        // 删除文件
-        var deleteFilesSql = "DELETE FROM files WHERE source = @source";
-        using (var cmd = _connection.CreateCommand())
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            cmd.CommandText = deleteFilesSql;
-            cmd.Parameters.AddWithValue("@source", source);
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
+            foreach (var modelName in _modelDimensions.Keys.ToList())
+            {
+                var tableName = ModelToTableName(modelName);
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
+                var param = cmd.Parameters.Add("@chunkId", SqliteType.Text);
+                foreach (var chunkId in chunkIds)
+                {
+                    param.Value = chunkId;
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
         }
+        finally { _writeLock.Release(); }
     }
 
     public async Task StoreBatchAsync(IEnumerable<VectorRecord> records, CancellationToken cancellationToken = default)
@@ -1553,33 +1582,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         }
 
         return totalDeleted;
-    }
-
-    public async Task ClearAllChunksAsync(CancellationToken cancellationToken = default)
-    {
-        await _writeLock.WaitAsync(cancellationToken);
-        try
-        {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "DELETE FROM chunks; UPDATE files SET chunk_count = 0";
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-        finally { _writeLock.Release(); }
-    }
-
-    public async Task<Dictionary<string, int>> GetChunkCountsBySourceAsync(CancellationToken cancellationToken = default)
-    {
-        var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = @"
-            SELECT f.source, COUNT(c.id)
-            FROM files f
-            LEFT JOIN chunks c ON c.file_id = f.id
-            GROUP BY f.source";
-        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-            result[reader.GetString(0)] = reader.GetInt32(1);
-        return result;
     }
 
     /// <summary>

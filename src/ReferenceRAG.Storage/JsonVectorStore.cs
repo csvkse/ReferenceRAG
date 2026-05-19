@@ -510,10 +510,7 @@ public class JsonVectorStore : IVectorStore, IDisposable
     public Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default)
         => Task.FromResult(0);
 
-    public Task ClearAllChunksAsync(CancellationToken cancellationToken = default)
+    public Task DeleteVectorsByFileAsync(string fileId, CancellationToken cancellationToken = default)
         => Task.CompletedTask;
-
-    public Task<Dictionary<string, int>> GetChunkCountsBySourceAsync(CancellationToken cancellationToken = default)
-        => Task.FromResult(new Dictionary<string, int>());
 
 }

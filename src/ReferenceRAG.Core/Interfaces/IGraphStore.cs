@@ -27,4 +27,8 @@ public interface IGraphStore
     Task<GraphTraversalResult> GetNeighborsAsync(string nodeId, int depth = 1, string[]? edgeTypes = null, CancellationToken ct = default);
     Task<List<GraphNode>> SearchNodesAsync(string query, int limit = 10, CancellationToken ct = default);
     Task<GraphStats> GetStatsAsync(CancellationToken ct = default);
+    /// <summary>清空所有图数据（全量重建前使用）。</summary>
+    Task ClearAllAsync(CancellationToken ct = default);
+    /// <summary>删除孤儿图节点（document 节点的 id 不在 files 表中的记录）及其关联边。</summary>
+    Task<int> CleanupOrphanNodesAsync(CancellationToken ct = default);
 }

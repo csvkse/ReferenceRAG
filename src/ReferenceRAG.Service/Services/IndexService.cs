@@ -162,7 +162,9 @@ public class IndexService : IHostedService
                     await prepSemaphore.WaitAsync(cts.Token);
                     try
                     {
-                        return await PrepareFileAsync(file, chunker, vectorStore, sources, request.Force, cts.Token);
+                        return request.VectorOnly
+                            ? await PrepareVectorOnlyAsync(file, vectorStore, cts.Token)
+                            : await PrepareFileAsync(file, chunker, vectorStore, sources, request.Force, cts.Token);
                     }
                     catch (OperationCanceledException) { return null; }
                     catch (Exception ex)
@@ -208,7 +210,9 @@ public class IndexService : IHostedService
                     await finSemaphore.WaitAsync(cts.Token);
                     try
                     {
-                        await FinalizeFileAsync(ctx!, _bm25Store, filenameMap, cts.Token);
+                        // VectorOnly 模式：跳过 BM25 / 图谱更新，只统计进度
+                        if (!request.VectorOnly)
+                            await FinalizeFileAsync(ctx!, _bm25Store, filenameMap, cts.Token);
                         var count = Interlocked.Increment(ref processedCount);
                         await IndexHub.BroadcastIndexProgress(_hubContext, new IndexProgressEvent
                         {
@@ -399,6 +403,10 @@ public class IndexService : IHostedService
 
         await vectorStore.DeleteChunksByFileAsync(fileId, cancellationToken);
 
+        // BM25 旧条目在 Phase 1 删除：即使 Phase 2 (GPU) 崩溃，BM25 也不会留下旧 chunk 的孤儿
+        if (oldChunkIds.Count > 0)
+            await _bm25Store.DeleteDocumentsByIdsAsync(oldChunkIds);
+
         foreach (var chunk in chunks)
         {
             chunk.FileId = fileId;
@@ -416,6 +424,33 @@ public class IndexService : IHostedService
     }
 
     /// <summary>
+    /// VectorOnly 模式 Phase 1：读取已有 chunks，删除旧向量，不重新分块。
+    /// chunk_id 保持不变，BM25 / 图谱不受影响。
+    /// </summary>
+    private async Task<FileProcessContext?> PrepareVectorOnlyAsync(
+        string filePath,
+        IVectorStore vectorStore,
+        CancellationToken cancellationToken)
+    {
+        var existingFile = await vectorStore.GetFileByPathAsync(filePath, cancellationToken);
+        if (existingFile == null) return null;
+
+        var chunks = (await vectorStore.GetChunksByFileAsync(existingFile.Id, cancellationToken)).ToList();
+        if (chunks.Count == 0) return null;
+
+        // 删除该文件的旧向量（仅向量表，不碰 chunks 表）
+        await vectorStore.DeleteVectorsByFileAsync(existingFile.Id, cancellationToken);
+
+        return new FileProcessContext
+        {
+            FileRecord = existingFile,
+            Content = "",
+            Chunks = chunks,
+            OldChunkIds = new()
+        };
+    }
+
+    /// <summary>
     /// Phase 3: BM25 索引 + 知识图谱更新 — GPU 推理已完成，纯 CPU 后处理。
     /// </summary>
     private async Task FinalizeFileAsync(
@@ -424,9 +459,6 @@ public class IndexService : IHostedService
         IReadOnlyDictionary<string, string> filenameMap,
         CancellationToken cancellationToken)
     {
-        if (bm25Store != null && ctx.OldChunkIds.Count > 0)
-            await bm25Store.DeleteDocumentsByIdsAsync(ctx.OldChunkIds);
-
         if (bm25Store != null)
         {
             var bm25Docs = ctx.Chunks.Select(c => (c.Id, c.Content));
@@ -479,6 +511,10 @@ public class IndexRequest
 {
     public List<string>? Sources { get; set; }
     public bool Force { get; set; }
+    /// <summary>
+    /// 仅重建向量（跳过分块/BM25/图谱），用于切换嵌入模型后重新推理
+    /// </summary>
+    public bool VectorOnly { get; set; }
 }
 
 /// <summary>

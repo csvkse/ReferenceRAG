@@ -179,6 +179,11 @@ public interface IVectorStore
     Task<int> DeleteVectorsByModelAsync(string modelName, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 仅删除指定文件的向量行，不碰 chunks 表（VectorOnly 重建用）
+    /// </summary>
+    Task DeleteVectorsByFileAsync(string fileId, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 删除无关联模型的向量（孤立项清理）
     /// </summary>
     Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default);
@@ -187,16 +192,6 @@ public interface IVectorStore
     /// 删除向量表中 chunk_id 不在 chunks 表的孤儿向量
     /// </summary>
     Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// 从 chunks 表实时统计各 source 的分块数（key=source名, value=chunk数）
-    /// </summary>
-    Task<Dictionary<string, int>> GetChunkCountsBySourceAsync(CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// 清空 chunks 表并将 files.chunk_count 重置为 0
-    /// </summary>
-    Task ClearAllChunksAsync(CancellationToken cancellationToken = default);
 
 }
 
