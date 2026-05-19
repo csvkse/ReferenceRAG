@@ -362,7 +362,7 @@ import {
   RefreshOutline,
   TrashOutline
 } from '@vicons/ionicons5'
-import { systemApi, vectorIndexApi, performanceApi } from '@/api'
+import { systemApi, indexJobsApi, performanceApi } from '@/api'
 import type { MetricsSummary, IndexJobResponse, SearchPhaseReport, HistogramStatistics } from '@/types/api'
 
 const message = useMessage()
@@ -596,7 +596,7 @@ const loadAlerts = async () => {
 const loadActiveJobs = async () => {
   jobsLoading.value = true
   try {
-    const response = await vectorIndexApi.getJobs()
+    const response = await indexJobsApi.getActive()
     activeJobs.value = response.data || []
   } catch (error) {
     console.error('Failed to load active jobs:', error)
@@ -668,7 +668,7 @@ const handleStopJob = async (jobId: string) => {
     onPositiveClick: async () => {
       stoppingJobs[jobId] = true
       try {
-        await vectorIndexApi.stopJob(jobId)
+        await indexJobsApi.cancelJob(jobId)
         message.success(`任务 ${jobId} 已中断`)
         await loadActiveJobs()
         await loadCompletedJobs()
@@ -685,7 +685,7 @@ const handleStopJob = async (jobId: string) => {
 const loadCompletedJobs = async () => {
   completedJobsLoading.value = true
   try {
-    const response = await vectorIndexApi.getCompletedJobs()
+    const response = await indexJobsApi.getHistory()
     completedJobs.value = response.data || []
   } catch (error) {
     console.error('Failed to load completed jobs:', error)
@@ -704,7 +704,7 @@ const handleClearCompletedJobs = () => {
     onPositiveClick: async () => {
       clearingJobs.value = true
       try {
-        await vectorIndexApi.clearCompletedJobs()
+        await indexJobsApi.clearHistory()
         message.success('已清空所有已完成的索引任务记录')
         completedJobs.value = []
       } catch (error: any) {

@@ -12,6 +12,7 @@ namespace ReferenceRAG.Service.Controllers;
 /// 性能测试 API
 /// </summary>
 [ApiController]
+[ApiExplorerSettings(IgnoreApi = true)]
 [Route("api/[controller]")]
 public class PerformanceController : ControllerBase
 {

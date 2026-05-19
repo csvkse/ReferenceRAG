@@ -123,14 +123,14 @@ import {
   SearchOutline,
   PlayOutline
 } from '@vicons/ionicons5'
-import { dashboardApi, sourcesApi, vectorIndexApi } from '@/api'
+import { indexApi, sourcesApi, indexJobsApi } from '@/api'
 import { useIndexStore } from '@/stores/index'
-import type { DashboardStats, SourceDetail } from '@/types/api'
+import type { IndexSummary, SourceDetail } from '@/types/api'
 
 const router = useRouter()
 const indexStore = useIndexStore()
 
-const stats = ref<DashboardStats | null>(null)
+const stats = ref<IndexSummary | null>(null)
 const sources = ref<SourceDetail[]>([])
 const loadingSources = ref(false)
 const isIndexing = ref(false)
@@ -152,7 +152,7 @@ const sourceColumns: DataTableColumns<SourceDetail> = [
 
 const loadStats = async () => {
   try {
-    const response = await dashboardApi.getStats()
+    const response = await indexApi.getSummary()
     stats.value = response.data
   } catch (error) {
     console.error('Failed to load stats:', error)
@@ -174,7 +174,7 @@ const loadSources = async () => {
 const handleStartIndex = async () => {
   isIndexing.value = true
   try {
-    await vectorIndexApi.startIndex()
+    await indexJobsApi.startJob()
   } catch (error) {
     console.error('Failed to start index:', error)
   } finally {

@@ -127,7 +127,7 @@
 <script setup lang="ts">
 import { ref, h, onMounted } from 'vue'
 import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput, type FormInst, type FormRules } from 'naive-ui'
-import { sourcesApi, vectorIndexApi } from '@/api'
+import { sourcesApi, indexApi, indexJobsApi } from '@/api'
 import type { SourceDetail, IndexSummary, ModelStat } from '@/types/api'
 
 const message = useMessage()
@@ -316,7 +316,7 @@ const loadSources = async () => {
 const loadVectorIndex = async () => {
   loadingIndex.value = true
   try {
-    const response = await vectorIndexApi.getSummary()
+    const response = await indexApi.getSummary()
     indexSummary.value = response.data
   } catch (error) {
     message.error('加载向量索引信息失败')
@@ -405,7 +405,7 @@ const handleReindex = (source: SourceDetail) => {
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
-        const response = await vectorIndexApi.rebuildSource(source.name)
+        const response = await indexApi.rebuildSource(source.name)
         message.success(response.data.message || '重建任务已启动')
         await loadVectorIndex()
       } catch (error) {
@@ -446,7 +446,7 @@ const handleDelete = (source: SourceDetail) => {
 const handleQuickIndexAll = async () => {
   quickIndexing.value = true
   try {
-    const response = await vectorIndexApi.startIndex({ force: false })
+    const response = await indexJobsApi.startJob({ force: false })
     message.success(response.data.message || '增量索引任务已启动（跳过未变更文件）')
     await loadVectorIndex()
   } catch (error) {
@@ -460,7 +460,7 @@ const handleQuickIndexSource = async (source: SourceDetail) => {
   sourceQuickIndexing.value.add(source.name)
   sourceQuickIndexing.value = new Set(sourceQuickIndexing.value)
   try {
-    await vectorIndexApi.startIndex({ sources: [source.name], force: false })
+    await indexJobsApi.startJob({ sources: [source.name], force: false })
     message.success(`${source.name} 增量索引已启动（跳过未变更文件）`)
     await loadVectorIndex()
   } catch (error) {
@@ -474,7 +474,7 @@ const handleQuickIndexSource = async (source: SourceDetail) => {
 const handleVectorOnlyIndexAll = async () => {
   vectorOnlyIndexing.value = true
   try {
-    const response = await vectorIndexApi.startIndex({ vectorOnly: true })
+    const response = await indexJobsApi.startJob({ vectorOnly: true })
     message.success(response.data.message || '向量补全任务已启动（仅重推向量，不动分块/BM25/图谱）')
     await loadVectorIndex()
   } catch (error) {
@@ -488,7 +488,7 @@ const handleVectorOnlyIndexSource = async (source: SourceDetail) => {
   sourceVectorOnlyIndexing.value.add(source.name)
   sourceVectorOnlyIndexing.value = new Set(sourceVectorOnlyIndexing.value)
   try {
-    await vectorIndexApi.startIndex({ sources: [source.name], vectorOnly: true })
+    await indexJobsApi.startJob({ sources: [source.name], vectorOnly: true })
     message.success(`${source.name} 向量补全已启动`)
     await loadVectorIndex()
   } catch (error) {
@@ -502,7 +502,7 @@ const handleVectorOnlyIndexSource = async (source: SourceDetail) => {
 const handleRebuildAll = async () => {
   rebuilding.value = true
   try {
-    const response = await vectorIndexApi.rebuild()
+    const response = await indexApi.rebuild()
     message.success(response.data.message || '向量索引重建任务已启动')
     await loadVectorIndex()
   } catch (error) {
@@ -515,7 +515,7 @@ const handleRebuildAll = async () => {
 const handleCleanup = async () => {
   cleaning.value = true
   try {
-    const response = await vectorIndexApi.cleanup()
+    const response = await indexApi.cleanup()
     message.success(response.data.message)
     await loadVectorIndex()
   } catch (error) {
@@ -528,7 +528,7 @@ const handleCleanup = async () => {
 const handleDeleteAllIndex = async () => {
   deletingAll.value = true
   try {
-    const response = await vectorIndexApi.deleteAll()
+    const response = await indexApi.deleteAllModels()
     message.success(`已删除 ${response.data.totalDeleted} 条向量`)
     await loadVectorIndex()
   } catch (error) {
@@ -540,7 +540,7 @@ const handleDeleteAllIndex = async () => {
 
 const handleDeleteModelIndex = async (modelName: string) => {
   try {
-    const response = await vectorIndexApi.deleteByModel(modelName)
+    const response = await indexApi.deleteModel(modelName)
     message.success(response.data.message)
     await loadVectorIndex()
   } catch (error) {

@@ -9,6 +9,7 @@ namespace ReferenceRAG.Service.Controllers;
 /// 重排测试 API
 /// </summary>
 [ApiController]
+[ApiExplorerSettings(IgnoreApi = true)]
 [Route("api/[controller]")]
 public class RerankTestController : ControllerBase
 {

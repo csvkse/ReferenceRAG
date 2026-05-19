@@ -12,6 +12,7 @@ namespace ReferenceRAG.Service.Controllers;
 /// 语义查询测试 API
 /// </summary>
 [ApiController]
+[ApiExplorerSettings(IgnoreApi = true)]
 [Route("api/[controller]")]
 public class SemanticTestController : ControllerBase
 {

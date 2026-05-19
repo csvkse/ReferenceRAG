@@ -7,10 +7,7 @@ import type {
   AIQueryResponse,
   DrilldownRequest,
   DrilldownResponse,
-  DashboardStats,
   ReferenceRAGConfig,
-  IndexRequest,
-  IndexJob,
   BenchmarkRequest,
   BenchmarkResult,
   QuickTestResult,
@@ -23,7 +20,6 @@ import type {
   LongTextTestResult,
   ModelInfo,
   ModelDownloadOptions,
-  VectorStats,
   SystemStatus,
   SystemMetrics,
   IndexMetrics,
@@ -39,6 +35,7 @@ import type {
   IndexSummary,
   IndexJobRequest,
   IndexJobResponse,
+  AllJobsResponse,
   PathsResponse,
   SearchPhaseReport
 } from '@/types/api'
@@ -121,11 +118,7 @@ export interface SearchStatusResponse {
   totalFiles: number
 }
 
-// Dashboard
-export const dashboardApi = {
-  getStats: () => api.get<DashboardStats>('/Dashboard/stats'),
-  getSources: () => api.get<SourceDetail[]>('/Dashboard/sources')
-}
+// Dashboard API removed — use indexApi.getSummary() + sourcesApi.getAll()
 
 // Sources
 export const sourcesApi = {
@@ -144,12 +137,28 @@ export const sourcesApi = {
   getFiles: (name: string) => api.get(`/Sources/${name}/files`)
 }
 
-// Index
+// Index Jobs — /api/index/jobs
+export const indexJobsApi = {
+  startJob: (request?: IndexJobRequest) => api.post<IndexJobResponse>('/index/jobs', request || {}),
+  getActive: () => api.get<IndexJobResponse[]>('/index/jobs'),
+  getAll: () => api.get<AllJobsResponse>('/index/jobs/all'),
+  getHistory: () => api.get<IndexJobResponse[]>('/index/jobs/history'),
+  clearHistory: () => api.delete('/index/jobs/history'),
+  getJob: (jobId: string) => api.get<IndexJobResponse>(`/index/jobs/${jobId}`),
+  cancelJob: (jobId: string) => api.post(`/index/jobs/${jobId}/cancel`)
+}
+
+// Index Management — /api/index
 export const indexApi = {
-  start: (data?: IndexRequest) => api.post<IndexJob>('/Index/start', data || {}),
-  getStatus: (indexId: string) => api.get<IndexJob>(`/Index/${indexId}/status`),
-  getActive: () => api.get<IndexJob[]>('/Index/active'),
-  stop: (indexId: string) => api.post(`/Index/${indexId}/stop`)
+  getSummary: () => api.get<IndexSummary>('/index/summary'),
+  getModels: () => api.get<VectorModelIndex[]>('/index/models'),
+  getCurrentModel: () => api.get<VectorModelIndex>('/index/models/current'),
+  deleteModel: (modelName: string) => api.delete<DeleteResult>(`/index/models/${modelName}`),
+  deleteAllModels: () => api.delete<BulkDeleteResult>('/index/models'),
+  deleteAllData: () => api.delete('/index/data'),
+  rebuild: (request?: RebuildRequest) => api.post<RebuildJob>('/index/rebuild', request || {}),
+  rebuildSource: (sourceName: string) => api.post<RebuildJob>(`/index/rebuild/${sourceName}`),
+  cleanup: () => api.post<CleanupResult>('/index/cleanup')
 }
 
 // Settings
@@ -237,41 +246,7 @@ export const modelsApi = {
   scanModels: () => api.post('/Models/scan')
 }
 
-// Vectors
-export const vectorsApi = {
-  getStats: () => api.get<VectorStats[]>('/Vectors/stats'),
-  getStatsByModel: (modelName: string) => api.get<VectorStats>(`/Vectors/stats/${modelName}`),
-  deleteByModel: (modelName: string) => api.delete(`/Vectors/model/${modelName}`),
-  deleteOrphaned: () => api.delete('/Vectors/orphaned')
-}
-
-// Vector Index
-export const vectorIndexApi = {
-  // 索引任务管理
-  startIndex: (request?: IndexJobRequest) => api.post<IndexJobResponse>('/VectorIndex/index', request || {}),
-  getJobs: () => api.get<IndexJobResponse[]>('/VectorIndex/jobs'),
-  getAllJobs: () => api.get<import('@/types/api').AllJobsResponse>('/VectorIndex/jobs/all'),
-  getJob: (jobId: string) => api.get<IndexJobResponse>(`/VectorIndex/jobs/${jobId}`),
-  stopJob: (jobId: string) => api.post(`/VectorIndex/jobs/${jobId}/stop`),
-  getCompletedJobs: () => api.get<IndexJobResponse[]>('/VectorIndex/jobs/history'),
-  clearCompletedJobs: () => api.delete('/VectorIndex/jobs/history'),
-
-  // 向量索引重建
-  rebuild: (request?: RebuildRequest) => api.post<RebuildJob>('/VectorIndex/rebuild', request || {}),
-  rebuildSource: (sourceName: string) => api.post<RebuildJob>(`/VectorIndex/rebuild/${sourceName}`),
-
-  // 向量状态查询
-  getModels: () => api.get<VectorModelIndex[]>('/VectorIndex/models'),
-  getCurrent: () => api.get<VectorModelIndex>('/VectorIndex/current'),
-  getSummary: () => api.get<IndexSummary>('/VectorIndex/summary'),
-
-  // 向量索引删除
-  deleteByModel: (modelName: string) => api.delete<DeleteResult>(`/VectorIndex/models/${modelName}`),
-  deleteAll: () => api.delete<BulkDeleteResult>('/VectorIndex/all'),
-  cleanup: () => api.post<CleanupResult>('/VectorIndex/cleanup'),
-
-  // 数据迁移
-}
+// vectorsApi / vectorIndexApi removed — use indexJobsApi + indexApi
 
 // System
 export const systemApi = {

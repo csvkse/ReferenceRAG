@@ -20,7 +20,7 @@
         :columns="columns"
         :data="stats"
         :loading="loading"
-        :row-key="(row: VectorStats) => row.modelName"
+        :row-key="(row: VectorModelIndex) => row.modelName"
       />
     </n-card>
   </n-space>
@@ -31,11 +31,11 @@ import { ref, h, onMounted } from 'vue'
 import { NTag, NButton, NSpace, NIcon, NPopconfirm, useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { RefreshOutline } from '@vicons/ionicons5'
-import { vectorsApi } from '@/api'
-import type { VectorStats } from '@/types/api'
+import { indexApi } from '@/api'
+import type { VectorModelIndex } from '@/types/api'
 
 const message = useMessage()
-const stats = ref<VectorStats[]>([])
+const stats = ref<VectorModelIndex[]>([])
 const loading = ref(false)
 
 const formatBytes = (bytes: number) => {
@@ -46,7 +46,7 @@ const formatBytes = (bytes: number) => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
-const columns: DataTableColumns<VectorStats> = [
+const columns: DataTableColumns<VectorModelIndex> = [
   { title: '模型名称', key: 'modelName' },
   { title: '维度', key: 'dimension', width: 90 },
   { title: '向量数量', key: 'vectorCount', width: 110 },
@@ -90,7 +90,7 @@ const columns: DataTableColumns<VectorStats> = [
 const loadStats = async () => {
   loading.value = true
   try {
-    const response = await vectorsApi.getStats()
+    const response = await indexApi.getModels()
     stats.value = response.data
   } catch (error) {
     console.error('Failed to load vector stats:', error)
@@ -102,7 +102,7 @@ const loadStats = async () => {
 
 const handleDelete = async (modelName: string) => {
   try {
-    const response = await vectorsApi.deleteByModel(modelName)
+    const response = await indexApi.deleteModel(modelName)
     message.success(response.data.message || `已删除 ${modelName} 的向量数据`)
     await loadStats()
   } catch (error: any) {
@@ -112,7 +112,7 @@ const handleDelete = async (modelName: string) => {
 
 const handleDeleteOrphaned = async () => {
   try {
-    const response = await vectorsApi.deleteOrphaned()
+    const response = await indexApi.cleanup()
     message.success(response.data.message || '孤立项清理完成')
     await loadStats()
   } catch (error: any) {

@@ -161,14 +161,7 @@ export interface IndexJob {
   progressPercent: number
 }
 
-// --- Dashboard ---
-
-export interface DashboardStats {
-  totalFiles: number
-  totalChunks: number
-  sourceCount: number
-  avgQueryTime: number
-}
+// DashboardStats removed — use IndexSummary (includes sourceCount + avgQueryTime)
 
 // --- Settings ---
 
@@ -549,6 +542,7 @@ export interface VectorModelIndex {
   lastUpdated: string | null
   isCurrentModel: boolean
   dimensionMatch: boolean
+  modelExists: boolean
 }
 
 export interface DeleteResult {
@@ -587,6 +581,8 @@ export interface IndexSummary {
   currentDimension: number
   totalFiles: number
   totalChunks: number
+  sourceCount: number
+  avgQueryTime: number
   modelStats: ModelStat[]
 }
 

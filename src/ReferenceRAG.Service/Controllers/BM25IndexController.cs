@@ -9,6 +9,7 @@ namespace ReferenceRAG.Service.Controllers;
 /// BM25 索引管理 API - 管理倒排索引和搜索
 /// </summary>
 [ApiController]
+[ApiExplorerSettings(IgnoreApi = true)]
 [Route("api/[controller]")]
 public class BM25IndexController : ControllerBase
 {
