@@ -3,79 +3,50 @@ using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
-using ReferenceRAG.Core.Services.Graph;
 
 namespace ReferenceRAG.Service.Services;
 
 /// <summary>
-/// 自动索引服务 - 监听文件变更并自动更新向量索引
+/// 自动索引服务 — 监听 FileMonitorService 事件，通过 FileIndexPipeline 处理单文件变更。
+/// 修复: 重命名旧路径清理（Bug B）、跨服务互斥（Bug D）。
 /// </summary>
 public class AutoIndexService : IHostedService, IDisposable
 {
     private readonly IFileMonitorService _fileMonitor;
-    private readonly IVectorStore _vectorStore;
-    private readonly IEmbeddingService _embeddingService;
-    private readonly IMarkdownChunker _chunker;
-    private readonly ContentHashDetector _hashDetector;
+    private readonly IFileIndexPipeline _pipeline;
+    private readonly FileProcessingGuard _guard;
     private readonly ConfigManager _configManager;
-    private readonly IBM25Store _bm25Store;
-    private readonly GraphIndexingService? _graphIndexing;
-    private readonly IndexCleaner _indexCleaner;
     private readonly ILogger<AutoIndexService>? _logger;
-    private readonly Queue<FileChangeEventArgs> _indexQueue;
+
+    private readonly Queue<FileChangeEventArgs> _indexQueue = new();
     private readonly Timer _processTimer;
     private bool _isProcessing;
     private bool _disposed;
 
-    public event EventHandler<AutoIndexProgressEventArgs>? Progress;
-
     public AutoIndexService(
         IFileMonitorService fileMonitor,
-        IVectorStore vectorStore,
-        IEmbeddingService embeddingService,
-        IMarkdownChunker chunker,
-        ContentHashDetector hashDetector,
+        IFileIndexPipeline pipeline,
+        FileProcessingGuard guard,
         ConfigManager configManager,
-        IBM25Store bm25Store,
-        IndexCleaner indexCleaner,
-        GraphIndexingService? graphIndexing = null,
         ILogger<AutoIndexService>? logger = null)
     {
         _fileMonitor = fileMonitor;
-        _vectorStore = vectorStore;
-        _embeddingService = embeddingService;
-        _chunker = chunker;
-        _hashDetector = hashDetector;
+        _pipeline = pipeline;
+        _guard = guard;
         _configManager = configManager;
-        _bm25Store = bm25Store;
-        _indexCleaner = indexCleaner;
-        _graphIndexing = graphIndexing;
         _logger = logger;
-        _indexQueue = new Queue<FileChangeEventArgs>();
-
         _processTimer = new Timer(ProcessQueue, null, Timeout.Infinite, Timeout.Infinite);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _logger?.LogInformation("自动索引服务启动中...");
-
-        // 订阅文件变更事件
         _fileMonitor.FileChanged += OnFileChanged;
 
-        // 从配置加载监控源
         var config = _configManager.Load();
         foreach (var source in config.Sources.Where(s => s.Enabled))
-        {
             _fileMonitor.AddSource(source.Path, source.Name, source.FilePatterns);
-            _logger?.LogInformation("添加监控源: {Name} ({Path}), 文件模式: {Patterns}", 
-                source.Name, source.Path, string.Join(", ", source.FilePatterns));
-        }
 
-        // 启动文件监控
         _ = _fileMonitor.StartAsync(cancellationToken);
-
-        // 启动队列处理定时器
         _processTimer.Change(1000, 1000);
 
         _logger?.LogInformation("自动索引服务已启动，监控 {Count} 个源", config.Sources.Count(s => s.Enabled));
@@ -84,27 +55,16 @@ public class AutoIndexService : IHostedService, IDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        _logger?.LogInformation("自动索引服务停止中...");
-
-        // 停止定时器
         _processTimer.Change(Timeout.Infinite, Timeout.Infinite);
-
-        // 取消订阅
         _fileMonitor.FileChanged -= OnFileChanged;
-
-        // 停止文件监控
         await _fileMonitor.StopAsync();
-
         _logger?.LogInformation("自动索引服务已停止");
     }
 
     private void OnFileChanged(object? sender, FileChangeEventArgs e)
     {
         lock (_indexQueue)
-        {
             _indexQueue.Enqueue(e);
-        }
-
         _logger?.LogDebug("队列添加: {FileName} ({ChangeType})", Path.GetFileName(e.FilePath), e.ChangeType);
     }
 
@@ -112,16 +72,12 @@ public class AutoIndexService : IHostedService, IDisposable
     {
         if (_isProcessing) return;
 
-        FileChangeEventArgs? change = null;
+        FileChangeEventArgs? change;
         lock (_indexQueue)
         {
-            if (_indexQueue.Count > 0)
-            {
-                change = _indexQueue.Dequeue();
-            }
+            if (_indexQueue.Count == 0) return;
+            change = _indexQueue.Dequeue();
         }
-
-        if (change == null) return;
 
         _isProcessing = true;
         try
@@ -140,166 +96,52 @@ public class AutoIndexService : IHostedService, IDisposable
 
     private async Task ProcessChangeAsync(FileChangeEventArgs change)
     {
-        _logger?.LogInformation("开始处理: {FileName} ({ChangeType})", Path.GetFileName(change.FilePath), change.ChangeType);
+        _logger?.LogInformation("开始处理: {FileName} ({ChangeType})",
+            Path.GetFileName(change.FilePath), change.ChangeType);
 
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        if (change.ChangeType == ChangeType.Deleted)
+        {
+            if (!_guard.TryAcquire(change.FilePath))
+            {
+                _logger?.LogDebug("文件正在处理中，跳过删除: {FileName}", Path.GetFileName(change.FilePath));
+                return;
+            }
+            try
+            {
+                var deleted = await _pipeline.DeleteFileByPathAsync(change.FilePath);
+                if (deleted)
+                    _logger?.LogInformation("已删除索引: {FileName}", Path.GetFileName(change.FilePath));
+            }
+            finally { _guard.Release(change.FilePath); }
+            return;
+        }
+
+        // Modified / Created / Renamed
+        var targetPath = change.FilePath;
+        if (!_guard.TryAcquire(targetPath))
+        {
+            _logger?.LogDebug("文件正在处理中，跳过: {FileName}", Path.GetFileName(targetPath));
+            return;
+        }
 
         try
         {
-            if (change.ChangeType == ChangeType.Deleted)
-            {
-                var file = await _vectorStore.GetFileByPathAsync(change.FilePath);
-                if (file != null)
-                {
-                    await _indexCleaner.DeleteFileAsync(file.Id, change.FilePath);
-                    _logger?.LogInformation("已删除索引: {FileName}", Path.GetFileName(change.FilePath));
-                }
-            }
-            else
-            {
-                // 检查文件是否存在
-                if (!File.Exists(change.FilePath))
-                {
-                    _logger?.LogDebug("文件不存在，跳过: {FileName}", Path.GetFileName(change.FilePath));
-                    return;
-                }
+            var config = _configManager.Load();
+            var sources = config.Sources.Where(s => s.Enabled).ToList();
 
-                // 检查内容是否变化
-                var newHash = await _hashDetector.ComputeFileFingerprintAsync(change.FilePath);
-                var existingFile = await _vectorStore.GetFileByPathAsync(change.FilePath);
+            var indexed = await _pipeline.IndexSingleAsync(
+                targetPath,
+                sources,
+                oldFilePath: change.OldFilePath,   // Bug B: 重命名时传旧路径，pipeline 内部清理
+                ct: CancellationToken.None);
 
-                if (existingFile != null && existingFile.ContentHash == newHash)
-                {
-                    _logger?.LogDebug("内容未变化，跳过: {FileName}", Path.GetFileName(change.FilePath));
-                    return;
-                }
-
-                // 读取文件内容
-                var content = await File.ReadAllTextAsync(change.FilePath);
-
-                // 创建文件记录
-                var fileRecord = new FileRecord
-                {
-                    Id = existingFile?.Id ?? Guid.NewGuid().ToString(),
-                    Path = change.FilePath,
-                    FileName = Path.GetFileName(change.FilePath),
-                    ParentFolder = Path.GetDirectoryName(change.FilePath),
-                    Source = change.Source ?? "Unknown",
-                    ContentHash = newHash,
-                    ContentLength = content.Length,
-                    Title = ExtractTitle(content) ?? Path.GetFileNameWithoutExtension(change.FilePath),
-                    ChunkCount = 0,
-                    TotalTokens = 0,
-                    ModifiedAt = File.GetLastWriteTime(change.FilePath),
-                    IndexedAt = DateTime.UtcNow
-                };
-
-                // 分段
-                var chunks = _chunker.Chunk(content, new ChunkingOptions
-                {
-                    MaxTokens = 512,
-                    MinTokens = 50,
-                    OverlapTokens = 50
-                });
-
-                if (chunks.Count == 0)
-                {
-                    _logger?.LogDebug("文件内容为空或无法分段，跳过: {FileName}", Path.GetFileName(change.FilePath));
-                    return;
-                }
-
-                // 设置 chunk 的 FileId 和 Source
-                foreach (var chunk in chunks)
-                {
-                    chunk.FileId = fileRecord.Id;
-                    chunk.Source = fileRecord.Source;
-                    chunk.Id = Guid.NewGuid().ToString();
-                }
-
-                fileRecord.ChunkCount = chunks.Count;
-                fileRecord.TotalTokens = chunks.Sum(c => c.TokenCount);
-
-                // 生成向量
-                var vectors = new List<VectorRecord>();
-                var config = _configManager.Load();
-                var batchSize = config.Embedding.BatchSize;
-
-                for (int i = 0; i < chunks.Count; i += batchSize)
-                {
-                    var batch = chunks.Skip(i).Take(batchSize).ToList();
-                    var embeddings = await _embeddingService.EncodeBatchAsync(batch.Select(c => c.Content), EmbeddingMode.Document);
-
-                    for (int j = 0; j < batch.Count; j++)
-                    {
-                        vectors.Add(new VectorRecord
-                        {
-                            Id = Guid.NewGuid().ToString(),
-                            ChunkId = batch[j].Id,
-                            FileId = batch[j].FileId,
-                            Vector = embeddings[j],
-                            Dimension = embeddings[j].Length,
-                            Source = batch[j].Source,
-                            ModelName = _embeddingService.ModelName
-                        });
-                    }
-                }
-
-                // 获取旧 chunk ID，用于清理 BM25 旧条目
-                var oldChunks = await _vectorStore.GetChunksByFileAsync(fileRecord.Id);
-                var oldChunkIds = oldChunks.Select(c => c.Id).ToList();
-
-                // 保存到存储
-                await _vectorStore.UpsertFileAsync(fileRecord);
-                await _vectorStore.DeleteChunksByFileAsync(fileRecord.Id);
-
-                // 同步清理 BM25 中的旧条目
-                if (oldChunkIds.Count > 0)
-                    await _bm25Store.DeleteDocumentsByIdsAsync(oldChunkIds);
-
-                await _vectorStore.UpsertChunksAsync(chunks);
-                await _vectorStore.UpsertVectorsAsync(vectors);
-
-                // 索引新 chunks 到 BM25
-                var bm25Docs = chunks.Select(c => (c.Id, c.Content));
-                await _bm25Store.IndexBatchAsync(bm25Docs);
-
-                // 更新知识图谱（提取 wiki-link）
-                if (_graphIndexing != null)
-                    await _graphIndexing.UpdateGraphAsync(fileRecord, content, chunks);
-
-                sw.Stop();
-
-                _logger?.LogInformation("索引完成: {FileName} ({ChunksCount} 分段, {VectorsCount} 向量, {ElapsedMilliseconds}ms)",
-                    Path.GetFileName(change.FilePath), chunks.Count, vectors.Count, sw.ElapsedMilliseconds);
-
-                Progress?.Invoke(this, new AutoIndexProgressEventArgs
-                {
-                    FilePath = change.FilePath,
-                    ChangeType = change.ChangeType,
-                    ChunksIndexed = chunks.Count,
-                    VectorsGenerated = vectors.Count,
-                    DurationMs = sw.ElapsedMilliseconds
-                });
-            }
+            if (indexed)
+                _logger?.LogInformation("自动索引完成: {FileName}", Path.GetFileName(targetPath));
         }
-        catch (Exception ex)
+        finally
         {
-            _logger?.LogError(ex, "索引失败: {FileName}", Path.GetFileName(change.FilePath));
+            _guard.Release(targetPath);
         }
-    }
-
-    private string? ExtractTitle(string content)
-    {
-        var lines = content.Split('\n');
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.StartsWith("# "))
-            {
-                return trimmed[2..].Trim();
-            }
-        }
-        return null;
     }
 
     public void Dispose()
@@ -310,4 +152,13 @@ public class AutoIndexService : IHostedService, IDisposable
             _disposed = true;
         }
     }
+}
+
+public class AutoIndexProgressEventArgs : EventArgs
+{
+    public string FilePath { get; set; } = string.Empty;
+    public ChangeType ChangeType { get; set; }
+    public int ChunksIndexed { get; set; }
+    public int VectorsGenerated { get; set; }
+    public long DurationMs { get; set; }
 }

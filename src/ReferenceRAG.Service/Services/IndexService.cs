@@ -8,68 +8,52 @@ using ReferenceRAG.Core.Services.Graph;
 using ReferenceRAG.Service.Hubs;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 
 namespace ReferenceRAG.Service.Services;
 
 /// <summary>
-/// 索引服务 - 协调文件索引流程并广播进度
+/// 批量索引任务调度器。负责 job 队列管理、进度广播、并行协调。
+/// 单文件索引逻辑统一由 IFileIndexPipeline 执行。
 /// </summary>
 public class IndexService : IHostedService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly IHubContext<IndexHub> _hubContext;
     private readonly ConfigManager _configManager;
+    private readonly IFileIndexPipeline _pipeline;
+    private readonly FileProcessingGuard _guard;
     private readonly ILogger<IndexService> _logger;
 
     private readonly ConcurrentDictionary<string, IndexJob> _activeJobs = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _jobCancellationTokens = new();
-    // 正在处理的文件路径集合：防止多 Job 并发处理同一文件导致向量重复
-    private readonly ConcurrentDictionary<string, byte> _fileInProgress =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    // 已完成任务记录（最多保留20条）
     private readonly ConcurrentQueue<IndexJob> _completedJobs = new();
     private const int MaxCompletedJobs = 20;
-
-    private readonly IBM25Store _bm25Store;
 
     public IndexService(
         IServiceProvider serviceProvider,
         IHubContext<IndexHub> hubContext,
         ConfigManager configManager,
-        IBM25Store bm25Store,
+        IFileIndexPipeline pipeline,
+        FileProcessingGuard guard,
         ILogger<IndexService> logger)
     {
         _serviceProvider = serviceProvider;
         _hubContext = hubContext;
         _configManager = configManager;
-        _bm25Store = bm25Store;
+        _pipeline = pipeline;
+        _guard = guard;
         _logger = logger;
     }
 
-    /// <summary>
-    /// 当前活跃的索引任务
-    /// </summary>
     public IReadOnlyDictionary<string, IndexJob> ActiveJobs => _activeJobs;
-
-    /// <summary>
-    /// 已完成/已取消的索引任务历史（最多20条）
-    /// </summary>
     public IReadOnlyCollection<IndexJob> CompletedJobs => _completedJobs;
 
-    /// <summary>
-    /// 清空已完成/已取消的索引任务历史
-    /// </summary>
     public void ClearCompletedJobs()
     {
         while (_completedJobs.TryDequeue(out _)) { }
         _logger.LogInformation("已清空所有已完成的索引任务记录");
     }
 
-    /// <summary>
-    /// 启动索引任务
-    /// </summary>
     public async Task<IndexJob> StartIndexAsync(IndexRequest request, CancellationToken cancellationToken = default)
     {
         var indexId = Guid.NewGuid().ToString("N")[..8];
@@ -81,30 +65,23 @@ public class IndexService : IHostedService
             StartTime = DateTime.UtcNow
         };
 
-        // 创建可取消的 CancellationTokenSource
         var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _jobCancellationTokens[indexId] = cts;
         _activeJobs[indexId] = job;
 
-        // 后台执行索引
         _ = Task.Run(async () =>
         {
             try
             {
                 using var scope = _serviceProvider.CreateScope();
-                var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
-                var chunker = scope.ServiceProvider.GetRequiredService<IMarkdownChunker>();
                 var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
-                var fileDetector = scope.ServiceProvider.GetRequiredService<IFileChangeDetector>();
+                var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
 
                 job.Status = IndexStatus.Running;
 
-                // 广播开始事件
                 await IndexHub.BroadcastIndexStarted(_hubContext, new IndexStartedEvent
                 {
-                    IndexId = indexId,
-                    TotalFiles = 0,
-                    StartTime = job.StartTime
+                    IndexId = indexId, TotalFiles = 0, StartTime = job.StartTime
                 });
 
                 var config = _configManager.Load();
@@ -115,34 +92,24 @@ public class IndexService : IHostedService
                 var allFiles = new List<string>();
                 foreach (var source in sources)
                 {
-                    // 转换路径格式（WSL 环境下将 Windows 路径转为 /mnt/x/ 格式）
                     var normalizedPath = PathUtility.NormalizePath(source.Path);
                     if (!Directory.Exists(normalizedPath))
                     {
-                        _logger.LogWarning("源目录不存在或无法访问: {Path} (normalized: {NormalizedPath})", source.Path, normalizedPath);
+                        _logger.LogWarning("源目录不存在: {Path}", source.Path);
                         continue;
                     }
-
-                    var files = Directory.GetFiles(normalizedPath, "*.*", SearchOption.AllDirectories)
-                        .Where(f => source.FilePatterns.Any(p => MatchesPattern(f, p)))
-                        .Where(f => !source.ExcludeDirs.Any(d => f.Contains(d)));
-
-                    allFiles.AddRange(files);
+                    allFiles.AddRange(
+                        Directory.GetFiles(normalizedPath, "*.*", SearchOption.AllDirectories)
+                            .Where(f => source.FilePatterns.Any(p => MatchesPattern(f, p)))
+                            .Where(f => !source.ExcludeDirs.Any(d => f.Contains(d))));
                 }
 
-                // 去重：防止 sources 路径重叠导致同一文件出现多次
-                allFiles = allFiles
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
+                allFiles = allFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 job.TotalFiles = allFiles.Count;
 
-                // 更新开始事件的总文件数
                 await IndexHub.BroadcastIndexStarted(_hubContext, new IndexStartedEvent
                 {
-                    IndexId = indexId,
-                    TotalFiles = job.TotalFiles,
-                    StartTime = job.StartTime
+                    IndexId = indexId, TotalFiles = job.TotalFiles, StartTime = job.StartTime
                 });
 
                 var sw = Stopwatch.StartNew();
@@ -150,54 +117,78 @@ public class IndexService : IHostedService
                 var processedCount = 0;
                 var errorsCount = 0;
 
-                // ── Phase 1: CPU 并行 ── 读文件、hash 检测、分块（无 GPU 调用）
+                // ── Phase 1: CPU 并行 ── 读文件、hash检测、分块、清旧数据
                 const int maxPrepParallelism = 8;
                 using var prepSemaphore = new SemaphoreSlim(maxPrepParallelism);
 
                 var prepTasks = allFiles.Select(async file =>
                 {
                     if (cts.Token.IsCancellationRequested) return null;
-                    // 跨 Job 文件级互斥：若另一 Job 正在处理同一文件则跳过，避免向量重复
-                    if (!_fileInProgress.TryAdd(file, 0)) return null;
+                    if (!_guard.TryAcquire(file)) return null;
                     await prepSemaphore.WaitAsync(cts.Token);
                     try
                     {
                         return request.VectorOnly
-                            ? await PrepareVectorOnlyAsync(file, vectorStore, cts.Token)
-                            : await PrepareFileAsync(file, chunker, vectorStore, sources, request.Force, cts.Token);
+                            ? await _pipeline.PrepareVectorOnlyAsync(file, cts.Token)
+                            : await _pipeline.PrepareAsync(file, sources, request.Force, cts.Token);
                     }
                     catch (OperationCanceledException) { return null; }
                     catch (Exception ex)
                     {
                         errors.Add($"{file}: {ex.Message}");
                         Interlocked.Increment(ref errorsCount);
-                        _logger.LogWarning(ex, "Failed to prepare file: {File}", file);
+                        _logger.LogWarning(ex, "Phase1 失败: {File}", file);
                         return null;
                     }
                     finally
                     {
                         prepSemaphore.Release();
-                        _fileInProgress.TryRemove(file, out _);
+                        _guard.Release(file);
                     }
                 }).ToList();
 
                 var prepResults = await Task.WhenAll(prepTasks);
                 var contexts = prepResults.Where(c => c != null).ToList()!;
 
-                // ── Phase 2: GPU 统一大批次推理 ── 所有文件 chunks 合并，一次性过 GPU
+                // ── 清理磁盘已删文件（Bug A）──
+                if (!request.VectorOnly && !cts.Token.IsCancellationRequested)
+                {
+                    var allFilesSet = new HashSet<string>(allFiles, StringComparer.OrdinalIgnoreCase);
+                    var sourceNames = sources.Select(s => s.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var dbFiles = (await vectorStore.GetAllFilesAsync(cts.Token))
+                        .Where(f => sourceNames.Contains(f.Source));
+
+                    foreach (var dbFile in dbFiles)
+                    {
+                        if (cts.Token.IsCancellationRequested) break;
+                        if (!allFilesSet.Contains(dbFile.Path))
+                        {
+                            try
+                            {
+                                await _pipeline.DeleteFileAsync(dbFile.Id, dbFile.Path, cts.Token);
+                                _logger.LogInformation("清理已删除文件: {Path}", dbFile.Path);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "清理已删除文件失败: {Path}", dbFile.Path);
+                            }
+                        }
+                    }
+                }
+
+                // ── Phase 2: GPU 统一大批次推理 ──
                 var allChunks = contexts.SelectMany(c => c!.Chunks).ToList();
                 if (allChunks.Count > 0)
                 {
                     cts.Token.ThrowIfCancellationRequested();
-                    using var pipeline = new IndexingPipeline(
-                        embeddingService, vectorStore,
+                    using var indexingPipeline = new IndexingPipeline(
+                        embeddingService,
+                        vectorStore,
                         batchSize: config.Embedding.BatchSize);
-                    await pipeline.ExecuteAsync(allChunks, "batch", cts.Token);
+                    await indexingPipeline.ExecuteAsync(allChunks, "batch", cts.Token);
                 }
 
-                // ── Phase 3: CPU 并行 ── BM25 + 知识图谱后处理
-                // filename→fullNodeId 映射：必须用全量文件（含本次未变化的文件），
-                // 否则增量索引时本批次文件指向旧文件的 wiki-link 无法解析
+                // ── Phase 3: BM25 + 图谱后处理 ──
                 var allIndexedFiles = await vectorStore.GetAllFilesAsync(cts.Token);
                 var filenameMap = GraphIndexingService.BuildFilenameMap(allIndexedFiles);
 
@@ -210,9 +201,9 @@ public class IndexService : IHostedService
                     await finSemaphore.WaitAsync(cts.Token);
                     try
                     {
-                        // VectorOnly 模式：跳过 BM25 / 图谱更新，只统计进度
                         if (!request.VectorOnly)
-                            await FinalizeFileAsync(ctx!, _bm25Store, filenameMap, cts.Token);
+                            await _pipeline.FinalizeAsync(ctx!, filenameMap, cts.Token);
+
                         var count = Interlocked.Increment(ref processedCount);
                         await IndexHub.BroadcastIndexProgress(_hubContext, new IndexProgressEvent
                         {
@@ -228,35 +219,21 @@ public class IndexService : IHostedService
                     {
                         errors.Add($"{ctx!.FileRecord.Path}: {ex.Message}");
                         Interlocked.Increment(ref errorsCount);
-                        _logger.LogWarning(ex, "Failed to finalize file: {File}", ctx!.FileRecord.Path);
+                        _logger.LogWarning(ex, "Phase3 失败: {File}", ctx!.FileRecord.Path);
                     }
                     finally { finSemaphore.Release(); }
                 }).ToList();
 
                 await Task.WhenAll(finalizeTasks);
 
-                // 更新最终状态
                 job.ProcessedFiles = processedCount;
                 job.Errors = errorsCount;
-
                 sw.Stop();
 
-                // 根据是否被取消设置最终状态
-                if (cts.Token.IsCancellationRequested)
-                {
-                    job.Status = IndexStatus.Cancelled;
-                    _logger.LogInformation("索引任务 {IndexId} 已取消，已处理 {ProcessedFiles}/{TotalFiles} 文件",
-                        indexId, processedCount, job.TotalFiles);
-                }
-                else
-                {
-                    job.Status = IndexStatus.Completed;
-                }
-
+                job.Status = cts.Token.IsCancellationRequested ? IndexStatus.Cancelled : IndexStatus.Completed;
                 job.EndTime = DateTime.UtcNow;
                 job.Duration = sw.Elapsed;
 
-                // 广播完成事件
                 await IndexHub.BroadcastIndexCompleted(_hubContext, new IndexCompletedEvent
                 {
                     IndexId = indexId,
@@ -283,211 +260,43 @@ public class IndexService : IHostedService
             }
             finally
             {
-                // 清理 CancellationTokenSource
-                if (_jobCancellationTokens.TryRemove(indexId, out var cts))
-                {
-                    cts.Dispose();
-                }
-
-                // 将已完成/已取消的任务添加到历史队列
-                if (job.Status == IndexStatus.Completed || job.Status == IndexStatus.Cancelled)
+                if (_jobCancellationTokens.TryRemove(indexId, out var removedCts))
+                    removedCts.Dispose();
+                if (job.Status is IndexStatus.Completed or IndexStatus.Cancelled)
                 {
                     _completedJobs.Enqueue(job);
-
-                    // 保持历史记录不超过最大数量
                     while (_completedJobs.Count > MaxCompletedJobs)
-                    {
                         _completedJobs.TryDequeue(out _);
-                    }
                 }
-
-                // 从活跃任务中移除
-                _activeJobs.TryRemove(indexId, out var _);
+                _activeJobs.TryRemove(indexId, out _);
             }
         }, cts.Token);
 
         return job;
     }
 
-    /// <summary>
-    /// 停止索引任务
-    /// </summary>
     public Task<bool> StopIndexAsync(string indexId)
     {
         if (_activeJobs.TryGetValue(indexId, out var job) &&
-            (job.Status == IndexStatus.Running || job.Status == IndexStatus.Pending))
+            job.Status is IndexStatus.Running or IndexStatus.Pending)
         {
-            _logger.LogInformation("请求停止索引任务 {IndexId}", indexId);
-
-            // 取消 CancellationToken
             if (_jobCancellationTokens.TryGetValue(indexId, out var cts))
-            {
                 cts.Cancel();
-            }
-
             job.Status = IndexStatus.Cancelled;
             return Task.FromResult(true);
         }
-
-        _logger.LogWarning("无法停止索引任务 {IndexId}：任务不存在或状态不允许 (当前状态: {Status})",
-            indexId, job?.Status.ToString() ?? "null");
+        _logger.LogWarning("无法停止 {IndexId}：任务不存在或状态不允许 (当前: {Status})",
+            indexId, _activeJobs.TryGetValue(indexId, out var j) ? j.Status.ToString() : "null");
         return Task.FromResult(false);
     }
 
-    /// <summary>
-    /// 获取索引状态
-    /// </summary>
-    public IndexJob? GetStatus(string indexId)
-    {
-        return _activeJobs.TryGetValue(indexId, out var job) ? job : null;
-    }
-
-    /// <summary>
-    /// Phase 1: 读文件、hash 检测、分块 — 纯 CPU，无 GPU 调用。
-    /// 返回 null 表示文件无需重建。
-    /// </summary>
-    private async Task<FileProcessContext?> PrepareFileAsync(
-        string filePath,
-        IMarkdownChunker chunker,
-        IVectorStore vectorStore,
-        List<SourceFolder> sources,
-        bool forceReindex,
-        CancellationToken cancellationToken)
-    {
-        var content = await File.ReadAllTextAsync(filePath, cancellationToken);
-
-        var sortedSources = sources.OrderByDescending(s => s.Path.Length).ToList();
-        var source = sortedSources.FirstOrDefault(s =>
-            filePath.StartsWith(s.Path + Path.DirectorySeparatorChar) ||
-            filePath.Equals(s.Path) ||
-            filePath.StartsWith(PathUtility.NormalizePath(s.Path) + Path.DirectorySeparatorChar) ||
-            filePath.Equals(PathUtility.NormalizePath(s.Path)));
-
-        var contentHash = ComputeHash(content);
-        var existingFile = await vectorStore.GetFileByPathAsync(filePath, cancellationToken);
-        var fileId = existingFile?.Id ?? Guid.NewGuid().ToString();
-
-        if (!forceReindex && existingFile != null && existingFile.ContentHash == contentHash)
-        {
-            _logger.LogDebug("内容未变化，跳过: {FileName}", Path.GetFileName(filePath));
-            return null;
-        }
-
-        var chunks = chunker.Chunk(content, new ChunkingOptions
-        {
-            MaxTokens = 512,
-            MinTokens = 50,
-            OverlapTokens = 50
-        });
-        if (chunks.Count == 0) return null;
-
-        var fileRecord = new FileRecord
-        {
-            Id = fileId,
-            Path = filePath,
-            FileName = Path.GetFileName(filePath),
-            ParentFolder = Path.GetDirectoryName(filePath),
-            Source = source?.Name ?? "unknown",
-            ContentHash = contentHash,
-            ContentLength = content.Length,
-            Title = Path.GetFileNameWithoutExtension(filePath),
-            ModifiedAt = File.GetLastWriteTime(filePath),
-            ChunkCount = chunks.Count,
-            IndexedAt = DateTime.UtcNow
-        };
-
-        await vectorStore.UpsertFileAsync(fileRecord, cancellationToken);
-
-        var oldChunks = await vectorStore.GetChunksByFileAsync(fileId, cancellationToken);
-        var oldChunkIds = oldChunks.Select(c => c.Id).ToList();
-
-        await vectorStore.DeleteChunksByFileAsync(fileId, cancellationToken);
-
-        // BM25 旧条目在 Phase 1 删除：即使 Phase 2 (GPU) 崩溃，BM25 也不会留下旧 chunk 的孤儿
-        if (oldChunkIds.Count > 0)
-            await _bm25Store.DeleteDocumentsByIdsAsync(oldChunkIds);
-
-        foreach (var chunk in chunks)
-        {
-            chunk.FileId = fileId;
-            chunk.Id = Guid.NewGuid().ToString();
-            chunk.Source = source?.Name ?? "unknown";
-        }
-
-        return new FileProcessContext
-        {
-            FileRecord = fileRecord,
-            Content = content,
-            Chunks = chunks,
-            OldChunkIds = oldChunkIds
-        };
-    }
-
-    /// <summary>
-    /// VectorOnly 模式 Phase 1：读取已有 chunks，删除旧向量，不重新分块。
-    /// chunk_id 保持不变，BM25 / 图谱不受影响。
-    /// </summary>
-    private async Task<FileProcessContext?> PrepareVectorOnlyAsync(
-        string filePath,
-        IVectorStore vectorStore,
-        CancellationToken cancellationToken)
-    {
-        var existingFile = await vectorStore.GetFileByPathAsync(filePath, cancellationToken);
-        if (existingFile == null) return null;
-
-        var chunks = (await vectorStore.GetChunksByFileAsync(existingFile.Id, cancellationToken)).ToList();
-        if (chunks.Count == 0) return null;
-
-        // 删除该文件的旧向量（仅向量表，不碰 chunks 表）
-        await vectorStore.DeleteVectorsByFileAsync(existingFile.Id, cancellationToken);
-
-        return new FileProcessContext
-        {
-            FileRecord = existingFile,
-            Content = "",
-            Chunks = chunks,
-            OldChunkIds = new()
-        };
-    }
-
-    /// <summary>
-    /// Phase 3: BM25 索引 + 知识图谱更新 — GPU 推理已完成，纯 CPU 后处理。
-    /// </summary>
-    private async Task FinalizeFileAsync(
-        FileProcessContext ctx,
-        IBM25Store? bm25Store,
-        IReadOnlyDictionary<string, string> filenameMap,
-        CancellationToken cancellationToken)
-    {
-        if (bm25Store != null)
-        {
-            var bm25Docs = ctx.Chunks.Select(c => (c.Id, c.Content));
-            await bm25Store.IndexBatchAsync(bm25Docs);
-        }
-
-        var graphIndexing = _serviceProvider.GetService<GraphIndexingService>();
-        if (graphIndexing != null)
-        {
-            Func<string, string?> resolver = shortId =>
-                filenameMap.TryGetValue(shortId, out var full) ? full : null;
-            await graphIndexing.UpdateGraphAsync(ctx.FileRecord, ctx.Content, ctx.Chunks, cancellationToken, resolver);
-        }
-    }
-
-    private static string ComputeHash(string content)
-    {
-        using var sha = System.Security.Cryptography.SHA256.Create();
-        var bytes = System.Text.Encoding.UTF8.GetBytes(content);
-        var hash = sha.ComputeHash(bytes);
-        return Convert.ToHexString(hash);
-    }
+    public IndexJob? GetStatus(string indexId) =>
+        _activeJobs.TryGetValue(indexId, out var job) ? job : null;
 
     private static bool MatchesPattern(string filePath, string pattern)
     {
         if (pattern.StartsWith("*."))
-        {
             return filePath.EndsWith(pattern[1..], StringComparison.OrdinalIgnoreCase);
-        }
         return filePath.Contains(pattern, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -504,22 +313,14 @@ public class IndexService : IHostedService
     }
 }
 
-/// <summary>
-/// 索引请求
-/// </summary>
 public class IndexRequest
 {
     public List<string>? Sources { get; set; }
     public bool Force { get; set; }
-    /// <summary>
-    /// 仅重建向量（跳过分块/BM25/图谱），用于切换嵌入模型后重新推理
-    /// </summary>
+    /// <summary>仅重建向量（跳过分块/BM25/图谱），用于切换嵌入模型后重新推理</summary>
     public bool VectorOnly { get; set; }
 }
 
-/// <summary>
-/// 索引任务
-/// </summary>
 public class IndexJob
 {
     public string Id { get; set; } = string.Empty;
@@ -533,29 +334,10 @@ public class IndexJob
     public int Errors { get; set; }
     public string CurrentFile { get; set; } = string.Empty;
     public string? ErrorMessage { get; set; }
-
     public double ProgressPercent => TotalFiles > 0 ? (double)ProcessedFiles / TotalFiles * 100 : 0;
 }
 
-/// <summary>
-/// 索引状态
-/// </summary>
 public enum IndexStatus
 {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-    Cancelled
-}
-
-/// <summary>
-/// Phase 1 → Phase 2 → Phase 3 之间传递的文件上下文
-/// </summary>
-internal class FileProcessContext
-{
-    public FileRecord FileRecord { get; set; } = null!;
-    public string Content { get; set; } = "";
-    public List<ChunkRecord> Chunks { get; set; } = new();
-    public List<string> OldChunkIds { get; set; } = new();
+    Pending, Running, Completed, Failed, Cancelled
 }

@@ -15,18 +15,18 @@ public class SourcesController : ControllerBase
 {
     private readonly ConfigManager _configManager;
     private readonly IVectorStore _vectorStore;
-    private readonly IndexCleaner _indexCleaner;
+    private readonly IFileIndexPipeline _pipeline;
     private readonly ILogger<SourcesController> _logger;
 
     public SourcesController(
         ConfigManager configManager,
         IVectorStore vectorStore,
-        IndexCleaner indexCleaner,
+        IFileIndexPipeline pipeline,
         ILogger<SourcesController> logger)
     {
         _configManager = configManager;
         _vectorStore = vectorStore;
-        _indexCleaner = indexCleaner;
+        _pipeline = pipeline;
         _logger = logger;
     }
 
@@ -39,13 +39,10 @@ public class SourcesController : ControllerBase
         var config = _configManager.Load();
         var files = await _vectorStore.GetAllFilesAsync();
         var fileList = files.ToList();
-        // 从 chunks 表实时统计，反映向量删除/重建后的真实状态
-        var chunkCounts = await _vectorStore.GetChunkCountsBySourceAsync();
 
         var sources = config.Sources.Select(s =>
         {
             var sourceFiles = fileList.Where(f => f.Source == s.Name).ToList();
-            chunkCounts.TryGetValue(s.Name, out var realChunkCount);
             return new SourceDetail
             {
                 Name = s.Name,
@@ -55,7 +52,7 @@ public class SourcesController : ControllerBase
                 Recursive = s.Recursive,
                 FilePatterns = s.FilePatterns,
                 FileCount = sourceFiles.Count,
-                ChunkCount = realChunkCount,
+                ChunkCount = sourceFiles.Sum(f => f.ChunkCount),
                 LastIndexed = sourceFiles.Max(f => f.ModifiedAt)
             };
         }).ToList();
@@ -299,9 +296,7 @@ public class SourcesController : ControllerBase
         _configManager.RemoveSource(name);
 
         if (deleteData)
-        {
-            await _indexCleaner.DeleteBySourceAsync(name);
-        }
+            await _pipeline.DeleteSourceAsync(name);
 
         return NoContent();
     }

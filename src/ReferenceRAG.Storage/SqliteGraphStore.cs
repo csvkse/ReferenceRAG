@@ -372,6 +372,8 @@ public class SqliteGraphStore : IGraphStore, IDisposable
         try
         {
             var orphanIds = new List<string>();
+
+            // 1. document 节点 id 不在 files 表
             using (var cmd = _connection.CreateCommand())
             {
                 cmd.CommandText = """
@@ -382,6 +384,22 @@ public class SqliteGraphStore : IGraphStore, IDisposable
                 using var r = cmd.ExecuteReader();
                 while (r.Read()) orphanIds.Add(r.GetString(0));
             }
+
+            // 2. heading 节点：id 前缀（# 之前部分）不在现存 document 节点中
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT id FROM graph_nodes
+                    WHERE type = 'heading'
+                      AND instr(id, '#') > 0
+                      AND substr(id, 1, instr(id, '#') - 1) NOT IN (
+                          SELECT id FROM graph_nodes WHERE type = 'document'
+                      )
+                    """;
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) orphanIds.Add(r.GetString(0));
+            }
+
             if (orphanIds.Count == 0) return 0;
 
             using var tx = _connection.BeginTransaction();

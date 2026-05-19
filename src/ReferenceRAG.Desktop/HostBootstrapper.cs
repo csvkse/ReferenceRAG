@@ -236,10 +236,14 @@ public static class HostBootstrapper
                 sp.GetRequiredService<ILogger<HybridSearchService>>());
         });
 
+        // 索引基础设施
+        builder.Services.AddSingleton<ReferenceRAG.Core.Services.FileProcessingGuard>();
+        builder.Services.AddSingleton<ReferenceRAG.Core.Interfaces.IFileIndexPipeline,
+            ReferenceRAG.Core.Services.FileIndexPipeline>();
+
         // 索引服务（后台服务）
         builder.Services.AddSingleton<IndexService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<IndexService>());
-        builder.Services.AddSingleton<IndexCleaner>();
 
         // 文件监控与自动索引
         builder.Services.AddSingleton<IFileMonitorService>(sp =>

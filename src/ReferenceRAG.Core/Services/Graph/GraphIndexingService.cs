@@ -137,8 +137,12 @@ public class GraphIndexingService
     /// <summary>
     /// 删除节点及其所有关联边。
     /// </summary>
-    public Task RemoveAsync(string filePath, CancellationToken ct = default)
-        => _graphStore.DeleteNodeAsync(NormalizeNodeId(filePath), ct);
+    public async Task RemoveAsync(string filePath, CancellationToken ct = default)
+    {
+        var nodeId = NormalizeNodeId(filePath);
+        await _graphStore.DeleteHeadingNodesAsync(nodeId, ct);  // Bug C: 先清 heading 子节点
+        await _graphStore.DeleteNodeAsync(nodeId, ct);
+    }
 
     private static string NormalizeNodeId(string path)
         => path.Replace('\\', '/').TrimStart('/');

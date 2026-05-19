@@ -19,7 +19,7 @@ public class VectorIndexController : ControllerBase
     private readonly ConfigManager _configManager;
     private readonly IBM25Store _bm25Store;
     private readonly IGraphStore _graphStore;
-    private readonly IndexCleaner _indexCleaner;
+    private readonly IFileIndexPipeline _pipeline;
     private readonly ILogger<VectorIndexController> _logger;
 
     public VectorIndexController(
@@ -29,7 +29,7 @@ public class VectorIndexController : ControllerBase
         ConfigManager configManager,
         IBM25Store bm25Store,
         IGraphStore graphStore,
-        IndexCleaner indexCleaner,
+        IFileIndexPipeline pipeline,
         ILogger<VectorIndexController> logger)
     {
         _vectorStore = vectorStore;
@@ -38,7 +38,7 @@ public class VectorIndexController : ControllerBase
         _configManager = configManager;
         _bm25Store = bm25Store;
         _graphStore = graphStore;
-        _indexCleaner = indexCleaner;
+        _pipeline = pipeline;
         _logger = logger;
     }
 
@@ -309,7 +309,7 @@ public class VectorIndexController : ControllerBase
             currentModel, currentDimension, sourceName);
 
         // 重建前清理该源的所有存储（向量 + BM25 + 图谱）
-        await _indexCleaner.DeleteBySourceAsync(sourceName);
+        await _pipeline.DeleteSourceAsync(sourceName);
 
         // 启动重新索引任务
         var job = await _indexService.StartIndexAsync(new IndexRequest

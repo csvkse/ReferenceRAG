@@ -13,10 +13,20 @@ allowed-tools:
 ## 服务地址
 
 ```
-BASE_URL=http://localhost:7897
+BASE_URL=http://localhost:7897   # 默认端口，以实际配置为准
 ```
 
 如需自定义，在 `~/.agents/.env` 中设置 `OBSIDIAN_RAG_API_URL`。
+
+## 认证
+
+服务可配置 API Key。若已配置，所有请求需附加：
+
+```
+Authorization: Bearer <ApiKey>
+```
+
+未配置 ApiKey 时无需此头。
 
 ---
 
@@ -67,8 +77,71 @@ BASE_URL=http://localhost:7897
     └── GET /api/sources  →  GET /api/sources/{name}/files
 ```
 
-**查询词扩展**：调用前将用户输入扩展为多个相关词（中英文、同义词、相关概念）以提升召回。  
-示例：`Git 分支管理` → `Git 分支管理 branch 版本控制 分支策略 git flow`
+---
+
+## 查询前处理（调用任何搜索 API 前必须执行）
+
+**在调用 `/api/ai/query` 或 `/api/bm25index/search` 之前，必须先将用户输入扩展为丰富的查询字符串。**
+
+### 扩展规则
+
+1. 提取核心名词和技术术语
+2. 补充中英文同义词、缩写、别名
+3. 补充上位/下位概念、相关操作动词
+4. 拼接为单个字符串（空格分隔，无需引号）
+
+### 扩展示例
+
+| 用户输入 | 扩展后查询 |
+|----------|-----------|
+| `docker 怎么配置网络` | `docker 网络配置 network docker-compose 容器网络 bridge overlay port mapping 端口映射` |
+| `项目笔记整理方法` | `笔记整理 知识管理 PKM 项目管理 Obsidian 工作流 笔记结构 分类 归档` |
+| `git 撤销提交` | `git 撤销 revert reset undo 回滚 commit 提交 撤回 版本控制` |
+| `Python 读取配置文件` | `Python config 配置文件 读取 解析 yaml json ini configparser settings` |
+| `如何做好需求分析` | `需求分析 需求文档 PRD 用户故事 功能规格 业务需求 需求评审 需求收集` |
+
+> 简单 2-3 词的查询不扩展，召回率可能下降 40% 以上。扩展后再搜索。
+
+---
+
+## 精读策略（按需使用）
+
+### 触发条件
+
+满足以下任一条件时，使用「先看结构再精读」代替直接用 `context` 回答：
+
+- 用户明确要求"完整内容"/"读全文"/"这篇文档说了什么"
+- 搜索结果来自同一文件的多个碎片 chunk（score 差异 < 0.1）
+- 需要某文件特定章节，但 chunk 内容被截断且 drill-down 仍不完整
+- 已知文件路径，需要精确取某行范围的内容
+
+### 执行步骤
+
+```
+步骤 1：从搜索结果取 filePath（绝对路径）
+
+步骤 2：POST /api/sources/files/info
+        → 获取文件章节目录（headingPath + startLine + endLine）
+        → 【不返回正文，几乎不消耗 token】
+
+步骤 3：根据 headingPath 和行号判断哪些章节与问题相关
+
+步骤 4：POST /api/sources/file/lines
+        → items: [{ path, startLine, endLine }]
+        → 只取目标章节内容，精准省 token
+
+步骤 5：用取到的内容回答用户
+```
+
+### 全文读取
+
+`startLine: 0, endLine: 0` 等价于读取整个文件的所有 chunk：
+
+```json
+{ "items": [{ "path": "/abs/path/to/note.md", "startLine": 0, "endLine": 0 }] }
+```
+
+> 先用 `files/info` 确认文件结构，仅在确实需要全文时再用 `0,0`，避免超大文件撑爆上下文。
 
 ---
 
@@ -89,9 +162,11 @@ POST /api/ai/query
 | filters.folders | string[] | 限定文件夹路径 |
 
 **模式说明：**
-- `HybridRerank`：BM25 + 向量混合召回，rerank 精排，**准确率最高**，日常首选
-- `Quick`：纯向量，返回 3 条，适合快速试探
-- `Deep`：纯向量，返回 20 条，上下文更大，适合探索性查询
+- `HybridRerank`：BM25 + 向量混合召回 + rerank 精排，**准确率最高**，日常首选
+- `Hybrid`：BM25 + 向量混合召回，不带 rerank，速度快于 HybridRerank
+- `Standard`：纯向量，返回 10 条（默认）
+- `Quick`：纯向量，返回 5 条，快速试探
+- `Deep`：纯向量，返回 20 条，适合探索性查询
 
 **响应关键字段：**
 ```json
@@ -111,6 +186,11 @@ POST /api/ai/query
   "context": "所有结果拼装的上下文文本（可直接用于回答）",
   "stats": { "totalMatches": 5, "durationMs": 120 }
 }
+```
+
+> ⚡ **优先使用 `context` 字段**作为最终上下文，系统已自动拼装去重格式化，无需手动处理 chunks。
+
+```json
 ```
 
 **调用示例（Windows Git Bash）：**
@@ -342,7 +422,7 @@ EOF
 
 ---
 
-### 9. 按行范围批量获取内容（含全文）
+### 8. 按行范围批量获取内容（含全文）
 
 已知文件路径和行号范围（如来自搜索结果的 `startLine`/`endLine`），精准取出对应的分段。支持一次请求多个文件、多个范围。
 
@@ -403,7 +483,7 @@ EOF
 
 ---
 
-### 10. 文件列表
+### 9. 文件列表
 
 列出某个源下的所有文件，回答"知识库里有哪些笔记"。
 
@@ -465,8 +545,9 @@ curl -s "http://localhost:7897/api/sources/Obsidian/files?pageSize=50"
 
 ## 支持的模型
 
-**Embedding**：bge-small-zh-v1.5、bge-base-zh-v1.5、bge-large-zh-v1.5、bge-m3  
-**Rerank**：bge-reranker-base、bge-reranker-large
+**本地 ONNX（Embedding）**：bge-small-zh-v1.5、bge-base-zh-v1.5、bge-large-zh-v1.5、bge-m3  
+**本地 ONNX（Rerank）**：bge-reranker-base、bge-reranker-large  
+**OpenAI 兼容 API**：支持任意 Ollama / vLLM / Xinference / LM Studio / TEI 等兼容模型，在设置页切换推理模式后配置。
 
 ## Web UI / Swagger
 
@@ -475,4 +556,4 @@ curl -s "http://localhost:7897/api/sources/Obsidian/files?pageSize=50"
 
 ## GitHub
 
-https://github.com/hlrlive/ObsidianRAG
+https://github.com/csvkse/ReferenceRAG
