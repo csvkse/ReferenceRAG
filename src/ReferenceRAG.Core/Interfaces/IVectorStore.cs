@@ -193,6 +193,11 @@ public interface IVectorStore
     /// </summary>
     Task<Dictionary<string, int>> GetChunkCountsBySourceAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 清空 chunks 表并将 files.chunk_count 重置为 0
+    /// </summary>
+    Task ClearAllChunksAsync(CancellationToken cancellationToken = default);
+
 }
 
 /// <summary>

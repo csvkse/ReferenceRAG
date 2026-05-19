@@ -1555,6 +1555,18 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         return totalDeleted;
     }
 
+    public async Task ClearAllChunksAsync(CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "DELETE FROM chunks; UPDATE files SET chunk_count = 0";
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally { _writeLock.Release(); }
+    }
+
     public async Task<Dictionary<string, int>> GetChunkCountsBySourceAsync(CancellationToken cancellationToken = default)
     {
         var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);

@@ -432,7 +432,7 @@ public class VectorIndexController : ControllerBase
     }
 
     /// <summary>
-    /// 删除所有向量索引（保留分段数据）
+    /// 删除所有向量索引及分段数据（完全清空，需重新索引）
     /// </summary>
     [HttpDelete("all")]
     public async Task<ActionResult<BulkDeleteResult>> DeleteAllIndexes()
@@ -454,6 +454,9 @@ public class VectorIndexController : ControllerBase
             });
             totalCount += deleted;
         }
+
+        // 向量删完后同步清空 chunks，保持数据一致
+        await _vectorStore.ClearAllChunksAsync();
 
         _logger.LogInformation("已删除所有向量索引，共 {Count} 条", totalCount);
 
