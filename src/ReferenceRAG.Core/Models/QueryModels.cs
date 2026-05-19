@@ -183,6 +183,27 @@ public class SearchStats
     public int TotalMatches { get; set; }
     public long DurationMs { get; set; }
     public int EstimatedTokens { get; set; }
+    /// <summary>各阶段耗时明细（由 SearchTraceAttribute 自动填充）</summary>
+    public SearchPhaseStats? Phases { get; set; }
+}
+
+/// <summary>
+/// 搜索各阶段耗时（毫秒），null 表示该阶段未执行
+/// </summary>
+public class SearchPhaseStats
+{
+    /// <summary>ONNX Embedding 推理</summary>
+    public long EmbedMs { get; set; }
+    /// <summary>标题图搜索（TryTitleFirstSearch）</summary>
+    public long TitleMs { get; set; }
+    /// <summary>纯向量相似检索（ExecuteStandardSearch）</summary>
+    public long VectorMs { get; set; }
+    /// <summary>混合搜索 BM25+向量融合（HybridSearchService）</summary>
+    public long HybridMs { get; set; }
+    /// <summary>图扩展（ExpandWithGraph）</summary>
+    public long GraphMs { get; set; }
+    /// <summary>Cross-Encoder 重排（OnnxRerankService）</summary>
+    public long RerankMs { get; set; }
 }
 
 /// <summary>

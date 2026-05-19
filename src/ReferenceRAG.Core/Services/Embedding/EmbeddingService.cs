@@ -1,8 +1,10 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using Rougamo;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services.Tokenizers;
+using ReferenceRAG.Core.Tracing;
 using System.Diagnostics;
 using System.Numerics;
 
@@ -12,7 +14,7 @@ namespace ReferenceRAG.Core.Services;
 /// 向量编码服务 - ONNX + 归一化
 /// 支持 ITextTokenizer 接口，可切换不同分词器实现
 /// </summary>
-public class EmbeddingService : IEmbeddingService, IDisposable
+public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchTraceAttribute>
 {
     private enum PoolingMode { Mean, Cls }
 

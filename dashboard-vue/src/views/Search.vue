@@ -155,6 +155,23 @@
         </n-space>
       </template>
 
+      <!-- Phase Trace Row -->
+      <div v-if="searchResponse.stats.phases && hasAnyPhase(searchResponse.stats.phases)"
+           style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap">
+        <n-text depth="3" style="font-size: 12px; white-space: nowrap">链路追踪:</n-text>
+        <template v-for="p in phaseItems(searchResponse.stats.phases)" :key="p.label">
+          <n-tag
+            v-if="p.ms > 0"
+            size="small"
+            :type="p.ms > 500 ? 'error' : p.ms > 200 ? 'warning' : 'default'"
+            :bordered="false"
+            round
+          >
+            {{ p.label }} {{ p.ms }}ms
+          </n-tag>
+        </template>
+      </div>
+
       <!-- Context -->
       <n-card v-if="searchResponse.context" title="组装上下文" size="small" style="margin-bottom: 16px">
         <n-input
@@ -280,7 +297,7 @@ import {
   OptionsOutline
 } from '@vicons/ionicons5'
 import { aiQueryApi, sourcesApi, pathsApi, type SearchStatusResponse } from '@/api'
-import type { SourceDetail, AIQueryResponse, ChunkResult, DrilldownResponse, QueryMode, SourcePathInfo } from '@/types/api'
+import type { SourceDetail, AIQueryResponse, ChunkResult, DrilldownResponse, QueryMode, SourcePathInfo, SearchPhaseStats } from '@/types/api'
 
 const searchQuery = ref('')
 const loading = ref(false)
@@ -369,6 +386,18 @@ const handlePathSelect = (keys: string[]) => {
 const showDrilldown = ref(false)
 const drilldownLoading = ref(false)
 const drilldownResponse = ref<DrilldownResponse | null>(null)
+
+const phaseItems = (p: SearchPhaseStats) => [
+  { label: '嵌入', ms: p.embedMs },
+  { label: '标题', ms: p.titleMs },
+  { label: '向量', ms: p.vectorMs },
+  { label: '混合', ms: p.hybridMs },
+  { label: '图扩展', ms: p.graphMs },
+  { label: '重排', ms: p.rerankMs },
+]
+
+const hasAnyPhase = (p: SearchPhaseStats) =>
+  p.embedMs > 0 || p.titleMs > 0 || p.vectorMs > 0 || p.hybridMs > 0 || p.graphMs > 0 || p.rerankMs > 0
 
 const getScoreType = (score: number) => {
   if (score >= 0.8) return 'success'

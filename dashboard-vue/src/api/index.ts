@@ -39,7 +39,8 @@ import type {
   IndexSummary,
   IndexJobRequest,
   IndexJobResponse,
-  PathsResponse
+  PathsResponse,
+  SearchPhaseReport
 } from '@/types/api'
 
 // PascalCase ↔ camelCase conversion utilities
@@ -171,7 +172,9 @@ export const performanceApi = {
   quickTest: (textLength = 10000) => api.get<QuickTestResult>(`/Performance/quick-test?textLength=${textLength}`),
   batchSizes: (data?: BatchOptimizationRequest) => api.post<BatchOptimizationResult>('/Performance/batch-sizes', data || {}),
   memoryTest: (vectorCount = 1000, dimension = 512) =>
-    api.get<MemoryTestResult>(`/Performance/memory-test?vectorCount=${vectorCount}&dimension=${dimension}`)
+    api.get<MemoryTestResult>(`/Performance/memory-test?vectorCount=${vectorCount}&dimension=${dimension}`),
+  getSearchTrace: () => api.get<SearchPhaseReport>('/performance/search-trace'),
+  resetSearchTrace: () => api.delete('/performance/search-trace')
 }
 
 // Semantic Test

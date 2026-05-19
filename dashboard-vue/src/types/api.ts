@@ -70,10 +70,20 @@ export interface FileSummary {
   chunkCount: number
 }
 
+export interface SearchPhaseStats {
+  embedMs: number
+  titleMs: number
+  vectorMs: number
+  hybridMs: number
+  graphMs: number
+  rerankMs: number
+}
+
 export interface SearchStats {
   totalMatches: number
   durationMs: number
   estimatedTokens: number
+  phases?: SearchPhaseStats
 }
 
 export interface QueryOptions {
@@ -461,6 +471,27 @@ export interface MetricsSummary {
   p95QueryLatencyMs: number
   p99QueryLatencyMs: number
   avgResultsPerQuery: number
+}
+
+export interface HistogramStatistics {
+  count: number
+  sum: number
+  average: number
+  min: number
+  max: number
+  p50: number
+  p95: number
+  p99: number
+}
+
+export interface SearchPhaseReport {
+  totalSearches: number
+  embed: HistogramStatistics
+  title: HistogramStatistics
+  vector: HistogramStatistics
+  hybrid: HistogramStatistics
+  graph: HistogramStatistics
+  rerank: HistogramStatistics
 }
 
 export interface Alert {

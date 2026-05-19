@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using Rougamo;
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Tracing;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Services.Graph;
 
@@ -10,7 +12,7 @@ namespace ReferenceRAG.Core.Services;
 /// <summary>
 /// 搜索服务实现
 /// </summary>
-public class SearchService : ISearchService
+public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 {
     private readonly IVectorStore _vectorStore;
     private readonly IEmbeddingService _embeddingService;

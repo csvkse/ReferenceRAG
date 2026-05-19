@@ -215,6 +215,40 @@
       </n-spin>
     </n-card>
 
+    <!-- Search Phase Trace -->
+    <n-card>
+      <template #header>
+        <n-space align="center">
+          <n-text>请求追踪统计</n-text>
+          <n-tag v-if="searchTrace && searchTrace.totalSearches > 0" size="small" type="info">
+            共 {{ searchTrace.totalSearches }} 次搜索
+          </n-tag>
+        </n-space>
+      </template>
+      <template #header-extra>
+        <n-space>
+          <n-button text @click="loadSearchTrace">
+            <template #icon><n-icon :component="RefreshOutline" /></template>
+            刷新
+          </n-button>
+          <n-button text type="error" :loading="resettingTrace" @click="handleResetTrace">
+            <template #icon><n-icon :component="TrashOutline" /></template>
+            重置
+          </n-button>
+        </n-space>
+      </template>
+      <n-spin :show="traceLoading">
+        <n-empty v-if="!searchTrace || searchTrace.totalSearches === 0" description="尚无搜索追踪记录" />
+        <n-data-table
+          v-else
+          :columns="traceColumns"
+          :data="traceTableData"
+          size="small"
+          :bordered="false"
+        />
+      </n-spin>
+    </n-card>
+
     <!-- System Metrics -->
     <n-card title="系统资源">
       <n-spin :show="systemMetricsLoading">
@@ -319,8 +353,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, reactive } from 'vue'
-import { useMessage, useDialog } from 'naive-ui'
+import { ref, computed, h, onMounted, onUnmounted, reactive } from 'vue'
+import { useMessage, useDialog, NTag } from 'naive-ui'
 import {
   CheckmarkCircleOutline,
   AlertCircleOutline,
@@ -328,8 +362,8 @@ import {
   RefreshOutline,
   TrashOutline
 } from '@vicons/ionicons5'
-import { systemApi, vectorIndexApi } from '@/api'
-import type { MetricsSummary, IndexJobResponse } from '@/types/api'
+import { systemApi, vectorIndexApi, performanceApi } from '@/api'
+import type { MetricsSummary, IndexJobResponse, SearchPhaseReport, HistogramStatistics } from '@/types/api'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -368,6 +402,61 @@ const stoppingJobs = reactive<Record<string, boolean>>({})
 const completedJobsLoading = ref(false)
 const completedJobs = ref<IndexJobResponse[]>([])
 const clearingJobs = ref(false)
+
+// Search Phase Trace
+const traceLoading = ref(false)
+const resettingTrace = ref(false)
+const searchTrace = ref<SearchPhaseReport | null>(null)
+
+const p95Tag = (val: number, count: number) => {
+  if (count === 0) return '—'
+  const type = val > 500 ? 'error' : val > 200 ? 'warning' : 'success'
+  return h(NTag, { type, size: 'small', round: true }, () => `${val} ms`)
+}
+
+const fmtMs = (val: number, count: number) => count > 0 ? `${val} ms` : '—'
+
+const traceColumns = [
+  { title: '阶段', key: 'name', width: 180 },
+  { title: '样本数', key: 'count', width: 80, align: 'center' as const },
+  {
+    title: '均值',  key: 'avg', width: 90, align: 'right' as const,
+    render: (row: any) => fmtMs(Math.round(row.avg), row.count)
+  },
+  {
+    title: 'P50',  key: 'p50', width: 90, align: 'right' as const,
+    render: (row: any) => fmtMs(row.p50, row.count)
+  },
+  {
+    title: 'P95',  key: 'p95', width: 110, align: 'right' as const,
+    render: (row: any) => p95Tag(row.p95, row.count)
+  },
+  {
+    title: 'P99',  key: 'p99', width: 90, align: 'right' as const,
+    render: (row: any) => fmtMs(row.p99, row.count)
+  },
+  {
+    title: '最大',  key: 'max', width: 90, align: 'right' as const,
+    render: (row: any) => fmtMs(row.max, row.count)
+  }
+]
+
+const flatStats = (s: HistogramStatistics) => ({
+  count: s.count, avg: s.average, p50: s.p50, p95: s.p95, p99: s.p99, max: s.max
+})
+
+const traceTableData = computed(() => {
+  if (!searchTrace.value) return []
+  const t = searchTrace.value
+  return [
+    { name: 'ONNX 推理',           ...flatStats(t.embed) },
+    { name: '标题搜索',             ...flatStats(t.title) },
+    { name: '向量检索',             ...flatStats(t.vector) },
+    { name: '混合搜索（BM25+向量）', ...flatStats(t.hybrid) },
+    { name: '图扩展',               ...flatStats(t.graph) },
+    { name: 'Cross-Encoder 重排',   ...flatStats(t.rerank) },
+  ]
+})
 
 let refreshInterval: number | null = null
 
@@ -628,6 +717,39 @@ const handleClearCompletedJobs = () => {
   })
 }
 
+const loadSearchTrace = async () => {
+  traceLoading.value = true
+  try {
+    const res = await performanceApi.getSearchTrace()
+    searchTrace.value = res.data
+  } catch (e) {
+    console.error('Failed to load search trace:', e)
+  } finally {
+    traceLoading.value = false
+  }
+}
+
+const handleResetTrace = () => {
+  dialog.warning({
+    title: '确认重置追踪统计',
+    content: '重置后所有阶段耗时数据将清零，不可恢复。',
+    positiveText: '确认重置',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      resettingTrace.value = true
+      try {
+        await performanceApi.resetSearchTrace()
+        searchTrace.value = null
+        message.success('追踪统计已重置')
+      } catch (e) {
+        message.error('重置失败')
+      } finally {
+        resettingTrace.value = false
+      }
+    }
+  })
+}
+
 const loadAll = () => {
   loadStatus()
   loadQueryMetrics()
@@ -635,6 +757,7 @@ const loadAll = () => {
   loadAlerts()
   loadActiveJobs()
   loadCompletedJobs()
+  loadSearchTrace()
 }
 
 onMounted(() => {

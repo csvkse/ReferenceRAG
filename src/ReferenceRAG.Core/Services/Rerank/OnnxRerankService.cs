@@ -1,7 +1,9 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using Rougamo;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services.Tokenizers;
+using ReferenceRAG.Core.Tracing;
 using System.Diagnostics;
 
 namespace ReferenceRAG.Core.Services.Rerank;
@@ -10,7 +12,7 @@ namespace ReferenceRAG.Core.Services.Rerank;
 /// 重排服务 - 基于 ONNX Runtime 的 Cross-Encoder 实现
 /// 用于对 Query-Document 对进行相关性评分
 /// </summary>
-public class OnnxRerankService : IRerankService, IDisposable
+public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTraceAttribute>
 {
     private readonly RerankOptions _options;
     private InferenceSession? _session;

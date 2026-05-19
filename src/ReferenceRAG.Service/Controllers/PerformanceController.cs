@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Core.Tracing;
 using System.Diagnostics;
 using System.Collections.Concurrent;
 
@@ -239,6 +240,24 @@ public class PerformanceController : ControllerBase
             ChunkCount = chunks.Count,
             Results = results
         });
+    }
+
+    /// <summary>
+    /// 查询搜索各阶段耗时统计（由 SearchTraceAttribute 自动采集）
+    /// Embed=ONNX推理 / Title=标题搜索 / Vector=向量检索 / Hybrid=混合融合 / Graph=图扩展
+    /// </summary>
+    [HttpGet("search-trace")]
+    public ActionResult<SearchPhaseReport> GetSearchTrace()
+        => Ok(SearchPhaseCollector.GetReport());
+
+    /// <summary>
+    /// 重置搜索阶段追踪统计
+    /// </summary>
+    [HttpDelete("search-trace")]
+    public ActionResult ResetSearchTrace()
+    {
+        SearchPhaseCollector.Reset();
+        return NoContent();
     }
 
     /// <summary>
