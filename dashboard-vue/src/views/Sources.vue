@@ -69,6 +69,14 @@
             <n-button type="success" :loading="quickIndexing" @click="handleQuickIndexAll">
               快速增量索引（全局）
             </n-button>
+            <n-popconfirm @positive-click="handleVectorOnlyIndexAll">
+              <template #trigger>
+                <n-button type="info" :loading="vectorOnlyIndexing">
+                  补全缺失向量（全局）
+                </n-button>
+              </template>
+              将对所有文件重新生成向量，不修改分块/BM25/图谱。适用于向量数少于分块数时补全缺口。
+            </n-popconfirm>
             <n-popconfirm @positive-click="handleRebuildAll">
               <template #trigger>
                 <n-button type="primary" :loading="rebuilding">
@@ -139,7 +147,9 @@ const rebuilding = ref(false)
 const cleaning = ref(false)
 const deletingAll = ref(false)
 const quickIndexing = ref(false)
+const vectorOnlyIndexing = ref(false)
 const sourceQuickIndexing = ref<Set<string>>(new Set())
+const sourceVectorOnlyIndexing = ref<Set<string>>(new Set())
 const indexSummary = ref<IndexSummary | null>(null)
 
 const newSource = ref({
@@ -217,6 +227,14 @@ const columns = [
             onClick: () => handleQuickIndexSource(row)
           }, {
             default: () => '增量索引'
+          }),
+          h(NButton, {
+            size: 'small',
+            type: 'info',
+            loading: sourceVectorOnlyIndexing.value.has(row.name),
+            onClick: () => handleVectorOnlyIndexSource(row)
+          }, {
+            default: () => '补全向量'
           }),
           h(NButton, {
             size: 'small',
@@ -431,6 +449,34 @@ const handleQuickIndexSource = async (source: SourceDetail) => {
   } finally {
     sourceQuickIndexing.value.delete(source.name)
     sourceQuickIndexing.value = new Set(sourceQuickIndexing.value)
+  }
+}
+
+const handleVectorOnlyIndexAll = async () => {
+  vectorOnlyIndexing.value = true
+  try {
+    const response = await vectorIndexApi.startIndex({ vectorOnly: true })
+    message.success(response.data.message || '向量补全任务已启动（仅重推向量，不动分块/BM25/图谱）')
+    await loadVectorIndex()
+  } catch (error) {
+    message.error('启动向量补全失败')
+  } finally {
+    vectorOnlyIndexing.value = false
+  }
+}
+
+const handleVectorOnlyIndexSource = async (source: SourceDetail) => {
+  sourceVectorOnlyIndexing.value.add(source.name)
+  sourceVectorOnlyIndexing.value = new Set(sourceVectorOnlyIndexing.value)
+  try {
+    await vectorIndexApi.startIndex({ sources: [source.name], vectorOnly: true })
+    message.success(`${source.name} 向量补全已启动`)
+    await loadVectorIndex()
+  } catch (error) {
+    message.error(`${source.name} 向量补全启动失败`)
+  } finally {
+    sourceVectorOnlyIndexing.value.delete(source.name)
+    sourceVectorOnlyIndexing.value = new Set(sourceVectorOnlyIndexing.value)
   }
 }
 

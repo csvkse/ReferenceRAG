@@ -603,6 +603,7 @@ export interface ModelStat {
 export interface IndexJobRequest {
   sources?: string[]
   force?: boolean
+  vectorOnly?: boolean
 }
 
 export interface IndexJobResponse {
