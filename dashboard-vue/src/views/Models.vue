@@ -34,7 +34,11 @@
     <!-- Current Model -->
     <n-card title="当前模型">
       <n-spin :show="currentLoading">
-        <n-descriptions v-if="currentModel" :column="5" label-placement="left">
+        <n-alert v-if="embeddingApiMode" type="info" :show-icon="false" style="margin-bottom: 12px">
+          当前为 <strong>OpenAI 兼容 API 模式</strong>，本地模型管理不适用。
+          请在「设置 → 嵌入模型」中配置 API 地址和模型名称。
+        </n-alert>
+        <n-descriptions v-if="currentModel && !embeddingApiMode" :column="5" label-placement="left">
           <n-descriptions-item label="模型名称">
             <n-tag type="primary">{{ currentModel.displayName || currentModel.name }}</n-tag>
           </n-descriptions-item>
@@ -58,7 +62,11 @@
     <!-- Current Rerank Model -->
     <n-card title="当前重排模型">
       <n-spin :show="rerankCurrentLoading">
-        <n-descriptions v-if="currentRerankModel" :column="3" label-placement="left">
+        <n-alert v-if="rerankApiMode" type="info" :show-icon="false" style="margin-bottom: 12px">
+          当前为 <strong>OpenAI 兼容 API 模式</strong>，本地重排模型管理不适用。
+          请在「设置 → 重排模型」中配置 API 地址和模型名称。
+        </n-alert>
+        <n-descriptions v-if="currentRerankModel && !rerankApiMode" :column="3" label-placement="left">
           <n-descriptions-item label="模型名称">
             <n-tag type="info">{{ currentRerankModel.displayName || currentRerankModel.name }}</n-tag>
           </n-descriptions-item>
@@ -418,6 +426,8 @@ const message = useMessage()
 const modelsPath = ref('')
 const modelsPathLoading = ref(false)
 const savingModelsPath = ref(false)
+const embeddingApiMode = ref(false)
+const rerankApiMode = ref(false)
 
 const models = ref<ModelInfo[]>([])
 const currentModel = ref<ModelInfo | null>(null)
@@ -445,6 +455,8 @@ const loadModelsPath = async () => {
     const response = await settingsApi.get()
     const config = response.data as ReferenceRAGConfig
     modelsPath.value = (config as any).modelsRootPath || 'models'
+    embeddingApiMode.value = config.embedding?.mode === 'openai'
+    rerankApiMode.value = config.rerank?.mode === 'openai'
   } catch (error) {
     console.error('Failed to load models path:', error)
     modelsPath.value = 'models'

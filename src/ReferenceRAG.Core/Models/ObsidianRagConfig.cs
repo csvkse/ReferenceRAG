@@ -190,6 +190,19 @@ public class EmbeddingConfig
     /// </summary>
     public int BatchSize { get; set; } = 32;
 
+    // ── OpenAI 兼容 API 模式 ──
+
+    /// <summary>推理模式：onnx（本地）| openai（兼容 API）</summary>
+    public string Mode { get; set; } = "onnx";
+
+    /// <summary>API 基础地址，例如 http://localhost:11434/v1</summary>
+    public string? ApiBaseUrl { get; set; }
+
+    /// <summary>API Key（留空则不发送 Authorization 头）</summary>
+    public string? ApiKey { get; set; }
+
+    /// <summary>API 模式的向量维度（留空则自动探测）</summary>
+    public int? ApiDimension { get; set; }
 }
 
 /// <summary>
@@ -385,6 +398,17 @@ public class RerankConfig
     /// 0 表示不过滤
     /// </summary>
     public float ScoreThreshold { get; set; } = 0.0f;
+
+    // ── OpenAI 兼容 API 模式 ──
+
+    /// <summary>推理模式：onnx（本地）| openai（兼容 API）</summary>
+    public string Mode { get; set; } = "onnx";
+
+    /// <summary>API 基础地址，例如 http://localhost:11434/v1</summary>
+    public string? ApiBaseUrl { get; set; }
+
+    /// <summary>API Key（留空则不发送 Authorization 头）</summary>
+    public string? ApiKey { get; set; }
 }
 
 /// <summary>

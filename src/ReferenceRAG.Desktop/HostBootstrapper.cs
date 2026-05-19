@@ -118,6 +118,8 @@ public static class HostBootstrapper
         {
             var config = sp.GetRequiredService<ConfigManager>();
             var cfg = config.Load();
+            if (cfg.Embedding.Mode == "openai")
+                return new OpenAIEmbeddingService(cfg.Embedding);
             return new EmbeddingService(new EmbeddingOptions
             {
                 ModelPath          = cfg.Embedding.ModelPath,
@@ -144,6 +146,9 @@ public static class HostBootstrapper
                 var modelsPath = Path.Combine(dataPath, "models");
                 modelPath = Path.Combine(modelsPath, rerankConfig.ModelName, "model.onnx");
             }
+
+            if (rerankConfig.Mode == "openai")
+                return new OpenAIRerankService(rerankConfig);
 
             return new OnnxRerankService(new RerankOptions
             {

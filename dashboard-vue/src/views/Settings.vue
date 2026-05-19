@@ -6,27 +6,57 @@
         <n-tab-pane name="embedding" tab="嵌入模型">
           <n-card>
             <n-form label-placement="left" label-width="140">
-              <n-form-item label="模型路径">
-                <n-input v-model:value="config.embedding.modelPath" placeholder="ONNX 模型路径" />
+              <!-- 推理模式切换 -->
+              <n-form-item label="推理模式">
+                <n-radio-group v-model:value="config.embedding.mode" size="small">
+                  <n-radio-button value="onnx">本地 ONNX</n-radio-button>
+                  <n-radio-button value="openai">OpenAI 兼容 API</n-radio-button>
+                </n-radio-group>
               </n-form-item>
-              <n-form-item label="模型名称">
-                <n-input v-model:value="config.embedding.modelName" placeholder="bge-small-zh-v1.5" />
-              </n-form-item>
-              <n-form-item label="使用 CUDA">
-                <n-switch v-model:value="config.embedding.useCuda" :disabled="!cudaAvailable" />
-              </n-form-item>
-              <n-form-item v-if="!cudaAvailable" label="">
-                <n-text depth="3" style="font-size: 12px;color: var(--n-warning-color)">系统未检测到 CUDA/GPU 支持，Embedding CUDA 已禁用</n-text>
-              </n-form-item>
-              <n-form-item v-if="config.embedding.useCuda && cudaAvailable" label="CUDA 设备 ID">
-                <n-input-number v-model:value="config.embedding.cudaDeviceId" :min="0" :max="7" style="width: 200px" />
-              </n-form-item>
-              <n-form-item v-if="config.embedding.useCuda && cudaAvailable" label="CUDA 库路径">
-                <n-input v-model:value="config.embedding.cudaLibraryPath" placeholder="CUDA DLL 所在目录（可选）" />
-              </n-form-item>
-              <n-form-item label="最大序列长度">
-                <n-input-number v-model:value="config.embedding.maxSequenceLength" :min="32" :max="2048" style="width: 100%" />
-              </n-form-item>
+
+              <!-- ONNX 模式专属字段 -->
+              <template v-if="config.embedding.mode !== 'openai'">
+                <n-form-item label="模型路径">
+                  <n-input v-model:value="config.embedding.modelPath" placeholder="ONNX 模型路径" />
+                </n-form-item>
+                <n-form-item label="模型名称">
+                  <n-input v-model:value="config.embedding.modelName" placeholder="bge-small-zh-v1.5" />
+                </n-form-item>
+                <n-form-item label="使用 CUDA">
+                  <n-switch v-model:value="config.embedding.useCuda" :disabled="!cudaAvailable" />
+                </n-form-item>
+                <n-form-item v-if="!cudaAvailable" label="">
+                  <n-text depth="3" style="font-size: 12px;color: var(--n-warning-color)">系统未检测到 CUDA/GPU 支持，Embedding CUDA 已禁用</n-text>
+                </n-form-item>
+                <n-form-item v-if="config.embedding.useCuda && cudaAvailable" label="CUDA 设备 ID">
+                  <n-input-number v-model:value="config.embedding.cudaDeviceId" :min="0" :max="7" style="width: 200px" />
+                </n-form-item>
+                <n-form-item v-if="config.embedding.useCuda && cudaAvailable" label="CUDA 库路径">
+                  <n-input v-model:value="config.embedding.cudaLibraryPath" placeholder="CUDA DLL 所在目录（可选）" />
+                </n-form-item>
+                <n-form-item label="最大序列长度">
+                  <n-input-number v-model:value="config.embedding.maxSequenceLength" :min="32" :max="2048" style="width: 100%" />
+                </n-form-item>
+              </template>
+
+              <!-- API 模式专属字段 -->
+              <template v-else>
+                <n-form-item label="API 地址">
+                  <n-input v-model:value="config.embedding.apiBaseUrl" placeholder="http://localhost:11434/v1" />
+                </n-form-item>
+                <n-form-item label="API Key">
+                  <n-input v-model:value="config.embedding.apiKey" type="password" show-password-on="click" placeholder="留空则不发送 Authorization 头" />
+                </n-form-item>
+                <n-form-item label="模型名称">
+                  <n-input v-model:value="config.embedding.modelName" placeholder="bge-m3" />
+                </n-form-item>
+                <n-form-item label="向量维度">
+                  <n-input-number v-model:value="config.embedding.apiDimension" :min="1" :max="8192" placeholder="留空则自动探测" style="width: 100%" />
+                  <n-text depth="3" style="font-size: 12px; margin-left: 8px">留空将在首次调用时自动探测</n-text>
+                </n-form-item>
+              </template>
+
+              <!-- 两种模式均适用 -->
               <n-form-item label="批处理大小">
                 <n-input-number v-model:value="config.embedding.batchSize" :min="1" :max="256" style="width: 100%" />
               </n-form-item>
@@ -188,24 +218,51 @@
               <n-form-item label="启用重排">
                 <n-switch v-model:value="config.rerank.enabled" />
               </n-form-item>
-              <n-form-item label="模型名称">
-                <n-input v-model:value="config.rerank.modelName" placeholder="bge-reranker-base" />
+
+              <!-- 推理模式切换 -->
+              <n-form-item label="推理模式">
+                <n-radio-group v-model:value="config.rerank.mode" size="small">
+                  <n-radio-button value="onnx">本地 ONNX</n-radio-button>
+                  <n-radio-button value="openai">OpenAI 兼容 API</n-radio-button>
+                </n-radio-group>
               </n-form-item>
-              <n-form-item label="当前模型">
-                <n-input v-model:value="config.rerank.currentModel" placeholder="当前使用的重排模型" disabled />
-              </n-form-item>
-              <n-form-item label="模型路径">
-                <n-input v-model:value="config.rerank.modelPath" placeholder="重排模型 ONNX 文件路径" />
-              </n-form-item>
-              <n-form-item label="使用 CUDA">
-                <n-switch v-model:value="config.rerank.useCuda" :disabled="!cudaAvailable" />
-              </n-form-item>
-              <n-form-item v-if="!cudaAvailable" label="">
-                <n-text depth="3" style="font-size: 12px;color: var(--n-warning-color)">系统未检测到 CUDA/GPU 支持，重排 CUDA 已禁用</n-text>
-              </n-form-item>
-              <n-form-item v-if="config.rerank.useCuda && cudaAvailable" label="CUDA 设备 ID">
-                <n-input-number v-model:value="config.rerank.cudaDeviceId" :min="0" :max="7" style="width: 200px" />
-              </n-form-item>
+
+              <!-- ONNX 模式专属字段 -->
+              <template v-if="config.rerank.mode !== 'openai'">
+                <n-form-item label="模型名称">
+                  <n-input v-model:value="config.rerank.modelName" placeholder="bge-reranker-base" />
+                </n-form-item>
+                <n-form-item label="当前模型">
+                  <n-input v-model:value="config.rerank.currentModel" placeholder="当前使用的重排模型" disabled />
+                </n-form-item>
+                <n-form-item label="模型路径">
+                  <n-input v-model:value="config.rerank.modelPath" placeholder="重排模型 ONNX 文件路径" />
+                </n-form-item>
+                <n-form-item label="使用 CUDA">
+                  <n-switch v-model:value="config.rerank.useCuda" :disabled="!cudaAvailable" />
+                </n-form-item>
+                <n-form-item v-if="!cudaAvailable" label="">
+                  <n-text depth="3" style="font-size: 12px;color: var(--n-warning-color)">系统未检测到 CUDA/GPU 支持，重排 CUDA 已禁用</n-text>
+                </n-form-item>
+                <n-form-item v-if="config.rerank.useCuda && cudaAvailable" label="CUDA 设备 ID">
+                  <n-input-number v-model:value="config.rerank.cudaDeviceId" :min="0" :max="7" style="width: 200px" />
+                </n-form-item>
+              </template>
+
+              <!-- API 模式专属字段 -->
+              <template v-else>
+                <n-form-item label="API 地址">
+                  <n-input v-model:value="config.rerank.apiBaseUrl" placeholder="http://localhost:11434/v1" />
+                </n-form-item>
+                <n-form-item label="API Key">
+                  <n-input v-model:value="config.rerank.apiKey" type="password" show-password-on="click" placeholder="留空则不发送 Authorization 头" />
+                </n-form-item>
+                <n-form-item label="模型名称">
+                  <n-input v-model:value="config.rerank.modelName" placeholder="jina-reranker-v2-base-multilingual" />
+                </n-form-item>
+              </template>
+
+              <!-- 两种模式均适用 -->
               <n-form-item label="重排返回数量">
                 <n-input-number v-model:value="config.rerank.topN" :min="1" :max="100" style="width: 100%" />
               </n-form-item>
@@ -260,12 +317,15 @@ const defaultConfig: ReferenceRAGConfig = {
   dataPath: 'data',
   sources: [],
   embedding: {
+    mode: 'onnx',
     modelPath: '',
     modelName: 'bge-small-zh-v1.5',
     useCuda: false,
     cudaDeviceId: 0,
     maxSequenceLength: 512,
-    batchSize: 32
+    batchSize: 32,
+    apiBaseUrl: '',
+    apiKey: ''
   },
   chunking: {
     maxTokens: 512,
@@ -295,6 +355,7 @@ const defaultConfig: ReferenceRAGConfig = {
     apiKey: ''
   },
   rerank: {
+    mode: 'onnx',
     enabled: false,
     modelName: 'bge-reranker-base',
     currentModel: '',
@@ -302,7 +363,9 @@ const defaultConfig: ReferenceRAGConfig = {
     useCuda: false,
     cudaDeviceId: 0,
     topN: 10,
-    recallFactor: 3
+    recallFactor: 3,
+    apiBaseUrl: '',
+    apiKey: ''
   }
 }
 

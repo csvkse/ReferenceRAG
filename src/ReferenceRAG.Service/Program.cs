@@ -181,6 +181,8 @@ builder.Services.AddSingleton<IEmbeddingService>(sp =>
 {
     var config = sp.GetRequiredService<ConfigManager>();
     var cfg = config.Load();
+    if (cfg.Embedding.Mode == "openai")
+        return new OpenAIEmbeddingService(cfg.Embedding);
     return new EmbeddingService(new EmbeddingOptions
     {
         ModelPath = cfg.Embedding.ModelPath,
@@ -215,6 +217,9 @@ builder.Services.AddSingleton<IRerankService>(sp =>
         if (!File.Exists(modelPath))
             modelPath = Path.Combine(cfgModelsPath, targetName, "model.onnx"); // 旧扁平结构兜底
     }
+
+    if (rerankConfig.Mode == "openai")
+        return new OpenAIRerankService(rerankConfig);
 
     return new OnnxRerankService(new RerankOptions
     {

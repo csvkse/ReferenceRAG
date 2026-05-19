@@ -192,6 +192,10 @@ export interface EmbeddingConfig {
   cudaLibraryPath?: string
   maxSequenceLength: number
   batchSize: number
+  mode?: string          // "onnx" | "openai"
+  apiBaseUrl?: string
+  apiKey?: string
+  apiDimension?: number
 }
 
 export interface ChunkingConfig {
@@ -233,6 +237,9 @@ export interface RerankConfig {
   cudaDeviceId: number
   topN: number
   recallFactor: number
+  mode?: string          // "onnx" | "openai"
+  apiBaseUrl?: string
+  apiKey?: string
 }
 
 // --- Performance ---
