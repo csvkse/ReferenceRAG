@@ -8,7 +8,7 @@ dist/
 publish/
 
 # Excluded from public repo
-docs/
+docs/*
 resource/
 
 # IDE
