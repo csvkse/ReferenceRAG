@@ -234,6 +234,7 @@ public static class HostBootstrapper
         // 索引服务（后台服务）
         builder.Services.AddSingleton<IndexService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<IndexService>());
+        builder.Services.AddSingleton<IndexCleaner>();
 
         // 文件监控与自动索引
         builder.Services.AddSingleton<IFileMonitorService>(sp =>
