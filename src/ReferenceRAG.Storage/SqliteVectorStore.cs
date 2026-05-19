@@ -800,18 +800,16 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
         if (chunkIds.Count > 0)
         {
-            const int deleteBatchSize = 500;
             foreach (var modelName in _modelDimensions.Keys.ToList())
             {
                 var tableName = ModelToTableName(modelName);
-                for (int i = 0; i < chunkIds.Count; i += deleteBatchSize)
+                // vec0 虚拟表不支持 IN (...) 批删，必须逐条 = ? 删除
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
+                var param = cmd.Parameters.Add("@chunkId", SqliteType.Text);
+                foreach (var chunkId in chunkIds)
                 {
-                    var batch = chunkIds.Skip(i).Take(deleteBatchSize).ToList();
-                    var placeholders = string.Join(",", batch.Select((_, idx) => $"@did{idx}"));
-                    using var cmd = _connection.CreateCommand();
-                    cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id IN ({placeholders})";
-                    for (int j = 0; j < batch.Count; j++)
-                        cmd.Parameters.AddWithValue($"@did{j}", batch[j]);
+                    param.Value = chunkId;
                     await cmd.ExecuteNonQueryAsync(cancellationToken);
                 }
             }
@@ -1510,6 +1508,48 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         foreach (var modelName in toDelete)
         {
             totalDeleted += await DeleteVectorsByModelAsync(modelName, cancellationToken);
+        }
+
+        return totalDeleted;
+    }
+
+    public async Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default)
+    {
+        var totalDeleted = 0;
+
+        foreach (var modelName in _modelDimensions.Keys.ToList())
+        {
+            var tableName = ModelToTableName(modelName);
+            var rowidsTable = $"{tableName}_rowids";
+
+            // 找出孤儿 chunk_id（vec0 rowids 表有记录但 chunks 表无对应）
+            var orphanIds = new List<string>();
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT r.id FROM {rowidsTable} r
+                    WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.id = r.id)";
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                    orphanIds.Add(reader.GetString(0));
+            }
+
+            if (orphanIds.Count == 0) continue;
+
+            await _writeLock.WaitAsync(cancellationToken);
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
+                var param = cmd.Parameters.Add("@chunkId", SqliteType.Text);
+                foreach (var id in orphanIds)
+                {
+                    param.Value = id;
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                    totalDeleted++;
+                }
+            }
+            finally { _writeLock.Release(); }
         }
 
         return totalDeleted;

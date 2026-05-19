@@ -183,6 +183,11 @@ public interface IVectorStore
     /// </summary>
     Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 删除向量表中 chunk_id 不在 chunks 表的孤儿向量
+    /// </summary>
+    Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default);
+
 }
 
 /// <summary>

@@ -482,9 +482,30 @@ public class VectorIndexController : ControllerBase
         return Ok(new CleanupResult
         {
             DeletedCount = deletedCount,
-            Message = deletedCount > 0 
-                ? $"已清理 {deletedCount} 条孤立向量" 
+            Message = deletedCount > 0
+                ? $"已清理 {deletedCount} 条孤立向量"
                 : "没有发现孤立向量"
+        });
+    }
+
+    /// <summary>
+    /// 清理向量表中 chunk_id 不存在于 chunks 表的孤儿记录（修复批量删除静默失败遗留数据）
+    /// </summary>
+    [HttpPost("cleanup/orphan-chunks")]
+    public async Task<ActionResult<CleanupResult>> CleanupOrphanChunkVectors()
+    {
+        _logger.LogInformation("清理孤儿 chunk 向量（chunk_id 不在 chunks 表）");
+
+        var deletedCount = await _vectorStore.CleanupOrphanChunkVectorsAsync();
+
+        _logger.LogInformation("已清理 {Count} 条孤儿 chunk 向量", deletedCount);
+
+        return Ok(new CleanupResult
+        {
+            DeletedCount = deletedCount,
+            Message = deletedCount > 0
+                ? $"已清理 {deletedCount} 条孤儿 chunk 向量"
+                : "没有发现孤儿向量"
         });
     }
 

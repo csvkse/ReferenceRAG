@@ -507,4 +507,7 @@ public class JsonVectorStore : IVectorStore, IDisposable
         }
     }
 
+    public Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default)
+        => Task.FromResult(0);
+
 }
