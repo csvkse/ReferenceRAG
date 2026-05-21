@@ -100,6 +100,8 @@ public class FileIndexPipeline : IFileIndexPipeline
         var oldChunks = await _vectorStore.GetChunksByFileAsync(fileId, ct);
         var oldChunkIds = oldChunks.Select(c => c.Id).ToList();
 
+        // 先删向量（DeleteVectorsByFileAsync 内部查 chunks 找 chunk_id，必须在 DeleteChunks 之前调用）
+        await _vectorStore.DeleteVectorsByFileAsync(fileId, ct);
         await _vectorStore.DeleteChunksByFileAsync(fileId, ct);
 
         if (oldChunkIds.Count > 0)
