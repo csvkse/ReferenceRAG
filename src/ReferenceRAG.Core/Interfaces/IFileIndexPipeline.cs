@@ -27,11 +27,13 @@ public interface IFileIndexPipeline
 
     /// <summary>
     /// Phase 3: BM25索引 + 图谱更新（GPU推理已在外部完成）。
+    /// updateGraph=false 时仅更新 BM25，跳过图谱（VectorOnly 场景）。
     /// </summary>
     Task FinalizeAsync(
         FileProcessContext ctx,
         IReadOnlyDictionary<string, string> filenameMap,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        bool updateGraph = true);
 
     /// <summary>
     /// 单文件全流程 (Phase1 + GPU + Phase3)。AutoIndexService 使用。

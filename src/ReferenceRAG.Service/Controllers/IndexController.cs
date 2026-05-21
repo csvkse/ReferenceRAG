@@ -59,12 +59,12 @@ public class IndexController : ControllerBase
     public async Task<ActionResult<IndexSummary>> GetSummary()
     {
         var stats = await _vectorStore.GetVectorStatsAsync();
-        var files = await _vectorStore.GetAllFilesAsync();
-        var fileList = files.ToList();
-
         var config = _configManager.Load();
         var sourceNames = config.Sources.Select(s => s.Name).ToHashSet();
-        var validFiles = fileList.Where(f => sourceNames.Contains(f.Source)).ToList();
+
+        var sourceStats = (await _vectorStore.GetSourceStatsAsync())
+            .Where(s => sourceNames.Contains(s.Source))
+            .ToList();
 
         var avgQueryTime = await _queryStats.GetAverageQueryTimeAsync();
 
@@ -72,8 +72,8 @@ public class IndexController : ControllerBase
         {
             CurrentModel = _embeddingService.ModelName,
             CurrentDimension = _embeddingService.Dimension,
-            TotalFiles = validFiles.Count,
-            TotalChunks = validFiles.Sum(f => f.ChunkCount),
+            TotalFiles = sourceStats.Sum(s => s.FileCount),
+            TotalChunks = sourceStats.Sum(s => s.ChunkCount),
             SourceCount = config.Sources.Count,
             AvgQueryTime = avgQueryTime,
             ModelStats = stats.Select(s => new ModelStat

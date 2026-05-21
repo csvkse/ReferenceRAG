@@ -258,11 +258,27 @@ public class Fts5BM25Store : IBM25Store, IDisposable
                     avgDocLength = Convert.ToDouble(result);
             }
 
+            long vocabSize = 0;
+            try
+            {
+                using var vocabCmd = _connection.CreateCommand();
+                vocabCmd.CommandText = $"CREATE VIRTUAL TABLE IF NOT EXISTS temp.bm25_vocab USING fts5vocab({FtsTableName}, 'row')";
+                await vocabCmd.ExecuteNonQueryAsync();
+
+                using var countCmd = _connection.CreateCommand();
+                countCmd.CommandText = "SELECT COUNT(*) FROM temp.bm25_vocab";
+                vocabSize = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
+            }
+            catch
+            {
+                vocabSize = 0;
+            }
+
             return new BM25IndexStats
             {
-                TotalDocuments  = (int)totalDocs,
+                TotalDocuments   = (int)totalDocs,
                 AverageDocLength = avgDocLength,
-                VocabularySize  = (int)totalDocs
+                VocabularySize   = (int)vocabSize
             };
         }
         finally { _lock.Release(); }

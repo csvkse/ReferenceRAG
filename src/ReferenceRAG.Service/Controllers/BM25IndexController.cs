@@ -166,16 +166,15 @@ public class BM25IndexController : ControllerBase
     public async Task<ActionResult<BM25Summary>> GetSummary()
     {
         var stats = await _bm25Store.GetStatsAsync();
-        var files = await _vectorStore.GetAllFilesAsync();
-        var fileList = files.ToList();
+        var sourceStats = (await _vectorStore.GetSourceStatsAsync()).ToList();
 
         return Ok(new BM25Summary
         {
             TotalIndexedDocuments = stats.TotalDocuments,
             TotalVocabularySize = stats.VocabularySize,
             AverageDocLength = stats.AverageDocLength,
-            TotalFiles = fileList.Count,
-            TotalChunks = fileList.Sum(f => f.ChunkCount)
+            TotalFiles = sourceStats.Sum(s => s.FileCount),
+            TotalChunks = sourceStats.Sum(s => s.ChunkCount)
         });
     }
 }

@@ -148,8 +148,7 @@ public class SynonymService
             ["模块"] = new List<string> { "module", "组件", "component" },
             ["接口"] = new List<string> { "api", "interface", "端口" },
 
-            // 系统相关
-            ["系统"] = new List<string> { "system", "体系" },
+            // 系统相关（P6: 删除重复的 "系统" 键）
             ["平台"] = new List<string> { "platform" },
             ["环境"] = new List<string> { "environment", "env" },
             ["版本"] = new List<string> { "version", "版本号" },

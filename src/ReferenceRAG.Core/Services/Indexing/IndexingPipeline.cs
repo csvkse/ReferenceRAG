@@ -239,7 +239,7 @@ public class IndexingPipeline : IDisposable
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var texts = chunkBatch.Chunks.Select(c => c.Content).ToList();
+                var texts = chunkBatch.Chunks.Select(c => c.EnhancedContent ?? c.Content).ToList();
 
                 // GPU 推理（上一批的 embedChannel.WriteAsync 在此期间后台完成）
                 var vectors = await _embeddingService.EncodeBatchAsync(texts, EmbeddingMode.Document, cancellationToken);

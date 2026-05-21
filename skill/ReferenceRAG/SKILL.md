@@ -160,6 +160,7 @@ POST /api/ai/query
 | topK | int | 返回数量，默认 10 |
 | sources | string[] | 限定源，省略 = 全部 |
 | filters.folders | string[] | 限定文件夹路径 |
+| slim | bool | `true` = 省略 `prompt` 和 `chunks[*].content`，响应体积减少约 60%，**Agent 调用时强烈推荐** |
 
 **模式说明：**
 - `HybridRerank`：BM25 + 向量混合召回 + rerank 精排，**准确率最高**，日常首选
@@ -510,7 +511,7 @@ curl -s "http://localhost:7897/api/sources/Obsidian/files?pageSize=50"
 
 ### 场景 A：通用查询（最常用）
 1. 扩展查询词
-2. `POST /api/ai/query` (HybridRerank)
+2. `POST /api/ai/query` (HybridRerank, **slim: true**)
 3. 直接使用响应中的 `context` 字段回答用户
 
 ### 场景 B：结果不够详细

@@ -201,8 +201,8 @@ public class IndexService : IHostedService
                     await finSemaphore.WaitAsync(cts.Token);
                     try
                     {
-                        if (!request.VectorOnly)
-                            await _pipeline.FinalizeAsync(ctx!, filenameMap, cts.Token);
+                        // P4: VectorOnly 时跳过图谱但仍更新 BM25
+                        await _pipeline.FinalizeAsync(ctx!, filenameMap, cts.Token, updateGraph: !request.VectorOnly);
 
                         var count = Interlocked.Increment(ref processedCount);
                         await IndexHub.BroadcastIndexProgress(_hubContext, new IndexProgressEvent

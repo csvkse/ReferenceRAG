@@ -397,7 +397,7 @@ public class RerankConfig
     /// 重排分数阈值（低于此阈值的文档将被过滤）
     /// 0 表示不过滤
     /// </summary>
-    public float ScoreThreshold { get; set; } = 0.0f;
+    public float ScoreThreshold { get; set; } = 0.05f;
 
     // ── OpenAI 兼容 API 模式 ──
 

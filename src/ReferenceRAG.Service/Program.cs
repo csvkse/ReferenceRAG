@@ -280,7 +280,6 @@ builder.Services.AddScoped<ISearchService>(sp =>
         rerankService,
         graphStore);
 });
-builder.Services.AddScoped<HierarchicalSearchService>();
 // 注册混合搜索服务（从 appsettings.json 读取 HybridSearch 配置）
 builder.Services.AddSingleton<HybridSearchService>(sp =>
 {

@@ -208,8 +208,6 @@ public static class HostBootstrapper
                 configManager, logger, hybridService, rerankService, graphStore);
         });
 
-        builder.Services.AddScoped<HierarchicalSearchService>();
-
         // 混合搜索服务
         builder.Services.AddSingleton<HybridSearchService>(sp =>
         {

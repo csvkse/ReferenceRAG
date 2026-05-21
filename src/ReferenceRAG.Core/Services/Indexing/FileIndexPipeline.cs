@@ -17,6 +17,7 @@ public class FileIndexPipeline : IFileIndexPipeline
     private readonly IBM25Store _bm25Store;
     private readonly IMarkdownChunker _chunker;
     private readonly IEmbeddingService _embeddingService;
+    private readonly ITextEnhancer _textEnhancer;
     private readonly ConfigManager _configManager;
     private readonly GraphIndexingService? _graphIndexing;
     private readonly ILogger<FileIndexPipeline>? _logger;
@@ -26,6 +27,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         IBM25Store bm25Store,
         IMarkdownChunker chunker,
         IEmbeddingService embeddingService,
+        ITextEnhancer textEnhancer,
         ConfigManager configManager,
         GraphIndexingService? graphIndexing = null,
         ILogger<FileIndexPipeline>? logger = null)
@@ -34,6 +36,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         _bm25Store = bm25Store;
         _chunker = chunker;
         _embeddingService = embeddingService;
+        _textEnhancer = textEnhancer;
         _configManager = configManager;
         _graphIndexing = graphIndexing;
         _logger = logger;
@@ -59,7 +62,11 @@ public class FileIndexPipeline : IFileIndexPipeline
         var existingFile = await _vectorStore.GetFileByPathAsync(filePath, ct);
         var fileId = existingFile?.Id ?? Guid.NewGuid().ToString();
 
-        if (!force && existingFile != null && existingFile.ContentHash == contentHash)
+        // 跳过条件：hash 匹配 AND 上次已完整完成（status='complete'）
+        // status='pending' 说明上次中断，即使 hash 一致也必须重新索引
+        if (!force && existingFile != null
+            && existingFile.ContentHash == contentHash
+            && existingFile.IndexedStatus == "complete")
         {
             _logger?.LogDebug("内容未变化，跳过: {FileName}", Path.GetFileName(filePath));
             return null;
@@ -84,7 +91,8 @@ public class FileIndexPipeline : IFileIndexPipeline
             Title = Path.GetFileNameWithoutExtension(filePath),
             ModifiedAt = File.GetLastWriteTime(filePath),
             ChunkCount = chunks.Count,
-            IndexedAt = DateTime.UtcNow
+            IndexedAt = DateTime.UtcNow,
+            IndexedStatus = "pending"   // Phase3 完成后改为 complete
         };
 
         await _vectorStore.UpsertFileAsync(fileRecord, ct);
@@ -102,6 +110,8 @@ public class FileIndexPipeline : IFileIndexPipeline
             chunk.FileId = fileId;
             chunk.Id = Guid.NewGuid().ToString();
             chunk.Source = sourceName;
+            // P5: 预计算增强内容用于 embedding，原始 Content 保留给 BM25 和显示
+            chunk.EnhancedContent = _textEnhancer.Enhance(chunk, fileRecord);
         }
 
         return new FileProcessContext
@@ -124,6 +134,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         if (chunks.Count == 0) return null;
 
         await _vectorStore.DeleteVectorsByFileAsync(existingFile.Id, ct);
+        await _vectorStore.MarkFileStatusAsync(existingFile.Id, "pending", ct);
 
         return new FileProcessContext
         {
@@ -137,16 +148,21 @@ public class FileIndexPipeline : IFileIndexPipeline
     public async Task FinalizeAsync(
         FileProcessContext ctx,
         IReadOnlyDictionary<string, string> filenameMap,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool updateGraph = true)
     {
+        // P4: BM25 总是更新（含 VectorOnly 场景）；图谱仅在 updateGraph=true 时更新
         await _bm25Store.IndexBatchAsync(ctx.Chunks.Select(c => (c.Id, c.Content)));
 
-        if (_graphIndexing != null)
+        if (updateGraph && _graphIndexing != null)
         {
             Func<string, string?> resolver = shortId =>
                 filenameMap.TryGetValue(shortId, out var full) ? full : null;
             await _graphIndexing.UpdateGraphAsync(ctx.FileRecord, ctx.Content, ctx.Chunks, ct, resolver);
         }
+
+        // 所有阶段完成，标记为 complete，防止中断后因 hash 匹配被跳过
+        await _vectorStore.MarkFileStatusAsync(ctx.FileRecord.Id, "complete", ct);
     }
 
     public async Task<bool> IndexSingleAsync(
@@ -172,7 +188,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         {
             var batch = ctx.Chunks.Skip(i).Take(batchSize).ToList();
             var embeddings = await _embeddingService.EncodeBatchAsync(
-                batch.Select(c => c.Content), EmbeddingMode.Document, ct);
+                batch.Select(c => c.EnhancedContent ?? c.Content), EmbeddingMode.Document, ct);
 
             for (int j = 0; j < batch.Count; j++)
                 vectors.Add(new VectorRecord

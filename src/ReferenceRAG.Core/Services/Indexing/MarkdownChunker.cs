@@ -13,53 +13,44 @@ public class MarkdownChunker : IMarkdownChunker
 {
     private const int ShortContentThreshold = 200;
     private readonly ITokenizer? _tokenizer;
-    private ChunkingOptions _options;
+    private readonly ChunkingOptions _defaultOptions;
 
-    // 预编译正则表达式，避免循环中重复创建
     private static readonly System.Text.RegularExpressions.Regex HeadingPattern =
         new(@"^(#{1,6})\s+(.+)$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     public MarkdownChunker(ChunkingOptions? options = null, ITokenizer? tokenizer = null)
     {
-        _options = options ?? new ChunkingOptions();
+        _defaultOptions = options ?? new ChunkingOptions();
         _tokenizer = tokenizer;
     }
 
-    /// <summary>
-    /// 分段 Markdown 内容
-    /// </summary>
     public List<ChunkRecord> Chunk(string content, FileRecord file)
     {
-        var chunks = Chunk(content, _options);
-        // 设置 FileId
+        var chunks = Chunk(content, (ChunkingOptions?)null);
         foreach (var chunk in chunks)
-        {
             chunk.FileId = file.Id;
-        }
         return chunks;
     }
 
-    /// <summary>
-    /// 分段 Markdown 内容（接口方法）
-    /// </summary>
     public List<ChunkRecord> Chunk(string content, ChunkingOptions? options = null)
     {
-        if (options != null) _options = options;
-        
+        // P2: 不修改实例状态，使用局部有效配置
+        var effectiveOptions = options ?? _defaultOptions;
+
         var result = new List<ChunkRecord>();
         var lines = content.Split('\n');
         var chunkIndex = 0;
 
-        // 1. 提取章节
         var sections = ExtractSections(content, lines);
+        // P0: 合并短节（< MinTokens）到相邻节，避免产生无效 chunk
+        sections = MergeShortSections(sections, effectiveOptions);
 
         foreach (var section in sections)
         {
             var sectionTokens = _tokenizer?.CountTokens(section.Content) ?? TokenEstimator.EstimateTokens(section.Content);
 
-            if (sectionTokens <= _options.MaxTokens)
+            if (sectionTokens <= effectiveOptions.MaxTokens)
             {
-                // 章节完整，直接输出
                 result.Add(CreateChunk(
                     section.Content,
                     lines,
@@ -73,8 +64,7 @@ public class MarkdownChunker : IMarkdownChunker
             }
             else
             {
-                // 章节过长，继续切分
-                foreach (var chunk in ChunkSection(section, lines, chunkIndex, Guid.NewGuid().ToString()))
+                foreach (var chunk in ChunkSection(section, lines, chunkIndex, Guid.NewGuid().ToString(), effectiveOptions))
                 {
                     result.Add(chunk);
                     chunkIndex++;
@@ -85,9 +75,62 @@ public class MarkdownChunker : IMarkdownChunker
         return result;
     }
 
+    // ── 短节合并 (P0) ─────────────────────────────────────────────────────────
+
     /// <summary>
-    /// 提取章节（按标题层级）
+    /// 将 token 数 &lt; MinTokens 的节合并到相邻节，避免产生纯标题等无效 chunk。
     /// </summary>
+    private List<Section> MergeShortSections(List<Section> sections, ChunkingOptions options)
+    {
+        if (sections.Count <= 1) return sections;
+
+        var result = new List<Section>();
+        Section? pending = null;
+
+        foreach (var section in sections)
+        {
+            var tokens = _tokenizer?.CountTokens(section.Content) ?? TokenEstimator.EstimateTokens(section.Content);
+
+            if (tokens < options.MinTokens)
+            {
+                // 短节先缓存，合并到下一节
+                pending = pending == null ? section : MergeTwoSections(pending, section);
+            }
+            else
+            {
+                // 将缓存的短节前置合并到当前节
+                var merged = pending != null ? MergeTwoSections(pending, section) : section;
+                pending = null;
+                result.Add(merged);
+            }
+        }
+
+        // 尾部剩余短节追加到最后一节；若整个文档都是短节则直接输出
+        if (pending != null)
+        {
+            if (result.Count > 0)
+                result[^1] = MergeTwoSections(result[^1], pending);
+            else
+                result.Add(pending);
+        }
+
+        return result;
+    }
+
+    private static Section MergeTwoSections(Section first, Section second)
+    {
+        return new Section
+        {
+            Content = first.Content + "\n" + second.Content,
+            StartLine = first.StartLine,
+            EndLine = second.EndLine,
+            HeadingPath = first.HeadingPath ?? second.HeadingPath,
+            Level = first.Level > 0 ? first.Level : second.Level
+        };
+    }
+
+    // ── 章节提取 ──────────────────────────────────────────────────────────────
+
     private List<Section> ExtractSections(string content, string[] lines)
     {
         var sections = new List<Section>();
@@ -100,12 +143,10 @@ public class MarkdownChunker : IMarkdownChunker
             var line = lines[i];
             var lineNum = i + 1;
 
-            // 检测标题 (Markdown 格式: # Title)
             var headingMatch = HeadingPattern.Match(line);
 
             if (headingMatch.Success)
             {
-                // 保存上一个章节
                 if (sectionStart.HasValue && currentContent.Count > 0)
                 {
                     var headingPath = string.Join("/", headingStack.Select(h => h.Text));
@@ -119,7 +160,6 @@ public class MarkdownChunker : IMarkdownChunker
                     });
                 }
 
-                // 更新标题栈
                 var level = headingMatch.Groups[1].Value.Length;
                 var text = headingMatch.Groups[2].Value.Trim();
 
@@ -137,7 +177,6 @@ public class MarkdownChunker : IMarkdownChunker
             }
         }
 
-        // 最后一个章节
         if (sectionStart.HasValue && currentContent.Count > 0)
         {
             var headingPath = string.Join("/", headingStack.Select(h => h.Text));
@@ -151,7 +190,6 @@ public class MarkdownChunker : IMarkdownChunker
             });
         }
 
-        // 如果没有章节，返回整个文档作为一个章节
         if (sections.Count == 0)
         {
             sections.Add(new Section
@@ -167,14 +205,14 @@ public class MarkdownChunker : IMarkdownChunker
         return sections;
     }
 
-    /// <summary>
-    /// 切分过长章节
-    /// </summary>
+    // ── 过长章节切分 ──────────────────────────────────────────────────────────
+
     private List<ChunkRecord> ChunkSection(
         Section section,
         string[] allLines,
         int startChunkIndex,
-        string fileId)
+        string fileId,
+        ChunkingOptions options)
     {
         var result = new List<ChunkRecord>();
         var paragraphs = ExtractParagraphs(section, allLines);
@@ -186,10 +224,8 @@ public class MarkdownChunker : IMarkdownChunker
         {
             var paraTokens = _tokenizer?.CountTokens(para.Content) ?? TokenEstimator.EstimateTokens(para.Content);
 
-            // 长段落处理
-            if (paraTokens > _options.MaxTokens)
+            if (paraTokens > options.MaxTokens)
             {
-                // 先输出缓冲区
                 if (buffer.Count > 0)
                 {
                     result.Add(CreateChunkFromParagraphs(buffer, allLines, chunkIndex++, section, fileId));
@@ -197,20 +233,17 @@ public class MarkdownChunker : IMarkdownChunker
                     bufferTokens = 0;
                 }
 
-                // 切分长段落
-                foreach (var subChunk in SplitLongParagraph(para, allLines, chunkIndex, section, fileId))
+                foreach (var subChunk in SplitLongParagraph(para, allLines, chunkIndex, section, fileId, options))
                 {
                     result.Add(subChunk);
                     chunkIndex++;
                 }
             }
-            else if (bufferTokens + paraTokens > _options.MaxTokens)
+            else if (bufferTokens + paraTokens > options.MaxTokens)
             {
-                // 缓冲区满，输出当前 chunk
                 result.Add(CreateChunkFromParagraphs(buffer, allLines, chunkIndex++, section, fileId));
 
-                // 保留末尾段落作为滑动重叠，提升边界处的语义召回率
-                var overlap = TakeTrailingParagraphs(buffer, _options.OverlapTokens);
+                var overlap = TakeTrailingParagraphs(buffer, options.OverlapTokens);
                 buffer.Clear();
                 buffer.AddRange(overlap);
                 bufferTokens = overlap.Sum(p => _tokenizer?.CountTokens(p.Content) ?? TokenEstimator.EstimateTokens(p.Content));
@@ -225,18 +258,12 @@ public class MarkdownChunker : IMarkdownChunker
             }
         }
 
-        // 剩余内容
         if (buffer.Count > 0)
-        {
             result.Add(CreateChunkFromParagraphs(buffer, allLines, chunkIndex, section, fileId));
-        }
 
         return result;
     }
 
-    /// <summary>
-    /// 提取段落
-    /// </summary>
     private List<Paragraph> ExtractParagraphs(Section section, string[] allLines)
     {
         var paragraphs = new List<Paragraph>();
@@ -251,7 +278,6 @@ public class MarkdownChunker : IMarkdownChunker
 
             if (string.IsNullOrWhiteSpace(line))
             {
-                // 空行分隔段落
                 if (currentPara.Count > 0 && paraStart.HasValue)
                 {
                     paragraphs.Add(new Paragraph
@@ -271,7 +297,6 @@ public class MarkdownChunker : IMarkdownChunker
             }
         }
 
-        // 最后一个段落
         if (currentPara.Count > 0 && paraStart.HasValue)
         {
             paragraphs.Add(new Paragraph
@@ -285,18 +310,15 @@ public class MarkdownChunker : IMarkdownChunker
         return paragraphs;
     }
 
-    /// <summary>
-    /// 切分长段落
-    /// </summary>
     private List<ChunkRecord> SplitLongParagraph(
         Paragraph para,
         string[] allLines,
         int startChunkIndex,
         Section section,
-        string fileId)
+        string fileId,
+        ChunkingOptions options)
     {
         var result = new List<ChunkRecord>();
-        // 按句子切分
         var sentences = SplitSentences(para.Content);
         var buffer = new List<string>();
         var bufferTokens = 0;
@@ -307,7 +329,7 @@ public class MarkdownChunker : IMarkdownChunker
         {
             var sentenceTokens = _tokenizer?.CountTokens(sentence) ?? TokenEstimator.EstimateTokens(sentence);
 
-            if (bufferTokens + sentenceTokens > _options.MaxTokens && buffer.Count > 0)
+            if (bufferTokens + sentenceTokens > options.MaxTokens && buffer.Count > 0)
             {
                 result.Add(CreateChunk(
                     string.Join("", buffer),
@@ -346,9 +368,8 @@ public class MarkdownChunker : IMarkdownChunker
         return result;
     }
 
-    /// <summary>
-    /// 创建分段记录
-    /// </summary>
+    // ── Chunk 构建 ────────────────────────────────────────────────────────────
+
     private ChunkRecord CreateChunk(
         string content,
         string[] lines,
@@ -360,10 +381,8 @@ public class MarkdownChunker : IMarkdownChunker
         string fileId,
         ChunkType chunkType = ChunkType.Text)
     {
-        // 计算权重
         float weight = ComputeWeight(level, content);
 
-        // 获取结束列
         int endColumn = lines.Length > 0 && endLine > 0 && endLine <= lines.Length
             ? lines[Math.Min(endLine - 1, lines.Length - 1)].Length
             : 0;
@@ -386,9 +405,6 @@ public class MarkdownChunker : IMarkdownChunker
         };
     }
 
-    /// <summary>
-    /// 从段落列表创建分段
-    /// </summary>
     private ChunkRecord CreateChunkFromParagraphs(
         List<Paragraph> paragraphs,
         string[] allLines,
@@ -412,31 +428,28 @@ public class MarkdownChunker : IMarkdownChunker
         );
     }
 
-    /// <summary>
-    /// 计算分段权重
-    /// </summary>
+    // ── 权重计算 (P1: 删除错误的短内容加权) ──────────────────────────────────
+
     private float ComputeWeight(int level, string content)
     {
         float weight = 1.0f;
 
-        // 标题级别越高，权重越大
         weight *= level switch
         {
-            1 => 1.5f,  // H1
-            2 => 1.3f,  // H2
-            3 => 1.1f,  // H3
+            1 => 1.5f,
+            2 => 1.3f,
+            3 => 1.1f,
             _ => 1.0f
         };
 
-        // 内容越短，信息密度越高
-        if (content.Length < ShortContentThreshold) weight *= 1.2f;
+        // P1: 原来 content.Length < 200 时 weight *= 1.2f，
+        // 这会让纯标题 chunk 排名更高，已移除。
 
         return weight;
     }
 
-    /// <summary>
-    /// 从缓冲区末尾取不超过 maxTokens 的段落，用于滑动重叠
-    /// </summary>
+    // ── 辅助方法 ──────────────────────────────────────────────────────────────
+
     private List<Paragraph> TakeTrailingParagraphs(List<Paragraph> buffer, int maxTokens)
     {
         if (maxTokens <= 0 || buffer.Count == 0) return new List<Paragraph>();
@@ -455,9 +468,6 @@ public class MarkdownChunker : IMarkdownChunker
         return result;
     }
 
-    /// <summary>
-    /// 按句子切分
-    /// </summary>
     private List<string> SplitSentences(string text)
     {
         var sentences = new List<string>();
@@ -467,11 +477,9 @@ public class MarkdownChunker : IMarkdownChunker
         {
             current.Append(text[i]);
 
-            // 检测句子结束
             if (text[i] == '。' || text[i] == '！' || text[i] == '？' ||
                 text[i] == '.' || text[i] == '!' || text[i] == '?')
             {
-                // 检查后面是否有引号
                 if (i + 1 < text.Length && (text[i + 1] == '"' || text[i + 1] == '"' || text[i + 1] == '」'))
                 {
                     current.Append(text[i + 1]);
@@ -484,16 +492,13 @@ public class MarkdownChunker : IMarkdownChunker
         }
 
         if (current.Length > 0)
-        {
             sentences.Add(current.ToString());
-        }
 
         return sentences;
     }
 
-    /// <summary>
-    /// 章节信息
-    /// </summary>
+    // ── 内部类型 ──────────────────────────────────────────────────────────────
+
     private class Section
     {
         public string Content { get; set; } = string.Empty;
@@ -503,9 +508,6 @@ public class MarkdownChunker : IMarkdownChunker
         public int Level { get; set; }
     }
 
-    /// <summary>
-    /// 段落信息
-    /// </summary>
     private class Paragraph
     {
         public string Content { get; set; } = string.Empty;

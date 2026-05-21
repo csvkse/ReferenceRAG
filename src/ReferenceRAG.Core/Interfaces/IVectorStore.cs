@@ -43,6 +43,36 @@ public interface IVectorStore
     /// 流式获取所有文件记录（用于替代全量加载）
     /// </summary>
     Task<IAsyncEnumerable<FileRecord>> StreamAllFilesAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 批量按路径查找文件（IN 查询，替代 N 次 GetFileByPathAsync）
+    /// </summary>
+    Task<IEnumerable<FileRecord>> GetFilesByPathsAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 批量按 fileId 获取所有 chunks（IN 查询，替代 N 次 GetChunksByFileAsync）
+    /// </summary>
+    Task<IEnumerable<ChunkRecord>> GetChunksByFileIdsAsync(IEnumerable<string> fileIds, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 获取文件总数（COUNT(*)，替代全表加载计数）
+    /// </summary>
+    Task<int> GetFileCountAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 获取每个源的聚合统计（SQL GROUP BY，替代全表加载后内存聚合）
+    /// </summary>
+    Task<IEnumerable<SourceFileStat>> GetSourceStatsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 分页获取指定源的文件列表
+    /// </summary>
+    Task<IEnumerable<FileRecord>> GetFilesBySourceAsync(string source, int page, int pageSize, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 更新文件索引状态（'pending' / 'complete'）
+    /// </summary>
+    Task MarkFileStatusAsync(string fileId, string status, CancellationToken cancellationToken = default);
     
     // ==================== 分段操作 ====================
     
@@ -193,6 +223,17 @@ public interface IVectorStore
     /// </summary>
     Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default);
 
+}
+
+/// <summary>
+/// 按源聚合的文件统计
+/// </summary>
+public class SourceFileStat
+{
+    public string Source { get; set; } = string.Empty;
+    public int FileCount { get; set; }
+    public int ChunkCount { get; set; }
+    public DateTime? LastIndexed { get; set; }
 }
 
 /// <summary>

@@ -37,4 +37,10 @@ public class FileRecord
     // 系统字段
     public DateTime IndexedAt { get; set; } = DateTime.UtcNow;
     public int Version { get; set; } = 1;
+
+    /// <summary>
+    /// 索引状态：'pending' = Phase1已执行但Phase3未完成；'complete' = 全流程完成。
+    /// 用于防止中断后因 hash 匹配而跳过未完成文件。
+    /// </summary>
+    public string IndexedStatus { get; set; } = "complete";
 }

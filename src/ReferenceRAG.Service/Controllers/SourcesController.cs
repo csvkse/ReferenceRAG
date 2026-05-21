@@ -37,12 +37,12 @@ public class SourcesController : ControllerBase
     public async Task<ActionResult<List<SourceDetail>>> GetAll()
     {
         var config = _configManager.Load();
-        var files = await _vectorStore.GetAllFilesAsync();
-        var fileList = files.ToList();
+        var statsMap = (await _vectorStore.GetSourceStatsAsync())
+            .ToDictionary(s => s.Source, StringComparer.OrdinalIgnoreCase);
 
         var sources = config.Sources.Select(s =>
         {
-            var sourceFiles = fileList.Where(f => f.Source == s.Name).ToList();
+            statsMap.TryGetValue(s.Name, out var stat);
             return new SourceDetail
             {
                 Name = s.Name,
@@ -51,9 +51,9 @@ public class SourcesController : ControllerBase
                 Enabled = s.Enabled,
                 Recursive = s.Recursive,
                 FilePatterns = s.FilePatterns,
-                FileCount = sourceFiles.Count,
-                ChunkCount = sourceFiles.Sum(f => f.ChunkCount),
-                LastIndexed = sourceFiles.Max(f => f.ModifiedAt)
+                FileCount = stat?.FileCount ?? 0,
+                ChunkCount = stat?.ChunkCount ?? 0,
+                LastIndexed = stat?.LastIndexed
             };
         }).ToList();
 
@@ -114,14 +114,13 @@ public class SourcesController : ControllerBase
         var source = config.Sources.FirstOrDefault(s => s.Name == name);
 
         if (source == null)
-        {
             return NotFound(new { error = $"源 '{name}' 不存在" });
-        }
 
-        var files = await _vectorStore.GetAllFilesAsync();
-        var sourceFiles = files.Where(f => f.Source == name).ToList();
+        var statsMap = (await _vectorStore.GetSourceStatsAsync())
+            .ToDictionary(s => s.Source, StringComparer.OrdinalIgnoreCase);
+        statsMap.TryGetValue(name, out var stat);
 
-        var detail = new SourceDetail
+        return Ok(new SourceDetail
         {
             Name = source.Name,
             Path = source.Path,
@@ -129,12 +128,10 @@ public class SourcesController : ControllerBase
             Enabled = source.Enabled,
             Recursive = source.Recursive,
             FilePatterns = source.FilePatterns,
-            FileCount = sourceFiles.Count,
-            ChunkCount = sourceFiles.Sum(f => f.ChunkCount),
-            LastIndexed = sourceFiles.Max(f => f.ModifiedAt)
-        };
-
-        return Ok(detail);
+            FileCount = stat?.FileCount ?? 0,
+            ChunkCount = stat?.ChunkCount ?? 0,
+            LastIndexed = stat?.LastIndexed
+        });
     }
 
     /// <summary>
@@ -147,24 +144,16 @@ public class SourcesController : ControllerBase
         var source = config.Sources.FirstOrDefault(s => s.Name == name);
 
         if (source == null)
-        {
             return NotFound(new { error = $"源 '{name}' 不存在" });
-        }
 
-        var files = await _vectorStore.GetAllFilesAsync();
-        var sourceFiles = files
-            .Where(f => f.Source == name)
-            .OrderByDescending(f => f.ModifiedAt)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .Select(f => new FileDetail
-            {
-                Path = f.Path,
-                ChunkCount = f.ChunkCount,
-                LastModified = f.ModifiedAt ?? DateTime.MinValue,
-                Hash = f.ContentHash.Length >= 8 ? f.ContentHash[..8] : f.ContentHash
-            })
-            .ToList();
+        var files = await _vectorStore.GetFilesBySourceAsync(name, page, pageSize);
+        var sourceFiles = files.Select(f => new FileDetail
+        {
+            Path = f.Path,
+            ChunkCount = f.ChunkCount,
+            LastModified = f.ModifiedAt ?? DateTime.MinValue,
+            Hash = f.ContentHash.Length >= 8 ? f.ContentHash[..8] : f.ContentHash
+        }).ToList();
 
         return Ok(sourceFiles);
     }

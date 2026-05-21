@@ -170,7 +170,8 @@ public class AIQueryController : ControllerBase
             B = request.B,
             // HybridRerank 模式强制启用重排
             EnableRerank = request.Mode == QueryMode.HybridRerank ? true : request.EnableRerank,
-            RerankTopN = request.RerankTopN
+            RerankTopN = request.RerankTopN,
+            Slim = request.Slim
         };
     }
 
@@ -208,14 +209,7 @@ public class AIQueryController : ControllerBase
                 TotalFiles = 0  // 需要单独获取
             };
 
-            // 获取文件总数
-            var fileCount = 0;
-            var fileStream = await _vectorStore.StreamAllFilesAsync();
-            await foreach (var _ in fileStream)
-            {
-                fileCount++;
-            }
-            response.TotalFiles = fileCount;
+            response.TotalFiles = await _vectorStore.GetFileCountAsync();
 
             return Ok(response);
         }

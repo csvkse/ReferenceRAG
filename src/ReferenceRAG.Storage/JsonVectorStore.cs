@@ -111,6 +111,57 @@ public class JsonVectorStore : IVectorStore, IDisposable
         return _files.Values.ToAsyncEnumerable();
     }
 
+    public async Task<IEnumerable<FileRecord>> GetFilesByPathsAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        var set = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return _files.Values.Where(f => set.Contains(f.Path));
+    }
+
+    public async Task<IEnumerable<ChunkRecord>> GetChunksByFileIdsAsync(IEnumerable<string> fileIds, CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        var set = fileIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return _chunks.Values.Where(c => set.Contains(c.FileId)).OrderBy(c => c.FileId).ThenBy(c => c.ChunkIndex);
+    }
+
+    public async Task<int> GetFileCountAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        return _files.Count;
+    }
+
+    public async Task<IEnumerable<SourceFileStat>> GetSourceStatsAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        return _files.Values
+            .GroupBy(f => f.Source ?? "")
+            .Select(g => new SourceFileStat
+            {
+                Source = g.Key,
+                FileCount = g.Count(),
+                ChunkCount = g.Sum(f => f.ChunkCount),
+                LastIndexed = g.Max(f => f.ModifiedAt)
+            });
+    }
+
+    public async Task<IEnumerable<FileRecord>> GetFilesBySourceAsync(string source, int page, int pageSize, CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        return _files.Values
+            .Where(f => f.Source == source)
+            .OrderByDescending(f => f.ModifiedAt)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize);
+    }
+
+    public async Task MarkFileStatusAsync(string fileId, string status, CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        if (_files.TryGetValue(fileId, out var file))
+            file.IndexedStatus = status;
+    }
+
     // ==================== 分段操作 ====================
 
     public async Task UpsertChunkAsync(ChunkRecord chunk, CancellationToken cancellationToken = default)

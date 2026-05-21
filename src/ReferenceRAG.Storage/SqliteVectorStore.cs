@@ -231,7 +231,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 total_tokens INTEGER DEFAULT 0,
                 created_at TEXT,
                 updated_at TEXT,
-                indexed_at TEXT
+                indexed_at TEXT,
+                indexed_status TEXT NOT NULL DEFAULT 'complete'
             );
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
@@ -420,9 +421,9 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         {
             var sql = @"
                 INSERT OR REPLACE INTO files
-                (id, path, file_name, title, content_hash, content_length, tags, parent_folder, source, chunk_count, total_tokens, created_at, updated_at, indexed_at)
+                (id, path, file_name, title, content_hash, content_length, tags, parent_folder, source, chunk_count, total_tokens, created_at, updated_at, indexed_at, indexed_status)
                 VALUES
-                (@id, @path, @fileName, @title, @contentHash, @contentLength, @tags, @parentFolder, @source, @chunkCount, @totalTokens, @createdAt, @updatedAt, @indexedAt)
+                (@id, @path, @fileName, @title, @contentHash, @contentLength, @tags, @parentFolder, @source, @chunkCount, @totalTokens, @createdAt, @updatedAt, @indexedAt, @indexedStatus)
             ";
 
             using var command = _connection.CreateCommand();
@@ -441,6 +442,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             AddParameter(command, "@createdAt", file.CreatedAt?.ToString("O") ?? "");
             AddParameter(command, "@updatedAt", file.ModifiedAt?.ToString("O") ?? "");
             AddParameter(command, "@indexedAt", file.IndexedAt.ToString("O"));
+            AddParameter(command, "@indexedStatus", file.IndexedStatus);
 
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -559,6 +561,127 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         {
             // Cleanup happens in the DisposingAsyncEnumerable
         }
+    }
+
+    public async Task<IEnumerable<FileRecord>> GetFilesByPathsAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
+    {
+        var pathList = paths.Distinct().ToList();
+        if (pathList.Count == 0) return Enumerable.Empty<FileRecord>();
+
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var paramNames = pathList.Select((_, i) => $"@p{i}").ToList();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = $"SELECT * FROM files WHERE path IN ({string.Join(",", paramNames)}) ORDER BY path";
+            for (int i = 0; i < pathList.Count; i++)
+                AddParameter(cmd, $"@p{i}", pathList[i]);
+
+            var files = new List<FileRecord>();
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                files.Add(ReadFileRecord(reader));
+            return files;
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<IEnumerable<ChunkRecord>> GetChunksByFileIdsAsync(IEnumerable<string> fileIds, CancellationToken cancellationToken = default)
+    {
+        var idList = fileIds.Distinct().ToList();
+        if (idList.Count == 0) return Enumerable.Empty<ChunkRecord>();
+
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var paramNames = idList.Select((_, i) => $"@f{i}").ToList();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = $"SELECT * FROM chunks WHERE file_id IN ({string.Join(",", paramNames)}) ORDER BY file_id, chunk_index";
+            for (int i = 0; i < idList.Count; i++)
+                AddParameter(cmd, $"@f{i}", idList[i]);
+
+            var chunks = new List<ChunkRecord>();
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                chunks.Add(ReadChunkRecord(reader));
+            return chunks;
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<int> GetFileCountAsync(CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM files";
+            return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<IEnumerable<SourceFileStat>> GetSourceStatsAsync(CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                SELECT source, COUNT(*) AS file_count, SUM(chunk_count) AS chunk_count, MAX(updated_at) AS last_indexed
+                FROM files
+                GROUP BY source";
+
+            var stats = new List<SourceFileStat>();
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var lastIndexedStr = reader.IsDBNull(3) ? null : reader.GetString(3);
+                stats.Add(new SourceFileStat
+                {
+                    Source = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    FileCount = reader.GetInt32(1),
+                    ChunkCount = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                    LastIndexed = lastIndexedStr != null && DateTime.TryParse(lastIndexedStr, out var dt) ? dt : null
+                });
+            }
+            return stats;
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<IEnumerable<FileRecord>> GetFilesBySourceAsync(string source, int page, int pageSize, CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM files WHERE source = @source ORDER BY updated_at DESC LIMIT @limit OFFSET @offset";
+            AddParameter(cmd, "@source", source);
+            AddParameter(cmd, "@limit", pageSize);
+            AddParameter(cmd, "@offset", (page - 1) * pageSize);
+
+            var files = new List<FileRecord>();
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                files.Add(ReadFileRecord(reader));
+            return files;
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task MarkFileStatusAsync(string fileId, string status, CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE files SET indexed_status = @status WHERE id = @id";
+            AddParameter(cmd, "@status", status);
+            AddParameter(cmd, "@id", fileId);
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally { _writeLock.Release(); }
     }
 
     // ==================== 分段操作 ====================
@@ -1629,7 +1752,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             TotalTokens = reader.GetInt64(reader.GetOrdinal("total_tokens")),
             CreatedAt = DateTime.TryParse(reader.GetString(reader.GetOrdinal("created_at")), out var createdAt) ? createdAt : null,
             ModifiedAt = DateTime.TryParse(reader.GetString(reader.GetOrdinal("updated_at")), out var modifiedAt) ? modifiedAt : null,
-            IndexedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("indexed_at")))
+            IndexedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("indexed_at"))),
+            IndexedStatus = reader.IsDBNull(reader.GetOrdinal("indexed_status")) ? "complete" : reader.GetString(reader.GetOrdinal("indexed_status"))
         };
     }
 

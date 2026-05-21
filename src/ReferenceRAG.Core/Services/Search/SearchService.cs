@@ -260,6 +260,13 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
         sw.Stop();
 
+        // Slim 模式：省略 Prompt 和 Chunks[*].Content，减少约 60% 响应体积
+        if (request.Slim)
+        {
+            prompt = string.Empty;
+            foreach (var c in chunks) c.Content = string.Empty;
+        }
+
         return new AIQueryResponse
         {
             Query = request.Query,
@@ -274,7 +281,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                 DurationMs = sw.ElapsedMilliseconds,
                 EstimatedTokens = TokenEstimator.EstimateTokens(context)
             },
-            HasMore = false, // 重排后不再有分页
+            HasMore = false,
             Suggestion = null,
             RerankApplied = shouldRerank && _rerankService != null && topResults.Count > 0,
             RerankStats = rerankStats
@@ -317,7 +324,26 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         if (nodes.Count == 0)
             return new List<SearchResult>();
 
-        // 收集 TopK*2 个候选：合并后由 rerank 决定最终排序，不再提前截断
+        // 1. 批量查文件（1 次 SQL 代替 N 次串行查询）
+        var paths = nodes
+            .Select(n => ExtractFilePathFromNodeId(n.Id))
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct()
+            .ToList();
+
+        var filesByPath = (await _vectorStore.GetFilesByPathsAsync(paths!, cancellationToken))
+            .Where(f => string.IsNullOrEmpty(f.Source) || enabledSources.Contains(f.Source))
+            .ToDictionary(f => f.Path, StringComparer.OrdinalIgnoreCase);
+
+        if (filesByPath.Count == 0)
+            return new List<SearchResult>();
+
+        // 2. 批量查 chunks（1 次 SQL 代替 N 次串行查询）
+        var chunksByFileId = (await _vectorStore.GetChunksByFileIdsAsync(filesByPath.Values.Select(f => f.Id), cancellationToken))
+            .GroupBy(c => c.FileId)
+            .ToDictionary(g => g.Key, g => g.OrderBy(c => c.ChunkIndex).ToList());
+
+        // 3. 组装结果（零额外 DB 调用）
         var maxCandidates = request.TopK * 2;
         var results = new List<SearchResult>();
         var seenChunkIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -325,33 +351,16 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
         foreach (var node in nodes)
         {
-            if (results.Count >= maxCandidates)
-                break;
+            if (results.Count >= maxCandidates) break;
 
             var filePath = ExtractFilePathFromNodeId(node.Id);
-            if (string.IsNullOrWhiteSpace(filePath))
-                continue;
-
-            var file = await _vectorStore.GetFileByPathAsync(filePath, cancellationToken);
-            if (file == null)
-                continue;
-
-            if (!string.IsNullOrEmpty(file.Source) && !enabledSources.Contains(file.Source))
-                continue;
-
-            var chunks = (await _vectorStore.GetChunksByFileAsync(file.Id, cancellationToken)).ToList();
-            if (chunks.Count == 0)
-                continue;
+            if (filePath == null || !filesByPath.TryGetValue(filePath, out var file)) continue;
+            if (!chunksByFileId.TryGetValue(file.Id, out var chunks) || chunks.Count == 0) continue;
 
             var chosenChunk = ChooseBestTitleChunk(node, request.Query, chunks);
-            if (chosenChunk == null)
-                continue;
-
-            if (!seenChunkIds.Add(chosenChunk.Id))
-                continue;
-
-            if (node.Type.Equals("document", StringComparison.OrdinalIgnoreCase) && !seenFileIds.Add(file.Id))
-                continue;
+            if (chosenChunk == null) continue;
+            if (!seenChunkIds.Add(chosenChunk.Id)) continue;
+            if (node.Type.Equals("document", StringComparison.OrdinalIgnoreCase) && !seenFileIds.Add(file.Id)) continue;
 
             results.Add(new SearchResult
             {

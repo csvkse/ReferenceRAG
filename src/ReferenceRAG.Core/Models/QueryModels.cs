@@ -68,6 +68,12 @@ public class AIQueryRequest
     /// null: 使用配置文件的 Rerank.TopN
     /// </summary>
     public int? RerankTopN { get; set; }
+
+    /// <summary>
+    /// Agent 精简模式：省略 Prompt 和 Chunks[*].Content（约减少 60% 响应体积）。
+    /// 适合 Agent 直接使用 context 字段时使用。
+    /// </summary>
+    public bool Slim { get; set; } = false;
 }
 
 /// <summary>
