@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <PackageReference Include="jieba.NET" Version="0.42.2" GeneratePathProperty="true" />
     <PackageReference Include="Rougamo.Fody" Version="4.*" />
     <PackageReference Include="Markdig" Version="1.1.2" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
@@ -10,6 +11,13 @@
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="1.0.1" />
     <PackageReference Include="BERTTokenizers" Version="1.2.0" />
     <PackageReference Include="Tokenizers.HuggingFace" Version="1.21.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="$(Pkgjieba_NET)\Resources\**\*.*">
+      <Link>Resources\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

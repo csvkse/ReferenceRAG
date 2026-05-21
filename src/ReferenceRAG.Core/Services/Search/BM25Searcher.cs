@@ -1,5 +1,5 @@
+using JiebaNet.Segmenter;
 using System.Collections.Concurrent;
-using System.Text.RegularExpressions;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -10,6 +10,8 @@ namespace ReferenceRAG.Core.Services;
 /// </summary>
 public class BM25Searcher
 {
+    private static readonly JiebaSegmenter _segmenter = new JiebaSegmenter();
+
     private readonly BM25Options _options;
     private readonly ConcurrentDictionary<string, DocumentInfo> _documents = new();
     private readonly ConcurrentDictionary<string, int> _documentFrequency = new();
@@ -231,82 +233,14 @@ public class BM25Searcher
         return score;
     }
 
-    /// <summary>
-    /// 分词 - 支持中英文混合
-    /// </summary>
     private List<string> Tokenize(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return new List<string>();
 
-        var tokens = new List<string>();
-        var currentToken = new System.Text.StringBuilder();
-
-        foreach (var c in text)
-        {
-            if (char.IsWhiteSpace(c))
-            {
-                if (currentToken.Length > 0)
-                {
-                    tokens.Add(currentToken.ToString().ToLowerInvariant());
-                    currentToken.Clear();
-                }
-            }
-            else if (IsChinese(c))
-            {
-                // 中文字符单独成词
-                if (currentToken.Length > 0)
-                {
-                    tokens.Add(currentToken.ToString().ToLowerInvariant());
-                    currentToken.Clear();
-                }
-                tokens.Add(c.ToString());
-            }
-            else if (IsPunctuation(c))
-            {
-                // 标点符号单独处理或跳过
-                if (currentToken.Length > 0)
-                {
-                    tokens.Add(currentToken.ToString().ToLowerInvariant());
-                    currentToken.Clear();
-                }
-                // 可选：保留标点作为token
-                // tokens.Add(c.ToString());
-            }
-            else
-            {
-                currentToken.Append(c);
-            }
-        }
-
-        if (currentToken.Length > 0)
-        {
-            tokens.Add(currentToken.ToString().ToLowerInvariant());
-        }
-
-        // 过滤停用词
-        return tokens.Where(t => !_options.StopWords.Contains(t) && t.Length > 0).ToList();
-    }
-
-    private static bool IsChinese(char c)
-    {
-        return (c >= 0x4E00 && c <= 0x9FFF) ||
-               (c >= 0x3400 && c <= 0x4DBF) ||
-               (c >= 0xF900 && c <= 0xFAFF);
-    }
-
-    private static bool IsPunctuation(char c)
-    {
-        return char.GetUnicodeCategory(c) switch
-        {
-            System.Globalization.UnicodeCategory.ConnectorPunctuation => true,
-            System.Globalization.UnicodeCategory.DashPunctuation => true,
-            System.Globalization.UnicodeCategory.OpenPunctuation => true,
-            System.Globalization.UnicodeCategory.ClosePunctuation => true,
-            System.Globalization.UnicodeCategory.InitialQuotePunctuation => true,
-            System.Globalization.UnicodeCategory.FinalQuotePunctuation => true,
-            System.Globalization.UnicodeCategory.OtherPunctuation => true,
-            _ => false
-        };
+        return _segmenter.CutForSearch(text)
+            .Select(t => t.Trim().ToLowerInvariant())
+            .Where(t => t.Length > 0 && !string.IsNullOrWhiteSpace(t) && !_options.StopWords.Contains(t))
+            .ToList();
     }
 
     private class DocumentInfo

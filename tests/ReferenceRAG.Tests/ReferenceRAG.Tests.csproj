@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="jieba.NET" Version="0.42.2" GeneratePathProperty="true" />
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.5" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.5" />
@@ -22,6 +23,13 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\ReferenceRAG.Core\ReferenceRAG.Core.csproj" />
     <ProjectReference Include="..\..\src\ReferenceRAG.Storage\ReferenceRAG.Storage.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="$(Pkgjieba_NET)\Resources\**\*.*">
+      <Link>Resources\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

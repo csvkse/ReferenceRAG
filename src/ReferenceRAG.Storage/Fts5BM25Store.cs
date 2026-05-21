@@ -1,8 +1,8 @@
+using JiebaNet.Segmenter;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Interfaces;
 using System.Text;
-using System.Text.RegularExpressions;
 
 namespace ReferenceRAG.Storage;
 
@@ -25,9 +25,11 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     // FTS5 表名
     private const string FtsTableName = "bm25_fts";
 
-    // 英文停用词
+    private static readonly JiebaSegmenter _segmenter = new JiebaSegmenter();
+
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
     {
+        // 英文停用词
         "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
         "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
         "being", "have", "has", "had", "do", "does", "did", "will", "would",
@@ -36,7 +38,14 @@ public class Fts5BM25Store : IBM25Store, IDisposable
         "she", "we", "they", "what", "which", "who", "when", "where", "why",
         "how", "all", "each", "every", "both", "few", "more", "most", "other",
         "some", "such", "no", "not", "only", "same", "so", "than", "too",
-        "very", "just", "as", "if", "then", "because", "while", "although"
+        "very", "just", "as", "if", "then", "because", "while", "although",
+        // 中文停用词
+        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都",
+        "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会",
+        "着", "没有", "看", "好", "自己", "这", "那", "里", "以", "来",
+        "对", "与", "或", "但", "因为", "所以", "如果", "虽然", "但是",
+        "然后", "而且", "而", "及", "等", "被", "把", "让", "使", "为",
+        "将", "于", "之", "其", "此", "该", "各", "某", "哪", "什么", "怎么"
     };
 
     /// <summary>生产用：接受共享连接，与其他 Store 共用同一连接和锁。</summary>
@@ -324,19 +333,12 @@ public class Fts5BM25Store : IBM25Store, IDisposable
 
     #region 分词方法
 
-    /// <summary>
-    /// 为索引分词 - 将内容转换为空格分隔的 token
-    /// 中文按字符分词，英文按单词分词
-    /// </summary>
     private string TokenizeForIndex(string text)
     {
         var tokens = Tokenize(text);
         return string.Join(" ", tokens);
     }
 
-    /// <summary>
-    /// 转义 FTS5 查询字符串 - 支持中英文混合分词
-    /// </summary>
     private string EscapeFtsQuery(string query)
     {
         if (string.IsNullOrWhiteSpace(query))
@@ -347,92 +349,21 @@ public class Fts5BM25Store : IBM25Store, IDisposable
         if (tokens.Count == 0)
             return query;
 
-        // 每个 token 用双引号包裹，用 OR 连接
         return string.Join(" OR ", tokens.Select(t => $"\"{t.Replace("\"", "\"\"")}\""));
     }
 
     /// <summary>
-    /// 分词 - 支持中英文混合
-    /// 中文按字符分词，英文按单词分词
+    /// jieba CutForSearch 模式：中文词语级切割，英文整词保留。
+    /// 索引和查询共用同一分词，保证 token 空间一致。
     /// </summary>
-    private List<string> Tokenize(string text)
+    private static List<string> Tokenize(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return new List<string>();
 
-        var tokens = new List<string>();
-        var currentToken = new StringBuilder();
-
-        foreach (var c in text)
-        {
-            if (char.IsWhiteSpace(c))
-            {
-                if (currentToken.Length > 0)
-                {
-                    tokens.Add(currentToken.ToString().ToLowerInvariant());
-                    currentToken.Clear();
-                }
-            }
-            else if (IsChinese(c))
-            {
-                if (currentToken.Length > 0)
-                {
-                    tokens.Add(currentToken.ToString().ToLowerInvariant());
-                    currentToken.Clear();
-                }
-                tokens.Add(c.ToString());
-            }
-            else if (IsPunctuation(c))
-            {
-                if (currentToken.Length > 0)
-                {
-                    tokens.Add(currentToken.ToString().ToLowerInvariant());
-                    currentToken.Clear();
-                }
-            }
-            else
-            {
-                currentToken.Append(c);
-            }
-        }
-
-        if (currentToken.Length > 0)
-        {
-            tokens.Add(currentToken.ToString().ToLowerInvariant());
-        }
-
-        return tokens.Where(t => !StopWords.Contains(t) && t.Length > 0).ToList();
-    }
-
-    /// <summary>
-    /// 判断字符是否为中文字符
-    /// </summary>
-    private static bool IsChinese(char c)
-    {
-        return (c >= 0x4E00 && c <= 0x9FFF) ||
-               (c >= 0x3400 && c <= 0x4DBF) ||
-               (c >= 0xF900 && c <= 0xFAFF) ||
-               (c >= 0x20000 && c <= 0x2A6DF) ||
-               (c >= 0x2A700 && c <= 0x2B73F) ||
-               (c >= 0x2B740 && c <= 0x2B81F) ||
-               (c >= 0x2B820 && c <= 0x2CEAF);
-    }
-
-    /// <summary>
-    /// 判断字符是否为标点符号
-    /// </summary>
-    private static bool IsPunctuation(char c)
-    {
-        return char.GetUnicodeCategory(c) switch
-        {
-            System.Globalization.UnicodeCategory.ConnectorPunctuation => true,
-            System.Globalization.UnicodeCategory.DashPunctuation => true,
-            System.Globalization.UnicodeCategory.OpenPunctuation => true,
-            System.Globalization.UnicodeCategory.ClosePunctuation => true,
-            System.Globalization.UnicodeCategory.InitialQuotePunctuation => true,
-            System.Globalization.UnicodeCategory.FinalQuotePunctuation => true,
-            System.Globalization.UnicodeCategory.OtherPunctuation => true,
-            _ => false
-        };
+        return _segmenter.CutForSearch(text)
+            .Select(t => t.Trim().ToLowerInvariant())
+            .Where(t => t.Length > 0 && !string.IsNullOrWhiteSpace(t) && !StopWords.Contains(t))
+            .ToList();
     }
 
     #endregion
