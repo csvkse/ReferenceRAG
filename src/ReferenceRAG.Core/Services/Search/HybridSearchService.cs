@@ -10,7 +10,7 @@ namespace ReferenceRAG.Core.Services;
 /// 混合搜索服务 - 结合 BM25 关键词搜索和 Embedding 语义搜索
 /// 使用分数级加权融合 (Score-level Weighted Fusion) 算法
 /// </summary>
-public class HybridSearchService : IRougamo<SearchTraceAttribute>
+public class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSearchService
 {
     private readonly IVectorStore _vectorStore;
     private readonly IEmbeddingService _embeddingService;

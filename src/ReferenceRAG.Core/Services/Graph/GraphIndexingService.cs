@@ -4,7 +4,7 @@ using ReferenceRAG.Core.Models;
 
 namespace ReferenceRAG.Core.Services.Graph;
 
-public class GraphIndexingService
+public class GraphIndexingService : IGraphIndexingService
 {
     private readonly IGraphStore _graphStore;
     private readonly WikiLinkExtractor _extractor;

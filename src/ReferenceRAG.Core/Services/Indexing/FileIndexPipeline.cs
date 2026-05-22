@@ -19,7 +19,7 @@ public class FileIndexPipeline : IFileIndexPipeline
     private readonly IEmbeddingService _embeddingService;
     private readonly ITextEnhancer _textEnhancer;
     private readonly ConfigManager _configManager;
-    private readonly GraphIndexingService? _graphIndexing;
+    private readonly IGraphIndexingService? _graphIndexing;
     private readonly ILogger<FileIndexPipeline>? _logger;
 
     public FileIndexPipeline(
@@ -29,7 +29,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         IEmbeddingService embeddingService,
         ITextEnhancer textEnhancer,
         ConfigManager configManager,
-        GraphIndexingService? graphIndexing = null,
+        IGraphIndexingService? graphIndexing = null,
         ILogger<FileIndexPipeline>? logger = null)
     {
         _vectorStore = vectorStore;

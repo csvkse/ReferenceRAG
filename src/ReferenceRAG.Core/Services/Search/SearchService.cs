@@ -17,7 +17,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     private readonly IVectorStore _vectorStore;
     private readonly IEmbeddingService _embeddingService;
     private readonly ITextEnhancer _textEnhancer;
-    private readonly HybridSearchService? _hybridSearchService;
+    private readonly IHybridSearchService? _hybridSearchService;
     private readonly IRerankService? _rerankService;
     private readonly IGraphStore? _graphStore;
     private readonly ConfigManager _configManager;
@@ -29,7 +29,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         ITextEnhancer textEnhancer,
         ConfigManager configManager,
         ILogger<SearchService> logger,
-        HybridSearchService? hybridSearchService = null,
+        IHybridSearchService? hybridSearchService = null,
         IRerankService? rerankService = null,
         IGraphStore? graphStore = null)
     {
