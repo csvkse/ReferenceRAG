@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 
 using Microsoft.OpenApi;
 
+using ReferenceRAG.Core.Extensions;
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
@@ -12,6 +13,7 @@ using ReferenceRAG.Service.Hubs;
 using ReferenceRAG.Service.Middleware;
 using ReferenceRAG.Service.Services;
 using ReferenceRAG.Storage;
+using ReferenceRAG.Storage.Extensions;
 
 using Serilog;
 
@@ -110,231 +112,39 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 
-// 注册配置管理
+// 注册配置管理（其他扩展依赖它，必须第一个注册）
 builder.Services.AddSingleton<ConfigManager>();
 
-// 注册模型管理器
-builder.Services.AddSingleton<IModelManager>(sp =>
+// 读取 HybridSearch 配置（Core 库不依赖 IConfiguration，在此预读后传入）
+var hybridOptions = new HybridSearchOptions();
+var hybridSection = builder.Configuration.GetSection("HybridSearch");
+if (hybridSection.Exists())
 {
-    var configManager = sp.GetRequiredService<ConfigManager>();
-    var cfg = configManager.Load();
-    var dataPath = cfg.DataPath ?? "data";
-
-    // 使用顶层 ModelsRootPath（支持绝对路径和相对路径）
-    string modelsPath;
-    var modelsRootPath = cfg.ModelsRootPath;
-    if (!string.IsNullOrEmpty(modelsRootPath) && Path.IsPathRooted(modelsRootPath))
+    hybridSection.Bind(hybridOptions);
+    try { hybridOptions.Validate(); }
+    catch (Exception ex)
     {
-        // 绝对路径直接使用
-        modelsPath = modelsRootPath;
+        Console.WriteLine($"[HybridSearch] Configuration validation failed: {ex.Message}, using defaults");
+        hybridOptions = new HybridSearchOptions();
     }
-    else
-    {
-        // 相对路径：dataPath + modelsRootPath（或默认 "models"）
-        modelsPath = Path.Combine(dataPath, modelsRootPath ?? "models");
-    }
+}
 
-    Console.WriteLine($"[ModelManager] 使用模型路径: {modelsPath}");
-    return new ModelManager(modelsPath, configManager);
-});
+// 领域服务注册
+builder.Services
+    .AddFileMonitor()
+    .AddChunking()
+    .AddModelManagement()
+    .AddRagStorage()
+    .AddSearch(hybridOptions)
+    .AddIndexingPipeline();
 
-// 注册核心服务
-builder.Services.AddSingleton<ITokenizer, SimpleTokenizer>();
-builder.Services.AddSingleton<ITextEnhancer, TextEnhancer>();
-builder.Services.AddSingleton<IMarkdownChunker, MarkdownChunker>();
-// 共享 SQLite 连接 — VectorStore / GraphStore / BM25Store 共用同一连接和锁
-// 消除多连接 WAL 序列化开销，并通过统一锁保证 SqliteConnection 线程安全
-builder.Services.AddSingleton<ReferenceRAG.Storage.SharedSqliteConnection>(sp =>
-{
-    var cfg = sp.GetRequiredService<ConfigManager>().Load();
-    var dbPath = Path.Combine(cfg.DataPath ?? "data", "vectors.db");
-    Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-    return new ReferenceRAG.Storage.SharedSqliteConnection(dbPath);
-});
-
-// 注册向量存储
-builder.Services.AddSingleton<IVectorStore>(sp =>
-{
-    var shared = sp.GetRequiredService<ReferenceRAG.Storage.SharedSqliteConnection>();
-    return new SqliteVectorStore(shared);
-});
-
-// 注册知识图谱存储（与向量存储共用同一连接）
-builder.Services.AddSingleton<IGraphStore>(sp =>
-{
-    var shared = sp.GetRequiredService<ReferenceRAG.Storage.SharedSqliteConnection>();
-    return new SqliteGraphStore(shared);
-});
-builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.WikiLinkExtractor>();
-builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.GraphIndexingService>();
-
-// 注册 BM25 存储（与向量存储共用同一连接）
-builder.Services.AddSingleton<IBM25Store>(sp =>
-{
-    var shared = sp.GetRequiredService<ReferenceRAG.Storage.SharedSqliteConnection>();
-    var cfg = sp.GetRequiredService<ConfigManager>().Load();
-    var bm25Provider = cfg.Search?.BM25Provider?.ToLowerInvariant() ?? "fts5";
-    Console.WriteLine($"[BM25 Provider] bm25Provider='{bm25Provider}'");
-    return new Fts5BM25Store(shared);
-});
-builder.Services.AddSingleton<IEmbeddingService>(sp =>
-{
-    var config = sp.GetRequiredService<ConfigManager>();
-    var cfg = config.Load();
-    if (cfg.Embedding.Mode == "openai")
-        return new OpenAIEmbeddingService(cfg.Embedding);
-    return new EmbeddingService(new EmbeddingOptions
-    {
-        ModelPath = cfg.Embedding.ModelPath,
-        ModelName = cfg.Embedding.ModelName,
-        MaxSequenceLength = cfg.Embedding.MaxSequenceLength,
-        BatchSize = cfg.Embedding.BatchSize,
-        UseCuda = cfg.Embedding.UseCuda,
-        CudaDeviceId = cfg.Embedding.CudaDeviceId,
-        CudaLibraryPath = cfg.Embedding.CudaLibraryPath
-    });
-});
-
-// 注册重排服务
-builder.Services.AddSingleton<IRerankService>(sp =>
-{
-    var config = sp.GetRequiredService<ConfigManager>();
-    var cfg = config.Load();
-
-    // 获取重排模型路径
-    var rerankConfig = cfg.Rerank;
-    string modelPath = rerankConfig.ModelPath ?? string.Empty;
-
-    if (string.IsNullOrEmpty(modelPath))
-    {
-        // 没有指定路径时，按子目录结构推断（CurrentModel 优先，回退 ModelName）
-        var cfgModelsPath = cfg.ModelsRootPath
-            ?? Path.Combine(cfg.DataPath ?? "data", "models");
-        var targetName = !string.IsNullOrEmpty(rerankConfig.CurrentModel)
-            ? rerankConfig.CurrentModel
-            : rerankConfig.ModelName;
-        modelPath = Path.Combine(cfgModelsPath, "Reranker", targetName, "model.onnx");
-        if (!File.Exists(modelPath))
-            modelPath = Path.Combine(cfgModelsPath, targetName, "model.onnx"); // 旧扁平结构兜底
-    }
-
-    if (rerankConfig.Mode == "openai")
-        return new OpenAIRerankService(rerankConfig);
-
-    return new OnnxRerankService(new RerankOptions
-    {
-        ModelPath = modelPath,
-        ModelName = rerankConfig.ModelName,
-        UseCuda = rerankConfig.UseCuda,
-        CudaDeviceId = rerankConfig.CudaDeviceId,
-        CudaLibraryPath = cfg.Embedding.CudaLibraryPath
-    });
-});
-
-// 注册业务服务
-builder.Services.AddSingleton<ContentHashDetector>();
-builder.Services.AddSingleton<QueryOptimizer>();
-builder.Services.AddSingleton<VectorAggregator>();
-builder.Services.AddSingleton<ContextBuilder>();
-builder.Services.AddSingleton<ObsidianLinkGenerator>();
-builder.Services.AddSingleton<MetricsCollector>();
-builder.Services.AddSingleton<AlertService>();
-// 查询统计服务 - 使用独立的 SQLite 数据库
-builder.Services.AddSingleton(sp =>
-{
-    var configManager = sp.GetRequiredService<ConfigManager>();
-    var config = configManager.Load();
-    var dataPath = config.DataPath ?? "data";
-    var statsDbPath = Path.Combine(dataPath, "query_stats.db");
-    return new QueryStatsService(statsDbPath);
-});
-// FileChangeDetector 需要配置路径，使用工厂方法延迟创建
-builder.Services.AddSingleton<IFileChangeDetector>(sp =>
-{
-    var configManager = sp.GetRequiredService<ConfigManager>();
-    var config = configManager.Load();
-    var firstSource = config.Sources.FirstOrDefault();
-    return new FileChangeDetector(
-        firstSource?.Path ?? Directory.GetCurrentDirectory(),
-        config.Indexing?.DebounceMs ?? 500,
-        firstSource?.FilePatterns);
-});
-builder.Services.AddScoped<ISearchService>(sp =>
-{
-    var vectorStore = sp.GetRequiredService<IVectorStore>();
-    var embeddingService = sp.GetRequiredService<IEmbeddingService>();
-    var textEnhancer = sp.GetRequiredService<ITextEnhancer>();
-    var configManager = sp.GetRequiredService<ConfigManager>();
-    var logger = sp.GetRequiredService<ILogger<SearchService>>();
-    var hybridSearchService = sp.GetRequiredService<HybridSearchService>();
-    var rerankService = sp.GetRequiredService<IRerankService>();
-    var graphStore = sp.GetService<IGraphStore>();
-
-    return new SearchService(
-        vectorStore,
-        embeddingService,
-        textEnhancer,
-        configManager,
-        logger,
-        hybridSearchService,
-        rerankService,
-        graphStore);
-});
-// 注册混合搜索服务（从 appsettings.json 读取 HybridSearch 配置）
-builder.Services.AddSingleton<HybridSearchService>(sp =>
-{
-    var hybridSearchConfig = sp.GetRequiredService<IConfiguration>().GetSection("HybridSearch");
-    var options = new HybridSearchOptions();
-
-    if (hybridSearchConfig.Exists())
-    {
-        hybridSearchConfig.Bind(options);
-        // 验证配置有效性
-        try
-        {
-            options.Validate();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[HybridSearch] Configuration validation failed: {ex.Message}, using defaults");
-            options = new HybridSearchOptions();
-        }
-    }
-
-    Console.WriteLine($"[HybridSearch] Config loaded: UseRRF={options.UseRRF}, RRFK={options.RRFK}, BM25Weight={options.BM25Weight}, EmbeddingWeight={options.EmbeddingWeight}");
-    return new HybridSearchService(
-        sp.GetRequiredService<IVectorStore>(),
-        sp.GetRequiredService<IEmbeddingService>(),
-        sp.GetRequiredService<IBM25Store>(),
-        options,
-        sp.GetRequiredService<ILogger<HybridSearchService>>(),
-        synonymService: new ReferenceRAG.Core.Services.SynonymService());
-});
-
-// 索引基础设施
-builder.Services.AddSingleton<ReferenceRAG.Core.Services.FileProcessingGuard>();
-builder.Services.AddSingleton<ReferenceRAG.Core.Interfaces.IFileIndexPipeline,
-    ReferenceRAG.Core.Services.FileIndexPipeline>();
-
-// 注册索引服务（后台服务）
+// 后台服务
 builder.Services.AddSingleton<IndexService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<IndexService>());
-
-// 注册文件监控和自动索引服务
-builder.Services.AddSingleton<IFileMonitorService>(sp =>
-{
-    var configManager = sp.GetRequiredService<ConfigManager>();
-    var config = configManager.Load();
-    var debounceMs = config.Indexing?.DebounceMs ?? 500;
-    var logger = sp.GetService<ILogger<FileMonitorService>>();
-    return new FileMonitorService(debounceMs, logger);
-});
 builder.Services.AddHostedService<AutoIndexService>();
-
-// 注册启动同步服务
 builder.Services.AddHostedService<StartupSyncService>();
 
-// 注册测试记录存储
+// 测试记录存储（Service 层，非领域服务）
 builder.Services.AddSingleton<TestRecordStore>();
 
 // 注册 SignalR
