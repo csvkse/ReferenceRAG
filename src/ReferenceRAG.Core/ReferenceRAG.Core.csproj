@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <PackageReference Include="jieba.NET" Version="0.42.2" GeneratePathProperty="true" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="Rougamo.Fody" Version="4.*" />
     <PackageReference Include="Markdig" Version="1.1.2" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
@@ -10,6 +11,7 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.24.4" />
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="1.0.1" />
     <PackageReference Include="BERTTokenizers" Version="1.2.0" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.8" />
     <PackageReference Include="Tokenizers.HuggingFace" Version="1.21.4" />
   </ItemGroup>
 

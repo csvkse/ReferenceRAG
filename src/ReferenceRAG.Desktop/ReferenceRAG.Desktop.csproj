@@ -23,6 +23,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3912.50" />
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.8" />
   </ItemGroup>
 
   <ItemGroup>
@@ -50,16 +51,13 @@
     <Exec WorkingDirectory="$(VueRoot)" Command="npm run build" Condition="!Exists('$(VueDistPath)')" />
 
     <!-- Publish 时清空旧 wwwroot（避免不同 hash 的旧文件残留） -->
-    <RemoveDir Directories="$(WwwrootDir)"
-               Condition="'$(PublishDir)' != '' AND Exists('$(WwwrootDir)')" />
+    <RemoveDir Directories="$(WwwrootDir)" Condition="'$(PublishDir)' != '' AND Exists('$(WwwrootDir)')" />
 
     <ItemGroup>
       <VueFiles Include="$(VueDistPath)\**\*" />
     </ItemGroup>
 
-    <Copy SourceFiles="@(VueFiles)"
-          DestinationFiles="@(VueFiles->'$(WwwrootDir)\%(RecursiveDir)%(Filename)%(Extension)')"
-          Condition="Exists('$(VueDistPath)')" />
+    <Copy SourceFiles="@(VueFiles)" DestinationFiles="@(VueFiles->'$(WwwrootDir)\%(RecursiveDir)%(Filename)%(Extension)')" Condition="Exists('$(VueDistPath)')" />
 
     <Message Importance="high" Text="[Desktop] Vue SPA 已同步到 $(WwwrootDir)" Condition="Exists('$(VueDistPath)')" />
   </Target>

@@ -19,6 +19,7 @@
     <PackageReference Include="Microsoft.OpenApi" Version="2.4.1" />
     <PackageReference Include="ModelContextProtocol" Version="1.2.0" />
     <PackageReference Include="McpHelper.Core" Version="1.0.9" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.8" />
 
     <!-- Windows 服务支持 -->
     <PackageReference Include="System.Management" Version="10.0.2" />
