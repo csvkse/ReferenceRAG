@@ -14,7 +14,7 @@ public class AutoIndexService : IHostedService, IDisposable
 {
     private readonly IFileMonitorService _fileMonitor;
     private readonly IFileIndexPipeline _pipeline;
-    private readonly FileProcessingGuard _guard;
+    private readonly IFileProcessingGuard _guard;
     private readonly ConfigManager _configManager;
     private readonly ILogger<AutoIndexService>? _logger;
 
@@ -26,7 +26,7 @@ public class AutoIndexService : IHostedService, IDisposable
     public AutoIndexService(
         IFileMonitorService fileMonitor,
         IFileIndexPipeline pipeline,
-        FileProcessingGuard guard,
+        IFileProcessingGuard guard,
         ConfigManager configManager,
         ILogger<AutoIndexService>? logger = null)
     {

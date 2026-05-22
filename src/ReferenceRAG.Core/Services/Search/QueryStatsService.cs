@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using ReferenceRAG.Core.Interfaces;
 using System.Text;
 
 namespace ReferenceRAG.Core.Services;
@@ -6,7 +7,7 @@ namespace ReferenceRAG.Core.Services;
 /// <summary>
 /// 查询统计服务 - 持久化记录每次查询的耗时和结果数
 /// </summary>
-public class QueryStatsService : IDisposable
+internal class QueryStatsService : IQueryStatsService, IDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly string _dbPath;

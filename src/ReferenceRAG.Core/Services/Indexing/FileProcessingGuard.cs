@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ReferenceRAG.Core.Interfaces;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -6,7 +7,7 @@ namespace ReferenceRAG.Core.Services;
 /// 跨服务文件级互斥锁。IndexJobService 和 AutoIndexService 共享同一实例，
 /// 防止同一文件被并发索引（向量重复、BM25重复、图谱错乱）。
 /// </summary>
-public sealed class FileProcessingGuard
+internal sealed class FileProcessingGuard : IFileProcessingGuard
 {
     private readonly ConcurrentDictionary<string, byte> _inProgress =
         new(StringComparer.OrdinalIgnoreCase);

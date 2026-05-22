@@ -64,7 +64,7 @@ public class SearchStatusResponse
 public class AIQueryController : ControllerBase
 {
     private readonly ISearchService _searchService;
-    private readonly QueryStatsService _statsService;
+    private readonly IQueryStatsService _statsService;
     private readonly IModelManager _modelManager;
     private readonly IVectorStore _vectorStore;
     private readonly IBM25Store _bm25Store;
@@ -73,7 +73,7 @@ public class AIQueryController : ControllerBase
 
     public AIQueryController(
         ISearchService searchService,
-        QueryStatsService statsService,
+        IQueryStatsService statsService,
         IModelManager modelManager,
         IVectorStore vectorStore,
         IBM25Store bm25Store,

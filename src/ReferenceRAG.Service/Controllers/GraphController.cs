@@ -12,7 +12,7 @@ public class GraphController : ControllerBase
 {
     private readonly IGraphStore _graphStore;
     private readonly IVectorStore _vectorStore;
-    private readonly GraphIndexingService _graphIndexingService;
+    private readonly IGraphIndexingService _graphIndexingService;
     private readonly ILogger<GraphController> _logger;
 
     // 控制器是 Scoped，用 static 字段跨请求共享重建状态
@@ -22,7 +22,7 @@ public class GraphController : ControllerBase
     public GraphController(
         IGraphStore graphStore,
         IVectorStore vectorStore,
-        GraphIndexingService graphIndexingService,
+        IGraphIndexingService graphIndexingService,
         ILogger<GraphController> logger)
     {
         _graphStore = graphStore;
@@ -52,7 +52,7 @@ public class GraphController : ControllerBase
                 var files = (await _vectorStore.GetAllFilesAsync()).ToList();
 
                 // 建立 filename→fullNodeId 映射（解析 Obsidian wiki-link 短文件名）
-                var filenameMap = GraphIndexingService.BuildFilenameMap(files);
+                var filenameMap = GraphFilenameMapper.BuildFilenameMap(files);
                 Func<string, string?> resolver = shortId =>
                     filenameMap.TryGetValue(shortId, out var full) ? full : null;
 

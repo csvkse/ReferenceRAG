@@ -16,7 +16,7 @@ public static class SearchExtensions
         services.AddSingleton<MetricsCollector>();
         services.AddSingleton<AlertService>();
 
-        services.AddSingleton(sp =>
+        services.AddSingleton<IQueryStatsService>(sp =>
         {
             var cfg = sp.GetRequiredService<ConfigManager>().Load();
             var statsDbPath = Path.Combine(cfg.DataPath ?? "data", "query_stats.db");

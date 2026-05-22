@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Core.Services.Graph;
 using ReferenceRAG.Core.Services.Rerank;
 using ReferenceRAG.Service.Controllers;
 using ReferenceRAG.Service.Hubs;
@@ -170,7 +171,7 @@ public static class HostBootstrapper
         builder.Services.AddSingleton<AlertService>();
 
         // 查询统计
-        builder.Services.AddSingleton(sp =>
+        builder.Services.AddSingleton<IQueryStatsService>(sp =>
         {
             var configManager = sp.GetRequiredService<ConfigManager>();
             var config = configManager.Load();
@@ -199,7 +200,7 @@ public static class HostBootstrapper
             var textEnhancer     = sp.GetRequiredService<ITextEnhancer>();
             var configManager    = sp.GetRequiredService<ConfigManager>();
             var logger           = sp.GetRequiredService<ILogger<SearchService>>();
-            var hybridService    = sp.GetRequiredService<HybridSearchService>();
+            var hybridService    = sp.GetRequiredService<IHybridSearchService>();
             var rerankService    = sp.GetRequiredService<IRerankService>();
             var graphStore       = sp.GetService<ReferenceRAG.Core.Interfaces.IGraphStore>();
 
@@ -209,7 +210,7 @@ public static class HostBootstrapper
         });
 
         // 混合搜索服务
-        builder.Services.AddSingleton<HybridSearchService>(sp =>
+        builder.Services.AddSingleton<IHybridSearchService>(sp =>
         {
             var hybridSearchConfig = sp.GetRequiredService<IConfiguration>().GetSection("HybridSearch");
             var options = new HybridSearchOptions();
@@ -235,9 +236,8 @@ public static class HostBootstrapper
         });
 
         // 索引基础设施
-        builder.Services.AddSingleton<ReferenceRAG.Core.Services.FileProcessingGuard>();
-        builder.Services.AddSingleton<ReferenceRAG.Core.Interfaces.IFileIndexPipeline,
-            ReferenceRAG.Core.Services.FileIndexPipeline>();
+        builder.Services.AddSingleton<IFileProcessingGuard, FileProcessingGuard>();
+        builder.Services.AddSingleton<IFileIndexPipeline, FileIndexPipeline>();
 
         // 索引服务（后台服务）
         builder.Services.AddSingleton<IndexService>();
@@ -269,8 +269,8 @@ public static class HostBootstrapper
             var dbPath = Path.Combine(dataPath, "vectors.db");
             return new ReferenceRAG.Storage.SqliteGraphStore(dbPath);
         });
-        builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.WikiLinkExtractor>();
-        builder.Services.AddSingleton<ReferenceRAG.Core.Services.Graph.GraphIndexingService>();
+        builder.Services.AddSingleton<WikiLinkExtractor>();
+        builder.Services.AddSingleton<IGraphIndexingService, GraphIndexingService>();
 
         // SignalR
         builder.Services.AddSignalR(options =>

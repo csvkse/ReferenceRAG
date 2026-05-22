@@ -22,7 +22,7 @@ public class IndexController : ControllerBase
     private readonly IModelManager _modelManager;
     private readonly ConfigManager _configManager;
     private readonly IndexService _indexService;
-    private readonly QueryStatsService _queryStats;
+    private readonly IQueryStatsService _queryStats;
     private readonly ILogger<IndexController> _logger;
 
     public IndexController(
@@ -34,7 +34,7 @@ public class IndexController : ControllerBase
         IModelManager modelManager,
         ConfigManager configManager,
         IndexService indexService,
-        QueryStatsService queryStats,
+        IQueryStatsService queryStats,
         ILogger<IndexController> logger)
     {
         _vectorStore = vectorStore;

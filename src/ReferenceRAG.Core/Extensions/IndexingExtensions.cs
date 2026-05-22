@@ -11,7 +11,7 @@ public static class IndexingExtensions
     {
         services.AddSingleton<WikiLinkExtractor>();
         services.AddSingleton<IGraphIndexingService, GraphIndexingService>();
-        services.AddSingleton<FileProcessingGuard>();
+        services.AddSingleton<IFileProcessingGuard, FileProcessingGuard>();
         services.AddSingleton<IFileIndexPipeline, FileIndexPipeline>();
         return services;
     }

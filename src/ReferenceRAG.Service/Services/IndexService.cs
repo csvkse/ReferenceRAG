@@ -21,7 +21,7 @@ public class IndexService : IHostedService
     private readonly IHubContext<IndexHub> _hubContext;
     private readonly ConfigManager _configManager;
     private readonly IFileIndexPipeline _pipeline;
-    private readonly FileProcessingGuard _guard;
+    private readonly IFileProcessingGuard _guard;
     private readonly ILogger<IndexService> _logger;
 
     private readonly ConcurrentDictionary<string, IndexJob> _activeJobs = new();
@@ -34,7 +34,7 @@ public class IndexService : IHostedService
         IHubContext<IndexHub> hubContext,
         ConfigManager configManager,
         IFileIndexPipeline pipeline,
-        FileProcessingGuard guard,
+        IFileProcessingGuard guard,
         ILogger<IndexService> logger)
     {
         _serviceProvider = serviceProvider;
@@ -190,7 +190,7 @@ public class IndexService : IHostedService
 
                 // ── Phase 3: BM25 + 图谱后处理 ──
                 var allIndexedFiles = await vectorStore.GetAllFilesAsync(cts.Token);
-                var filenameMap = GraphIndexingService.BuildFilenameMap(allIndexedFiles);
+                var filenameMap = GraphFilenameMapper.BuildFilenameMap(allIndexedFiles);
 
                 const int maxFinalizeParallelism = 4;
                 using var finSemaphore = new SemaphoreSlim(maxFinalizeParallelism);

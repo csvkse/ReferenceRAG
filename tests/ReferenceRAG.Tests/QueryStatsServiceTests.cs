@@ -1,10 +1,11 @@
+using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Tests;
 
 public class QueryStatsServiceTests : IDisposable
 {
-    private readonly QueryStatsService _statsService;
+    private readonly IQueryStatsService _statsService;
     private readonly string _testDbPath;
 
     public QueryStatsServiceTests()
@@ -38,7 +39,7 @@ public class QueryStatsServiceTests : IDisposable
     public async Task GetAverageQueryTimeAsync_WithNoData_ReturnsZero()
     {
         var emptyDbPath = Path.Combine(Path.GetTempPath(), $"empty_{Guid.NewGuid()}.db");
-        var statsService = new QueryStatsService(emptyDbPath);
+        var statsService = new QueryStatsService(emptyDbPath) as IQueryStatsService;
 
         var avgTime = await statsService.GetAverageQueryTimeAsync();
 
