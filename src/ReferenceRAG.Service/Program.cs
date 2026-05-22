@@ -1,25 +1,10 @@
 using System.Diagnostics;
 using System.Text.Json.Serialization;
-
 using Microsoft.OpenApi;
-
-using ReferenceRAG.Core.Extensions;
-using ReferenceRAG.Core.Helpers;
-using ReferenceRAG.Core.Interfaces;
-using ReferenceRAG.Core.Services;
-using ReferenceRAG.Core.Services.Rerank;
-using ReferenceRAG.Service.Controllers;
-using ReferenceRAG.Service.Hubs;
+using ReferenceRAG.Service.Extensions;
 using ReferenceRAG.Service.Middleware;
-using ReferenceRAG.Service.Services;
-using ReferenceRAG.Storage;
-using ReferenceRAG.Storage.Extensions;
-
 using Serilog;
-
 using WebApiWindowsService;
-
-// MCP Helper
 using McpHelper.Extensions;
 using McpHelper.Models;
 using ReferenceRAG.Service.McpTools;
@@ -83,14 +68,7 @@ var isService = ServiceManager.ConfigureService(args, builder);
 //    // 等待 10 秒
 //    Thread.Sleep(waitSeconds * 1000);
 //}
-//// ================================================================== 
-#endregion
-
-#region 简单日志（Obsolete）
-//// 文件日志（写入 logs/ 目录，按日期轮转）
-//var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
-//Directory.CreateDirectory(logDir);
-//builder.Logging.AddProvider(new ReferenceRAG.Service.Services.FileLoggerProvider(logDir));
+//// ==================================================================
 #endregion
 
 #region 依赖注入服务管理
@@ -112,47 +90,10 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 
-// 注册配置管理（其他扩展依赖它，必须第一个注册）
-builder.Services.AddSingleton<ConfigManager>();
-
-// 读取 HybridSearch 配置（Core 库不依赖 IConfiguration，在此预读后传入）
-var hybridOptions = new HybridSearchOptions();
-var hybridSection = builder.Configuration.GetSection("HybridSearch");
-if (hybridSection.Exists())
-{
-    hybridSection.Bind(hybridOptions);
-    try { hybridOptions.Validate(); }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"[HybridSearch] Configuration validation failed: {ex.Message}, using defaults");
-        hybridOptions = new HybridSearchOptions();
-    }
-}
-
-// 领域服务注册
-builder.Services
-    .AddFileMonitor()
-    .AddChunking()
-    .AddModelManagement()
-    .AddRagStorage()
-    .AddSearch(hybridOptions)
-    .AddIndexingPipeline();
-
-// 后台服务
-builder.Services.AddSingleton<IndexService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<IndexService>());
-builder.Services.AddHostedService<AutoIndexService>();
-builder.Services.AddHostedService<StartupSyncService>();
-
-// 测试记录存储（Service 层，非领域服务）
-builder.Services.AddSingleton<TestRecordStore>();
-
-// 注册 SignalR
-builder.Services.AddSignalR(options =>
-{
-    options.EnableDetailedErrors = builder.Environment.IsDevelopment();
-    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
-});
+// 核心领域服务（与 Desktop/HostBootstrapper 共用）
+builder.Services.AddRagCoreServices(
+    builder.Configuration,
+    signalRDetailedErrors: builder.Environment.IsDevelopment());
 
 // 配置 CORS
 builder.Services.AddCors(options =>
@@ -180,9 +121,8 @@ builder.Services.AddCors(options =>
                   .AllowCredentials();
         }
     });
-}); 
+});
 #endregion
-
 
 #region MCP Server 配置
 // 获取服务配置
@@ -223,7 +163,7 @@ if (mcApiKeys.Count==0)
 
 
 // 注册完整的中间件套件
-builder.Services.AddAppMcpHelper(appMiddlewareOptions); 
+builder.Services.AddAppMcpHelper(appMiddlewareOptions);
 
 // 注册自定义 MCP Tools
 builder.Services.AddMcpToolRegistry(registry =>
@@ -238,10 +178,6 @@ builder.Services.AddMcpToolRegistry(registry =>
 
 var app = builder.Build();
 
-
-#region 静态类配置
-StaticLogger.LoggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
-#endregion
 
 #region 中间件管理
 
@@ -280,45 +216,13 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 
 app.UseApiKeyAuthentication();
-app.UseAuthorization();
-app.MapControllers();
 
-// SPA fallback：非 API 请求返回 index.html
-app.MapFallbackToFile("index.html");
+// 共用端点注册、目录初始化（与 Desktop/HostBootstrapper 共用）
+app.UseRagEndpoints();
+#endregion
 
-// 映射 SignalR Hub
-app.MapHub<IndexHub>("/hubs/index");
-
-// 确保数据目录存在
-var configManager = app.Services.GetRequiredService<ConfigManager>();
-var config = configManager.Load();
-var dataPath = config.DataPath ?? "data";
-if (!Directory.Exists(dataPath))
-{
-    Directory.CreateDirectory(dataPath);
-}
-
-// 确保模型目录存在
-var modelDir = Path.GetDirectoryName(config.Embedding.ModelPath);
-if (!string.IsNullOrEmpty(modelDir) && !Directory.Exists(modelDir))
-{
-    Directory.CreateDirectory(modelDir);
-}
-
-// 初始化混合搜索服务的 BM25 索引
-using (var scope = app.Services.CreateScope())
-{
-    var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
-    try
-    {
-        await searchService.InitializeAsync();
-        app.Logger.LogInformation("搜索服务 BM25 索引初始化完成");
-    }
-    catch (Exception ex)
-    {
-        app.Logger.LogWarning(ex, "BM25 索引初始化失败，混合搜索可能退化为纯向量搜索");
-    }
-} 
+#region 初始化搜索索引
+await app.InitializeSearchAsync();
 #endregion
 
 #region 中间件：支持程序重启

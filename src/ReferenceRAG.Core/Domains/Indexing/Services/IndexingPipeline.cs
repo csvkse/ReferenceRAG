@@ -301,9 +301,9 @@ public class IndexingPipeline : IDisposable
                 });
             }
 
-            // 批量写入
-            await _vectorStore.UpsertVectorsAsync(records, cancellationToken);
+            // 批量写入（chunks 必须先于向量写入：中断时 chunks 缺失可被下次清理，反之则产生孤儿向量）
             await _vectorStore.UpsertChunksAsync(embeddedBatch.Chunks, cancellationToken);
+            await _vectorStore.UpsertVectorsAsync(records, cancellationToken);
 
             totalVectors += records.Count;
 
