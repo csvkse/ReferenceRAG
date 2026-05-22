@@ -29,6 +29,9 @@ public interface IGraphStore
     Task<GraphStats> GetStatsAsync(CancellationToken ct = default);
     /// <summary>清空所有图数据（全量重建前使用）。</summary>
     Task ClearAllAsync(CancellationToken ct = default);
-    /// <summary>删除孤儿图节点（document 节点的 id 不在 files 表中的记录）及其关联边。</summary>
-    Task<int> CleanupOrphanNodesAsync(CancellationToken ct = default);
+    /// <summary>
+    /// 删除孤儿图节点：document 节点 id（归一化路径）不在 validFileNodeIds 中的记录及其关联边。
+    /// 调用方将 files.Path 归一化后传入：path.Replace('\\','/').TrimStart('/')
+    /// </summary>
+    Task<int> CleanupOrphanNodesAsync(IEnumerable<string> validFileNodeIds, CancellationToken ct = default);
 }

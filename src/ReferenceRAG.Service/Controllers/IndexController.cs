@@ -289,8 +289,14 @@ public class IndexController : ControllerBase
         var existingModels = new List<string> { _embeddingService.ModelName };
         var modelDeleted = await _vectorStore.DeleteOrphanedVectorsAsync(existingModels);
         var chunkDeleted = await _vectorStore.CleanupOrphanChunkVectorsAsync();
-        var bm25Deleted = await _bm25Store.CleanupOrphanDocumentsAsync();
-        var graphDeleted = await _graphStore.CleanupOrphanNodesAsync();
+
+        // BM25 / Graph 现在各自独立 DB，需调用方提供有效 ID 集合
+        var validChunkIds = await _vectorStore.GetAllChunkIdsAsync();
+        var bm25Deleted = await _bm25Store.CleanupOrphanDocumentsAsync(validChunkIds);
+
+        var allFiles = await _vectorStore.GetAllFilesAsync();
+        var validFileNodeIds = allFiles.Select(f => f.Path.Replace('\\', '/').TrimStart('/'));
+        var graphDeleted = await _graphStore.CleanupOrphanNodesAsync(validFileNodeIds);
 
         var total = modelDeleted + chunkDeleted + bm25Deleted + graphDeleted;
         _logger.LogInformation("清理完成（模型级: {M}, chunk级: {C}, BM25: {B}, 图谱: {G}）",

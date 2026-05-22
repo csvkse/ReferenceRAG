@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Services.Graph;
 using System.Diagnostics;
 
@@ -13,6 +14,7 @@ public class GraphController : ControllerBase
     private readonly IGraphStore _graphStore;
     private readonly IVectorStore _vectorStore;
     private readonly IGraphIndexingService _graphIndexingService;
+    private readonly ConfigManager _configManager;
     private readonly ILogger<GraphController> _logger;
 
     // 控制器是 Scoped，用 static 字段跨请求共享重建状态
@@ -23,11 +25,13 @@ public class GraphController : ControllerBase
         IGraphStore graphStore,
         IVectorStore vectorStore,
         IGraphIndexingService graphIndexingService,
+        ConfigManager configManager,
         ILogger<GraphController> logger)
     {
         _graphStore = graphStore;
         _vectorStore = vectorStore;
         _graphIndexingService = graphIndexingService;
+        _configManager = configManager;
         _logger = logger;
     }
 
@@ -49,7 +53,15 @@ public class GraphController : ControllerBase
 
             try
             {
-                var files = (await _vectorStore.GetAllFilesAsync()).ToList();
+                var config = _configManager.Load();
+                var enabledSources = config.Sources
+                    .Where(s => s.Enabled)
+                    .Select(s => s.Name)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var files = (await _vectorStore.GetAllFilesAsync())
+                    .Where(f => enabledSources.Contains(f.Source))
+                    .ToList();
 
                 // 建立 filename→fullNodeId 映射（解析 Obsidian wiki-link 短文件名）
                 var filenameMap = GraphFilenameMapper.BuildFilenameMap(files);
@@ -71,6 +83,8 @@ public class GraphController : ControllerBase
                         failed++;
                         _logger.LogWarning(ex, "图谱重建单文件失败: {Path}", file.Path);
                     }
+
+                    await Task.Yield(); // 每文件后让出调度，允许搜索请求插队
                 }
 
                 sw.Stop();

@@ -50,8 +50,15 @@ public class BM25IndexController : ControllerBase
 
         _logger.LogInformation("开始独立重建 BM25 索引");
 
-        // 获取所有文档
-        var files = await _vectorStore.GetAllFilesAsync();
+        // 仅处理启用源的文档
+        var config = _configManager.Load();
+        var enabledSources = config.Sources
+            .Where(s => s.Enabled)
+            .Select(s => s.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var files = (await _vectorStore.GetAllFilesAsync())
+            .Where(f => enabledSources.Contains(f.Source));
         var chunksList = new List<(string chunkId, string content)>();
 
         foreach (var file in files)

@@ -8,6 +8,7 @@ public static class StorageExtensions
 {
     public static IServiceCollection AddRagStorage(this IServiceCollection services)
     {
+        // VectorStore: vectors.db（含 files / chunks / vec_* 表）
         services.AddSingleton<SharedSqliteConnection>(sp =>
         {
             var cfg = sp.GetRequiredService<ConfigManager>().Load();
@@ -19,11 +20,23 @@ public static class StorageExtensions
         services.AddSingleton<IVectorStore>(sp =>
             new SqliteVectorStore(sp.GetRequiredService<SharedSqliteConnection>()));
 
-        services.AddSingleton<IGraphStore>(sp =>
-            new SqliteGraphStore(sp.GetRequiredService<SharedSqliteConnection>()));
-
+        // BM25Store: bm25.db（独立连接+锁，重建时不阻塞向量检索）
         services.AddSingleton<IBM25Store>(sp =>
-            new Fts5BM25Store(sp.GetRequiredService<SharedSqliteConnection>()));
+        {
+            var cfg = sp.GetRequiredService<ConfigManager>().Load();
+            var dbPath = Path.Combine(cfg.DataPath ?? "data", "bm25.db");
+            Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+            return new Fts5BM25Store(dbPath);
+        });
+
+        // GraphStore: graph.db（独立连接+锁，图谱重建时不阻塞向量检索）
+        services.AddSingleton<IGraphStore>(sp =>
+        {
+            var cfg = sp.GetRequiredService<ConfigManager>().Load();
+            var dbPath = Path.Combine(cfg.DataPath ?? "data", "graph.db");
+            Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+            return new SqliteGraphStore(dbPath);
+        });
 
         return services;
     }

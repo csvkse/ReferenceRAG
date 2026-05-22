@@ -366,38 +366,43 @@ public class SqliteGraphStore : IGraphStore, IDisposable
         finally { _lock.Release(); }
     }
 
-    public async Task<int> CleanupOrphanNodesAsync(CancellationToken ct = default)
+    public async Task<int> CleanupOrphanNodesAsync(IEnumerable<string> validFileNodeIds, CancellationToken ct = default)
     {
+        var validSet = validFileNodeIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         await _lock.WaitAsync(ct);
         try
         {
             var orphanIds = new List<string>();
 
-            // 1. document 节点 id 不在 files 表
+            // 1. document 节点：归一化路径不在 validFileNodeIds 中
             using (var cmd = _connection.CreateCommand())
             {
-                cmd.CommandText = """
-                    SELECT id FROM graph_nodes
-                    WHERE type = 'document'
-                      AND id NOT IN (SELECT id FROM files)
-                    """;
+                cmd.CommandText = "SELECT id FROM graph_nodes WHERE type = 'document'";
                 using var r = cmd.ExecuteReader();
-                while (r.Read()) orphanIds.Add(r.GetString(0));
+                while (r.Read())
+                {
+                    var id = r.GetString(0);
+                    if (!validSet.Contains(id)) orphanIds.Add(id);
+                }
             }
 
-            // 2. heading 节点：id 前缀（# 之前部分）不在现存 document 节点中
+            // 2. heading 节点：前缀 document 已成孤儿
+            var orphanDocSet = orphanIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
             using (var cmd = _connection.CreateCommand())
             {
                 cmd.CommandText = """
                     SELECT id FROM graph_nodes
                     WHERE type = 'heading'
                       AND instr(id, '#') > 0
-                      AND substr(id, 1, instr(id, '#') - 1) NOT IN (
-                          SELECT id FROM graph_nodes WHERE type = 'document'
-                      )
                     """;
                 using var r = cmd.ExecuteReader();
-                while (r.Read()) orphanIds.Add(r.GetString(0));
+                while (r.Read())
+                {
+                    var id = r.GetString(0);
+                    var prefix = id[..id.IndexOf('#')];
+                    if (orphanDocSet.Contains(prefix)) orphanIds.Add(id);
+                }
             }
 
             if (orphanIds.Count == 0) return 0;

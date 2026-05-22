@@ -42,9 +42,10 @@ public interface IBM25Store
     Task<BM25IndexStats> GetStatsAsync();
 
     /// <summary>
-    /// 删除 BM25 索引中 chunk_id 不在 chunks 表的孤儿记录。
+    /// 删除 BM25 索引中不在 validChunkIds 集合里的孤儿记录。
+    /// 调用方从 IVectorStore.GetAllChunkIdsAsync() 获取有效 ID 集合后传入。
     /// </summary>
-    Task<int> CleanupOrphanDocumentsAsync(CancellationToken cancellationToken = default);
+    Task<int> CleanupOrphanDocumentsAsync(IEnumerable<string> validChunkIds, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

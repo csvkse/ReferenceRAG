@@ -621,6 +621,22 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         finally { _writeLock.Release(); }
     }
 
+    public async Task<IEnumerable<string>> GetAllChunkIdsAsync(CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var ids = new List<string>();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT id FROM chunks";
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                ids.Add(reader.GetString(0));
+            return ids;
+        }
+        finally { _writeLock.Release(); }
+    }
+
     public async Task<IEnumerable<SourceFileStat>> GetSourceStatsAsync(CancellationToken cancellationToken = default)
     {
         await _writeLock.WaitAsync(cancellationToken);

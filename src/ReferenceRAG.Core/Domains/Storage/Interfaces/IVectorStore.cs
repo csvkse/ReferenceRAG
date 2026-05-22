@@ -223,6 +223,11 @@ public interface IVectorStore
     /// </summary>
     Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 返回 chunks 表中所有 chunk id（供跨 DB 孤儿清理使用）
+    /// </summary>
+    Task<IEnumerable<string>> GetAllChunkIdsAsync(CancellationToken cancellationToken = default);
+
 }
 
 /// <summary>

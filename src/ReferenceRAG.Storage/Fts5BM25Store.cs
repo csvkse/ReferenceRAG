@@ -296,18 +296,23 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     #endregion
 
     /// <inheritdoc />
-    public async Task<int> CleanupOrphanDocumentsAsync(CancellationToken cancellationToken = default)
+    public async Task<int> CleanupOrphanDocumentsAsync(IEnumerable<string> validChunkIds, CancellationToken cancellationToken = default)
     {
+        var validSet = validChunkIds.ToHashSet();
+
         await _lock.WaitAsync(cancellationToken);
         try
         {
             var orphanIds = new List<string>();
             using (var cmd = _connection.CreateCommand())
             {
-                cmd.CommandText = $"SELECT id FROM {FtsTableName} WHERE id NOT IN (SELECT id FROM chunks)";
+                cmd.CommandText = $"SELECT id FROM {FtsTableName}";
                 using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
-                    orphanIds.Add(reader.GetString(0));
+                {
+                    var id = reader.GetString(0);
+                    if (!validSet.Contains(id)) orphanIds.Add(id);
+                }
             }
             if (orphanIds.Count == 0) return 0;
 
