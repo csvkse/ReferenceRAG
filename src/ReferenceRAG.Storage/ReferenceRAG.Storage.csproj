@@ -1,11 +1,11 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <PackageReference Include="jieba.NET" Version="0.42.2" GeneratePathProperty="true" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
-    <PackageReference Include="Microsoft.SemanticKernel.Connectors.SqliteVec" Version="1.74.0-preview" />
-    <PackageReference Include="System.Drawing.Common" Version="10.0.8" />
+    <PackageReference Include="jieba.NET" GeneratePathProperty="true" />
+    <PackageReference Include="Newtonsoft.Json" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.SemanticKernel.Connectors.SqliteVec" />
+    <PackageReference Include="System.Drawing.Common" />
   </ItemGroup>
 
   <ItemGroup>

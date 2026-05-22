@@ -1,18 +1,18 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <PackageReference Include="jieba.NET" Version="0.42.2" GeneratePathProperty="true" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Rougamo.Fody" Version="4.*" />
-    <PackageReference Include="Markdig" Version="1.1.2" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
-    <PackageReference Include="Microsoft.Extensions.VectorData.Abstractions" Version="10.1.0" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.24.4" />
-    <PackageReference Include="Microsoft.ML.Tokenizers" Version="1.0.1" />
-    <PackageReference Include="BERTTokenizers" Version="1.2.0" />
-    <PackageReference Include="System.Drawing.Common" Version="10.0.8" />
-    <PackageReference Include="Tokenizers.HuggingFace" Version="1.21.4" />
+    <PackageReference Include="jieba.NET" GeneratePathProperty="true" />
+    <PackageReference Include="Newtonsoft.Json" />
+    <PackageReference Include="Rougamo.Fody" />
+    <PackageReference Include="Markdig" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.VectorData.Abstractions" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" />
+    <PackageReference Include="Microsoft.ML.Tokenizers" />
+    <PackageReference Include="BERTTokenizers" />
+    <PackageReference Include="System.Drawing.Common" />
+    <PackageReference Include="Tokenizers.HuggingFace" />
   </ItemGroup>
 
   <ItemGroup>

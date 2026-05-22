@@ -1,0 +1,54 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 共享包版本 -->
+    <PackageVersion Include="System.Drawing.Common" Version="10.0.8" />
+    <PackageVersion Include="jieba.NET" Version="0.42.2" />
+    <PackageVersion Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.5" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.5" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
+
+    <!-- Core 专用 -->
+    <PackageVersion Include="Rougamo.Fody" Version="4.0.4" />
+    <PackageVersion Include="Markdig" Version="1.1.2" />
+    <PackageVersion Include="Microsoft.Extensions.VectorData.Abstractions" Version="10.1.0" />
+    <PackageVersion Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.24.4" />
+    <PackageVersion Include="Microsoft.ML.Tokenizers" Version="1.0.1" />
+    <PackageVersion Include="BERTTokenizers" Version="1.2.0" />
+    <PackageVersion Include="Tokenizers.HuggingFace" Version="1.21.4" />
+
+    <!-- Storage 专用 -->
+    <PackageVersion Include="Microsoft.SemanticKernel.Connectors.SqliteVec" Version="1.74.0-preview" />
+
+    <!-- Service 专用 -->
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.2" />
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.2" />
+    <PackageVersion Include="Swashbuckle.AspNetCore" Version="10.1.7" />
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.4.1" />
+    <PackageVersion Include="ModelContextProtocol" Version="1.2.0" />
+    <PackageVersion Include="McpHelper.Core" Version="1.0.9" />
+    <PackageVersion Include="System.Management" Version="10.0.2" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting.Systemd" Version="9.0.0" />
+    <PackageVersion Include="Serilog.Extensions.Hosting" Version="8.0.0" />
+    <PackageVersion Include="Serilog.Sinks.Console" Version="6.0.0" />
+    <PackageVersion Include="Serilog.Sinks.File" Version="6.0.0" />
+
+    <!-- Desktop 专用 -->
+    <PackageVersion Include="Microsoft.Web.WebView2" Version="1.0.3912.50" />
+    <PackageVersion Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
+
+    <!-- Tests 专用 -->
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageVersion Include="Xunit.SkippableFact" Version="1.5.23" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="Moq" Version="4.20.72" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.5" />
+  </ItemGroup>
+</Project>
