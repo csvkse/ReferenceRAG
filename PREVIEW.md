@@ -23,14 +23,33 @@ ReferenceRAG 支持多种使用方式接入 AI 客户端，实现知识库检索
 
 | 方案 | 客户端 | 说明 |
 |------|--------|------|
-| **方案一** | Obsidian + claudian | Obsidian 内直接 RAG 问答 |
-| **方案二** | CherryStudio + MCP | CherryStudio 通过 MCP 调用 |
-| **方案三** | Claude Code + Skills | Claude Code 对话中查询 |
-| **方案四** | 直接调用 API | curl 直接查询（无需配置） |
+| **方案一** | AI 对话 | 内置聊天式查询，直接提问 |
+| **方案二** | Obsidian + claudian | Obsidian 内直接 RAG 问答 |
+| **方案三** | CherryStudio + MCP | CherryStudio 通过 MCP 调用 |
+| **方案四** | Claude Code + Skills | Claude Code 对话中查询 |
+| **方案五** | 直接调用 API | curl 直接查询（无需配置） |
 
 ---
 
-### 方案一：Obsidian + claudian
+### 方案一：AI 对话
+
+![AI 对话](images/preview/页面-AI对话.png)
+
+内置聊天式查询界面，直接向知识库提问：
+- 自然语言输入，无需掌握搜索语法
+- 自动调用检索工具，从知识库获取答案
+- 支持多轮对话，追问、细化、切换话题
+- 注明来源笔记，答案可追溯
+- 自动扩展模糊查询，提升召回率
+
+**使用方式**：
+1. 启动服务后访问 `http://localhost:7897`
+2. 进入 **Chat** 页面
+3. 直接输入问题，如"笔记里有没有关于 Docker 配置的内容？"
+
+---
+
+### 方案二：Obsidian + claudian
 
 ![Obsidian 提问](images/preview/Obsidian-提问.png)
 
@@ -47,7 +66,7 @@ Skills 文件夹中的 `CLAUDE.md` 是 Obsidian 配合 claudian 时的项目级�
 
 ---
 
-### 方案二：CherryStudio + MCP
+### 方案三：CherryStudio + MCP
 
 ![CherryStudio 提问](images/preview/CherryStudio-提问.png)
 
@@ -71,7 +90,7 @@ CherryStudio 支持通过 MCP 协议连接 ReferenceRAG，实现知识库检索�
 
 ---
 
-### 方案三：Claude Code + Skills
+### 方案四：Claude Code + Skills
 
 ![Claude Code 使用示例](images/preview/Claude-使用示例.png)
 
@@ -83,7 +102,7 @@ Claude Code 可通过 Skills 技能调用 ReferenceRAG 查询知识库。
 
 ---
 
-### 方案四：直接调用 API
+### 方案五：直接调用 API
 
 ```bash
 # 查询知识库
