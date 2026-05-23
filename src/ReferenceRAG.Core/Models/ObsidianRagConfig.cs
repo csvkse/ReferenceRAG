@@ -78,11 +78,6 @@ public class SourceFolder
     public List<string> FilePatterns { get; set; } = new() { "*.md" };
 
     /// <summary>
-    /// 是否递归索引
-    /// </summary>
-    public bool Recursive { get; set; } = true;
-
-    /// <summary>
     /// 排除的目录
     /// </summary>
     public List<string> ExcludeDirs { get; set; } = new()

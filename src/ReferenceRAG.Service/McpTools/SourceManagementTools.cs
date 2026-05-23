@@ -50,7 +50,6 @@ public class SourceManagementTools
                     priority = source.Priority,
                     filePatterns = source.FilePatterns,
                     tags = source.Tags,
-                    recursive = source.Recursive,
                     stats = new
                     {
                         vectorCount = vectorCount,
@@ -141,7 +140,6 @@ public class SourceManagementTools
                     priority = source.Priority,
                     filePatterns = source.FilePatterns,
                     tags = source.Tags,
-                    recursive = source.Recursive,
                     excludeDirs = source.ExcludeDirs,
                     excludeFiles = source.ExcludeFiles,
                     stats = new
@@ -304,10 +302,8 @@ public class SourceManagementTools
         if (!Directory.Exists(source.Path))
             return [];
 
-        var searchOption = source.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-
         return source.FilePatterns
-            .SelectMany(pattern => Directory.EnumerateFiles(source.Path, pattern, searchOption))
+            .SelectMany(pattern => Directory.EnumerateFiles(source.Path, pattern, SearchOption.AllDirectories))
             .Where(file => !IsExcluded(file, source));
     }
 

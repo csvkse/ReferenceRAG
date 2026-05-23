@@ -49,7 +49,6 @@ public class SourcesController : ControllerBase
                 Path = s.Path,
                 Type = s.Type.ToString(),
                 Enabled = s.Enabled,
-                Recursive = s.Recursive,
                 FilePatterns = s.FilePatterns,
                 FileCount = stat?.FileCount ?? 0,
                 ChunkCount = stat?.ChunkCount ?? 0,
@@ -126,7 +125,6 @@ public class SourcesController : ControllerBase
             Path = source.Path,
             Type = source.Type.ToString(),
             Enabled = source.Enabled,
-            Recursive = source.Recursive,
             FilePatterns = source.FilePatterns,
             FileCount = stat?.FileCount ?? 0,
             ChunkCount = stat?.ChunkCount ?? 0,
@@ -204,7 +202,6 @@ public class SourcesController : ControllerBase
             Name = request.Name ?? Path.GetFileName(request.Path) ?? "新源",
             Type = request.Type ?? SourceType.Markdown,
             Enabled = true,
-            Recursive = request.Recursive ?? true,
             FilePatterns = request.FilePatterns?.ToList() ?? new List<string> { "*.md" },
             ExcludeDirs = new List<string> { ".git", "node_modules" }
         };
@@ -251,11 +248,6 @@ public class SourcesController : ControllerBase
         if (request.Enabled.HasValue)
         {
             source.Enabled = request.Enabled.Value;
-        }
-
-        if (request.Recursive.HasValue)
-        {
-            source.Recursive = request.Recursive.Value;
         }
 
         if (request.FilePatterns != null)
@@ -321,8 +313,7 @@ public class SourcesController : ControllerBase
             return BadRequest(new { error = $"源目录不存在或无法访问: {source.Path}" });
         }
 
-        var files = Directory.GetFiles(normalizedPath, "*.*",
-            source.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
+        var files = Directory.GetFiles(normalizedPath, "*.*", SearchOption.AllDirectories)
             .Where(f => source.FilePatterns.Any(p => MatchesPattern(f, p)))
             .Where(f => !source.ExcludeDirs.Any(d => f.Contains(d)))
             .ToList();
@@ -525,7 +516,6 @@ public class SourceDetail
     public string Path { get; set; } = "";
     public string Type { get; set; } = "";
     public bool Enabled { get; set; }
-    public bool Recursive { get; set; }
     public List<string> FilePatterns { get; set; } = new();
     public int FileCount { get; set; }
     public int ChunkCount { get; set; }
@@ -551,7 +541,6 @@ public class AddSourceRequest
     public string? Path { get; set; }
     public string? Name { get; set; }
     public SourceType? Type { get; set; }
-    public bool? Recursive { get; set; }
     public string[]? FilePatterns { get; set; }
 }
 
@@ -562,7 +551,6 @@ public class UpdateSourceRequest
 {
     public string? Name { get; set; }
     public bool? Enabled { get; set; }
-    public bool? Recursive { get; set; }
     public string[]? FilePatterns { get; set; }
 }
 

@@ -16,9 +16,6 @@
           <n-form-item label="名称">
             <n-input v-model:value="newSource.name" placeholder="输入源名称（可选，默认使用文件夹名）" />
           </n-form-item>
-          <n-form-item label="递归扫描">
-            <n-switch v-model:value="newSource.recursive" />
-          </n-form-item>
           <n-space>
             <n-button type="primary" :loading="creating" @click="handleCreateSource">
               添加
@@ -154,8 +151,7 @@ const indexSummary = ref<IndexSummary | null>(null)
 
 const newSource = ref({
   path: '',
-  name: '',
-  recursive: false
+  name: ''
 })
 
 const formRules: FormRules = {
@@ -335,8 +331,7 @@ const handleCreateSource = async () => {
   try {
     await sourcesApi.create({
       path: newSource.value.path,
-      name: newSource.value.name || undefined,
-      recursive: newSource.value.recursive || undefined
+      name: newSource.value.name || undefined
     })
     message.success('源添加成功')
     resetForm()
@@ -351,7 +346,7 @@ const handleCreateSource = async () => {
 }
 
 const resetForm = () => {
-  newSource.value = { path: '', name: '', recursive: false }
+  newSource.value = { path: '', name: '' }
   formRef.value?.restoreValidation()
 }
 
