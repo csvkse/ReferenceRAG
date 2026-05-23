@@ -95,7 +95,10 @@ builder.Services.AddRagCoreServices(
     builder.Configuration,
     signalRDetailedErrors: builder.Environment.IsDevelopment());
 
+
+
 // 配置 CORS
+builder.Services.AddHttpClient();
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
@@ -124,60 +127,7 @@ builder.Services.AddCors(options =>
 });
 #endregion
 
-#region MCP Server 配置
-// 获取服务配置
-var serviceApiKey = builder.Configuration.GetSection("ReferenceRAG:Service:ApiKey").Get<string>();
-var mcApiKeys = string.IsNullOrWhiteSpace(serviceApiKey)
-    ? []
-    : new List<string> { serviceApiKey };
-
-var appMiddlewareOptions = new AppMiddlewareOptions
-{
-    Authentication = new AuthenticationOptions  // 添加 MCP 认证配置
-    {
-        Enabled = true,
-        Type = AuthenticationType.ApiKey,
-        ApiKey = new ApiKeyOptions
-        {
-            Keys = mcApiKeys,
-            HeaderName = "X-Api-Key"
-        }
-    },
-    Mcp = new MopOptions
-    {
-        Enabled = true,
-        EnableInfo = false,
-        ServerName = "ReferenceRAG-MCP",
-        ServerVersion = "1.0.0",
-        TransportType = MopTransportType.Sse,
-        SseEndpoint = "/api/mcp",  // 添加 SSE 端点
-        Backends = new List<BackendEndpoint>
-        { }
-    }
-};
-
-if (mcApiKeys.Count==0)
-{
-    appMiddlewareOptions.Authentication.Enabled = false;
-}
-
-
-// 注册完整的中间件套件
-builder.Services.AddAppMcpHelper(appMiddlewareOptions);
-
-// 注册自定义 MCP Tools
-builder.Services.AddMcpToolRegistry(registry =>
-{
-    //registry.RegisterLocalTool<TestTools>();
-    registry.RegisterLocalTool<RagSearchTools>();
-    registry.RegisterLocalTool<EmbeddingTools>();
-    //registry.RegisterLocalTool<IndexStatusTools>();
-    //registry.RegisterLocalTool<SourceManagementTools>();
-});
-#endregion
-
 var app = builder.Build();
-
 
 #region 中间件管理
 

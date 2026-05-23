@@ -49,7 +49,9 @@
         </n-space>
       </n-layout-header>
       <n-layout-content style="padding: 20px; overflow: auto">
-        <router-view />
+        <keep-alive :include="['Chat']">
+          <router-view />
+        </keep-alive>
       </n-layout-content>
     </n-layout>
   </n-layout>
@@ -78,7 +80,8 @@ import {
   ConstructOutline,
   TerminalOutline,
   InformationCircleOutline,
-  GitNetworkOutline
+  GitNetworkOutline,
+  ChatbubblesOutline
 } from '@vicons/ionicons5'
 import { useIndexStore } from '@/stores/index'
 import { useAuthStore } from '@/stores/auth'
@@ -124,6 +127,11 @@ const menuOptions: MenuOption[] = [
         label: '知识图谱',
         key: 'Graph',
         icon: renderIcon(GitNetworkOutline)
+      },
+      {
+        label: 'AI 对话',
+        key: 'Chat',
+        icon: renderIcon(ChatbubblesOutline)
       }
     ]
   },

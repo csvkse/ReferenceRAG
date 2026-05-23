@@ -277,6 +277,39 @@
           </n-card>
         </n-tab-pane>
 
+        <!-- Chat Config -->
+        <n-tab-pane name="chat" tab="聊天模型">
+          <n-card>
+            <n-alert type="info" style="margin-bottom: 16px">
+              配置 AI 对话功能的 LLM 后端。修改后需要重启服务才能生效。
+            </n-alert>
+            <n-form label-placement="left" label-width="140">
+              <n-form-item label="API 地址">
+                <n-input v-model:value="chatConfig.endpoint" placeholder="https://api.openai.com/v1" />
+              </n-form-item>
+              <n-form-item label="API Key">
+                <n-input
+                  v-model:value="chatConfig.apiKey"
+                  type="password"
+                  show-password-on="click"
+                  placeholder="your-api-key"
+                />
+              </n-form-item>
+              <n-form-item label="模型名称">
+                <n-input v-model:value="chatConfig.model" placeholder="gpt-4o-mini" />
+              </n-form-item>
+              <n-form-item label="系统提示词">
+                <n-input
+                  v-model:value="chatConfig.systemPrompt"
+                  type="textarea"
+                  :autosize="{ minRows: 3, maxRows: 6 }"
+                  placeholder="你是智能助手..."
+                />
+              </n-form-item>
+            </n-form>
+          </n-card>
+        </n-tab-pane>
+
         <!-- Data Path -->
         <n-tab-pane name="data" tab="数据路径">
           <n-card>
@@ -293,7 +326,10 @@
       </n-tabs>
 
       <!-- Save Button -->
-      <n-space style="margin-top: 16px; justify-content: flex-end">
+      <n-space style="margin-top: 16px" justify="space-between" align="center">
+        <n-text depth="3" style="font-size: 12px">
+          部分配置（端口、聊天模型等）需重启服务后生效
+        </n-text>
         <n-button type="primary" :loading="saving" @click="handleSave">保存配置</n-button>
       </n-space>
     </n-spin>
@@ -305,10 +341,60 @@ import { ref, computed, onMounted } from 'vue'
 import { useMessage } from 'naive-ui'
 import { settingsApi, sourcesApi, type CudaAvailability } from '@/api'
 import type { ReferenceRAGConfig, SourceDetail } from '@/types/api'
+import { API_URL } from '@/config/env'
+import { useAuthStore } from '@/stores/auth'
 
 const message = useMessage()
+const authStore = useAuthStore()
 const loading = ref(false)
 const saving = ref(false)
+
+interface ChatConfigForm {
+  endpoint: string
+  apiKey: string
+  model: string
+  systemPrompt: string
+}
+
+const chatConfig = ref<ChatConfigForm>({
+  endpoint: '',
+  apiKey: '',
+  model: '',
+  systemPrompt: ''
+})
+
+const loadChatConfig = async () => {
+  try {
+    const headers: Record<string, string> = {}
+    if (authStore.apiKey) headers['X-API-Key'] = authStore.apiKey
+    const res = await fetch(`${API_URL}/chat/config`, { headers })
+    if (!res.ok) return
+    const data = await res.json()
+    chatConfig.value = {
+      endpoint: data.endpoint ?? data.Endpoint ?? '',
+      apiKey: data.apiKey ?? data.ApiKey ?? '',
+      model: data.model ?? data.Model ?? '',
+      systemPrompt: data.systemPrompt ?? data.SystemPrompt ?? ''
+    }
+  } catch { /* ignore */ }
+}
+
+const handleSaveChat = async () => {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (authStore.apiKey) headers['X-API-Key'] = authStore.apiKey
+  const res = await fetch(`${API_URL}/chat/config`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      Endpoint: chatConfig.value.endpoint,
+      ApiKey: chatConfig.value.apiKey,
+      Model: chatConfig.value.model,
+      SystemPrompt: chatConfig.value.systemPrompt
+    })
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || '聊天配置保存失败')
+}
 const sourceNames = ref<string[]>([])
 const cudaAvailable = ref(true)
 const originalModelsRootPath = ref('models')
@@ -446,6 +532,7 @@ const normalizeModelsRootPath = (path?: string) =>
 const handleSave = async () => {
   saving.value = true
   try {
+    await handleSaveChat()
     const modelsPath = config.value.modelsRootPath?.trim()
     const modelsPathChanged =
       normalizeModelsRootPath(modelsPath) !== normalizeModelsRootPath(originalModelsRootPath.value)
@@ -474,5 +561,6 @@ onMounted(() => {
   loadConfig()
   loadSourceNames()
   loadCudaAvailability()
+  loadChatConfig()
 })
 </script>
