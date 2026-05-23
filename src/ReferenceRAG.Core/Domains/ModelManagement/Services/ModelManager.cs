@@ -892,7 +892,22 @@ public class ModelManager : IModelManager, IDisposable
 
     public ModelInfo? GetCurrentModel()
     {
-        return _currentModel;
+        if (_currentModel != null) return _currentModel;
+
+        var cfg = _configManager.Load();
+        if (cfg.Embedding?.Mode == "openai" && !string.IsNullOrEmpty(cfg.Embedding.ModelName))
+        {
+            return new ModelInfo
+            {
+                Name = cfg.Embedding.ModelName,
+                DisplayName = $"{cfg.Embedding.ModelName} (API)",
+                Dimension = cfg.Embedding.ApiDimension ?? 0,
+                ModelType = "embedding",
+                IsDownloaded = true
+            };
+        }
+
+        return null;
     }
 
     public async Task<bool> SwitchModelAsync(string modelName)
@@ -1635,6 +1650,18 @@ public class ModelManager : IModelManager, IDisposable
     /// </summary>
     public ModelInfo? GetCurrentRerankModel()
     {
+        var cfg = _configManager.Load();
+        if (cfg.Rerank?.Mode == "openai" && !string.IsNullOrEmpty(cfg.Rerank.ModelName))
+        {
+            return new ModelInfo
+            {
+                Name = cfg.Rerank.ModelName,
+                DisplayName = $"{cfg.Rerank.ModelName} (API)",
+                ModelType = "reranker",
+                IsDownloaded = true
+            };
+        }
+
         return _currentRerankModel;
     }
 

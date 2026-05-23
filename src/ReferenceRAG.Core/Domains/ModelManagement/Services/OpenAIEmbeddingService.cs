@@ -38,6 +38,10 @@ public sealed class OpenAIEmbeddingService : IEmbeddingService, IDisposable, IRo
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
         if (!string.IsNullOrWhiteSpace(cfg.ApiKey))
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", cfg.ApiKey);
+
+        // 后台预热：建立 TCP/TLS 连接 + 探测维度，消除首次搜索冷启动延迟
+        if (!IsSimulationMode)
+            _ = Task.Run(() => EnsureProbeAsync(CancellationToken.None));
     }
 
     public async Task<float[]> EncodeAsync(string text, CancellationToken ct = default)

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Windows;
@@ -161,8 +162,10 @@ public partial class App : Application
         menu.Items.Add(_autoStartMenuItem);
         menu.Items.Add(_startMinimizedMenuItem);
         menu.Items.Add(new Separator());
+        menu.Items.Add(new MenuItem { Header = "重启软件" });
+        ((MenuItem)menu.Items[5]).Click += RestartMenuItem_Click;
         menu.Items.Add(new MenuItem { Header = "退出" });
-        ((MenuItem)menu.Items[5]).Click += ExitMenuItem_Click;
+        ((MenuItem)menu.Items[6]).Click += ExitMenuItem_Click;
 
         var trayIcon = TryFindResource("TrayIcon") as TaskbarIcon;
         if (trayIcon != null)
@@ -189,6 +192,23 @@ public partial class App : Application
     {
         bool newValue = _startMinimizedMenuItem!.IsChecked;
         StartupManager.SetStartMinimized(newValue);
+    }
+
+    private void RestartMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        // 先释放 mutex，新进程才能通过单实例检测
+        _instanceMutex?.ReleaseMutex();
+        _instanceMutex?.Dispose();
+        _instanceMutex = null;
+
+        var exePath = Environment.ProcessPath;
+        if (!string.IsNullOrEmpty(exePath))
+            Process.Start(new ProcessStartInfo(exePath) { UseShellExecute = true });
+
+        _cts.Cancel();
+        var trayIcon = TryFindResource("TrayIcon") as TaskbarIcon;
+        trayIcon?.Dispose();
+        Shutdown();
     }
 
     private void ExitMenuItem_Click(object sender, RoutedEventArgs e)

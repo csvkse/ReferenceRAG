@@ -452,7 +452,11 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     /// </summary>
     private bool DetermineRerankExecution(AIQueryRequest request, RerankConfig config)
     {
-        // 请求参数优先级最高
+        // 全局禁用优先级最高，覆盖所有请求级参数和模式
+        if (!config.Enabled)
+            return false;
+
+        // 请求参数优先级第二
         if (request.EnableRerank.HasValue)
             return request.EnableRerank.Value;
 
@@ -460,8 +464,6 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         if (request.Mode == QueryMode.HybridRerank)
             return true;
 
-        // Hybrid 模式不启用重排（纯混合召回）
-        // 其他模式也不启用
         return false;
     }
 
