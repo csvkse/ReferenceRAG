@@ -209,7 +209,7 @@ http://localhost:7897/swagger
 
 - [项目介绍](docs/introduction.md)
 - [索引架构](docs/index-architecture.md)
-- [启动预览](PREVIEW.md)
+- [使用预览](PREVIEW.md)
 
 ---
 
