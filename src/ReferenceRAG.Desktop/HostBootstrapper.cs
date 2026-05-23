@@ -3,8 +3,12 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.OpenApi;
+using McpHelper.Extensions;
+using McpHelper.Models;
 using ReferenceRAG.Service.Controllers;
 using ReferenceRAG.Service.Extensions;
+using ReferenceRAG.Service.Middleware;
 
 namespace ReferenceRAG.Desktop;
 
@@ -35,6 +39,15 @@ public static class HostBootstrapper
                 options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
             });
         builder.Services.AddEndpointsApiExplorer();
+        builder.Services.AddSwaggerGen(c =>
+        {
+            c.SwaggerDoc("v1", new OpenApiInfo
+            {
+                Title = "Obsidian RAG API (Desktop)",
+                Version = "v1",
+                Description = "Obsidian 笔记库向量检索 API - Desktop Edition"
+            });
+        });
 
         // 核心领域服务（与 Service/Program.cs 共用）
         builder.Services.AddRagCoreServices(builder.Configuration);
@@ -55,7 +68,18 @@ public static class HostBootstrapper
 
         app.UseCors();
 
-        // Desktop 不启用 Swagger、MCP、API Key 认证
+        // MCP 中间件（必须在 CORS 之后，其他中间件之前）
+        app.UseAppMcpHelper();
+
+        // Swagger
+        app.UseSwagger();
+        app.UseSwaggerUI(c =>
+        {
+            c.SwaggerEndpoint("/swagger/v1/swagger.json", "Obsidian RAG API v1");
+        });
+
+        // API Key 认证
+        app.UseApiKeyAuthentication();
 
         // 静态文件（Vue SPA）：index.html 禁缓存，带 hash 的资源永久缓存
         app.UseDefaultFiles();
