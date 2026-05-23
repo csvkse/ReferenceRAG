@@ -318,6 +318,15 @@ public class MafChatService
 
     public bool DeleteSession(string sessionId) => _sessions.TryRemove(sessionId, out _);
 
+    public IReadOnlyList<string> GetToolDescriptions()
+    {
+        return _tools.Select(t =>
+        {
+            var func = t as AIFunction;
+            return func != null ? $"{func.Name}（{func.Description?.Split('。')[0] ?? ""}）" : "";
+        }).Where(s => !string.IsNullOrEmpty(s)).ToList();
+    }
+
     public async IAsyncEnumerable<SseEvent> StreamAsync(
         string sessionId,
         string userMessage,

@@ -8,6 +8,7 @@ using WebApiWindowsService;
 using McpHelper.Extensions;
 using McpHelper.Models;
 using ReferenceRAG.Service.McpTools;
+using ReferenceRAG.Service.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
@@ -98,7 +99,6 @@ builder.Services.AddRagCoreServices(
 
 
 // 配置 CORS
-builder.Services.AddHttpClient();
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>

@@ -43,17 +43,7 @@
                 }"
               >
                 <!-- User message -->
-                <div v-if="msg.role === 'user'" style="display: flex; align-items: flex-start; gap: 8px">
-                  <div style="flex: 1; white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.6">{{ msg.content.trimStart() }}</div>
-                  <div v-if="!streaming" style="display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; margin-top: 2px">
-                    <n-button text size="tiny" style="opacity: 0.5" title="编辑" @click="startEdit(i, msg.content)">
-                      <template #icon><n-icon :component="CreateOutline" size="13" /></template>
-                    </n-button>
-                    <n-button text size="tiny" style="opacity: 0.5" title="重试" @click="retry(msg.content, i)">
-                      <template #icon><n-icon :component="RefreshOutline" size="13" /></template>
-                    </n-button>
-                  </div>
-                </div>
+                <div v-if="msg.role === 'user'" style="white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.6">{{ msg.content.trimStart() }}</div>
 
                 <!-- Assistant message -->
                 <div v-else>
@@ -61,6 +51,18 @@
                   <div v-else class="markdown-body" v-html="renderMd(msg.content) + (streaming && i === messages.length - 1 ? '<span class=\'cursor-blink\'>▌</span>' : '')"></div>
                 </div>
               </n-card>
+
+              <!-- User actions -->
+              <div v-if="msg.role === 'user' && !streaming" style="display: flex; gap: 4px; padding: 0 4px">
+                <n-button text size="tiny" style="opacity: 0.6; font-size: 11px" @click="startEdit(i, msg.content)">
+                  <template #icon><n-icon :component="CreateOutline" size="12" /></template>
+                  编辑
+                </n-button>
+                <n-button text size="tiny" style="opacity: 0.6; font-size: 11px" @click="retry(msg.content, i)">
+                  <template #icon><n-icon :component="RefreshOutline" size="12" /></template>
+                  重试
+                </n-button>
+              </div>
 
               <!-- Assistant actions -->
               <div v-if="msg.role === 'assistant' && msg.content && !(streaming && i === messages.length - 1)" style="display: flex; gap: 4px; padding: 0 4px">
@@ -112,9 +114,13 @@
             <template #icon><n-icon :component="SendOutline" /></template>
           </n-button>
         </div>
-        <n-text depth="3" style="font-size: 12px">
-          工具：SearchKnowledge（知识库检索）· GetIndexStatus（索引状态）
-        </n-text>
+        <n-collapse>
+          <n-collapse-item title="可用工具" name="tools">
+            <div style="display: flex; flex-direction: column; gap: 4px">
+              <n-text v-for="(tool, idx) in toolDescriptions" :key="idx" depth="3" style="font-size: 12px">{{ tool }}</n-text>
+            </div>
+          </n-collapse-item>
+        </n-collapse>
       </n-space>
     </n-card>
 
@@ -164,6 +170,8 @@ const messages = ref<Message[]>([])
 const input = ref('')
 const streaming = ref(false)
 const scrollbarRef = ref<any>(null)
+const toolDescriptions = ref<string[]>([])
+const initialized = ref(false)
 
 const rawSet = ref(new Set<number>())
 const editVisible = ref(false)
@@ -318,16 +326,20 @@ const send = async () => {
 }
 
 const initSession = async () => {
-  if (sessionId.value) return
+  if (initialized.value) return
+  initialized.value = true
   try {
     sessionId.value = await createSession()
+    const res = await fetch(`${API_URL}/chat/tools`, { headers: getHeaders() })
+    if (res.ok) toolDescriptions.value = await res.json()
   } catch {
+    initialized.value = false
     message.error('初始化会话失败，请检查服务连接及 Chat 配置')
   }
 }
 
 onMounted(initSession)
-onActivated(initSession)
+onActivated(() => {})
 </script>
 
 <style scoped>

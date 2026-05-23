@@ -68,6 +68,8 @@ public static class RagWebHostExtensions
             options.KeepAliveInterval = TimeSpan.FromSeconds(15);
         });
 
+        services.AddHttpClient();
+
         // MAF 流式聊天服务（内存会话）
         services.AddSingleton<ReferenceRAG.Service.Services.MafChatService>();
 

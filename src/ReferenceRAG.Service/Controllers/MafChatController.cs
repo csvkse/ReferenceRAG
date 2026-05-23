@@ -57,6 +57,12 @@ public class MafChatController : ControllerBase
         return NoContent();
     }
 
+    [HttpGet("tools")]
+    public ActionResult<IReadOnlyList<string>> GetTools()
+    {
+        return Ok(_chatService.GetToolDescriptions());
+    }
+
     [HttpPost("stream")]
     public async Task StreamChat([FromBody] ChatStreamRequest request, CancellationToken ct)
     {
