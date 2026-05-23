@@ -210,7 +210,7 @@ Vue 3 + Vite + Naive UI 构建的前端界面：
 ## API 与使用文档
 
 - **Swagger：** `http://localhost:7897/swagger`
-- **Skill 文档：** [skill/ReferenceRAG/skill.md](skill/ReferenceRAG/skill.md)
+- **Skill 文档：** [skill/ReferenceRAG/SKILL.md](skill/ReferenceRAG/SKILL.md)
 - **使用预览：** [PREVIEW.md](PREVIEW.md)
 
 ---
