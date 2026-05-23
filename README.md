@@ -258,9 +258,3 @@ Vue 3 + Vite + Naive UI 构建的前端界面：
 ### API 精简
 - **refactor:** 精简 API 端点结构（27→16 累引相关端点）
 - **refactor:** 累引 controller 合并，删除冗余端点
-
----
-
-## GitHub
-
-https://github.com/csvkse/ReferenceRAG
