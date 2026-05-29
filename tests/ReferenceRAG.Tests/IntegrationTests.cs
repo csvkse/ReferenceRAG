@@ -40,8 +40,7 @@ public class IntegrationTests : IDisposable
                     Path = _testVaultPath,
                     Name = "测试库",
                     Type = SourceType.Markdown,
-                    FilePatterns = new List<string> { "*.md" },
-                    Recursive = true
+                    FilePatterns = new List<string> { "*.md" }
                 }
             },
             Embedding = new EmbeddingConfig

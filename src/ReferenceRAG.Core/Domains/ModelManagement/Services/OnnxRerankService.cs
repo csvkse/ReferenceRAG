@@ -15,6 +15,7 @@ namespace ReferenceRAG.Core.Services.Rerank;
 public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTraceAttribute>
 {
     private readonly RerankOptions _options;
+    private readonly IGpuMemoryManager? _memoryManager;
     private InferenceSession? _session;
     private ITextTokenizer _tokenizer;
     private bool _simulationMode;
@@ -24,12 +25,19 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
     public string ModelName => _options.ModelName;
     public bool IsLoaded => _session != null && !_simulationMode;
 
-    public OnnxRerankService(RerankOptions options)
+    public OnnxRerankService(RerankOptions options, IGpuMemoryManager? memoryManager = null)
     {
         _options = options;
+        _memoryManager = memoryManager;
         _tokenizer = new FallbackTokenizer();
 
         LoadModel(options.ModelPath, options.ModelName);
+
+        // 注册到显存管理器
+        if (_options.UseCuda && _memoryManager != null)
+        {
+            _memoryManager.Register("OnnxRerankService", () => _session, _options.CudaDeviceId);
+        }
     }
 
     /// <summary>
@@ -196,9 +204,17 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
     {
         lock (_lock)
         {
+            // 从显存管理器注销
+            _memoryManager?.Unregister("OnnxRerankService");
+
             var oldSession = _session;
             _session = null;
             oldSession?.Dispose();
+
+            // 强制 GC 释放显存
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
             Console.WriteLine("[OnnxRerankService] 模型已卸载");
         }
     }
@@ -249,20 +265,31 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
             return result;
         }
 
-        // 批量推理优化：将多个 query-document 对一起输入模型
-        var scores = await Task.Run(() =>
+        // 进入推理（显存管理器计数）
+        _memoryManager?.EnterInference("OnnxRerankService");
+
+        try
         {
-            lock (_lock)
+            // 批量推理优化：将多个 query-document 对一起输入模型
+            var scores = await Task.Run(() =>
             {
-                return ComputeRelevanceScoresBatch(query, docList);
-            }
-        }, cancellationToken);
+                lock (_lock)
+                {
+                    return ComputeRelevanceScoresBatch(query, docList);
+                }
+            }, cancellationToken);
 
-        // 按分数降序排列
-        result.Documents = scores.OrderByDescending(d => d.RelevanceScore).ToList();
-        result.DurationMs = sw.ElapsedMilliseconds;
+            // 按分数降序排列
+            result.Documents = scores.OrderByDescending(d => d.RelevanceScore).ToList();
+            result.DurationMs = sw.ElapsedMilliseconds;
 
-        return result;
+            return result;
+        }
+        finally
+        {
+            // 退出推理（可能触发延迟释放）
+            _memoryManager?.ExitInference("OnnxRerankService");
+        }
     }
 
     /// <summary>

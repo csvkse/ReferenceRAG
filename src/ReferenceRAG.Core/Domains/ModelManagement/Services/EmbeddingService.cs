@@ -19,6 +19,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
     private enum PoolingMode { Mean, Cls }
 
     private readonly EmbeddingOptions _options;
+    private readonly IGpuMemoryManager? _memoryManager;
     private InferenceSession? _session;
     private ITextTokenizer _tokenizer;
     private bool _simulationMode;
@@ -33,12 +34,19 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
     public bool IsSimulationMode => _simulationMode;
     public bool SupportsAsymmetricEncoding { get; private set; }
 
-    public EmbeddingService(EmbeddingOptions options)
+    public EmbeddingService(EmbeddingOptions options, IGpuMemoryManager? memoryManager = null)
     {
         _options = options;
+        _memoryManager = memoryManager;
         _tokenizer = new FallbackTokenizer();
 
         LoadModel(options.ModelPath, options.ModelName);
+
+        // 注册到显存管理器
+        if (_options.UseCuda && _memoryManager != null)
+        {
+            _memoryManager.Register("EmbeddingService", () => _session, _options.CudaDeviceId);
+        }
     }
 
     /// <summary>
@@ -298,9 +306,17 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
     {
         lock (_lock)
         {
+            // 从显存管理器注销
+            _memoryManager?.Unregister("EmbeddingService");
+
             var oldSession = _session;
             _session = null;
             oldSession?.Dispose();
+
+            // 强制 GC 释放显存
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
             Console.WriteLine("[EmbeddingService] 模型已卸载");
         }
     }
@@ -382,20 +398,25 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
         var textList = texts.ToList();
         if (textList.Count == 0) return Array.Empty<float[]>();
 
-        // 统一走批量推理路径（CUDA 已设置 EnableMemoryPattern=false，支持动态 batch）
-        return await Task.Run(() =>
+        // 进入推理（显存管理器计数）
+        _memoryManager?.EnterInference("EmbeddingService");
+
+        try
         {
-            // 在 lock 内检查 _session 状态，避免竞态条件
-            InferenceSession? session;
-            lock (_lock)
+            // 统一走批量推理路径（CUDA 已设置 EnableMemoryPattern=false，支持动态 batch）
+            return await Task.Run(() =>
             {
-                if (_session == null || _simulationMode)
+                // 在 lock 内检查 _session 状态，避免竞态条件
+                InferenceSession? session;
+                lock (_lock)
                 {
-                    Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
-                    return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
+                    if (_session == null || _simulationMode)
+                    {
+                        Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
+                        return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
+                    }
+                    session = _session;
                 }
-                session = _session;
-            }
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -514,6 +535,12 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
             return batchEmbeddings;
 
         }, cancellationToken);
+        }
+        finally
+        {
+            // 退出推理（可能触发延迟释放）
+            _memoryManager?.ExitInference("EmbeddingService");
+        }
     }
 
     /// <summary>

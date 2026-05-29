@@ -9,6 +9,10 @@ public static class ModelManagementExtensions
 {
     public static IServiceCollection AddModelManagement(this IServiceCollection services)
     {
+        // 注册 GPU 显存管理器（单例 + HostedService）
+        services.AddSingleton<IGpuMemoryManager, GpuMemoryManager>();
+        services.AddHostedService(sp => (GpuMemoryManager)sp.GetRequiredService<IGpuMemoryManager>());
+
         services.AddSingleton<IModelManager>(sp =>
         {
             var configManager = sp.GetRequiredService<ConfigManager>();
@@ -27,8 +31,11 @@ public static class ModelManagementExtensions
         services.AddSingleton<IEmbeddingService>(sp =>
         {
             var cfg = sp.GetRequiredService<ConfigManager>().Load();
+            var memoryManager = sp.GetService<IGpuMemoryManager>();
+
             if (cfg.Embedding.Mode == "openai")
                 return new OpenAIEmbeddingService(cfg.Embedding);
+
             return new EmbeddingService(new EmbeddingOptions
             {
                 ModelPath = cfg.Embedding.ModelPath,
@@ -38,12 +45,13 @@ public static class ModelManagementExtensions
                 UseCuda = cfg.Embedding.UseCuda,
                 CudaDeviceId = cfg.Embedding.CudaDeviceId,
                 CudaLibraryPath = cfg.Embedding.CudaLibraryPath
-            });
+            }, memoryManager);
         });
 
         services.AddSingleton<IRerankService>(sp =>
         {
             var cfg = sp.GetRequiredService<ConfigManager>().Load();
+            var memoryManager = sp.GetService<IGpuMemoryManager>();
             var rerankConfig = cfg.Rerank;
             string modelPath = rerankConfig.ModelPath ?? string.Empty;
 
@@ -69,7 +77,7 @@ public static class ModelManagementExtensions
                 UseCuda = rerankConfig.UseCuda,
                 CudaDeviceId = rerankConfig.CudaDeviceId,
                 CudaLibraryPath = cfg.Embedding.CudaLibraryPath
-            });
+            }, memoryManager);
         });
 
         return services;
