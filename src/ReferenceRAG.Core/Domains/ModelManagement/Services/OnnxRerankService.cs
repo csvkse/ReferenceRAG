@@ -36,7 +36,20 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
         // 注册到显存管理器
         if (_options.UseCuda && _memoryManager != null)
         {
-            _memoryManager.Register("OnnxRerankService", () => _session, _options.CudaDeviceId);
+            _memoryManager.Register("OnnxRerankService", () => _session, _options.CudaDeviceId,
+                onShrink: async () =>
+                {
+                    lock (_lock)
+                    {
+                        var oldSession = _session;
+                        _session = null;
+                        oldSession?.Dispose();
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        LoadModel(_options.ModelPath, _options.ModelName);
+                    }
+                    await Task.CompletedTask;
+                });
         }
     }
 

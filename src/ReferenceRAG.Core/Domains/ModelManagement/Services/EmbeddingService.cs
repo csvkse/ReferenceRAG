@@ -45,7 +45,20 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
         // 注册到显存管理器
         if (_options.UseCuda && _memoryManager != null)
         {
-            _memoryManager.Register("EmbeddingService", () => _session, _options.CudaDeviceId);
+            _memoryManager.Register("EmbeddingService", () => _session, _options.CudaDeviceId,
+                onShrink: async () =>
+                {
+                    lock (_lock)
+                    {
+                        var oldSession = _session;
+                        _session = null;
+                        oldSession?.Dispose();
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        LoadModel(_options.ModelPath, _options.ModelName);
+                    }
+                    await Task.CompletedTask;
+                });
         }
     }
 
