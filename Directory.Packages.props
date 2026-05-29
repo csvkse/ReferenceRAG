@@ -2,7 +2,6 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
-
   <ItemGroup>
     <!-- 共享包版本 -->
     <PackageVersion Include="System.Drawing.Common" Version="10.0.8" />
@@ -12,7 +11,6 @@
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.5" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.5" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
-
     <!-- Core 专用 -->
     <PackageVersion Include="Rougamo.Fody" Version="4.0.4" />
     <PackageVersion Include="Markdig" Version="1.1.2" />
@@ -21,10 +19,8 @@
     <PackageVersion Include="Microsoft.ML.Tokenizers" Version="1.0.1" />
     <PackageVersion Include="BERTTokenizers" Version="1.2.0" />
     <PackageVersion Include="Tokenizers.HuggingFace" Version="1.21.4" />
-
     <!-- Storage 专用 -->
     <PackageVersion Include="Microsoft.SemanticKernel.Connectors.SqliteVec" Version="1.74.0-preview" />
-
     <!-- Service 专用 -->
     <PackageVersion Include="Microsoft.Extensions.AI" Version="10.5.1" />
     <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.6.0" />
@@ -40,11 +36,9 @@
     <PackageVersion Include="Serilog.Extensions.Hosting" Version="8.0.0" />
     <PackageVersion Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageVersion Include="Serilog.Sinks.File" Version="6.0.0" />
-
     <!-- Desktop 专用 -->
     <PackageVersion Include="Microsoft.Web.WebView2" Version="1.0.3912.50" />
     <PackageVersion Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
-
     <!-- Tests 专用 -->
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />

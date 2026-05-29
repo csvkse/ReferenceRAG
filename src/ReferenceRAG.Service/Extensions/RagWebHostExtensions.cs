@@ -61,6 +61,7 @@ public static class RagWebHostExtensions
         services.AddHostedService(sp => sp.GetRequiredService<IndexService>());
         services.AddHostedService<AutoIndexService>();
         services.AddHostedService<StartupSyncService>();
+        services.AddHostedService<OrphanCleanupService>();
         services.AddSingleton<TestRecordStore>();
         services.AddSignalR(options =>
         {
