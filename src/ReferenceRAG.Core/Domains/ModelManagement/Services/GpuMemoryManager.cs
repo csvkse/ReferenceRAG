@@ -35,11 +35,11 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
 
     #region Session 注册管理
 
-    public void Register(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId = 0)
+    public void Register(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId = 0, Func<Task>? onShrink = null)
     {
-        var sessionRef = new SessionRef(name, getSession, deviceId, _logger);
+        var sessionRef = new SessionRef(name, getSession, deviceId, _logger, onShrink);
         _sessions[name] = sessionRef;
-        _logger?.LogInformation("[GpuMemoryManager] 注册 Session: {Name}, DeviceId={DeviceId}", name, deviceId);
+        _logger?.LogInformation("[GpuMemoryManager] 注册 Session: {Name}, DeviceId={DeviceId}, HasShrinkCallback={HasCallback}", name, deviceId, onShrink != null);
     }
 
     public void Unregister(string name)
@@ -252,6 +252,7 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
     private class SessionRef : IDisposable
     {
         private readonly Func<Microsoft.ML.OnnxRuntime.InferenceSession?> _getSession;
+        private readonly Func<Task>? _onShrink;
         private readonly ILogger? _logger;
         private readonly object _lock = new();
         private int _activeCount;
@@ -268,12 +269,13 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
         public TimeSpan IdleTime => DateTime.UtcNow - _lastActivityTime;
         public bool HasPendingShrink => _pendingShrink;
 
-        public SessionRef(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId, ILogger? logger)
+        public SessionRef(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId, ILogger? logger, Func<Task>? onShrink)
         {
             Name = name;
             _getSession = getSession;
             DeviceId = deviceId;
             _logger = logger;
+            _onShrink = onShrink;
         }
 
         /// <summary>
@@ -330,7 +332,21 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
         {
             _logger?.LogInformation("[GpuMemoryManager] {Name}: 执行显存释放", Name);
 
-            // GC 释放（推荐，安全）
+            // 方案 1: 调用注册的释放回调（推荐，可重建 Session）
+            if (_onShrink != null)
+            {
+                try
+                {
+                    _onShrink().GetAwaiter().GetResult();
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "[GpuMemoryManager] {Name}: 释放回调执行失败", Name);
+                }
+            }
+
+            // 方案 2: GC 释放（仅释放托管资源，对 CUDA 显存无效）
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();

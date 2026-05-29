@@ -55,7 +55,8 @@ public interface IGpuMemoryManager
     /// <param name="name">Session 名称标识</param>
     /// <param name="getSession">获取 Session 的委托（弱引用）</param>
     /// <param name="deviceId">GPU 设备 ID</param>
-    void Register(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId = 0);
+    /// <param name="onShrink">释放显存回调（可选，用于重建 Session）</param>
+    void Register(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId = 0, Func<Task>? onShrink = null);
 
     /// <summary>
     /// 注销 Session
