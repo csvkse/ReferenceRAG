@@ -8,12 +8,16 @@ dist/
 publish/
 
 # Excluded from public repo
-docs/*
+docs/private/
+docs/drafts/
+docs/Archived/
+docs/superpowers/
 resource/
 
 # IDE
 .vs/
 .vscode/
+.tmpobj/
 *.user
 *.suo
 .claude/
@@ -28,6 +32,7 @@ test-vault/
 
 # Session files
 /*.html
+*.log
 
 # User-specific config
 reference-rag.json
@@ -48,6 +53,11 @@ out/
 
 # Node.js
 node_modules/
+*.tsbuildinfo
+
+# Generated frontend configuration
+dashboard-vue/vite.config.js
+dashboard-vue/vite.config.d.ts
 
 # Reference projects (large)
 reference/

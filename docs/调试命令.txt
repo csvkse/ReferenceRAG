@@ -1,0 +1,43 @@
+# 开发调试命令
+
+## 前端开发
+
+```bash
+# 进入前端目录
+cd dashboard-vue
+
+# 安装依赖（首次运行）
+npm install
+
+# 启动开发服务器
+npm run dev
+```
+
+## 后端开发
+
+```bash
+# 启动后端服务
+dotnet run --project src/ReferenceRAG.Service/ReferenceRAG.Service.csproj
+
+# 或者指定配置
+dotnet run --project src/ReferenceRAG.Service/ReferenceRAG.Service.csproj --configuration Debug
+```
+
+## 同时启动前后端
+
+### 方式一：两个终端窗口
+终端1：
+```bash
+cd dashboard-vue && npm run dev
+```
+
+终端2：
+```bash
+dotnet run --project src/ReferenceRAG.Service/ReferenceRAG.Service.csproj
+```
+
+### 方式二：使用并行命令（Windows PowerShell）
+```powershell
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd dashboard-vue; npm run dev"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "dotnet run --project src/ReferenceRAG.Service/ReferenceRAG.Service.csproj"
+```

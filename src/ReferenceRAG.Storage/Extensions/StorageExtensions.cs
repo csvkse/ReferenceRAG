@@ -38,6 +38,15 @@ public static class StorageExtensions
             return new SqliteGraphStore(dbPath);
         });
 
+        // QueryStats: query_stats.db（查询统计持久化属于存储层）
+        services.AddSingleton<IQueryStatsService>(sp =>
+        {
+            var cfg = sp.GetRequiredService<ConfigManager>().Load();
+            var dbPath = Path.Combine(cfg.DataPath ?? "data", "query_stats.db");
+            Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+            return new QueryStatsService(dbPath);
+        });
+
         return services;
     }
 }

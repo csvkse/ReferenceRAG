@@ -1,10 +1,12 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/ReferenceRAG.Core/ReferenceRAG.Core.csproj" />
+    <Project Path="src/ReferenceRAG.Desktop/ReferenceRAG.Desktop.csproj" />
     <Project Path="src/ReferenceRAG.Service/ReferenceRAG.Service.csproj" />
     <Project Path="src/ReferenceRAG.Storage/ReferenceRAG.Storage.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/PerfTestRunner/PerfTestRunner.csproj" />
     <Project Path="tests/ReferenceRAG.Tests/ReferenceRAG.Tests.csproj" />
   </Folder>
 </Solution>

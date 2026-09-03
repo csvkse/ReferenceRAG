@@ -16,13 +16,6 @@ public static class SearchExtensions
         services.AddSingleton<MetricsCollector>();
         services.AddSingleton<AlertService>();
 
-        services.AddSingleton<IQueryStatsService>(sp =>
-        {
-            var cfg = sp.GetRequiredService<ConfigManager>().Load();
-            var statsDbPath = Path.Combine(cfg.DataPath ?? "data", "query_stats.db");
-            return new QueryStatsService(statsDbPath);
-        });
-
         var options = hybridOptions ?? new HybridSearchOptions();
         services.AddSingleton<IHybridSearchService>(sp =>
         {

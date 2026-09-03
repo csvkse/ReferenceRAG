@@ -1,8 +1,8 @@
 using Microsoft.Data.Sqlite;
 using ReferenceRAG.Core.Interfaces;
-using System.Text;
+using ReferenceRAG.Core.Services;
 
-namespace ReferenceRAG.Core.Services;
+namespace ReferenceRAG.Storage;
 
 /// <summary>
 /// 查询统计服务 - 持久化记录每次查询的耗时和结果数
@@ -168,30 +168,4 @@ internal class QueryStatsService : IQueryStatsService, IDisposable
             _disposed = true;
         }
     }
-}
-
-/// <summary>
-/// 查询统计摘要
-/// </summary>
-public class QueryStatsSummary
-{
-    public long TotalQueries { get; set; }
-    public double AvgDurationMs { get; set; }
-    public long MaxDurationMs { get; set; }
-    public long MinDurationMs { get; set; }
-    public double AvgResultCount { get; set; }
-}
-
-/// <summary>
-/// 单条查询记录
-/// </summary>
-public class QueryStatRecord
-{
-    public long Id { get; set; }
-    public string QueryText { get; set; } = "";
-    public long DurationMs { get; set; }
-    public int ResultCount { get; set; }
-    public string Sources { get; set; } = "";
-    public string Mode { get; set; } = "";
-    public DateTime CreatedAt { get; set; }
 }

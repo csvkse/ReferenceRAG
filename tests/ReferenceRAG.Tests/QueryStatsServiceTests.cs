@@ -1,5 +1,6 @@
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Storage;
 
 namespace ReferenceRAG.Tests;
 

@@ -77,6 +77,8 @@ ReferenceRAG/
 │   └── ReferenceRAG.Desktop/     # WPF 桌面端壳
 ├── dashboard-vue/                # Vue 3 前端仪表盘
 ├── tests/                        # 单元测试、集成测试、性能测试
+├── tools/                        # 可复用的诊断与维护工具
+├── docs/                         # 架构、运维与故障排查文档
 ├── config/                       # 容器运行时配置
 ├── data/                         # 本地索引与运行时数据
 ├── models/                       # 模型文件目录
