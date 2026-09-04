@@ -27,7 +27,7 @@ jobs:
         working-directory: Business/ReferenceRAG.Business/wwwroot
         run: |
           node check.mjs
-          node --test tests/*.test.mjs
+          node --test
       - name: Verify transport
         run: dotnet test tests/ReferenceRAG.Host.Tests -c Release
       - name: Publish Web

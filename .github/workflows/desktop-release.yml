@@ -34,7 +34,7 @@ jobs:
         working-directory: Business/ReferenceRAG.Business/wwwroot
         run: |
           node check.mjs
-          node --test tests/*.test.mjs
+          node --test
 
       - name: Restore dependencies
         run: dotnet restore ReferenceRAG.slnx
