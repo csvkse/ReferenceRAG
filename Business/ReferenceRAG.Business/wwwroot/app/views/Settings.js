@@ -185,10 +185,15 @@ const component = /*@__PURE__*/ _defineComponent({
                 if (modelsPathChanged && modelsPath) {
                     await settingsApi.updateModelsPath(modelsPath);
                 }
-                await settingsApi.save(config.value);
+                const saveResponse = await settingsApi.save(config.value);
+                const saveResult = saveResponse.data || {};
                 originalModelsRootPath.value = config.value.modelsRootPath || 'models';
-                if (networkAccessChanged.value) {
-                    message.warning('配置已保存 — 监听地址已变更，需要重启服务才能生效');
+                if (saveResult.indexRequiresRebuild) {
+                    message.warning('配置已保存。嵌入模型已变化，请重启服务并重建向量索引');
+                    networkAccessChanged.value = false;
+                }
+                else if (networkAccessChanged.value || saveResult.requiresRestart) {
+                    message.warning('配置已保存，需要重启服务后生效');
                     networkAccessChanged.value = false;
                 }
                 else {

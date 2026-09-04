@@ -16,7 +16,7 @@ public record SseEvent(string Type, string? Delta = null, string? Message = null
 
 public class MafChatService
 {
-    private readonly IChatClient _client;
+    private readonly IChatClient? _client;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly string _systemPrompt;
@@ -39,7 +39,7 @@ public class MafChatService
 
         var section = config.GetSection("Chat");
         var endpoint = section["Endpoint"] ?? "https://api.openai.com/v1";
-        var apiKey = section["ApiKey"] ?? "placeholder";
+        var apiKey = section["ApiKey"];
         var model = section["Model"] ?? "gpt-4o-mini";
         _systemPrompt = section["SystemPrompt"] ?? "你是 ReferenceRAG 智能助手。";
 
@@ -57,16 +57,23 @@ public class MafChatService
             AIFunctionFactory.Create(GetIndexStatusAsync)
         ];
 
-        var rawClient = new OpenAIClient(
-            new ApiKeyCredential(apiKey),
-            new OpenAIClientOptions { Endpoint = new Uri(endpoint) })
-            .GetChatClient(model)
-            .AsIChatClient();
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            _logger.LogWarning("聊天 API Key 未配置；聊天接口将在调用时返回配置错误");
+        }
+        else
+        {
+            var rawClient = new OpenAIClient(
+                new ApiKeyCredential(apiKey),
+                new OpenAIClientOptions { Endpoint = new Uri(endpoint) })
+                .GetChatClient(model)
+                .AsIChatClient();
 
-        _client = rawClient
-            .AsBuilder()
-            .UseFunctionInvocation()
-            .Build();
+            _client = rawClient
+                .AsBuilder()
+                .UseFunctionInvocation()
+                .Build();
+        }
     }
 
     // ── 工具定义 ──────────────────────────────────────────────────────
@@ -332,6 +339,13 @@ public class MafChatService
         string userMessage,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        if (_client is null)
+        {
+            yield return new SseEvent("error", Message: "聊天 API Key 未配置，请设置环境变量 Chat__ApiKey 后重启服务");
+            yield return new SseEvent("done");
+            yield break;
+        }
+
         if (!_sessions.TryGetValue(sessionId, out var history))
         {
             yield return new SseEvent("error", Message: "会话不存在，请创建新会话");

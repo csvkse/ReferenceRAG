@@ -99,11 +99,29 @@ public class SettingsController : ControllerBase
     [HttpPost]
     public ActionResult Save([FromBody] ObsidianRagConfig config)
     {
+        var current = _configManager.Load();
+        var embeddingIdentityChanged = !string.Equals(current.Embedding.Mode, config.Embedding.Mode, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(current.Embedding.ModelName, config.Embedding.ModelName, StringComparison.Ordinal)
+            || current.Embedding.ApiDimension != config.Embedding.ApiDimension;
+        var embeddingRuntimeChanged = embeddingIdentityChanged
+            || !string.Equals(current.Embedding.ApiBaseUrl, config.Embedding.ApiBaseUrl, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(current.Embedding.ApiKey, config.Embedding.ApiKey, StringComparison.Ordinal)
+            || !string.Equals(current.Embedding.ModelPath, config.Embedding.ModelPath, StringComparison.OrdinalIgnoreCase);
+        var modelRuntimeChanged = embeddingRuntimeChanged
+            || !string.Equals(current.Rerank.Mode, config.Rerank.Mode, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(current.Rerank.ModelName, config.Rerank.ModelName, StringComparison.Ordinal)
+            || !string.Equals(current.Rerank.ApiBaseUrl, config.Rerank.ApiBaseUrl, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(current.Rerank.ApiKey, config.Rerank.ApiKey, StringComparison.Ordinal)
+            || !string.Equals(current.Rerank.ModelPath, config.Rerank.ModelPath, StringComparison.OrdinalIgnoreCase);
+
         _configManager.Save(config);
 
-        // 修改监听地址需要重启才能生效
-        var requiresRestart = true;
-        return Ok(new { message = "配置已保存", requiresRestart });
+        return Ok(new
+        {
+            message = modelRuntimeChanged ? "配置已保存，重启后应用模型服务" : "配置已保存",
+            requiresRestart = modelRuntimeChanged,
+            indexRequiresRebuild = embeddingIdentityChanged
+        });
     }
 
     /// <summary>

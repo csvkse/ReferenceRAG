@@ -20,6 +20,8 @@ public class SearchStatusResponse
     /// </summary>
     public int EmbeddingDimension { get; set; }
 
+    public string EmbeddingProvider { get; set; } = string.Empty;
+
     /// <summary>
     /// 当前重排模型名称
     /// </summary>
@@ -29,6 +31,10 @@ public class SearchStatusResponse
     /// 重排是否启用
     /// </summary>
     public bool RerankEnabled { get; set; }
+
+    public string RerankProvider { get; set; } = string.Empty;
+
+    public bool IndexRequiresRebuild { get; set; }
 
     /// <summary>
     /// BM25 索引文档数
@@ -65,7 +71,7 @@ public class AIQueryController : ControllerBase
 {
     private readonly ISearchService _searchService;
     private readonly IQueryStatsService _statsService;
-    private readonly IModelManager _modelManager;
+    private readonly IEmbeddingService _embeddingService;
     private readonly IVectorStore _vectorStore;
     private readonly IBM25Store _bm25Store;
     private readonly IRerankService _rerankService;
@@ -74,7 +80,7 @@ public class AIQueryController : ControllerBase
     public AIQueryController(
         ISearchService searchService,
         IQueryStatsService statsService,
-        IModelManager modelManager,
+        IEmbeddingService embeddingService,
         IVectorStore vectorStore,
         IBM25Store bm25Store,
         IRerankService rerankService,
@@ -82,7 +88,7 @@ public class AIQueryController : ControllerBase
     {
         _searchService = searchService;
         _statsService = statsService;
-        _modelManager = modelManager;
+        _embeddingService = embeddingService;
         _vectorStore = vectorStore;
         _bm25Store = bm25Store;
         _rerankService = rerankService;
@@ -183,11 +189,6 @@ public class AIQueryController : ControllerBase
     {
         try
         {
-            // 获取嵌入模型信息
-            var embeddingModel = _modelManager.GetCurrentModel();
-
-            // 获取重排模型信息
-            var rerankModel = _modelManager.GetCurrentRerankModel();
             var rerankEnabled = _rerankService.IsLoaded;
 
             // 获取 BM25 索引统计
@@ -198,9 +199,11 @@ public class AIQueryController : ControllerBase
 
             var response = new SearchStatusResponse
             {
-                EmbeddingModel = embeddingModel?.DisplayName ?? embeddingModel?.Name,
-                EmbeddingDimension = embeddingModel?.Dimension ?? 0,
-                RerankModel = rerankModel?.DisplayName ?? rerankModel?.Name,
+                EmbeddingModel = _embeddingService.ModelName,
+                EmbeddingDimension = _embeddingService.Dimension,
+                EmbeddingProvider = GetProviderName(_embeddingService),
+                RerankModel = _rerankService.ModelName,
+                RerankProvider = GetProviderName(_rerankService),
                 RerankEnabled = rerankEnabled,
                 Bm25IndexedDocuments = bm25Stats.TotalDocuments,
                 Bm25HasIndex = bm25Stats.TotalDocuments > 0,
@@ -208,6 +211,10 @@ public class AIQueryController : ControllerBase
                 VectorHasIndex = vectorStats.Sum(v => v.VectorCount) > 0,
                 TotalFiles = 0  // 需要单独获取
             };
+
+            response.IndexRequiresRebuild = vectorStats.Count > 0 && !vectorStats.Any(stat =>
+                string.Equals(stat.ModelName, response.EmbeddingModel, StringComparison.OrdinalIgnoreCase) &&
+                (response.EmbeddingDimension <= 0 || stat.Dimension == response.EmbeddingDimension));
 
             response.TotalFiles = await _vectorStore.GetFileCountAsync();
 
@@ -219,4 +226,7 @@ public class AIQueryController : ControllerBase
             return StatusCode(500, new { error = "获取搜索状态失败" });
         }
     }
+
+    private static string GetProviderName(object service)
+        => service.GetType().Name.StartsWith("OpenAI", StringComparison.Ordinal) ? "openai" : "onnx";
 }

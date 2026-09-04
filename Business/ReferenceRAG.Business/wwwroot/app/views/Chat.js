@@ -195,7 +195,7 @@ const component = /*@__PURE__*/ _defineComponent({
             }
         };
         onMounted(initSession);
-        onActivated(() => { });
+        onActivated(scrollToBottom);
         const __returned__ = { cancel, message, authStore, sessionId, messages, input, streaming, scrollbarRef, toolDescriptions, initialized, rawSet, editVisible, editText, editIndex, renderMd, toggleRaw, copyText, startEdit, confirmEdit, getHeaders, scrollToBottom, createSession, deleteSession, newSession, handleKeyDown, retry, send, initSession, get ChatbubblesOutline() { return ChatbubblesOutline; }, get AddOutline() { return AddOutline; }, get SendOutline() { return SendOutline; }, get RefreshOutline() { return RefreshOutline; }, get CreateOutline() { return CreateOutline; }, get CopyOutline() { return CopyOutline; }, get DocumentTextOutline() { return DocumentTextOutline; }, get LogoMarkdown() { return LogoMarkdown; } };
         return __returned__;
     }

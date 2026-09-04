@@ -69,6 +69,8 @@ internal static class Program
         // Structured Chromium bridge is the only accepted message path.
         events.WebMessagePostData.Add("ipc-msg",(source,payload)=>{if(ipc!=null && payload!=null)_=ipc.ReceiveAsync(payload);});
         var windowBuilder=InfiniFrameWindowBuilder.Create(events:events).SetTitle("ReferenceRAG").SetSize(1360,860).Center().SetStartUrl("app://localhost/index.html");
+        windowBuilder.Configuration.MinWidth=900;
+        windowBuilder.Configuration.MinHeight=600;
         windowBuilder.SetTrustAllOrigins(false).SetTrustedOrigins("app://localhost");
         windowBuilder.Configuration.WebSecurityEnabled=true;
         windowBuilder.Configuration.FileSystemAccessEnabled=false;
@@ -82,6 +84,7 @@ internal static class Program
         var window=windowBuilder.Build();handle=window.WindowHandle;
         platform.Window=window;
         SetWindowText(handle,"ReferenceRAG");
+        InitialWindowBounds.Apply(handle);
         LogStartup("InfiniFrame window created");
         ipc=new IpcDispatcher(app.Services.GetRequiredService<InProcessServer>(),window.SendWebMessage,app.Services.GetRequiredService<ILogger<IpcDispatcher>>());
         var publisher=app.Services.GetRequiredService<IndexEventPublisher>();publisher.Published+=ipc.Publish;

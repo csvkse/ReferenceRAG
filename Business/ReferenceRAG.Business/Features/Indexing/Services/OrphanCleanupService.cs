@@ -26,21 +26,28 @@ public class OrphanCleanupService : BackgroundService
     {
         _logger.LogInformation("[OrphanCleanupService] 启动，间隔: {Interval}", _interval);
 
-        // 启动后延迟 5 分钟执行首次清理
-        await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
-
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            try
-            {
-                await CleanupAsync();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "[OrphanCleanupService] 清理异常");
-            }
+            // 启动后延迟 5 分钟执行首次清理
+            await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
 
-            await Task.Delay(_interval, stoppingToken);
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await CleanupAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[OrphanCleanupService] 清理异常");
+                }
+
+                await Task.Delay(_interval, stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogDebug("[OrphanCleanupService] 已停止");
         }
     }
 
