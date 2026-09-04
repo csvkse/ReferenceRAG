@@ -29,35 +29,33 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: "dashboard-vue/package-lock.json"
 
-      - name: Build Vue Frontend
-        working-directory: dashboard-vue
+      - name: Validate static frontend
+        working-directory: Business/ReferenceRAG.Business/wwwroot
         run: |
-          npm ci
-          npm run build
+          node check.mjs
+          node --test tests/*.test.mjs
 
       - name: Restore dependencies
-        run: dotnet restore ReferenceRAG.sln
+        run: dotnet restore ReferenceRAG.slnx
 
       - name: Publish Desktop App
         run: >
-          dotnet publish src/ReferenceRAG.Desktop/ReferenceRAG.Desktop.csproj
+          dotnet publish Host/ReferenceRAG.DesktopHost/ReferenceRAG.DesktopHost.csproj
           -c Release
           -r win-x64
           --self-contained true
           -p:Platform=x64
-          -o publish_output
+          -o support/artifacts/publish/desktop
 
       - name: Archive production artifacts
-        run: Compress-Archive -Path publish_output\* -DestinationPath ReferenceRAG-win-x64.zip
+        run: Compress-Archive -Path support/artifacts/publish/desktop\* -DestinationPath support/artifacts/publish/ReferenceRAG-win-x64.zip
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ReferenceRAG-win-x64
-          path: ReferenceRAG-win-x64.zip
+          path: support/artifacts/publish/ReferenceRAG-win-x64.zip
 
   release:
     needs: build
@@ -70,13 +68,13 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: support/artifacts/downloads
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
-          files: artifacts/*/*
+          files: support/artifacts/downloads/*/*
           generate_release_notes: true
           body: |
             🎉 **ReferenceRAG Windows 桌面版更新发布**
@@ -88,7 +86,7 @@ jobs:
 
             * **🪟 Windows x64**:
                 * 下载 `ReferenceRAG-win-x64.zip`。
-                * 解压后双击运行 `ReferenceRAG.Desktop.exe`。
+                * 解压后双击运行 `ReferenceRAG.DesktopHost.exe`。
                 * 首次运行需安装 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2)（Edge 浏览器已含此组件）。
 
             ---

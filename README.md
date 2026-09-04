@@ -22,7 +22,7 @@
 
 内置聊天式查询界面，直接向知识库提问：
 
-![AI 对话](images/preview/页面-AI对话.png)
+![AI 对话](support/docs/images/preview/页面-AI对话.png)
 
 - 自然语言输入，无需掌握搜索语法
 - 自动调用检索工具，从知识库获取答案
@@ -58,7 +58,7 @@
 | 方式 | 适用场景 | 说明 |
 |------|----------|------|
 | **AI 对话** | 聊天式查询 | Web/桌面端内置，直接提问 |
-| **桌面端** | 日常使用 | 开箱即用，WPF + WebView2 |
+| **桌面端** | 日常使用 | InfiniFrame + WebView2，进程内 IPC |
 | **Web 仪表盘** | 浏览器访问 | Vue 3 + Naive UI |
 | **MCP 工具** | CherryStudio、Claude Code | MCP 协议调用 |
 | **Skill** | Claude Code | 内置检索技能 |
@@ -70,54 +70,61 @@
 
 ```
 ReferenceRAG/
-├── src/
-│   ├── ReferenceRAG.Core/        # 核心检索、索引、重排、模型管理
-│   ├── ReferenceRAG.Storage/     # SQLite 向量存储、BM25、图谱存储
-│   ├── ReferenceRAG.Service/     # Web API、MCP、SignalR、后台任务
-│   └── ReferenceRAG.Desktop/     # WPF 桌面端壳
-├── dashboard-vue/                # Vue 3 前端仪表盘
+├── Infrastructure/              # 数据、模型、文件监控及基础能力
+├── Business/ReferenceRAG.Business/ # 检索、索引、聊天业务及共享 wwwroot
+├── Host/
+│   ├── ReferenceRAG.ApiHost/     # 双端共享 API、MCP、认证及传输适配
+│   ├── ReferenceRAG.WebHost/     # HTTP / SignalR / 静态页面
+│   └── ReferenceRAG.DesktopHost/ # InfiniFrame / IPC / 托盘
 ├── tests/                        # 单元测试、集成测试、性能测试
-├── tools/                        # 可复用的诊断与维护工具
-├── docs/                         # 架构、运维与故障排查文档
-├── config/                       # 容器运行时配置
-├── data/                         # 本地索引与运行时数据
-├── models/                       # 模型文件目录
-└── skill/ReferenceRAG/           # Claude Code Skill
+├── support/                      # 配套资料与本机运行文件
+│   ├── tools/                    # 诊断工具、服务管理与迁移脚本
+│   ├── config/examples/          # 可提交的配置模板
+│   ├── config/local/             # 本机配置（不提交）
+│   ├── deploy/docker/            # 容器构建与 Compose
+│   ├── docs/                     # 架构、运维、迁移文档及图片
+│   ├── skill/                    # Agent 接入技能
+│   ├── artifacts/                # 发布包、日志、测试与旧文件归档（不提交）
+│   ├── data/                     # 本机数据（不提交）
+│   └── models/                   # 本机模型（不提交）
+└── ReferenceRAG.slnx             # 统一解决方案入口
 ```
 
 ---
 
 ## 快速开始
 
+目录和配置约定见 [support 说明](support/README.md)。本机配置位于 `support/config/local/`，发布输出位于 `support/artifacts/publish/`。
+
 ### 1. 桌面端（推荐）
 
 1. 下载 `ReferenceRAG-win-x64.zip`
-2. 解压运行 `ReferenceRAG.Desktop.exe`
-3. 自动打开 `http://localhost:7897`
+2. 解压运行 `ReferenceRAG.DesktopHost.exe`
+3. 自动打开桌面窗口，通过 IPC 访问进程内业务
 4. 进入 **Chat** 页面，直接向知识库提问
 
 **特性：**
 - 启动后自动拉起服务并打开界面
 - 关闭窗口最小化到托盘
 - 支持单实例、开机自启动
-- 端口占用自动回退
+- 默认无需监听端口；需要外部 API/MCP 时设置 `Desktop:EnableLocalApi=true`
 
 **系统要求：** WebView2 Runtime
 
 ### 2. 本地开发
 
-**前提：** .NET 10 SDK、Node.js、npm
+**前提：** .NET 10 SDK；桌面端需要 Windows 和 WebView2。Node.js 仅用于前端检查，无需 npm 安装或打包。
 
 ```bash
-dotnet run --project src/ReferenceRAG.Service
+dotnet run --project Host/ReferenceRAG.WebHost
 # 或
-dotnet run --project src/ReferenceRAG.Desktop
+dotnet run --project Host/ReferenceRAG.DesktopHost
 ```
 
 ### 3. Windows 服务管理
 
 ```bat
-cd src/ReferenceRAG.Service/scripts
+cd support/tools/scripts
 menu.bat
 ```
 
@@ -127,7 +134,7 @@ menu.bat
 
 ## Web 仪表盘
 
-Vue 3 + Vite + Naive UI 构建的前端界面：
+Vue 3 + Naive UI 的浏览器原生 ES Modules 界面，共享源码位于 `Business/ReferenceRAG.Business/wwwroot`。直接维护 JS 模块与运行时模板，Web 发布复制静态文件，桌面发布嵌入相同资源；不再使用 Vite/SFC 编译。
 
 | 页面 | 功能 |
 |------|------|
@@ -185,8 +192,12 @@ Vue 3 + Vite + Naive UI 构建的前端界面：
 | `ReferenceRAG:sources` | 知识源配置列表 |
 
 配置文件：
-- `src/ReferenceRAG.Service/appsettings.json`
+- `support/config/local/appsettings.json`
 - 桌面端发布目录下的 `appsettings.json`
+
+开发时现有 `support/config/local/appsettings*.json` 会复制到宿主输出目录。设置 `REFERENCERAG_CONTENT_ROOT` 可指定独立配置根目录；相对数据路径以该目录为基准。不要让新旧程序同时写入同一数据目录。新宿主之间通过目录锁限制单写入者。
+
+发布与验证记录见 [迁移交付说明](support/docs/migration/infinitool-migration-status.md)。两端均使用普通 .NET 发布，关闭 AOT 和裁剪。
 
 ---
 
@@ -205,15 +216,15 @@ Vue 3 + Vite + Naive UI 构建的前端界面：
 - 模型文件目录
 - 索引日志和运行日志
 
-迁移环境时需携带 `data/` 和 `models/` 目录。
+迁移环境时需携带实际配置指向的数据和模型目录；仓库内统一存放于 `support/data/`、`support/models/`，外部绝对路径保持原配置。
 
 ---
 
 ## API 与使用文档
 
 - **Swagger：** `http://localhost:7897/swagger`
-- **Skill 文档：** [skill/ReferenceRAG/SKILL.md](skill/ReferenceRAG/SKILL.md)
-- **使用预览：** [PREVIEW.md](PREVIEW.md)
+- **Skill 文档：** [skill/ReferenceRAG/SKILL.md](support/skill/ReferenceRAG/SKILL.md)
+- **使用预览：** [PREVIEW.md](support/docs/PREVIEW.md)
 
 ---
 

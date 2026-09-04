@@ -6,6 +6,16 @@ obj/
 *.pdb
 dist/
 publish/
+/artifacts/
+/support/artifacts/
+/support/config/local/
+/support/data/
+/support/models/
+/support/docs/private/
+/support/docs/drafts/
+/support/docs/Archived/
+/support/docs/superpowers/
+.codegraph/
 
 # Excluded from public repo
 docs/private/
@@ -41,6 +51,9 @@ CODEBUDDY.md
 # Model files (large binary)
 models/
 !src/**/Models/
+!Infrastructure/**/Models/
+!Business/**/Models/
+!Host/**/Models/
 
 # Frontend build outputs
 dist/
@@ -81,3 +94,9 @@ resource/test-suites/
 appsettings.Production.json
 appsettings.Development.json
 appsettings.json
+.migration-fixture/
+.migration-desktop-fixture/
+.migration-*.log
+.web-migration-*.log
+.desktop-migration-*.log
+.host-migration-*.log

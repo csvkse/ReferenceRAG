@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><RootNamespace>ReferenceRAG.Business</RootNamespace></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.csproj" />
+    <PackageReference Include="Microsoft.Extensions.AI" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
+    <PackageReference Include="Rougamo.Fody" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Microsoft.Extensions.Logging" />
+    <Using Include="Microsoft.Extensions.Configuration" />
+    <Using Include="Microsoft.Extensions.DependencyInjection" />
+    <EmbeddedResource Include="wwwroot/**/*" Exclude="wwwroot/tests/**;wwwroot/package.json;wwwroot/check.mjs" />
+  </ItemGroup>
+</Project>

@@ -3,6 +3,9 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.5" />
+    <PackageVersion Include="InfiniLore.InfiniFrame" Version="0.13.1" />
+    <PackageVersion Include="InfiniLore.InfiniFrame.Shared" Version="0.13.1" />
     <!-- 共享包版本 -->
     <PackageVersion Include="System.Drawing.Common" Version="10.0.8" />
     <PackageVersion Include="jieba.NET" Version="0.42.2" />

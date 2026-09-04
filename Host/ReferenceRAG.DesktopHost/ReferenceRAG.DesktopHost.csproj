@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>WinExe</OutputType><UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PublishAot>false</PublishAot><PublishTrimmed>false</PublishTrimmed>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationIcon>Assets/tray-icon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="System" />
+    <ProjectReference Include="../ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj" />
+    <PackageReference Include="InfiniLore.InfiniFrame" />
+    <PackageReference Include="InfiniLore.InfiniFrame.Shared" />
+    <Content Include="../../support/config/local/appsettings*.json" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets/tray-icon.ico" Link="tray-icon.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -13,8 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\ReferenceRAG.Core\ReferenceRAG.Core.csproj" />
-    <ProjectReference Include="..\..\src\ReferenceRAG.Storage\ReferenceRAG.Storage.csproj" />
+    <ProjectReference Include="../../Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj" />
   </ItemGroup>
 
 </Project>

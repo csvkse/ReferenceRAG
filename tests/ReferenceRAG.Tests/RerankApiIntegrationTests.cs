@@ -7,7 +7,7 @@ namespace ReferenceRAG.Tests;
 
 /// <summary>
 /// 重排 API 集成测试
-/// 需要启动后端服务: dotnet run --project src/ReferenceRAG.Service
+/// 需要启动后端服务: dotnet run --project Host/ReferenceRAG.WebHost
 /// </summary>
 public class RerankApiIntegrationTests : IAsyncLifetime
 {
@@ -40,7 +40,7 @@ public class RerankApiIntegrationTests : IAsyncLifetime
         if (!_serviceAvailable)
         {
             Console.WriteLine("⚠ 后端服务未启动，API 集成测试将被跳过");
-            Console.WriteLine("  启动命令: dotnet run --project src/ReferenceRAG.Service");
+            Console.WriteLine("  启动命令: dotnet run --project Host/ReferenceRAG.WebHost");
         }
     }
 

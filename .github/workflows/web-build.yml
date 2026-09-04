@@ -1,0 +1,38 @@
+name: Web Build
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'Host/**'
+      - 'Business/**'
+      - 'Infrastructure/**'
+      - 'support/config/examples/**'
+      - 'support/deploy/**'
+      - 'Directory.*.props'
+      - '.github/workflows/web-build.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check shared frontend
+        working-directory: Business/ReferenceRAG.Business/wwwroot
+        run: |
+          node check.mjs
+          node --test tests/*.test.mjs
+      - name: Verify transport
+        run: dotnet test tests/ReferenceRAG.Host.Tests -c Release
+      - name: Publish Web
+        run: dotnet publish Host/ReferenceRAG.WebHost -c Release -r win-x64 --self-contained true -o support/artifacts/publish/web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReferenceRAG-Web-win-x64
+          path: support/artifacts/publish/web/

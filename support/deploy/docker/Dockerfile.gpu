@@ -1,0 +1,60 @@
+# ReferenceRAG: shared static ES modules, no frontend build stage.
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY Directory.Build.props Directory.Packages.props ./
+COPY Infrastructure/ ./Infrastructure/
+COPY Business/ ./Business/
+COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
+COPY Host/ReferenceRAG.WebHost/ ./Host/ReferenceRAG.WebHost/
+RUN dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -c Release -o /app/publish /p:UseAppHost=false /p:DebugType=none /p:DebugSymbols=false
+
+# ============================================================
+# Stage 3: Runtime (GPU / CUDA)
+# ============================================================
+# Use NVIDIA CUDA base image for GPU support
+FROM nvidia/cuda:12.6.0-runtime-ubuntu24.04 AS runtime
+WORKDIR /app
+
+# Install .NET runtime and dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    unzip \
+    libgomp1 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install .NET ASP.NET Core runtime
+RUN wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh \
+    && chmod +x dotnet-install.sh \
+    && ./dotnet-install.sh --channel 10.0 --runtime aspnetcore --install-dir /usr/share/dotnet \
+    && rm dotnet-install.sh \
+    && ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
+
+# Create directories and user
+RUN mkdir -p /app/data /app/models /app/logs \
+    && groupadd -r appgroup \
+    && useradd -r -g appgroup appuser \
+    && chown -R appuser:appgroup /app
+
+# Copy published application
+COPY --from=build /app/publish .
+COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
+
+
+# Environment variables
+ENV ASPNETCORE_URLS=http://+:5000
+ENV ASPNETCORE_ENVIRONMENT=Production
+ENV DataPath=/app/data
+ENV LogsPath=/app/logs
+ENV DOTNET_RUNNING_IN_CONTAINER=true
+ENV CUDA_VISIBLE_DEVICES=0
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
+
+USER appuser
+
+EXPOSE 5000
+
+ENTRYPOINT ["dotnet", "ReferenceRAG.WebHost.dll"]

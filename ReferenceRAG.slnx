@@ -1,12 +1,18 @@
 <Solution>
-  <Folder Name="/src/">
-    <Project Path="src/ReferenceRAG.Core/ReferenceRAG.Core.csproj" />
-    <Project Path="src/ReferenceRAG.Desktop/ReferenceRAG.Desktop.csproj" />
-    <Project Path="src/ReferenceRAG.Service/ReferenceRAG.Service.csproj" />
-    <Project Path="src/ReferenceRAG.Storage/ReferenceRAG.Storage.csproj" />
+  <Folder Name="/Host/">
+    <Project Path="Host/ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj" />
+    <Project Path="Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj" />
+    <Project Path="Host/ReferenceRAG.DesktopHost/ReferenceRAG.DesktopHost.csproj" />
+  </Folder>
+  <Folder Name="/Business/">
+    <Project Path="Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj" />
+  </Folder>
+  <Folder Name="/Infrastructure/">
+    <Project Path="Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/PerfTestRunner/PerfTestRunner.csproj" />
     <Project Path="tests/ReferenceRAG.Tests/ReferenceRAG.Tests.csproj" />
+    <Project Path="tests/ReferenceRAG.Host.Tests/ReferenceRAG.Host.Tests.csproj" />
   </Folder>
 </Solution>
