@@ -98,7 +98,7 @@ ReferenceRAG/
 
 ### 1. 桌面端（推荐）
 
-1. 下载 `ReferenceRAG-win-x64.zip`
+1. 从 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases/latest) 下载 `ReferenceRAG-win-x64.zip`
 2. 解压运行 `ReferenceRAG.DesktopHost.exe`
 3. 自动打开桌面窗口，通过 IPC 访问进程内业务
 4. 进入 **Chat** 页面，直接向知识库提问
@@ -228,46 +228,50 @@ Vue 3 + Naive UI 的浏览器原生 ES Modules 界面，共享源码位于 `Busi
 
 ---
 
-## 更新历史
+## 版本与改动历史
 
-### AI 对话功能（MafChat）
+当前稳定版本为 [v1.0.7](https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.7)。版本级改动和升级提示见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 历史功能摘要
+
+#### AI 对话功能（MafChat）
 - **feat:** AI 对话功能（MafChat）+ 前端路由/导航集成
 - **fix:** MafChat 会话保持 + 工具列表 API + UI 优化
 - **feat:** Chat 页面交互优化 + 移除源递归扫描选项
 
-### 架构重构
+#### 架构重构
 - **refactor:** 按业务域重组文件夹结构（保持命名空间不变）
 - **refactor:** 完成领域内聚重构 - 接口隔离 + internal 修饰符
 - **refactor:** 用领域 DI 扩展方法替换 Program.cs 手工注册（~200行→~25行业务注册）
 - **refactor:** 统一包版本管理 - Directory.Packages.props
 
-### 搜索优化
+#### 搜索优化
 - **feat:** 替换 BM25 中文分词为 jieba.NET 词语级分词
 - **feat:** 搜索召回优化 + Agent API 扩展 + 图谱修复
 - **feat:** 添加向量搜索链路追踪（Rougamo AOP）
 - **perf:** 召回率全链路优化（5项）
 
-### 知识图谱
+#### 知识图谱
 - **feat:** 知识图谱接入搜索管道（Graph-enhanced RAG）
 - **feat:** 知识图谱 tag/heading/external 节点支持
 - **feat:** 知识图谱页面 — 独立重建按钮 + 可视化
 - **perf:** 图谱写入单次锁+单事务（N×锁 → 1×锁）
 
-### OpenAI API 模式
+#### OpenAI API 模式
 - **feat:** 支持 OpenAI 兼容 API 作为嵌入/重排模型后端
 - **fix:** 嵌入/重排模型 API 模式显示修复
 
-### 索引优化
+#### 索引优化
 - **feat:** 前端新增「补全缺失向量」按钮（全局+按源）
 - **fix:** 修复索引并发竞态及孤儿向量问题
 - **refactor:** 引入 FileIndexPipeline 统一单文件索引/删除逻辑
 - **fix:** 修复6个索引数据一致性问题
 
-### 桌面端
+#### 桌面端
 - **feat:** 新增桌面端 WPF 应用
 - **feat:** 桌面端功能增强及模型转换修复
 - **fix:** 桌面端前端缓存修复 + WebView2 优化
 
-### API 精简
+#### API 精简
 - **refactor:** 精简 API 端点结构（27→16 累引相关端点）
 - **refactor:** 累引 controller 合并，删除冗余端点

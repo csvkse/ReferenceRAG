@@ -69,6 +69,30 @@ public class ConfigManagerTests : IDisposable
     }
 
     [Fact]
+    public void Save_AfterInvalidRemoteModelSettings_ReplacesUrlAndKey()
+    {
+        var cm = CreateConfigManager();
+        var config = new ObsidianRagConfig();
+        config.Embedding.Mode = "openai";
+        config.Embedding.ApiBaseUrl = "not-a-valid-url";
+        config.Embedding.ApiKey = "wrong-key";
+        cm.Save(config);
+
+        config.Embedding.ApiBaseUrl = "https://example.test/v1";
+        config.Embedding.ApiKey = "corrected-key";
+        cm.Save(config);
+
+        using var document = System.Text.Json.JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(_testDir, "appsettings.json")));
+        var embedding = document.RootElement
+            .GetProperty("ReferenceRAG")
+            .GetProperty("embedding");
+
+        Assert.Equal("https://example.test/v1", embedding.GetProperty("apiBaseUrl").GetString());
+        Assert.Equal("corrected-key", embedding.GetProperty("apiKey").GetString());
+    }
+
+    [Fact]
     public void AddSource_AddsSourceToConfig()
     {
         var cm = CreateConfigManager();

@@ -1,43 +1,38 @@
 # 开发调试命令
 
-## 前端开发
+所有命令均在仓库根目录执行。
 
-```bash
-# 进入前端目录
-cd dashboard-vue
+## 前端检查
 
-# 安装依赖（首次运行）
-npm install
+前端使用浏览器原生 ES Modules，不需要安装依赖、启动 Vite 或生成 `dist`。
 
-# 启动开发服务器
-npm run dev
-```
-
-## 后端开发
-
-```bash
-# 启动后端服务
-dotnet run --project src/ReferenceRAG.Service/ReferenceRAG.Service.csproj
-
-# 或者指定配置
-dotnet run --project src/ReferenceRAG.Service/ReferenceRAG.Service.csproj --configuration Debug
-```
-
-## 同时启动前后端
-
-### 方式一：两个终端窗口
-终端1：
-```bash
-cd dashboard-vue && npm run dev
-```
-
-终端2：
-```bash
-dotnet run --project src/ReferenceRAG.Service/ReferenceRAG.Service.csproj
-```
-
-### 方式二：使用并行命令（Windows PowerShell）
 ```powershell
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd dashboard-vue; npm run dev"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "dotnet run --project src/ReferenceRAG.Service/ReferenceRAG.Service.csproj"
+Set-Location Business/ReferenceRAG.Business/wwwroot
+node check.mjs
+node --test
 ```
+
+## Web 端
+
+```powershell
+dotnet run --project Host/ReferenceRAG.WebHost
+```
+
+## 桌面端
+
+桌面端仅支持 Windows，并要求系统已安装 WebView2 Runtime。
+
+```powershell
+dotnet run --project Host/ReferenceRAG.DesktopHost
+```
+
+## 调试配置
+
+本机配置放在 `support/config/local/appsettings.json`，也可以通过环境变量指定独立配置根目录：
+
+```powershell
+$env:REFERENCERAG_CONTENT_ROOT = 'E:\ReferenceRAG-Local'
+dotnet run --project Host/ReferenceRAG.WebHost --configuration Debug
+```
+
+WebHost 与 DesktopHost 会对数据目录加单写入者锁，不要让两个宿主同时使用同一数据目录。

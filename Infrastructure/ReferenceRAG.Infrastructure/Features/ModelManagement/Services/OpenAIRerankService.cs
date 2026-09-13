@@ -2,7 +2,9 @@ using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Rougamo;
+using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Tracing;
@@ -15,6 +17,7 @@ namespace ReferenceRAG.Core.Services.Rerank;
 /// </summary>
 public sealed class OpenAIRerankService : IRerankService, IDisposable, IRougamo<SearchTraceAttribute>
 {
+    private static readonly ILogger _logger = StaticLogger.GetLogger("OpenAIRerankService");
     private readonly HttpClient _http;
     private readonly string _baseUrl;
 
@@ -46,23 +49,42 @@ public sealed class OpenAIRerankService : IRerankService, IDisposable, IRougamo<
         });
 
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
-        var resp = await _http.PostAsync($"{_baseUrl}/rerank", content, ct);
-        resp.EnsureSuccessStatusCode();
+        var url = $"{_baseUrl}/rerank";
+        var resp = await _http.PostAsync(url, content, ct);
+        var payload = await resp.Content.ReadAsByteArrayAsync(ct);
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            _logger.LogError("[OpenAIRerank] HTTP {Status} {Reason} | POST {Url} | 响应: {Body}",
+                (int)resp.StatusCode, resp.ReasonPhrase, url, Truncate(Decode(payload), 2000));
+            throw new HttpRequestException(
+                $"重排服务返回 {(int)resp.StatusCode} ({resp.ReasonPhrase})；POST {url}；响应: {Truncate(Decode(payload), 500)}");
+        }
         sw.Stop();
 
-        using var stream = await resp.Content.ReadAsStreamAsync(ct);
-        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
-
         var results = new List<RerankDocument>();
-        foreach (var item in doc.RootElement.GetProperty("results").EnumerateArray())
+        try
         {
-            var idx = item.GetProperty("index").GetInt32();
-            results.Add(new RerankDocument
+            using var doc = JsonDocument.Parse(payload);
+            foreach (var item in doc.RootElement.GetProperty("results").EnumerateArray())
             {
-                Index = idx,
-                Document = docs[idx],
-                RelevanceScore = item.GetProperty("relevance_score").GetDouble()
-            });
+                var idx = item.GetProperty("index").GetInt32();
+                results.Add(new RerankDocument
+                {
+                    Index = idx,
+                    Document = docs[idx],
+                    RelevanceScore = item.GetProperty("relevance_score").GetDouble()
+                });
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or IndexOutOfRangeException)
+        {
+            _logger.LogError(ex, "[OpenAIRerank] 响应解析失败 | POST {Url} | 响应: {Body}",
+                url, Truncate(Decode(payload), 2000));
+            throw new InvalidOperationException(
+                $"无法解析重排响应（{ex.Message}）；POST {url}；" +
+                $"请确认返回 OpenAI/Jina 格式的 {{\"results\":[{{\"index\":0,\"relevance_score\":0.5}}]}}；" +
+                $"响应片段: {Truncate(Decode(payload), 300)}", ex);
         }
 
         return new RerankResult
@@ -88,4 +110,11 @@ public sealed class OpenAIRerankService : IRerankService, IDisposable, IRougamo<
     public void UnloadModel() { }
 
     public void Dispose() => _http.Dispose();
+
+    private static string Decode(byte[] payload) =>
+        payload.Length == 0 ? "(空)" : Encoding.UTF8.GetString(payload);
+
+    private static string Truncate(string? value, int max) =>
+        string.IsNullOrEmpty(value) ? "(空)"
+        : value.Length <= max ? value : value[..max] + $"…(共 {value.Length} 字符)";
 }

@@ -23,6 +23,7 @@
 using System.Diagnostics;
 using Rougamo;
 using Rougamo.Context;
+using Rougamo.Metadatas;
 using ReferenceRAG.Core.Models;
 
 namespace ReferenceRAG.Core.Tracing;
@@ -108,14 +109,13 @@ public sealed class SearchPhaseReport
 
 // ------------------------------------------------------------------
 // Rougamo AOP 属性 — 编译期 IL 织入，覆盖 private 方法 + 无接口类
+// 匹配范围由类级 [Pointcut] 声明（Rougamo 5.0 起从 Flags 属性改为特性）
 // ------------------------------------------------------------------
+[Pointcut(AccessFlags.All | AccessFlags.Method)]
 public sealed class SearchTraceAttribute : MoAttribute
 {
     public static readonly ActivitySource ActivitySource =
         new("ReferenceRAG.Search", "1.0.0");
-
-    // 覆盖全部访问级别（含 private），仅匹配方法成员（非属性、构造函数）
-    public override AccessFlags Flags => AccessFlags.All | AccessFlags.Method;
 
     public override void OnEntry(MethodContext ctx)
     {

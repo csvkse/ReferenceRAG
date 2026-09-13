@@ -5,6 +5,7 @@ using System.ServiceProcess;
 using System.Text.Json;
 
 using Serilog;
+using Serilog.Events;
 
 namespace WebApiWindowsService;
 
@@ -196,7 +197,6 @@ public static class ServiceManager
     {
         var workDir = builder.Configuration["Work:Directory"];
         workDir = string.IsNullOrWhiteSpace(workDir) ? AppContext.BaseDirectory : workDir;
-        Log.Information("工作区目录: {WorkDir}", workDir);
 
         var logPath = Path.Combine(workDir, "Logs");
         if (!Directory.Exists(logPath))
@@ -204,18 +204,29 @@ public static class ServiceManager
             Directory.CreateDirectory(logPath);
         }
 
+        // 日志级别可配置：优先 Serilog:MinimumLevel，其次 Logging:LogLevel:Default。
+        // 排障时改为 Debug 可看到请求地址、响应体等详细诊断（默认 Information 会过滤掉）。
+        var levelName = builder.Configuration["Serilog:MinimumLevel"]
+            ?? builder.Configuration["Logging:LogLevel:Default"]
+            ?? "Information";
+        if (!Enum.TryParse<LogEventLevel>(levelName, ignoreCase: true, out var minimumLevel))
+            minimumLevel = LogEventLevel.Information;
+
         Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Information()
+            .MinimumLevel.Is(minimumLevel)
             .WriteTo.File(
                 shared: true,
                 path: @$"{logPath}\app_.log",
                 rollingInterval: RollingInterval.Day,
                 retainedFileCountLimit: 7,
-                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss} [{Level:u3}] {Message:lj}{NewLine}"
+                // SourceContext=产生日志的模块名，排障时用于定位来源
+                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss} [{Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}"
             )
             .CreateLogger();
 
         builder.Host.UseSerilog();
+        Log.Information("工作区目录: {WorkDir}", workDir);
+        Log.Information("日志级别: {Level}，日志目录: {LogPath}", minimumLevel, logPath);
         Log.Information("-----------程序调用-----------");
     }
 

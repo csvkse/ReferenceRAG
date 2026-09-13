@@ -522,7 +522,7 @@ DeleteSourceAsync(sourceName)
 
 ## 自动增量索引
 
-**实现**：`src/ReferenceRAG.Service/Services/AutoIndexService.cs`  
+**实现**：`Business/ReferenceRAG.Business/Features/Indexing/Services/AutoIndexService.cs`
 实现 `IHostedService`，应用启动时自动运行。
 
 ### 事件驱动队列模型

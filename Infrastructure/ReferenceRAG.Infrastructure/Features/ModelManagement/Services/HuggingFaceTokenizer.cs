@@ -58,12 +58,12 @@ public class HuggingFaceTokenizer : ITextTokenizer
     {
         var result = _tokenizer.Encode(
             text,
-            add_special_tokens: true,
-            include_type_ids: true,
-            include_attention_mask: true
+            addSpecialTokens: true,
+            includeTypeIds: true,
+            includeAttentionMask: true
         );
 
-        var encoding = result.Encodings[0];
+        var encoding = result.First();
         var ids = encoding.Ids;
         var typeIds = encoding.TypeIds;
         var attnMask = encoding.AttentionMask;
@@ -85,12 +85,12 @@ public class HuggingFaceTokenizer : ITextTokenizer
     {
         var result = _tokenizer.Encode(
             text,
-            add_special_tokens: true,
-            include_type_ids: false,
-            include_attention_mask: false
+            addSpecialTokens: true,
+            includeTypeIds: false,
+            includeAttentionMask: false
         );
 
-        var ids = result.Encodings[0].Ids;
+        var ids = result.First().Ids;
         var len = Math.Min(ids.Count, maxLength);
         var output = new List<int>(len);
         for (int i = 0; i < len; i++)
@@ -104,11 +104,11 @@ public class HuggingFaceTokenizer : ITextTokenizer
     {
         var result = _tokenizer.Encode(
             text,
-            add_special_tokens: true,
-            include_type_ids: false,
-            include_attention_mask: false
+            addSpecialTokens: true,
+            includeTypeIds: false,
+            includeAttentionMask: false
         );
-        return result.Encodings[0].Ids.Count;
+        return result.First().Ids.Count;
     }
 
     /// <summary>

@@ -19,6 +19,7 @@ using ReferenceRAG.Service.Extensions;
 using ReferenceRAG.Service.Middleware;
 using ReferenceRAG.Service.Controllers;
 using ReferenceRAG.Service.Hubs;
+using WebApiWindowsService;
 using McpHelper.Extensions;
 
 namespace ReferenceRAG.DesktopHost;
@@ -37,6 +38,8 @@ internal static class Program
         if(!owner){MessageBox.Show("ReferenceRAG 已在运行，请从托盘打开。");return;}
         Directory.SetCurrentDirectory(Environment.GetEnvironmentVariable("REFERENCERAG_CONTENT_ROOT") ?? AppContext.BaseDirectory);
         var builder=WebApplication.CreateBuilder(new WebApplicationOptions {Args=args,ContentRootPath=Directory.GetCurrentDirectory()});
+        // 与 WebHost 共用日志配置：桌面端是 WinExe 无控制台，没有文件日志就无法排障。
+        ServiceManager.ConfigureLogging(builder);
         var enableApi=builder.Configuration.GetValue("Desktop:EnableLocalApi",false);
         var port=builder.Configuration["ReferenceRAG:Service:port"] ?? "7897";
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
@@ -68,16 +71,19 @@ internal static class Program
         IpcDispatcher? ipc=null;
         // Structured Chromium bridge is the only accepted message path.
         events.WebMessagePostData.Add("ipc-msg",(source,payload)=>{if(ipc!=null && payload!=null)_=ipc.ReceiveAsync(payload);});
-        var windowBuilder=InfiniFrameWindowBuilder.Create(events:events).SetTitle("ReferenceRAG").SetSize(1360,860).Center().SetStartUrl("app://localhost/index.html");
-        windowBuilder.Configuration.MinWidth=900;
-        windowBuilder.Configuration.MinHeight=600;
-        windowBuilder.SetTrustAllOrigins(false).SetTrustedOrigins("app://localhost");
-        windowBuilder.Configuration.WebSecurityEnabled=true;
-        windowBuilder.Configuration.FileSystemAccessEnabled=false;
-        windowBuilder.Configuration.GrantBrowserPermissions=false;
-        windowBuilder.Configuration.CustomSchemeNames??=[];windowBuilder.Configuration.CustomSchemeNames.Add("app");
-        windowBuilder.Configuration.TemporaryFilesPath=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ReferenceRAG","WebView");
-        windowBuilder.Configuration.DevToolsEnabled=builder.Environment.EnvironmentName=="Development";
+        // InfiniFrame 0.62+ 把原先 Configuration 上的可写属性拆成了按功能分组的 feature 接口。
+        var windowBuilder=InfiniFrameWindowBuilder.Create(events:events)
+            .SetTitle("ReferenceRAG").SetSize(1360,860)
+            .CenteredOnMainMonitor(true)
+            .SetStartPageUrl("app://localhost/index.html");
+        windowBuilder.Features.Size.SetMinWidth(900);
+        windowBuilder.Features.Size.SetMinHeight(600);
+        windowBuilder.SetTrustAllOrigins(false);windowBuilder.AddTrustedOrigin("app://localhost");
+        windowBuilder.EnableWebSecurity(true);
+        windowBuilder.EnableFileSystemAccess(false);
+        windowBuilder.EnableBrowserPermissions(false);
+        windowBuilder.SetTemporaryFilesPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ReferenceRAG","WebView"));
+        windowBuilder.Debugging.EnableDevTools(builder.Environment.EnvironmentName=="Development");
         var exiting=false;IntPtr handle=IntPtr.Zero;
         windowBuilder.RegisterWindowClosingHandler((_,_)=>{if(exiting)return WindowClosingResult.Close;ShowWindow(handle,0);return WindowClosingResult.Cancel;});
         LogStartup("Creating InfiniFrame window");

@@ -190,7 +190,12 @@ public class EmbeddingConfig
     /// <summary>推理模式：onnx（本地）| openai（兼容 API）</summary>
     public string Mode { get; set; } = "onnx";
 
-    /// <summary>API 基础地址，例如 http://localhost:11434/v1</summary>
+    /// <summary>
+    /// API 基础地址，必须包含 /v1（代码只在其后追加端点路径）。
+    /// 例如 http://localhost:11434/v1。
+    /// 漏掉 /v1 会打到服务端的非 OpenAI 兼容端点（如 llama.cpp 的 /embeddings），
+    /// 其响应结构与 OpenAI 规范不同，会导致解析失败。
+    /// </summary>
     public string? ApiBaseUrl { get; set; }
 
     /// <summary>API Key（留空则不发送 Authorization 头）</summary>
@@ -399,7 +404,12 @@ public class RerankConfig
     /// <summary>推理模式：onnx（本地）| openai（兼容 API）</summary>
     public string Mode { get; set; } = "onnx";
 
-    /// <summary>API 基础地址，例如 http://localhost:11434/v1</summary>
+    /// <summary>
+    /// API 基础地址，必须包含 /v1（代码只在其后追加端点路径）。
+    /// 例如 http://localhost:11434/v1。
+    /// 漏掉 /v1 会打到服务端的非 OpenAI 兼容端点（如 llama.cpp 的 /embeddings），
+    /// 其响应结构与 OpenAI 规范不同，会导致解析失败。
+    /// </summary>
     public string? ApiBaseUrl { get; set; }
 
     /// <summary>API Key（留空则不发送 Authorization 头）</summary>
