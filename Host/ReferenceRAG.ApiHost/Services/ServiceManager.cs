@@ -204,9 +204,12 @@ public static class ServiceManager
             Directory.CreateDirectory(logPath);
         }
 
-        // 日志级别可配置：优先 Serilog:MinimumLevel，其次 Logging:LogLevel:Default。
-        // 排障时改为 Debug 可看到请求地址、响应体等详细诊断（默认 Information 会过滤掉）。
+        // 日志级别可配置，优先级：
+        //   Serilog:MinimumLevel（运维显式覆盖）→ ReferenceRAG:Service:logLevel（设置页）
+        //   → Logging:LogLevel:Default → Information
+        // 设置页的「日志级别」此前写的键无人读取，导致改了不生效。
         var levelName = builder.Configuration["Serilog:MinimumLevel"]
+            ?? builder.Configuration["ReferenceRAG:Service:logLevel"]
             ?? builder.Configuration["Logging:LogLevel:Default"]
             ?? "Information";
         if (!Enum.TryParse<LogEventLevel>(levelName, ignoreCase: true, out var minimumLevel))

@@ -32,6 +32,11 @@ public class SearchStatusResponse
     /// </summary>
     public bool RerankEnabled { get; set; }
 
+    /// <summary>
+    /// 重排模型是否已经加载到内存；与配置启用状态分开，避免懒加载模型被误报为未启用
+    /// </summary>
+    public bool RerankLoaded { get; set; }
+
     public string RerankProvider { get; set; } = string.Empty;
 
     public bool IndexRequiresRebuild { get; set; }
@@ -62,6 +67,12 @@ public class SearchStatusResponse
     public int TotalFiles { get; set; }
 }
 
+public sealed record RerankStatusSnapshot(bool Enabled, bool Loaded, string Model)
+{
+    public static RerankStatusSnapshot Create(bool configuredEnabled, IRerankService service) =>
+        new(configuredEnabled, service.IsLoaded, service.ModelName);
+}
+
 /// <summary>
 /// AI 专用查询接口
 /// </summary>
@@ -75,6 +86,7 @@ public class AIQueryController : ControllerBase
     private readonly IVectorStore _vectorStore;
     private readonly IBM25Store _bm25Store;
     private readonly IRerankService _rerankService;
+    private readonly ConfigManager _configManager;
     private readonly ILogger<AIQueryController> _logger;
 
     public AIQueryController(
@@ -84,6 +96,7 @@ public class AIQueryController : ControllerBase
         IVectorStore vectorStore,
         IBM25Store bm25Store,
         IRerankService rerankService,
+        ConfigManager configManager,
         ILogger<AIQueryController> logger)
     {
         _searchService = searchService;
@@ -92,6 +105,7 @@ public class AIQueryController : ControllerBase
         _vectorStore = vectorStore;
         _bm25Store = bm25Store;
         _rerankService = rerankService;
+        _configManager = configManager;
         _logger = logger;
     }
 
@@ -189,7 +203,8 @@ public class AIQueryController : ControllerBase
     {
         try
         {
-            var rerankEnabled = _rerankService.IsLoaded;
+            var config = _configManager.Load();
+            var rerankStatus = RerankStatusSnapshot.Create(config.Rerank.Enabled, _rerankService);
 
             // 获取 BM25 索引统计
             var bm25Stats = await _bm25Store.GetStatsAsync();
@@ -202,9 +217,10 @@ public class AIQueryController : ControllerBase
                 EmbeddingModel = _embeddingService.ModelName,
                 EmbeddingDimension = _embeddingService.Dimension,
                 EmbeddingProvider = GetProviderName(_embeddingService),
-                RerankModel = _rerankService.ModelName,
+                RerankModel = rerankStatus.Model,
                 RerankProvider = GetProviderName(_rerankService),
-                RerankEnabled = rerankEnabled,
+                RerankEnabled = rerankStatus.Enabled,
+                RerankLoaded = rerankStatus.Loaded,
                 Bm25IndexedDocuments = bm25Stats.TotalDocuments,
                 Bm25HasIndex = bm25Stats.TotalDocuments > 0,
                 VectorIndexedChunks = vectorStats.Sum(v => v.VectorCount),

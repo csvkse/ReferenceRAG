@@ -1,6 +1,8 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using Rougamo;
+using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services.Tokenizers;
 using ReferenceRAG.Core.Tracing;
@@ -14,6 +16,8 @@ namespace ReferenceRAG.Core.Services.Rerank;
 /// </summary>
 public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTraceAttribute>
 {
+    // 桌面端是 WinExe 无控制台，Console 输出不可见；关键状态必须走日志。
+    private static readonly ILogger _logger = StaticLogger.GetLogger("OnnxRerankService");
     private readonly RerankOptions _options;
     private readonly IGpuMemoryManager? _memoryManager;
     private InferenceSession? _session;
@@ -101,7 +105,7 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
             oldSession?.Dispose();
 
             // 加载 ONNX 模型
-            var sessionOptions = new SessionOptions();
+            using var sessionOptions = new SessionOptions();
             sessionOptions.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
 
             if (_options.UseCuda)
@@ -113,11 +117,12 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
 
                     sessionOptions.AppendExecutionProvider_CUDA(_options.CudaDeviceId);
                     sessionOptions.AppendExecutionProvider_CPU();
-                    Console.WriteLine($"[OnnxRerankService] 使用 CUDA GPU: {_options.CudaDeviceId} (确定性模式)");
+                    _logger.LogInformation("使用 CUDA GPU: {DeviceId} (确定性模式)", _options.CudaDeviceId);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[OnnxRerankService] CUDA 不可用，回退到 CPU: {ex.Message}");
+                    // 回退 CPU 会让重排显著变慢，且不中断服务，必须显式记录原因（如 CUDA 主版本不匹配）。
+                    _logger.LogWarning(ex, "CUDA 不可用，回退到 CPU。请检查 CUDA/cuDNN 版本与 cudaLibraryPath 配置");
                     sessionOptions.AppendExecutionProvider_CPU();
                 }
             }
@@ -134,7 +139,10 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
             Console.WriteLine($"[OnnxRerankService] 模型加载成功: {modelName}");
 
             // 加载分词器
+            var oldTokenizer = _tokenizer;
             _tokenizer = LoadTokenizer(modelPath);
+            if (!ReferenceEquals(oldTokenizer, _tokenizer) && oldTokenizer is IDisposable disposableTokenizer)
+                disposableTokenizer.Dispose();
             Console.WriteLine($"[OnnxRerankService] 分词器: {_tokenizer.Name}, 词汇表大小: {_tokenizer.VocabSize}");
 
             _simulationMode = false;
@@ -196,10 +204,13 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
             {
                 try
                 {
+                    if (!File.Exists(modelPath))
+                        return false;
+                    using (var validationSession = new InferenceSession(modelPath)) { }
                     Console.WriteLine($"[OnnxRerankService] 正在切换模型: {modelName}");
                     LoadModel(modelPath, modelName);
                     Console.WriteLine($"[OnnxRerankService] 模型切换完成: {modelName}");
-                    return true;
+                    return _session is not null && !_simulationMode;
                 }
                 catch (Exception ex)
                 {
@@ -504,6 +515,7 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
         }
         
         tokens.Add(_tokenizer.SepTokenId);
+        var querySepIndex = tokens.Count - 1;
         
         // 添加 document tokens（去掉首尾的 CLS 和 SEP）
         foreach (var t in docTokens.Skip(1).TakeWhile((_, i) => i < docTokens.Count - 1))
@@ -517,14 +529,13 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
         // 填充到 maxLength
         var attentionMask = new List<long>();
         var tokenTypeIds = new List<long>();
-        var sepIndex = tokens.Count - 1;
 
         var actualLength = tokens.Count;
         for (int i = 0; i < actualLength; i++)
         {
             attentionMask.Add(1);
             // Query 部分 token_type_id = 0，Document 部分 = 1
-            tokenTypeIds.Add(i <= sepIndex ? 0 : 1);
+            tokenTypeIds.Add(i <= querySepIndex ? 0 : 1);
         }
 
         // Padding

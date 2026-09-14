@@ -107,7 +107,7 @@ ReferenceRAG/
 - 启动后自动拉起服务并打开界面
 - 关闭窗口最小化到托盘
 - 支持单实例、开机自启动
-- 默认无需监听端口；需要外部 API/MCP 时设置 `Desktop:EnableLocalApi=true`
+- 默认无需监听端口；需要外部 API/MCP 时，在设置页开启「启用 HTTP 服务」
 
 **系统要求：** WebView2 Runtime
 
@@ -187,9 +187,16 @@ Vue 3 + Naive UI 的浏览器原生 ES Modules 界面，共享源码位于 `Busi
 |--------|------|
 | `ReferenceRAG:Service:port` | 服务端口，默认 7897 |
 | `ReferenceRAG:Service:apiKey` | API 密钥，留空关闭鉴权 |
+| `ReferenceRAG:Service:enableHttpService` | 是否监听 HTTP（仅桌面端；默认 false，用进程内 IPC） |
+| `ReferenceRAG:Service:allowNetworkAccess` | 是否允许局域网访问（默认仅 localhost） |
+| `ReferenceRAG:Service:enableCors` | 是否启用 CORS（默认 true） |
+| `ReferenceRAG:Service:enableSwagger` | 是否启用 Swagger（默认 true） |
+| `ReferenceRAG:Service:logLevel` | 日志级别（默认 Information，排障可设 Debug） |
 | `ReferenceRAG:dataPath` | 数据目录 |
 | `ReferenceRAG:modelsRootPath` | 模型文件目录 |
 | `ReferenceRAG:sources` | 知识源配置列表 |
+
+端口与监听地址在启动时读取，修改后需重启；其余项在设置页保存后生效。
 
 配置文件：
 - `support/config/local/appsettings.json`
@@ -198,6 +205,74 @@ Vue 3 + Naive UI 的浏览器原生 ES Modules 界面，共享源码位于 `Busi
 开发时现有 `support/config/local/appsettings*.json` 会复制到宿主输出目录。设置 `REFERENCERAG_CONTENT_ROOT` 可指定独立配置根目录；相对数据路径以该目录为基准。不要让新旧程序同时写入同一数据目录。新宿主之间通过目录锁限制单写入者。
 
 发布与验证记录见 [迁移交付说明](support/docs/migration/infinitool-migration-status.md)。两端均使用普通 .NET 发布，关闭 AOT 和裁剪。
+
+---
+
+## 环境要求与 GPU 加速
+
+### 支持的运行环境
+
+| 组件 | 版本 | 说明 |
+|------|------|------|
+| .NET SDK | 10.0.100 及以上 | 见 `global.json`，`rollForward: latestFeature` |
+| 目标框架 | `net10.0` / `net10.0-windows` | 两端均为常规发布，关闭 AOT 与裁剪 |
+| **ONNX Runtime (GPU)** | **1.24.4（已锁定）** | **要求 CUDA 12.x，不可升到 1.27+** |
+| CUDA | **12.x**（官方基准 12.8） | 仅本地 ONNX 推理需要 |
+| cuDNN | **9.x** | cuDNN 8.x 与 9.x 二进制不兼容 |
+| 操作系统 | Windows x64 | 桌面端另需 WebView2 Runtime |
+
+不满足 GPU 条件时自动回退 CPU 运行，功能不受影响，仅速度较慢。
+
+### ⚠️ ONNX Runtime 版本不可随意升级
+
+`Microsoft.ML.OnnxRuntime.Gpu` 已锁定 **1.24.4**，请勿升级到 1.27 及以上：
+
+| ORT 版本 | GPU 包编译所用 CUDA | 实际依赖的库 |
+|----------|--------------------|--------------|
+| 1.21.x – 1.26.x | CUDA 12.8 | `cublasLt64_12.dll` |
+| **1.27 及以上** | **CUDA 13.0** | `cublasLt64_13.dll` |
+
+自 1.27 起官方 GPU 包默认改用 CUDA 13 编译。在常见的 CUDA 12 环境上升级后，会出现：
+
+```
+Error loading "onnxruntime_providers_cuda.dll" which depends on
+"cublasLt64_13.dll" which is missing.
+```
+
+程序会**静默回退 CPU**（不报错、不中断），表现为推理变慢，容易误判为配置问题。升级前请先确认目标环境的 CUDA 版本，或同步安装 CUDA 13 运行时。
+
+### 如何确认 GPU 已生效
+
+查看日志（`Logs/app_年月日.log`）中 `[EmbeddingService]` / `[OnnxRerankService]` 的记录：
+
+```
+<时间> [INF] [EmbeddingService] 使用 CUDA GPU: 0 (动态batch已启用)
+<时间> [INF] [OnnxRerankService] 使用 CUDA GPU: 0 (确定性模式)
+```
+
+若出现 `CUDA 不可用，回退到 CPU`，说明 CUDA 未能加载，其后的异常堆栈会给出具体原因（库缺失、版本不匹配等）。**回退 CPU 不会中断服务，只会显著变慢**，因此务必确认这一行。
+
+也可用设置页的「模型健康诊断」，或日志中的 `[ModelProbe]` 行交叉验证模型是否正常工作。
+
+### 配置 CUDA 库路径
+
+CUDA/cuDNN 的 DLL 不在系统 PATH 时，用 `ReferenceRAG:embedding:cudaLibraryPath` 指定目录（多个路径用 `;` 分隔）。程序会在加载模型前追加到 PATH：
+
+```json
+{
+  "ReferenceRAG": {
+    "embedding": {
+      "useCuda": true,
+      "cudaDeviceId": 0,
+      "cudaLibraryPath": "D:/CUDA/bin;D:/cudnn/bin"
+    }
+  }
+}
+```
+
+该字段仅负责让运行时找到 DLL，**不改变所需的 CUDA 主版本**——路径指向 CUDA 12 的库时，ORT 1.24.4 可正常加载；指向 CUDA 13 的库无法满足 ORT 1.24.4 以外的版本需求。
+
+> **注意：** 设置页的「系统未检测到 CUDA/GPU」提示仅反映当前进程 PATH 中能否加载 CUDA，**未计入 `cudaLibraryPath`**，因此可能误报。请以日志中的 `使用 CUDA GPU` 为准。
 
 ---
 

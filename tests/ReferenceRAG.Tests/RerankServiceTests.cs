@@ -1,6 +1,8 @@
 using Xunit;
 using ReferenceRAG.Core.Services.Rerank;
 using ReferenceRAG.Core.Interfaces;
+using Microsoft.ML.OnnxRuntime.Tensors;
+using System.Reflection;
 
 namespace ReferenceRAG.Tests;
 
@@ -219,7 +221,7 @@ public class RerankServiceTests
     #region TC-RS-005: 模型切换测试
 
     [Fact]
-    public async Task TC_RS_005_ReloadModel_UpdatesModelName()
+    public async Task TC_RS_005_ReloadModel_PreservesCurrentModelWhenLoadFails()
     {
         Console.WriteLine("=== TC-RS-005: 模型切换测试 ===");
 
@@ -241,13 +243,38 @@ public class RerankServiceTests
         Console.WriteLine($"切换结果: {success}");
         Console.WriteLine($"切换后模型: {service.ModelName}");
 
-        // 即使模型不存在，ModelName 也应该更新
-        Assert.Equal("new-model", service.ModelName);
+        // 无效模型不应替换当前运行时状态
+        Assert.Equal("initial-model", service.ModelName);
+        Assert.False(success);
 
         Console.WriteLine("✓ 模型切换测试通过");
     }
 
     #endregion
+
+    [Fact]
+    public void TokenizeQueryDocument_AssignsDocumentSegmentIds()
+    {
+        using var service = new OnnxRerankService(new RerankOptions
+        {
+            ModelPath = "/nonexistent/model.onnx",
+            ModelName = "test-reranker",
+            MaxSequenceLength = 32
+        });
+
+        var method = typeof(OnnxRerankService).GetMethod(
+            "TokenizeQueryDocument", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var tensors = ((DenseTensor<long> InputIds, DenseTensor<long> AttentionMask, DenseTensor<long> TokenTypeIds))
+            method.Invoke(service, new object[] { "query", "document" })!;
+
+        var activeSegmentIds = Enumerable.Range(0, 32)
+            .Where(i => tensors.AttentionMask[0, i] == 1)
+            .Select(i => tensors.TokenTypeIds[0, i])
+            .ToArray();
+
+        Assert.Contains(0L, activeSegmentIds);
+        Assert.Contains(1L, activeSegmentIds);
+    }
 
     #region TC-RS-006: 单文档重排测试
 

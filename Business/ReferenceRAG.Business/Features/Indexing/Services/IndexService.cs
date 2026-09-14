@@ -73,6 +73,7 @@ public class IndexService : IHostedService
 
         var work = Task.Run(async () =>
         {
+            var heldFiles = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 using var scope = _serviceProvider.CreateScope();
@@ -91,19 +92,22 @@ public class IndexService : IHostedService
                     ? config.Sources.Where(s => request.Sources.Contains(s.Name)).ToList()
                     : config.Sources.Where(s => s.Enabled).ToList();
 
-                var allFiles = new List<string>();
-                foreach (var source in sources)
+                var allFiles = request.Files?.ToList() ?? new List<string>();
+                if (request.Files is null)
                 {
-                    var normalizedPath = PathUtility.NormalizePath(source.Path);
-                    if (!Directory.Exists(normalizedPath))
+                    foreach (var source in sources)
                     {
-                        _logger.LogWarning("源目录不存在: {Path}", source.Path);
-                        continue;
+                        var normalizedPath = PathUtility.NormalizePath(source.Path);
+                        if (!Directory.Exists(normalizedPath))
+                        {
+                            _logger.LogWarning("源目录不存在: {Path}", source.Path);
+                            continue;
+                        }
+                        allFiles.AddRange(
+                            Directory.GetFiles(normalizedPath, "*.*", SearchOption.AllDirectories)
+                                .Where(f => source.FilePatterns.Any(p => MatchesPattern(f, p)))
+                                .Where(f => !source.ExcludeDirs.Any(d => f.Contains(d))));
                     }
-                    allFiles.AddRange(
-                        Directory.GetFiles(normalizedPath, "*.*", SearchOption.AllDirectories)
-                            .Where(f => source.FilePatterns.Any(p => MatchesPattern(f, p)))
-                            .Where(f => !source.ExcludeDirs.Any(d => f.Contains(d))));
                 }
 
                 allFiles = allFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -127,12 +131,18 @@ public class IndexService : IHostedService
                 {
                     if (cts.Token.IsCancellationRequested) return null;
                     if (!_guard.TryAcquire(file)) return null;
-                    await prepSemaphore.WaitAsync(cts.Token);
+                    FileProcessContext? prepared = null;
+                    var enteredSemaphore = false;
                     try
                     {
-                        return request.VectorOnly
+                        await prepSemaphore.WaitAsync(cts.Token);
+                        enteredSemaphore = true;
+                        prepared = request.VectorOnly
                             ? await _pipeline.PrepareVectorOnlyAsync(file, cts.Token)
                             : await _pipeline.PrepareAsync(file, sources, request.Force, cts.Token);
+                        if (prepared is not null)
+                            heldFiles.TryAdd(file, 0);
+                        return prepared;
                     }
                     catch (OperationCanceledException) { return null; }
                     catch (Exception ex)
@@ -144,8 +154,10 @@ public class IndexService : IHostedService
                     }
                     finally
                     {
-                        prepSemaphore.Release();
-                        _guard.Release(file);
+                        if (enteredSemaphore)
+                            prepSemaphore.Release();
+                        if (prepared is null)
+                            _guard.Release(file);
                     }
                 }).ToList();
 
@@ -153,7 +165,7 @@ public class IndexService : IHostedService
                 var contexts = prepResults.Where(c => c != null).ToList()!;
 
                 // ── 清理磁盘已删文件（Bug A）──
-                if (!request.VectorOnly && !cts.Token.IsCancellationRequested)
+                if (request.Files is null && !request.VectorOnly && !cts.Token.IsCancellationRequested)
                 {
                     var allFilesSet = new HashSet<string>(allFiles, StringComparer.OrdinalIgnoreCase);
                     var sourceNames = sources.Select(s => s.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -187,7 +199,9 @@ public class IndexService : IHostedService
                         embeddingService,
                         vectorStore,
                         batchSize: config.Embedding.BatchSize);
-                    await indexingPipeline.ExecuteAsync(allChunks, "batch", cts.Token);
+                    var pipelineResult = await indexingPipeline.ExecuteAsync(allChunks, "batch", cts.Token);
+                    if (!pipelineResult.Success)
+                        throw new InvalidOperationException($"向量管道失败: {pipelineResult.ErrorMessage}");
                 }
 
                 // ── Phase 3: BM25 + 图谱后处理 ──
@@ -223,7 +237,12 @@ public class IndexService : IHostedService
                         Interlocked.Increment(ref errorsCount);
                         _logger.LogWarning(ex, "Phase3 失败: {File}", ctx!.FileRecord.Path);
                     }
-                    finally { finSemaphore.Release(); }
+                    finally
+                    {
+                        finSemaphore.Release();
+                        _guard.Release(ctx!.FileRecord.Path);
+                        heldFiles.TryRemove(ctx.FileRecord.Path, out _);
+                    }
                 }).ToList();
 
                 await Task.WhenAll(finalizeTasks);
@@ -262,6 +281,8 @@ public class IndexService : IHostedService
             }
             finally
             {
+                foreach (var file in heldFiles.Keys)
+                    _guard.Release(file);
                 if (_jobCancellationTokens.TryRemove(indexId, out var removedCts))
                     removedCts.Dispose();
                 if (job.Status is IndexStatus.Completed or IndexStatus.Cancelled)
@@ -321,6 +342,7 @@ public class IndexService : IHostedService
 public class IndexRequest
 {
     public List<string>? Sources { get; set; }
+    internal List<string>? Files { get; set; }
     public bool Force { get; set; }
     /// <summary>仅重建向量（跳过分块/BM25/图谱），用于切换嵌入模型后重新推理</summary>
     public bool VectorOnly { get; set; }

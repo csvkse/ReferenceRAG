@@ -129,6 +129,7 @@ const component = /*@__PURE__*/ _defineComponent({
                     filters: searchOptions.value.folders.length > 0 ? { folders: searchOptions.value.folders } : undefined
                 });
                 searchResponse.value = response.data;
+                await loadSearchStatus();
             }
             catch (error) {
                 console.error('Search failed:', error);

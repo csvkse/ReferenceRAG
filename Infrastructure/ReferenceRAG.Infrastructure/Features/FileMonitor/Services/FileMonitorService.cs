@@ -232,6 +232,11 @@ public class FileMonitorService : IFileMonitorService, IDisposable
 
             if (_isRunning)
             {
+                foreach (var key in _watchers.Keys.Where(k => k.StartsWith(name + "_", StringComparison.Ordinal)).ToList())
+                {
+                    _watchers[key].Dispose();
+                    _watchers.Remove(key);
+                }
                 CreateWatchers(normalizedPath, name, patterns);
             }
         }

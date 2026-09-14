@@ -18,7 +18,10 @@
     <PackageVersion Include="Rougamo.Fody" Version="5.0.2" />
     <PackageVersion Include="Markdig" Version="1.3.2" />
     <PackageVersion Include="Microsoft.Extensions.VectorData.Abstractions" Version="10.10.0" />
-    <PackageVersion Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.30.0" />
+    <!-- 必须保持 1.24.x：ORT 1.27+ 的 GPU 包改用 CUDA 13 编译（要 cublasLt64_13.dll），
+         本机及常见部署环境是 CUDA 12（cublasLt64_12.dll）。升到 1.27+ 会导致
+         CUDA 加载失败并静默回退 CPU。 -->
+    <PackageVersion Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.24.4" />
     <PackageVersion Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
     <PackageVersion Include="BERTTokenizers" Version="1.2.0" />
     <PackageVersion Include="Tokenizers.HuggingFace" Version="3.23.1" />

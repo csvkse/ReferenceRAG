@@ -172,7 +172,8 @@ public class StartupSyncService : IHostedService
                 {
                     await _indexService.StartIndexAsync(new IndexRequest
                     {
-                        Sources = affectedSourceNames
+                        Sources = affectedSourceNames,
+                        Files = changedPaths
                     });
                 }
             }
@@ -232,8 +233,7 @@ public class StartupSyncService : IHostedService
         // 找出属于不存在源的文件
         var orphanedFiles = storedFilesDict.Values
             .Where(f => !string.IsNullOrEmpty(f.Source))
-            .Where(f => !allConfigSourcePaths.Any(sourcePath =>
-                f.Path.StartsWith(sourcePath, StringComparison.OrdinalIgnoreCase)))
+            .Where(f => !allConfigSourcePaths.Any(sourcePath => IsPathWithin(f.Path, sourcePath)))
             .ToList();
 
         if (orphanedFiles.Count == 0)
@@ -314,8 +314,7 @@ public class StartupSyncService : IHostedService
 
                 // 检查文件所属源是否仍启用
                 // 如果源已禁用，跳过删除（保留索引以便重新启用时恢复）
-                var sourceEnabled = enabledSourcePaths.Any(enabledPath =>
-                    filePath.StartsWith(enabledPath, StringComparison.OrdinalIgnoreCase));
+                var sourceEnabled = enabledSourcePaths.Any(enabledPath => IsPathWithin(filePath, enabledPath));
 
                 if (!sourceEnabled)
                 {
@@ -477,6 +476,14 @@ public class StartupSyncService : IHostedService
             return filePath.EndsWith(pattern[1..], StringComparison.OrdinalIgnoreCase);
         }
         return filePath.Contains(pattern, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPathWithin(string candidate, string directory)
+    {
+        var normalizedCandidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidate));
+        var normalizedDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+        return normalizedCandidate.Equals(normalizedDirectory, StringComparison.OrdinalIgnoreCase) ||
+               normalizedCandidate.StartsWith(normalizedDirectory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 }
 

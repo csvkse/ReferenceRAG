@@ -1,6 +1,8 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using Rougamo;
+using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services.Tokenizers;
@@ -18,6 +20,8 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
 {
     private enum PoolingMode { Mean, Cls }
 
+    // 桌面端是 WinExe 无控制台，Console 输出不可见；关键状态必须走日志。
+    private static readonly ILogger _logger = StaticLogger.GetLogger("EmbeddingService");
     private readonly EmbeddingOptions _options;
     private readonly IGpuMemoryManager? _memoryManager;
     private InferenceSession? _session;
@@ -113,7 +117,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
             var modelDir = Path.GetDirectoryName(modelPath) ?? "";
 
             // 加载 ONNX 模型
-            var sessionOptions = new SessionOptions();
+            using var sessionOptions = new SessionOptions();
             sessionOptions.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
 
             if (_options.UseCuda)
@@ -125,11 +129,12 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
                     sessionOptions.EnableMemoryPattern = false;
                     sessionOptions.AppendExecutionProvider_CUDA(_options.CudaDeviceId);
                     sessionOptions.AppendExecutionProvider_CPU();
-                    Console.WriteLine($"[EmbeddingService] 使用 CUDA GPU: {_options.CudaDeviceId} (动态batch已启用)");
+                    _logger.LogInformation("使用 CUDA GPU: {DeviceId} (动态batch已启用)", _options.CudaDeviceId);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[EmbeddingService] CUDA 不可用，回退到 CPU: {ex.Message}");
+                    // 回退 CPU 会让推理显著变慢，且不中断服务，必须显式记录原因（如 CUDA 主版本不匹配）。
+                    _logger.LogWarning(ex, "CUDA 不可用，回退到 CPU。请检查 CUDA/cuDNN 版本与 cudaLibraryPath 配置");
                     sessionOptions.AppendExecutionProvider_CPU();
                 }
             }
@@ -254,7 +259,10 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
             Console.WriteLine($"[EmbeddingService] 向量维度: {Dimension}, 输出形状: [{string.Join(", ", outputShape)}] ({(isPooled ? "已内置pooling" : "需要mean pooling")}), MaxSeqLen: {_options.MaxSequenceLength}");
 
             // 加载分词器（优先使用 Microsoft.ML.Tokenizers）
+            var oldTokenizer = _tokenizer;
             _tokenizer = LoadTokenizer(modelPath);
+            if (!ReferenceEquals(oldTokenizer, _tokenizer) && oldTokenizer is IDisposable disposableTokenizer)
+                disposableTokenizer.Dispose();
             Console.WriteLine($"[EmbeddingService] 分词器: {_tokenizer.Name}, 词汇表大小: {_tokenizer.VocabSize}");
 
             // 从声明式配置检测非对称编码支持
@@ -293,6 +301,9 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
             {
                 try
                 {
+                    if (!File.Exists(modelPath))
+                        return false;
+                    using (var validationSession = new InferenceSession(modelPath)) { }
                     Console.WriteLine($"[EmbeddingService] 正在切换模型: {modelName}");
                     if (maxSequenceLength.HasValue)
                     {
@@ -301,7 +312,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
                     }
                     LoadModel(modelPath, modelName);
                     Console.WriteLine($"[EmbeddingService] 模型切换完成: {modelName}, 维度: {Dimension}, MaxSeqLen: {_options.MaxSequenceLength}");
-                    return true;
+                    return _session is not null && !_simulationMode;
                 }
                 catch (Exception ex)
                 {
@@ -419,8 +430,6 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
             // 统一走批量推理路径（CUDA 已设置 EnableMemoryPattern=false，支持动态 batch）
             return await Task.Run(() =>
             {
-                // 在 lock 内检查 _session 状态，避免竞态条件
-                InferenceSession? session;
                 lock (_lock)
                 {
                     if (_session == null || _simulationMode)
@@ -428,8 +437,7 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
                         Console.WriteLine("[EmbeddingService] 警告：运行在模拟模式，返回随机向量。请检查模型文件路径是否正确。");
                         return textList.Select(_ => CreateRandomVector(Dimension)).ToArray();
                     }
-                    session = _session;
-                }
+                    var session = _session;
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -545,7 +553,8 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
             }
 #endif
 
-            return batchEmbeddings;
+                    return batchEmbeddings;
+                }
 
         }, cancellationToken);
         }

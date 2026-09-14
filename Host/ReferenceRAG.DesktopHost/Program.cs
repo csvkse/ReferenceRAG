@@ -40,9 +40,17 @@ internal static class Program
         var builder=WebApplication.CreateBuilder(new WebApplicationOptions {Args=args,ContentRootPath=Directory.GetCurrentDirectory()});
         // 与 WebHost 共用日志配置：桌面端是 WinExe 无控制台，没有文件日志就无法排障。
         ServiceManager.ConfigureLogging(builder);
-        var enableApi=builder.Configuration.GetValue("Desktop:EnableLocalApi",false);
+        // 是否监听 HTTP 由设置页的「启用 HTTP 服务」控制（ReferenceRAG:Service:enableHttpService）。
+        // 默认关闭：前端经进程内 IPC 通信，不占端口。开启后额外监听，便于浏览器/curl/Swagger 调试。
+        // 兼容旧的 Desktop:EnableLocalApi 配置项与命令行开关。
+        // 命令行开关优先级最高，便于临时调试而不改配置。
+        var configuredHttp = builder.Configuration.GetValue<bool?>("ReferenceRAG:Service:enableHttpService")
+            ?? builder.Configuration.GetValue("Desktop:EnableLocalApi", false);
+        var enableApi = args.Contains("--serve-http") || configuredHttp;
         var port=builder.Configuration["ReferenceRAG:Service:port"] ?? "7897";
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        var allowNetwork = builder.Configuration.GetValue("ReferenceRAG:Service:allowNetworkAccess", false);
+        // 即使开启了 HTTP，也默认只绑本机回环，除非显式允许外网访问。
+        builder.WebHost.UseUrls($"http://{(allowNetwork ? "0.0.0.0" : "127.0.0.1")}:{port}");
         builder.Services.AddInProcessServer(enableApi);
         var platform = new DesktopPlatformActions();
         builder.Services.AddSingleton<ReferenceRAG.Business.Features.App.Contracts.IPlatformActions>(platform);
@@ -52,7 +60,11 @@ internal static class Program
         builder.Services.AddEndpointsApiExplorer();builder.Services.AddSwaggerGen();
         builder.Services.AddRagCoreServices(builder.Configuration);
         var app=builder.Build();
-        app.UseAppMcpHelper();app.UseSwagger();app.UseApiKeyAuthentication();
+        app.UseAppMcpHelper();app.UseSwagger();
+        // UseSwagger 只暴露 swagger.json；可视化界面需要 UseSwaggerUI 才存在。
+        // 仅在开启 HTTP 服务时注册，避免默认（纯 IPC）模式下多挂载无用端点。
+        if(enableApi) app.UseSwaggerUI(c=>c.SwaggerEndpoint("/swagger/v1/swagger.json","ReferenceRAG API v1"));
+        app.UseApiKeyAuthentication();
         app.UseRagEndpoints();
         LogStartup("Initializing search");
         Task.Run(async()=>{await app.InitializeSearchAsync();await app.StartAsync();}).GetAwaiter().GetResult();

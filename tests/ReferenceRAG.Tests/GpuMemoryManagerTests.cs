@@ -151,12 +151,32 @@ public class GpuMemoryManagerTests
     }
 
     [Fact]
+    public async Task ShrinkAsync_DoesNotInvokeUnloadCallback_WhenModelIsNotLoaded()
+    {
+        var manager = new GpuMemoryManager();
+        var unloadCount = 0;
+        manager.Register(
+            "LazyModel",
+            () => null,
+            onShrink: () =>
+            {
+                unloadCount++;
+                return Task.CompletedTask;
+            });
+
+        await manager.ShrinkAsync("LazyModel");
+
+        Assert.Equal(0, unloadCount);
+        manager.Dispose();
+    }
+
+    [Fact]
     public async Task ShrinkAsync_WithActiveInference_MarksPending()
     {
         // Arrange
         var manager = new GpuMemoryManager();
         var sessionName = "TestSession";
-        manager.Register(sessionName, () => null, 0);
+        manager.Register(sessionName, () => null, 0, isLoaded: () => true);
 
         // Act - 推理进行中请求释放
         manager.EnterInference(sessionName);

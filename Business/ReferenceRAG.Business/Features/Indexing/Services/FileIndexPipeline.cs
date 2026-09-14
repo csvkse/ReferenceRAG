@@ -100,13 +100,6 @@ public class FileIndexPipeline : IFileIndexPipeline
         var oldChunks = await _vectorStore.GetChunksByFileAsync(fileId, ct);
         var oldChunkIds = oldChunks.Select(c => c.Id).ToList();
 
-        // 先删向量（DeleteVectorsByFileAsync 内部查 chunks 找 chunk_id，必须在 DeleteChunks 之前调用）
-        await _vectorStore.DeleteVectorsByFileAsync(fileId, ct);
-        await _vectorStore.DeleteChunksByFileAsync(fileId, ct);
-
-        if (oldChunkIds.Count > 0)
-            await _bm25Store.DeleteDocumentsByIdsAsync(oldChunkIds);
-
         foreach (var chunk in chunks)
         {
             chunk.FileId = fileId;
@@ -162,6 +155,12 @@ public class FileIndexPipeline : IFileIndexPipeline
                 filenameMap.TryGetValue(shortId, out var full) ? full : null;
             await _graphIndexing.UpdateGraphAsync(ctx.FileRecord, ctx.Content, ctx.Chunks, ct, resolver);
         }
+
+        // 新向量/BM25/图谱都已写入后再清理旧版本，避免推理失败造成搜索空窗。
+        foreach (var oldChunkId in ctx.OldChunkIds)
+            await _vectorStore.DeleteChunkAsync(oldChunkId, ct);
+        if (ctx.OldChunkIds.Count > 0)
+            await _bm25Store.DeleteDocumentsByIdsAsync(ctx.OldChunkIds);
 
         // 所有阶段完成，标记为 complete，防止中断后因 hash 匹配被跳过
         await _vectorStore.MarkFileStatusAsync(ctx.FileRecord.Id, "complete", ct);

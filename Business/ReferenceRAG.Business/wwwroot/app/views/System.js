@@ -384,19 +384,18 @@ const component = /*@__PURE__*/ _defineComponent({
                 }
             });
         };
-        const loadAll = () => {
-            loadStatus();
-            loadQueryMetrics();
-            loadSystemMetrics();
-            loadAlerts();
-            loadActiveJobs();
-            loadCompletedJobs();
-            loadSearchTrace();
+        const loadAll = async () => {
+            await Promise.allSettled([
+                loadStatus(), loadQueryMetrics(), loadSystemMetrics(), loadAlerts(),
+                loadActiveJobs(), loadCompletedJobs(), loadSearchTrace()
+            ]);
+        };
+        const scheduleRefresh = async () => {
+            await loadAll();
+            refreshInterval = window.setTimeout(scheduleRefresh, 30000);
         };
         onMounted(() => {
-            loadAll();
-            // Auto refresh every 30 seconds
-            refreshInterval = window.setInterval(loadAll, 30000);
+            scheduleRefresh();
         });
         onUnmounted(() => {
             if (refreshInterval) {

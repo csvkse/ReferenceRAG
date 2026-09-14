@@ -102,32 +102,26 @@ builder.Services.AddRagCoreServices(
 
 
 // 配置 CORS
-builder.Services.AddCors(options =>
+// 是否启用由设置页的「启用 CORS」控制（默认启用）。
+var enableCors = serviceConfig.GetValue("enableCors", true);
+if (enableCors)
 {
-    options.AddDefaultPolicy(policy =>
+    builder.Services.AddCors(options =>
     {
-        if (builder.Environment.IsDevelopment())
+        options.AddDefaultPolicy(policy =>
         {
-            // 开发环境：从配置文件读取允许的 localhost 端口
+            // 允许来源按环境给默认值，可由 Cors:AllowedOrigins 覆盖
             var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
-                ?? new[] { "http://localhost:3000", "http://localhost:7897" };
+                ?? (builder.Environment.IsDevelopment()
+                    ? new[] { "http://localhost:3000", "http://localhost:7897" }
+                    : new[] { "http://localhost:5000", "http://localhost:5001", "http://localhost:7897" });
             policy.WithOrigins(allowedOrigins)
                   .WithMethods("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS")
                   .WithHeaders("Content-Type", "Authorization", "X-API-Key")
                   .AllowCredentials();
-        }
-        else
-        {
-            // Production: restrict to configured origins and methods
-            var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
-                ?? new[] { "http://localhost:5000", "http://localhost:5001", "http://localhost:7897" };
-            policy.WithOrigins(allowedOrigins)
-                  .WithMethods("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS")
-                  .WithHeaders("Content-Type", "Authorization", "X-API-Key")
-                  .AllowCredentials();
-        }
+        });
     });
-});
+}
 #endregion
 
 var app = builder.Build();
@@ -135,33 +129,22 @@ var app = builder.Build();
 #region 中间件管理
 
 // CORS 必须在其他中间件之前
-app.UseCors();
+if (enableCors) app.UseCors();
 
 // MCP 中间件（必须在 CORS 之后，其他中间件之前）
 app.UseAppMcpHelper();
 
-// Configure the HTTP request pipeline
-if (app.Environment.IsDevelopment())
+// Swagger 由设置页的「启用 Swagger」控制（ReferenceRAG:Service:enableSwagger），
+// 兼容既有的顶层 SwaggerEnabled 与 SWAGGER_ENABLED 环境变量。
+var swaggerEnabled = serviceConfig.GetValue<bool?>("enableSwagger")
+    ?? builder.Configuration.GetValue<bool>("SwaggerEnabled", false);
+if (swaggerEnabled)
 {
     app.UseSwagger();
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "Obsidian RAG API v1");
     });
-}
-else
-{
-    // Production: Swagger disabled by default for security
-    // Can be enabled via SWAGGER_ENABLED=true environment variable
-    var swaggerEnabled = builder.Configuration.GetValue<bool>("SwaggerEnabled", false);
-    if (swaggerEnabled)
-    {
-        app.UseSwagger();
-        app.UseSwaggerUI(c =>
-        {
-            c.SwaggerEndpoint("/swagger/v1/swagger.json", "Obsidian RAG API v1");
-        });
-    }
 }
 
 // 静态文件服务（Vue 前端）

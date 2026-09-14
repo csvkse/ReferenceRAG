@@ -20,7 +20,7 @@ internal sealed class LazyEmbeddingService : IEmbeddingService, IDisposable
         _factory = factory ?? (() => new EmbeddingService(_options, _memoryManager));
         Dimension = ReadConfiguredDimension(options.ModelPath);
         if(options.UseCuda && memoryManager is not null)
-            memoryManager.Register("EmbeddingService",()=>null,options.CudaDeviceId,()=>{UnloadModel();return Task.CompletedTask;});
+            memoryManager.Register("EmbeddingService",()=>null,options.CudaDeviceId,()=>{UnloadModel();return Task.CompletedTask;},()=>_inner is not null);
     }
 
     internal bool IsModelLoaded => _inner is not null;
@@ -59,7 +59,7 @@ internal sealed class LazyEmbeddingService : IEmbeddingService, IDisposable
     }
 
     public async Task<bool> ReloadModelAsync(string modelPath,string modelName,int? maxSequenceLength=null)
-    { _options.ModelPath=modelPath;_options.ModelName=modelName;if(maxSequenceLength.HasValue)_options.MaxSequenceLength=maxSequenceLength.Value;var result=await GetOrCreate().ReloadModelAsync(modelPath,modelName,maxSequenceLength);Dimension=_inner!.Dimension;return result; }
+    { var result=await GetOrCreate().ReloadModelAsync(modelPath,modelName,maxSequenceLength);Dimension=_inner!.Dimension;return result; }
     public void UnloadModel(){lock(_gate){_inner?.UnloadModel();_inner?.Dispose();_inner=null;}}
     private async Task<T> InferenceAsync<T>(Func<EmbeddingService,Task<T>> action)
     { _memoryManager?.EnterInference("EmbeddingService");try{return await action(GetOrCreate());}finally{_memoryManager?.ExitInference("EmbeddingService");} }
@@ -87,7 +87,7 @@ internal sealed class LazyRerankService : IRerankService, IDisposable
     private OnnxRerankService? _inner;
     private string _modelName;
     public LazyRerankService(string modelName,Func<OnnxRerankService> factory,IGpuMemoryManager? memoryManager=null,bool useCuda=false,int deviceId=0)
-    {_modelName=modelName;_factory=factory;_memoryManager=memoryManager;_useCuda=useCuda;if(useCuda&&memoryManager is not null)memoryManager.Register("OnnxRerankService",()=>null,deviceId,()=>{UnloadModel();return Task.CompletedTask;});}
+    {_modelName=modelName;_factory=factory;_memoryManager=memoryManager;_useCuda=useCuda;if(useCuda&&memoryManager is not null)memoryManager.Register("OnnxRerankService",()=>null,deviceId,()=>{UnloadModel();return Task.CompletedTask;},()=>_inner is not null);}
     internal bool IsModelLoaded=>_inner is not null;
     public string ModelName=>_inner?.ModelName??_modelName;
     public bool IsLoaded=>_inner?.IsLoaded??false;
@@ -96,7 +96,7 @@ internal sealed class LazyRerankService : IRerankService, IDisposable
     {_memoryManager?.EnterInference("OnnxRerankService");try{return await action(GetOrCreate());}finally{_memoryManager?.ExitInference("OnnxRerankService");}}
     public Task<double> RerankAsync(string query,string document,CancellationToken cancellationToken=default)=>InferenceAsync(x=>x.RerankAsync(query,document,cancellationToken));
     public Task<RerankResult> RerankBatchAsync(string query,IEnumerable<string> documents,CancellationToken cancellationToken=default)=>InferenceAsync(x=>x.RerankBatchAsync(query,documents,cancellationToken));
-    public async Task<bool> ReloadModelAsync(string path,string name){_modelName=name;return await GetOrCreate().ReloadModelAsync(path,name);}
+    public async Task<bool> ReloadModelAsync(string path,string name){var result=await GetOrCreate().ReloadModelAsync(path,name);if(result)_modelName=name;return result;}
     public void UnloadModel(){lock(_gate){_inner?.UnloadModel();_inner?.Dispose();_inner=null;}}
     public void Dispose(){UnloadModel();if(_useCuda)_memoryManager?.Unregister("OnnxRerankService");}
 }

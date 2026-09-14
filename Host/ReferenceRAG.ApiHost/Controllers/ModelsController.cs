@@ -120,6 +120,7 @@ public class ModelsController : ControllerBase
 
             var models = await _modelManager.GetAvailableModelsAsync();
             var model = models.FirstOrDefault(m => m.Name == request.ModelName);
+            var oldModel = models.FirstOrDefault(m => m.Name == oldModelName);
 
             if (model == null)
             {
@@ -134,25 +135,7 @@ public class ModelsController : ControllerBase
             _logger.LogInformation("开始切换模型: {OldModel} -> {NewModel} (DeleteOldVectors: {Delete})",
                 oldModelName, request.ModelName, request.DeleteOldVectors);
 
-            // 维度变化时处理旧向量
-            if (oldDimension != model.Dimension && request.DeleteOldVectors)
-            {
-                _logger.LogInformation("检测到维度变化 ({Old} -> {New})，删除旧模型向量",
-                    oldDimension, model.Dimension);
-                var deletedCount = await _vectorStore.DeleteVectorsByModelAsync(oldModelName);
-                _logger.LogInformation("已删除 {Count} 条旧模型向量", deletedCount);
-            }
-
-            // 更新配置文件
-            var success = await _modelManager.SwitchModelAsync(request.ModelName);
-
-            if (!success)
-            {
-                _logger.LogError("模型切换失败: {ModelName}", request.ModelName);
-                return StatusCode(500, new { error = "模型切换失败" });
-            }
-
-            // 重新加载 Embedding 服务的模型（传递模型的 MaxSequenceLength，修复 m3 截断问题）
+            // 先验证并切换运行时模型，避免无效模型破坏旧配置/向量。
             var onnxPath = Path.Combine(model.LocalPath ?? "", "model.onnx");
             var reloadSuccess = await _embeddingService.ReloadModelAsync(onnxPath, request.ModelName, model.MaxSequenceLength);
 
@@ -160,6 +143,29 @@ public class ModelsController : ControllerBase
             {
                 _logger.LogError("Embedding 服务重新加载模型失败: {ModelName}", request.ModelName);
                 return StatusCode(500, new { error = "模型重新加载失败" });
+            }
+
+            var success = await _modelManager.SwitchModelAsync(request.ModelName);
+            if (!success)
+            {
+                _logger.LogError("模型配置切换失败: {ModelName}", request.ModelName);
+                if (oldModel?.LocalPath is not null)
+                {
+                    var oldOnnxPath = Path.Combine(oldModel.LocalPath, "model.onnx");
+                    var rolledBack = await _embeddingService.ReloadModelAsync(
+                        oldOnnxPath, oldModelName, oldModel.MaxSequenceLength);
+                    _logger.Log(rolledBack ? LogLevel.Information : LogLevel.Critical,
+                        "运行时模型回滚 {Result}: {ModelName}", rolledBack ? "成功" : "失败", oldModelName);
+                }
+                return StatusCode(500, new { error = "模型配置切换失败" });
+            }
+
+            if (oldDimension != model.Dimension && request.DeleteOldVectors)
+            {
+                _logger.LogInformation("检测到维度变化 ({Old} -> {New})，删除旧模型向量",
+                    oldDimension, model.Dimension);
+                var deletedCount = await _vectorStore.DeleteVectorsByModelAsync(oldModelName);
+                _logger.LogInformation("已删除 {Count} 条旧模型向量", deletedCount);
             }
 
             _logger.LogInformation("模型切换成功: {ModelName} (Dimension: {OldDimension} -> {NewDimension})",

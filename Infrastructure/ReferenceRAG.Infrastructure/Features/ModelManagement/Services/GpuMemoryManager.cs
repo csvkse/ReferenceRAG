@@ -35,9 +35,9 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
 
     #region Session 注册管理
 
-    public void Register(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId = 0, Func<Task>? onShrink = null)
+    public void Register(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId = 0, Func<Task>? onShrink = null, Func<bool>? isLoaded = null)
     {
-        var sessionRef = new SessionRef(name, getSession, deviceId, _logger, onShrink);
+        var sessionRef = new SessionRef(name, getSession, deviceId, _logger, onShrink, isLoaded);
         _sessions[name] = sessionRef;
         _logger?.LogInformation("[GpuMemoryManager] 注册 Session: {Name}, DeviceId={DeviceId}, HasShrinkCallback={HasCallback}", name, deviceId, onShrink != null);
     }
@@ -108,8 +108,14 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
             if (process == null)
                 return GpuMemoryInfo.Unknown(deviceId);
 
-            var output = process.StandardOutput.ReadToEnd();
-            process.WaitForExit(5000);
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            if (!process.WaitForExit(5000))
+            {
+                process.Kill(entireProcessTree: true);
+                _logger?.LogWarning("[GpuMemoryManager] nvidia-smi 查询超时");
+                return GpuMemoryInfo.Unknown(deviceId);
+            }
+            var output = outputTask.GetAwaiter().GetResult();
 
             var parts = output.Trim().Split(", ");
             if (parts.Length >= 5)
@@ -205,6 +211,12 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
                 session.RequestShrink();
                 continue;
             }
+
+            if (session.IdleTime >= _idleTimeout)
+            {
+                _logger?.LogInformation("[GpuMemoryManager] {Name}: 空闲 {Idle}，触发释放", name, session.IdleTime);
+                session.RequestShrink();
+            }
         }
 
         await Task.CompletedTask;
@@ -253,6 +265,7 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
     {
         private readonly Func<Microsoft.ML.OnnxRuntime.InferenceSession?> _getSession;
         private readonly Func<Task>? _onShrink;
+        private readonly Func<bool> _isLoaded;
         private readonly ILogger? _logger;
         private readonly object _lock = new();
         private int _activeCount;
@@ -269,13 +282,14 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
         public TimeSpan IdleTime => DateTime.UtcNow - _lastActivityTime;
         public bool HasPendingShrink => _pendingShrink;
 
-        public SessionRef(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId, ILogger? logger, Func<Task>? onShrink)
+        public SessionRef(string name, Func<Microsoft.ML.OnnxRuntime.InferenceSession?> getSession, int deviceId, ILogger? logger, Func<Task>? onShrink, Func<bool>? isLoaded)
         {
             Name = name;
             _getSession = getSession;
             DeviceId = deviceId;
             _logger = logger;
             _onShrink = onShrink;
+            _isLoaded = isLoaded ?? (() => _getSession() is not null);
         }
 
         /// <summary>
@@ -316,6 +330,12 @@ public class GpuMemoryManager : IGpuMemoryManager, IHostedService, IDisposable
         {
             lock (_lock)
             {
+                if (!_isLoaded())
+                {
+                    _pendingShrink = false;
+                    return;
+                }
+
                 if (_activeCount == 0)
                 {
                     DoShrink();

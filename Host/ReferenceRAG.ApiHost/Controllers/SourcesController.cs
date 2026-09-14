@@ -16,17 +16,20 @@ public class SourcesController : ControllerBase
     private readonly ConfigManager _configManager;
     private readonly IVectorStore _vectorStore;
     private readonly IFileIndexPipeline _pipeline;
+    private readonly IFileMonitorService _fileMonitor;
     private readonly ILogger<SourcesController> _logger;
 
     public SourcesController(
         ConfigManager configManager,
         IVectorStore vectorStore,
         IFileIndexPipeline pipeline,
+        IFileMonitorService fileMonitor,
         ILogger<SourcesController> logger)
     {
         _configManager = configManager;
         _vectorStore = vectorStore;
         _pipeline = pipeline;
+        _fileMonitor = fileMonitor;
         _logger = logger;
     }
 
@@ -215,6 +218,8 @@ public class SourcesController : ControllerBase
         try
         {
             _configManager.AddSource(source);
+            if (source.Enabled)
+                _fileMonitor.AddSource(source.Path, source.Name, source.FilePatterns);
             _logger.LogInformation("已添加源: {Name} ({Path})", source.Name, source.Path);
             return CreatedAtAction(nameof(Get), new { name = source.Name }, source);
         }
@@ -256,6 +261,9 @@ public class SourcesController : ControllerBase
         }
 
         _configManager.Save(config);
+        _fileMonitor.RemoveSource(name);
+        if (source.Enabled)
+            _fileMonitor.AddSource(source.Path, source.Name, source.FilePatterns);
 
         return Ok(source);
     }
@@ -275,6 +283,7 @@ public class SourcesController : ControllerBase
         }
 
         _configManager.RemoveSource(name);
+        _fileMonitor.RemoveSource(name);
 
         if (deleteData)
             await _pipeline.DeleteSourceAsync(name);
@@ -289,6 +298,13 @@ public class SourcesController : ControllerBase
     public ActionResult Toggle(string name, [FromBody] ToggleRequest request)
     {
         _configManager.ToggleSource(name, request.Enabled);
+        var source = _configManager.Load().Sources.FirstOrDefault(s => s.Name == name);
+        if (source != null)
+        {
+            _fileMonitor.RemoveSource(name);
+            if (request.Enabled)
+                _fileMonitor.AddSource(source.Path, source.Name, source.FilePatterns);
+        }
         return Ok();
     }
 

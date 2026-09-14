@@ -116,8 +116,24 @@ public static class RagWebHostExtensions
 
         app.UseAuthorization();
         app.MapControllers();
-        foreach (var route in new[] { "/", "/login", "/dashboard", "/search", "/sources", "/settings", "/performance", "/api-help", "/models", "/system", "/bm25-index", "/guide", "/graph", "/chat" })
-            app.MapGet(route, () => Results.File(Path.Combine(app.Environment.WebRootPath, "index.html"), "text/html"));
+
+        // SPA fallback 只对真正提供静态前端的宿主注册（如 WebHost）。
+        // 桌面端前端由 app:// 自定义协议提供，其输出目录没有 wwwroot，
+        // ASP.NET Core 会把 WebRootPath 置为 null；此前无条件注册会让
+        // Path.Combine(null, "index.html") 在请求时抛 ArgumentNullException（HTTP 500）。
+        var webRootPath = app.Environment.WebRootPath;
+        if (!string.IsNullOrEmpty(webRootPath) && File.Exists(Path.Combine(webRootPath, "index.html")))
+        {
+            foreach (var route in new[] { "/", "/login", "/dashboard", "/search", "/sources", "/settings", "/performance", "/api-help", "/models", "/system", "/bm25-index", "/guide", "/graph", "/chat" })
+                app.MapGet(route, () => Results.File(Path.Combine(webRootPath, "index.html"), "text/html"));
+        }
+        else
+        {
+            app.Logger.LogInformation(
+                "未检测到静态前端（WebRootPath={WebRootPath}），跳过 SPA 路由注册；桌面端前端经 app:// 协议提供",
+                webRootPath ?? "<null>");
+        }
+
         app.MapHub<IndexHub>("/hubs/index");
 
         var configManager = app.Services.GetRequiredService<ConfigManager>();

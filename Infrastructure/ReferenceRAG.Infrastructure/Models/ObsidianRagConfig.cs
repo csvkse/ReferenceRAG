@@ -320,6 +320,14 @@ public class ServiceConfig
     public string EffectiveHost => Host ?? (AllowNetworkAccess ? "0.0.0.0" : "localhost");
 
     /// <summary>
+    /// 是否启用 HTTP 服务（仅桌面端有意义）。
+    /// 桌面端默认关闭：前后端通过进程内 IPC 通信，不监听端口，避免端口占用与外部访问。
+    /// 开启后额外监听 HTTP（地址由 AllowNetworkAccess 决定），便于用浏览器/curl/Swagger 调试。
+    /// 修改后需要重启生效。
+    /// </summary>
+    public bool EnableHttpService { get; set; } = false;
+
+    /// <summary>
     /// 是否启用 CORS
     /// </summary>
     public bool EnableCors { get; set; } = true;

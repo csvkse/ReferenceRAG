@@ -22,8 +22,12 @@ public class MafChatService
     private readonly string _systemPrompt;
     private readonly string _localBaseUrl;
     private readonly AITool[] _tools;
-    private readonly ConcurrentDictionary<string, List<ChatMessage>> _sessions = new();
+    private readonly ConcurrentDictionary<string, ChatSession> _sessions = new();
     private readonly ILogger<MafChatService> _logger;
+    private readonly TimeProvider _timeProvider;
+    private readonly int _maxSessions;
+    private readonly int _maxMessagesPerSession;
+    private readonly TimeSpan _sessionIdleTimeout;
 
     private static readonly JsonSerializerOptions _jsonOpts = new() { PropertyNameCaseInsensitive = true };
 
@@ -31,17 +35,22 @@ public class MafChatService
         IConfiguration config,
         IServiceScopeFactory scopeFactory,
         IHttpClientFactory httpClientFactory,
-        ILogger<MafChatService> logger)
+        ILogger<MafChatService> logger,
+        TimeProvider? timeProvider = null)
     {
         _scopeFactory = scopeFactory;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
 
         var section = config.GetSection("Chat");
         var endpoint = section["Endpoint"] ?? "https://api.openai.com/v1";
         var apiKey = section["ApiKey"];
         var model = section["Model"] ?? "gpt-4o-mini";
         _systemPrompt = section["SystemPrompt"] ?? "你是 ReferenceRAG 智能助手。";
+        _maxSessions = Math.Max(1, section.GetValue("MaxSessions", 100));
+        _maxMessagesPerSession = Math.Max(3, section.GetValue("MaxMessagesPerSession", 50));
+        _sessionIdleTimeout = TimeSpan.FromMinutes(Math.Max(1, section.GetValue("SessionIdleMinutes", 60)));
 
         var port = config.GetSection("ReferenceRAG:Service")["port"] ?? "7897";
         _localBaseUrl = $"http://localhost:{port}/api";
@@ -318,8 +327,15 @@ public class MafChatService
 
     public string CreateSession()
     {
+        RemoveExpiredSessions();
+        while (_sessions.Count >= _maxSessions)
+        {
+            var oldest = _sessions.MinBy(item => item.Value.LastAccessUtc);
+            if (oldest.Key is null || !_sessions.TryRemove(oldest.Key, out _)) break;
+        }
+
         var sessionId = Guid.NewGuid().ToString("N");
-        _sessions[sessionId] = [new ChatMessage(ChatRole.System, _systemPrompt)];
+        _sessions[sessionId] = new ChatSession([new ChatMessage(ChatRole.System, _systemPrompt)], _timeProvider.GetUtcNow());
         return sessionId;
     }
 
@@ -346,14 +362,22 @@ public class MafChatService
             yield break;
         }
 
-        if (!_sessions.TryGetValue(sessionId, out var history))
+        RemoveExpiredSessions();
+        if (!_sessions.TryGetValue(sessionId, out var session))
         {
             yield return new SseEvent("error", Message: "会话不存在，请创建新会话");
             yield return new SseEvent("done");
             yield break;
         }
 
-        history.Add(new ChatMessage(ChatRole.User, userMessage));
+        session.LastAccessUtc = _timeProvider.GetUtcNow();
+        List<ChatMessage> history;
+        lock (session.Messages)
+        {
+            session.Messages.Add(new ChatMessage(ChatRole.User, userMessage));
+            TrimHistory(session.Messages);
+            history = [.. session.Messages];
+        }
         var options = new ChatOptions { Tools = [.. _tools] };
         var responseText = new StringBuilder();
 
@@ -367,9 +391,37 @@ public class MafChatService
         }
 
         if (responseText.Length > 0)
-            history.Add(new ChatMessage(ChatRole.Assistant, responseText.ToString()));
+        {
+            lock (session.Messages)
+            {
+                session.Messages.Add(new ChatMessage(ChatRole.Assistant, responseText.ToString()));
+                TrimHistory(session.Messages);
+                session.LastAccessUtc = _timeProvider.GetUtcNow();
+            }
+        }
 
         yield return new SseEvent("done");
+    }
+
+    private void RemoveExpiredSessions()
+    {
+        var cutoff = _timeProvider.GetUtcNow() - _sessionIdleTimeout;
+        foreach (var item in _sessions)
+            if (item.Value.LastAccessUtc < cutoff)
+                _sessions.TryRemove(item.Key, out _);
+    }
+
+    private void TrimHistory(List<ChatMessage> messages)
+    {
+        var removable = messages.Count - _maxMessagesPerSession;
+        if (removable > 0)
+            messages.RemoveRange(1, Math.Min(removable, messages.Count - 1));
+    }
+
+    private sealed class ChatSession(List<ChatMessage> messages, DateTimeOffset lastAccessUtc)
+    {
+        public List<ChatMessage> Messages { get; } = messages;
+        public DateTimeOffset LastAccessUtc { get; set; } = lastAccessUtc;
     }
 
     // ── 辅助方法 ──────────────────────────────────────────────────────

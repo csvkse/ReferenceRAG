@@ -20,7 +20,7 @@ public class AutoIndexService : IHostedService, IDisposable
 
     private readonly Queue<FileChangeEventArgs> _indexQueue = new();
     private readonly Timer _processTimer;
-    private bool _isProcessing;
+    private int _isProcessing;
     private bool _disposed;
 
     public AutoIndexService(
@@ -75,16 +75,19 @@ public class AutoIndexService : IHostedService, IDisposable
 
     private async void ProcessQueue(object? state)
     {
-        if (_isProcessing) return;
+        if (Interlocked.CompareExchange(ref _isProcessing, 1, 0) != 0) return;
 
         FileChangeEventArgs? change;
         lock (_indexQueue)
         {
-            if (_indexQueue.Count == 0) return;
+            if (_indexQueue.Count == 0)
+            {
+                Volatile.Write(ref _isProcessing, 0);
+                return;
+            }
             change = _indexQueue.Dequeue();
         }
 
-        _isProcessing = true;
         try
         {
             await ProcessChangeAsync(change);
@@ -95,7 +98,7 @@ public class AutoIndexService : IHostedService, IDisposable
         }
         finally
         {
-            _isProcessing = false;
+            Volatile.Write(ref _isProcessing, 0);
         }
     }
 
@@ -108,7 +111,8 @@ public class AutoIndexService : IHostedService, IDisposable
         {
             if (!_guard.TryAcquire(change.FilePath))
             {
-                _logger?.LogDebug("文件正在处理中，跳过删除: {FileName}", Path.GetFileName(change.FilePath));
+                lock (_indexQueue) _indexQueue.Enqueue(change);
+                _logger?.LogDebug("文件正在处理中，删除事件已重新入队: {FileName}", Path.GetFileName(change.FilePath));
                 return;
             }
             try
@@ -125,7 +129,8 @@ public class AutoIndexService : IHostedService, IDisposable
         var targetPath = change.FilePath;
         if (!_guard.TryAcquire(targetPath))
         {
-            _logger?.LogDebug("文件正在处理中，跳过: {FileName}", Path.GetFileName(targetPath));
+            lock (_indexQueue) _indexQueue.Enqueue(change);
+            _logger?.LogDebug("文件正在处理中，变更事件已重新入队: {FileName}", Path.GetFileName(targetPath));
             return;
         }
 
