@@ -20,6 +20,7 @@ public class FileIndexPipeline : IFileIndexPipeline
     private readonly ITextEnhancer _textEnhancer;
     private readonly ConfigManager _configManager;
     private readonly IGraphIndexingService? _graphIndexing;
+    private readonly IEmbeddingTokenCounter? _tokenCounter;
     private readonly ILogger<FileIndexPipeline>? _logger;
 
     public FileIndexPipeline(
@@ -30,6 +31,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         ITextEnhancer textEnhancer,
         ConfigManager configManager,
         IGraphIndexingService? graphIndexing = null,
+        IEmbeddingTokenCounter? tokenCounter = null,
         ILogger<FileIndexPipeline>? logger = null)
     {
         _vectorStore = vectorStore;
@@ -39,6 +41,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         _textEnhancer = textEnhancer;
         _configManager = configManager;
         _graphIndexing = graphIndexing;
+        _tokenCounter = tokenCounter;
         _logger = logger;
     }
 
@@ -72,9 +75,15 @@ public class FileIndexPipeline : IFileIndexPipeline
             return null;
         }
 
+        var config = _configManager.Load();
+        var chunking = config.Chunking;
         var chunks = _chunker.Chunk(content, new ChunkingOptions
         {
-            MaxTokens = 512, MinTokens = 50, OverlapTokens = 50
+            MaxTokens = chunking.MaxTokens,
+            MinTokens = chunking.MinTokens,
+            OverlapTokens = chunking.OverlapTokens,
+            PreserveHeadings = chunking.PreserveHeadings,
+            PreserveCodeBlocks = chunking.PreserveCodeBlocks
         });
         if (chunks.Count == 0) return null;
 
@@ -100,6 +109,14 @@ public class FileIndexPipeline : IFileIndexPipeline
         var oldChunks = await _vectorStore.GetChunksByFileAsync(fileId, ct);
         var oldChunkIds = oldChunks.Select(c => c.Id).ToList();
 
+        var context = new FileProcessContext
+        {
+            FileRecord = fileRecord,
+            Content = content,
+            Chunks = chunks,
+            OldChunkIds = oldChunkIds
+        };
+
         foreach (var chunk in chunks)
         {
             chunk.FileId = fileId;
@@ -109,13 +126,21 @@ public class FileIndexPipeline : IFileIndexPipeline
             chunk.EnhancedContent = _textEnhancer.Enhance(chunk, fileRecord);
         }
 
-        return new FileProcessContext
+        var (changedCount, exact) = await LimitEmbeddingInputAsync(context.Chunks, config, ct);
+        if (changedCount > 0)
         {
-            FileRecord = fileRecord,
-            Content = content,
-            Chunks = chunks,
-            OldChunkIds = oldChunkIds
-        };
+            fileRecord.ChunkCount = chunks.Count;
+            await _vectorStore.UpsertFileAsync(fileRecord, ct);
+        }
+
+        if (changedCount > 0)
+        {
+            _logger?.LogWarning(
+                "{Action} {Count}/{Total} 条嵌入输入: {File}",
+                exact ? "已精确拆分" : "已截断", changedCount, chunks.Count, filePath);
+        }
+
+        return context;
     }
 
     public async Task<FileProcessContext?> PrepareVectorOnlyAsync(
@@ -130,6 +155,20 @@ public class FileIndexPipeline : IFileIndexPipeline
 
         await _vectorStore.DeleteVectorsByFileAsync(existingFile.Id, ct);
         await _vectorStore.MarkFileStatusAsync(existingFile.Id, "pending", ct);
+
+        var (changedCount, exact) = await LimitEmbeddingInputAsync(chunks, _configManager.Load(), ct);
+        if (changedCount > 0)
+        {
+            existingFile.ChunkCount = chunks.Count;
+            await _vectorStore.UpsertFileAsync(existingFile, ct);
+        }
+
+        if (changedCount > 0)
+        {
+            _logger?.LogWarning(
+                "{Action} {Count}/{Total} 条存量嵌入输入: {File}",
+                exact ? "已精确拆分" : "已截断", changedCount, chunks.Count, filePath);
+        }
 
         return new FileProcessContext
         {
@@ -270,5 +309,240 @@ public class FileIndexPipeline : IFileIndexPipeline
     {
         using var sha = SHA256.Create();
         return Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(content)));
+    }
+
+    private async Task<(int ChangedCount, bool Exact)> LimitEmbeddingInputAsync(
+        List<ChunkRecord> chunks,
+        Core.Models.ObsidianRagConfig config,
+        CancellationToken ct)
+    {
+        if (!string.Equals(config.Embedding.Mode, "openai", StringComparison.OrdinalIgnoreCase))
+            return (0, false);
+
+        if (_tokenCounter != null)
+        {
+            try
+            {
+                var splitCount = await SplitWithExactTokenCounterAsync(chunks, config, ct);
+                return (splitCount, true);
+            }
+            catch (NotSupportedException)
+            {
+                _logger?.LogDebug("嵌入服务不支持精确分词，回退到保守字符截断。");
+            }
+        }
+
+        var truncatedCount = TruncateEmbeddingInput(chunks, config);
+        return (truncatedCount, false);
+    }
+
+    private async Task<int> SplitWithExactTokenCounterAsync(
+        List<ChunkRecord> chunks,
+        Core.Models.ObsidianRagConfig config,
+        CancellationToken ct)
+    {
+        var maxInputTokens = config.Embedding.ApiMaxInputTokens ?? 512;
+        var tokenBudget = Math.Max(1, maxInputTokens - 2); // llama.cpp embeddings adds BOS/EOS.
+        var output = new List<ChunkRecord>(chunks.Count);
+
+        foreach (var chunk in chunks)
+        {
+            var text = chunk.EnhancedContent ?? chunk.Content;
+            var tokenCount = await _tokenCounter!.CountTokensAsync(text, ct);
+            if (tokenCount <= tokenBudget)
+            {
+                chunk.TokenCount = tokenCount;
+                output.Add(chunk);
+                continue;
+            }
+
+            var parts = await SplitTextByTokenBudgetAsync(text, tokenBudget, ct);
+            for (var partIndex = 0; partIndex < parts.Count; partIndex++)
+            {
+                var part = parts[partIndex];
+                if (string.IsNullOrWhiteSpace(part)) continue;
+
+                var partTokenCount = await _tokenCounter.CountTokensAsync(part, ct);
+                if (partTokenCount > tokenBudget)
+                    throw new InvalidOperationException($"精确分词拆分后仍超过限制: {partTokenCount} > {tokenBudget}");
+
+                output.Add(new ChunkRecord
+                {
+                    Id = partIndex == 0 ? chunk.Id : Guid.NewGuid().ToString(),
+                    FileId = chunk.FileId,
+                    Content = part,
+                    EnhancedContent = part,
+                    TokenCount = partTokenCount,
+                    StartLine = chunk.StartLine,
+                    EndLine = chunk.EndLine,
+                    StartColumn = chunk.StartColumn,
+                    EndColumn = chunk.EndColumn,
+                    HeadingPath = chunk.HeadingPath,
+                    Level = chunk.Level,
+                    ChunkType = ChunkType.Forced,
+                    Weight = chunk.Weight,
+                    Tags = chunk.Tags,
+                    Keywords = chunk.Keywords
+                });
+            }
+        }
+
+        var changedCount = output.Count - chunks.Count;
+        for (var i = 0; i < output.Count; i++)
+            output[i].ChunkIndex = i;
+
+        chunks.Clear();
+        chunks.AddRange(output);
+        return Math.Max(0, changedCount);
+    }
+
+    private async Task<List<string>> SplitTextByTokenBudgetAsync(
+        string text,
+        int tokenBudget,
+        CancellationToken ct)
+    {
+        var parts = new List<string>();
+        var current = new StringBuilder();
+
+        async Task FlushAsync()
+        {
+            if (current.Length > 0)
+            {
+                parts.Add(current.ToString());
+                current.Clear();
+            }
+        }
+
+        async Task<bool> AppendAsync(string candidate)
+        {
+            var combined = current.Length == 0 ? candidate : current + "\n" + candidate;
+            if (await _tokenCounter!.CountTokensAsync(combined, ct) <= tokenBudget)
+            {
+                current.Clear();
+                current.Append(combined);
+                return true;
+            }
+
+            return false;
+        }
+
+        foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
+        {
+            if (await _tokenCounter!.CountTokensAsync(line, ct) <= tokenBudget)
+            {
+                if (!await AppendAsync(line))
+                {
+                    await FlushAsync();
+                    if (!await AppendAsync(line))
+                        throw new InvalidOperationException("无法按 token 预算拆分嵌入输入。");
+                }
+
+                continue;
+            }
+
+            await FlushAsync();
+            foreach (var sentence in SplitSentenceCandidates(line))
+            {
+                if (await _tokenCounter.CountTokensAsync(sentence, ct) <= tokenBudget)
+                {
+                    if (!await AppendAsync(sentence))
+                    {
+                        await FlushAsync();
+                        if (!await AppendAsync(sentence))
+                            throw new InvalidOperationException("无法按 token 预算拆分嵌入输入。");
+                    }
+
+                    continue;
+                }
+
+                await foreach (var part in SplitOversizedTextAsync(sentence, tokenBudget, ct))
+                    parts.Add(part);
+            }
+        }
+
+        await FlushAsync();
+        return parts;
+    }
+
+    private async IAsyncEnumerable<string> SplitOversizedTextAsync(
+        string text,
+        int tokenBudget,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        var start = 0;
+        var estimate = Math.Max(1, text.Length * tokenBudget / Math.Max(1, await _tokenCounter!.CountTokensAsync(text, ct)));
+
+        while (start < text.Length)
+        {
+            var length = Math.Min(estimate, text.Length - start);
+            if (start + length < text.Length && char.IsHighSurrogate(text[start + length - 1]))
+                length--;
+            if (length <= 0) length = 1;
+
+            var candidate = text.Substring(start, length);
+            var tokens = await _tokenCounter.CountTokensAsync(candidate, ct);
+            while (tokens > tokenBudget && length > 1)
+            {
+                estimate = Math.Max(1, (int)((double)length * tokenBudget / tokens));
+                length = Math.Min(length - 1, estimate);
+                if (start + length < text.Length && char.IsHighSurrogate(text[start + length - 1]))
+                    length--;
+                if (length <= 0) length = 1;
+                candidate = text.Substring(start, length);
+                tokens = await _tokenCounter.CountTokensAsync(candidate, ct);
+            }
+
+            yield return candidate;
+            start += length;
+        }
+    }
+
+    private static IEnumerable<string> SplitSentenceCandidates(string text)
+    {
+        var start = 0;
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (text[i] is not ('。' or '！' or '？' or '.' or '!' or '?' or '；' or ';'))
+                continue;
+
+            var end = i + 1;
+            if (end < text.Length && text[end] is '"' or '”' or '」')
+                end++;
+
+            yield return text[start..end];
+            start = end;
+            i = end - 1;
+        }
+
+        if (start < text.Length)
+            yield return text[start..];
+    }
+
+    private int TruncateEmbeddingInput(IEnumerable<ChunkRecord> chunks, Core.Models.ObsidianRagConfig config)
+    {
+        var maxCharacters = Math.Max(1, (config.Embedding.ApiMaxInputTokens ?? 512) - 2);
+        var truncatedCount = 0;
+
+        foreach (var chunk in chunks)
+        {
+            var text = chunk.EnhancedContent ?? chunk.Content;
+            if (text.Length <= maxCharacters) continue;
+
+            chunk.EnhancedContent = TruncateToCharacterBudget(text, maxCharacters);
+            truncatedCount++;
+        }
+
+        return truncatedCount;
+    }
+
+    private static string TruncateToCharacterBudget(string text, int maxCharacters)
+    {
+        if (text.Length <= maxCharacters) return text;
+
+        var length = maxCharacters;
+        if (length > 0 && char.IsHighSurrogate(text[length - 1]))
+            length--;
+
+        return text[..length];
     }
 }

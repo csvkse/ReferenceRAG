@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import * as signalR from '@microsoft/signalr';
 import { HUB_URLS } from '/app/config/env.js';
 import {createIndexConnection} from '/core/transport/index-events.js';
@@ -16,6 +16,32 @@ export const useIndexStore = defineStore('index', () => {
         activeJobIds.value = new Set(data.map(job => job.jobId));
         isIndexing.value = activeJobIds.value.size > 0;
     };
+    // 轮询兜底：完成事件丢失（如任务失败时事件缺失）时也能复位 isIndexing
+    let activeJobsSyncTimer = null;
+    const startActiveJobsSync = () => {
+        if (activeJobsSyncTimer) return;
+        activeJobsSyncTimer = setInterval(async () => {
+            if (!isIndexing.value) return;
+            try {
+                await restoreActiveJobs();
+            } catch {
+                // 轮询失败时保留当前状态，等待下次轮询
+            }
+        }, 5000);
+    };
+    const stopActiveJobsSync = () => {
+        if (activeJobsSyncTimer) {
+            clearInterval(activeJobsSyncTimer);
+            activeJobsSyncTimer = null;
+        }
+    };
+    watch(isIndexing, (active) => {
+        if (active) {
+            startActiveJobsSync();
+        } else {
+            stopActiveJobsSync();
+        }
+    });
     const connect = async () => {
         if (connection.value)
             return;
@@ -66,6 +92,7 @@ export const useIndexStore = defineStore('index', () => {
             isConnected.value = false;
             activeJobIds.value.clear();
             isIndexing.value = false;
+            stopActiveJobsSync();
         }
     };
     const clearProgress = () => {

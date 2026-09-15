@@ -270,14 +270,36 @@ public class IndexService : IHostedService
             {
                 job.Status = IndexStatus.Cancelled;
                 job.EndTime = DateTime.UtcNow;
+                job.Duration = job.EndTime.Value - job.StartTime;
                 _logger.LogInformation("索引任务 {IndexId} 已取消", indexId);
+                // 失败/取消也必须广播完成事件，否则前端 isIndexing 永远不会复位
+                await _events.PublishAsync("IndexCompleted", new IndexCompletedEvent
+                {
+                    IndexId = indexId,
+                    TotalFiles = job.TotalFiles,
+                    TotalChunks = job.ProcessedFiles,
+                    TotalVectors = job.ProcessedFiles,
+                    Duration = job.Duration,
+                    CompletedAt = job.EndTime.Value
+                });
             }
             catch (Exception ex)
             {
                 job.Status = IndexStatus.Failed;
                 job.ErrorMessage = ex.Message;
                 job.EndTime = DateTime.UtcNow;
+                job.Duration = job.EndTime.Value - job.StartTime;
                 _logger.LogError(ex, "Index job {IndexId} failed", indexId);
+                await _events.PublishAsync("IndexCompleted", new IndexCompletedEvent
+                {
+                    IndexId = indexId,
+                    TotalFiles = job.TotalFiles,
+                    TotalChunks = job.ProcessedFiles,
+                    TotalVectors = job.ProcessedFiles,
+                    Duration = job.Duration,
+                    CompletedAt = job.EndTime.Value,
+                    Errors = new List<string> { ex.Message }
+                });
             }
             finally
             {
@@ -285,7 +307,7 @@ public class IndexService : IHostedService
                     _guard.Release(file);
                 if (_jobCancellationTokens.TryRemove(indexId, out var removedCts))
                     removedCts.Dispose();
-                if (job.Status is IndexStatus.Completed or IndexStatus.Cancelled)
+                if (job.Status is IndexStatus.Completed or IndexStatus.Failed or IndexStatus.Cancelled)
                 {
                     _completedJobs.Enqueue(job);
                     while (_completedJobs.Count > MaxCompletedJobs)

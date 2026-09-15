@@ -203,6 +203,12 @@ public class EmbeddingConfig
 
     /// <summary>API 模式的向量维度（留空则自动探测）</summary>
     public int? ApiDimension { get; set; }
+
+    /// <summary>
+    /// OpenAI 兼容 API 单条输入的最大 token 数。
+    /// 某些本地推理服务会按单条输入限制物理 batch 大小（如 llama.cpp 的 512）。
+    /// </summary>
+    public int? ApiMaxInputTokens { get; set; } = 512;
 }
 
 /// <summary>

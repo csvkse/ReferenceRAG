@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Core.Services.Tokenizers;
 using ReferenceRAG.Core.Services.Rerank;
 
 namespace ReferenceRAG.Core.Extensions;
@@ -47,6 +48,14 @@ public static class ModelManagementExtensions
                 CudaLibraryPath = cfg.Embedding.CudaLibraryPath
             };
             return new LazyEmbeddingService(options, memoryManager,()=>new EmbeddingService(options,null));
+        });
+
+        services.AddSingleton<IEmbeddingTokenCounter>(sp =>
+        {
+            var embedding = sp.GetRequiredService<ConfigManager>().Load().Embedding;
+            return embedding.Mode == "openai"
+                ? new LlamaCppTokenCounter(embedding)
+                : new UnsupportedEmbeddingTokenCounter();
         });
 
         services.AddSingleton<IRerankService>(sp =>

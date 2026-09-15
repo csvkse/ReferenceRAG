@@ -41,7 +41,7 @@ public class MarkdownChunker : IMarkdownChunker
         var lines = content.Split('\n');
         var chunkIndex = 0;
 
-        var sections = ExtractSections(content, lines);
+        var sections = ExtractSections(content, lines, effectiveOptions.PreserveHeadings);
         // P0: 合并短节（< MinTokens）到相邻节，避免产生无效 chunk
         sections = MergeShortSections(sections, effectiveOptions);
 
@@ -131,7 +131,7 @@ public class MarkdownChunker : IMarkdownChunker
 
     // ── 章节提取 ──────────────────────────────────────────────────────────────
 
-    private List<Section> ExtractSections(string content, string[] lines)
+    private List<Section> ExtractSections(string content, string[] lines, bool preserveHeadings)
     {
         var sections = new List<Section>();
         var headingStack = new Stack<(int Level, string Text)>();
@@ -150,14 +150,18 @@ public class MarkdownChunker : IMarkdownChunker
                 if (sectionStart.HasValue && currentContent.Count > 0)
                 {
                     var headingPath = string.Join("/", headingStack.Select(h => h.Text));
-                    sections.Add(new Section
+                    var sectionContent = string.Join("\n", currentContent);
+                    if (preserveHeadings || !string.IsNullOrWhiteSpace(sectionContent))
                     {
-                        Content = string.Join("\n", currentContent),
-                        StartLine = sectionStart.Value,
-                        EndLine = lineNum - 1,
-                        HeadingPath = headingPath,
-                        Level = headingStack.Count > 0 ? headingStack.Peek().Level : 0
-                    });
+                        sections.Add(new Section
+                        {
+                            Content = sectionContent,
+                            StartLine = sectionStart.Value,
+                            EndLine = lineNum - 1,
+                            HeadingPath = headingPath,
+                            Level = headingStack.Count > 0 ? headingStack.Peek().Level : 0
+                        });
+                    }
                 }
 
                 var level = headingMatch.Groups[1].Value.Length;
@@ -167,8 +171,16 @@ public class MarkdownChunker : IMarkdownChunker
                     headingStack.Pop();
                 headingStack.Push((level, text));
 
-                sectionStart = lineNum;
-                currentContent = new List<string> { line };
+                if (preserveHeadings)
+                {
+                    sectionStart = lineNum;
+                    currentContent = new List<string> { line };
+                }
+                else
+                {
+                    sectionStart = lineNum + 1;
+                    currentContent = new List<string>();
+                }
             }
             else
             {
@@ -180,17 +192,22 @@ public class MarkdownChunker : IMarkdownChunker
         if (sectionStart.HasValue && currentContent.Count > 0)
         {
             var headingPath = string.Join("/", headingStack.Select(h => h.Text));
-            sections.Add(new Section
+            var sectionContent = string.Join("\n", currentContent);
+            if (preserveHeadings || !string.IsNullOrWhiteSpace(sectionContent))
             {
-                Content = string.Join("\n", currentContent),
-                StartLine = sectionStart.Value,
-                EndLine = lines.Length,
-                HeadingPath = headingPath,
-                Level = headingStack.Count > 0 ? headingStack.Peek().Level : 0
-            });
+                sections.Add(new Section
+                {
+                    Content = sectionContent,
+                    StartLine = sectionStart.Value,
+                    EndLine = lines.Length,
+                    HeadingPath = headingPath,
+                    Level = headingStack.Count > 0 ? headingStack.Peek().Level : 0
+                });
+            }
         }
 
-        if (sections.Count == 0)
+        // PreserveHeadings=false 时，纯标题或空文档不产生任何节
+        if (sections.Count == 0 && preserveHeadings)
         {
             sections.Add(new Section
             {
@@ -215,7 +232,7 @@ public class MarkdownChunker : IMarkdownChunker
         ChunkingOptions options)
     {
         var result = new List<ChunkRecord>();
-        var paragraphs = ExtractParagraphs(section, allLines);
+        var paragraphs = ExtractParagraphs(section, allLines, options.PreserveCodeBlocks);
         var buffer = new List<Paragraph>();
         var bufferTokens = 0;
         var chunkIndex = startChunkIndex;
@@ -233,10 +250,18 @@ public class MarkdownChunker : IMarkdownChunker
                     bufferTokens = 0;
                 }
 
-                foreach (var subChunk in SplitLongParagraph(para, allLines, chunkIndex, section, fileId, options))
+                if (para.IsCode && options.PreserveCodeBlocks)
                 {
-                    result.Add(subChunk);
-                    chunkIndex++;
+                    // 代码块完整性优先：整块单独成 chunk，不按句子拆分
+                    result.Add(CreateChunkFromParagraphs([para], allLines, chunkIndex++, section, fileId));
+                }
+                else
+                {
+                    foreach (var subChunk in SplitLongParagraph(para, allLines, chunkIndex, section, fileId, options))
+                    {
+                        result.Add(subChunk);
+                        chunkIndex++;
+                    }
                 }
             }
             else if (bufferTokens + paraTokens > options.MaxTokens)
@@ -264,31 +289,61 @@ public class MarkdownChunker : IMarkdownChunker
         return result;
     }
 
-    private List<Paragraph> ExtractParagraphs(Section section, string[] allLines)
+    private List<Paragraph> ExtractParagraphs(Section section, string[] allLines, bool preserveCodeBlocks)
     {
         var paragraphs = new List<Paragraph>();
         var lines = section.Content.Split('\n');
         var currentPara = new List<string>();
         int? paraStart = null;
+        var inFence = false;
+
+        void FlushParagraph(bool isCode, int endLine)
+        {
+            if (currentPara.Count == 0 || !paraStart.HasValue) return;
+            paragraphs.Add(new Paragraph
+            {
+                Content = string.Join("\n", currentPara),
+                StartLine = paraStart.Value,
+                EndLine = endLine,
+                IsCode = isCode
+            });
+            currentPara.Clear();
+            paraStart = null;
+        }
 
         for (int i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
             var actualLineNum = section.StartLine + i;
 
+            if (preserveCodeBlocks && line.TrimStart().StartsWith("```", StringComparison.Ordinal))
+            {
+                if (!inFence)
+                {
+                    FlushParagraph(isCode: false, actualLineNum - 1);
+                    inFence = true;
+                    paraStart = actualLineNum;
+                    currentPara.Add(line);
+                }
+                else
+                {
+                    currentPara.Add(line);
+                    FlushParagraph(isCode: true, actualLineNum);
+                    inFence = false;
+                }
+                continue;
+            }
+
+            if (inFence)
+            {
+                // 围栏内的空行不拆分段落，保持代码块完整
+                currentPara.Add(line);
+                continue;
+            }
+
             if (string.IsNullOrWhiteSpace(line))
             {
-                if (currentPara.Count > 0 && paraStart.HasValue)
-                {
-                    paragraphs.Add(new Paragraph
-                    {
-                        Content = string.Join("\n", currentPara),
-                        StartLine = paraStart.Value,
-                        EndLine = actualLineNum - 1
-                    });
-                    currentPara.Clear();
-                    paraStart = null;
-                }
+                FlushParagraph(isCode: false, actualLineNum - 1);
             }
             else
             {
@@ -297,15 +352,7 @@ public class MarkdownChunker : IMarkdownChunker
             }
         }
 
-        if (currentPara.Count > 0 && paraStart.HasValue)
-        {
-            paragraphs.Add(new Paragraph
-            {
-                Content = string.Join("\n", currentPara),
-                StartLine = paraStart.Value,
-                EndLine = section.StartLine + lines.Length - 1
-            });
-        }
+        FlushParagraph(isCode: inFence, section.StartLine + lines.Length - 1);
 
         return paragraphs;
     }
@@ -513,5 +560,6 @@ public class MarkdownChunker : IMarkdownChunker
         public string Content { get; set; } = string.Empty;
         public int StartLine { get; set; }
         public int EndLine { get; set; }
+        public bool IsCode { get; set; }
     }
 }
