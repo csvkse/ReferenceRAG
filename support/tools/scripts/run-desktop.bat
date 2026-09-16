@@ -3,13 +3,13 @@ setlocal EnableDelayedExpansion
 if not exist "%~dp0..\..\artifacts\logs" mkdir "%~dp0..\..\artifacts\logs"
 
 echo ============================================
-echo   ReferenceRAG Desktop - 开发模式运行
+echo   ReferenceRAG Desktop - Dev Run
 echo ============================================
 echo.
 
 cd /d "%~dp0..\..\.."
 
-REM 解析参数
+REM parse args
 set CONFIG=Debug
 set EXTRA_ARGS=
 
@@ -22,15 +22,16 @@ shift
 goto parse_args
 :end_parse
 
-echo 配置: %CONFIG%
-echo 额外参数: %EXTRA_ARGS%
+echo Config: %CONFIG%
+echo ExtraArgs: %EXTRA_ARGS%
 echo.
 
-REM 记录启动日志
-echo [%date% %time%] 桌面端开发模式启动 - %CONFIG% >> "%~dp0..\..\artifacts\logs\desktop.log"
+REM write startup log
+echo [%date% %time%] desktop dev start - %CONFIG% >> "%~dp0..\..\artifacts\logs\desktop.log"
 
-REM 桌面端为 WinForms 应用，dotnet run 前台运行；Ctrl+C 退出
-echo 正在以开发模式启动桌面端（Ctrl+C 退出）...
+REM WinForms app; dotnet run runs in foreground; Ctrl+C to stop
+echo starting desktop dev
+echo press Ctrl+C to stop
 echo ============================================
 dotnet run --project Host/ReferenceRAG.DesktopHost/ReferenceRAG.DesktopHost.csproj -c %CONFIG% %EXTRA_ARGS%
 set EXIT_CODE=%ERRORLEVEL%
@@ -38,10 +39,10 @@ set EXIT_CODE=%ERRORLEVEL%
 echo.
 echo ============================================
 if %EXIT_CODE% equ 0 (
-    echo 桌面端已退出（正常）
+    echo desktop exited ok
 ) else (
-    echo 桌面端退出，错误代码: %EXIT_CODE%
-    echo [%date% %time%] 桌面端开发模式异常退出 - 错误代码: %EXIT_CODE% >> "%~dp0..\..\artifacts\logs\desktop.log"
+    echo desktop exited with code %EXIT_CODE%
+    echo [%date% %time%] desktop dev abnormal exit - code %EXIT_CODE% >> "%~dp0..\..\artifacts\logs\desktop.log"
 )
 echo ============================================
 
