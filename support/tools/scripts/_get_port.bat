@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM ============================================
 REM   公共函数：读取服务端口
 REM   用法：call "%~dp0_get_port.bat"

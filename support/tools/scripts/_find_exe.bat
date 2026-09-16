@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM ============================================
 REM   公共函数：查找可执行文件
 REM   用法：call "%~dp0_find_exe.bat"

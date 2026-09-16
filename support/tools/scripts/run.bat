@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal EnableDelayedExpansion
 if not exist "%~dp0..\..\artifacts\logs" mkdir "%~dp0..\..\artifacts\logs"
 
