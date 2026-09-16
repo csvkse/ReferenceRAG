@@ -19,6 +19,12 @@ public class FileRecord
     // 内容指纹
     public string ContentHash { get; set; } = string.Empty;
     public long ContentLength { get; set; }
+
+    /// <summary>
+    /// 分块配置指纹（MaxTokens/MinTokens/OverlapTokens/Preserve* 的哈希）。
+    /// 分块配置变更后，即使内容 hash 不变也必须重新分块。
+    /// </summary>
+    public string? ChunkingHash { get; set; }
     
     // 元数据（从 frontmatter 提取）
     public string? Title { get; set; }

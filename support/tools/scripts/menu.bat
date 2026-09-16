@@ -30,7 +30,7 @@ REM 读取端口
 call "%~dp0_get_port.bat"
 echo   [端口: %SERVICE_PORT%]
 echo.
-echo   [1] 构建 (Build)
+echo   [1] 构建 Web 服务 (Build WebHost)
 echo   [2] 安装服务 (Install)
 echo   [3] 启动服务 (Start)
 echo   [4] 停止服务 (Stop)
@@ -39,13 +39,15 @@ echo   [6] 卸载服务 (Uninstall)
 echo   [7] 控制台运行 (Run as Console)
 echo   [8] 打开浏览器 (Open Browser)
 echo   [9] 查看日志 (View Logs)
+echo   [A] 构建桌面端 (Build Desktop)
+echo   [B] 桌面端开发模式运行 (Run Desktop Dev)
 echo.
 echo   [0] 退出 (Exit)
 echo.
 echo   ==================================================
 echo.
 
-set /p CHOICE="请选择操作 [0-9]: "
+set /p CHOICE="请选择操作 [0-9/A/B]: "
 
 if "%CHOICE%"=="1" goto build
 if "%CHOICE%"=="2" goto install
@@ -56,6 +58,8 @@ if "%CHOICE%"=="6" goto uninstall
 if "%CHOICE%"=="7" goto run
 if "%CHOICE%"=="8" goto browser
 if "%CHOICE%"=="9" goto logs
+if /i "%CHOICE%"=="A" goto build-desktop
+if /i "%CHOICE%"=="B" goto run-desktop
 if "%CHOICE%"=="0" goto end
 
 echo 无效的选择，请重新输入
@@ -99,19 +103,27 @@ goto menu
 :logs
 cls
 echo ============================================
-echo   服务日志 (最近 30 行)
+echo   服务日志
 echo ============================================
 echo.
 if exist "%~dp0..\..\artifacts\logs\service.log" (
-    more +0 "%~dp0..\..\artifacts\logs\service.log" | findstr /n "^" | findstr "^[1-9][0-9]*:" | more +0
+    more +0 "%~dp0..\..\artifacts\logs\service.log"
     echo.
-    echo 按任意键查看完整日志...
+    echo 按任意键用记事本打开完整日志...
     pause >nul
     notepad "%~dp0..\..\artifacts\logs\service.log"
 ) else (
     echo 暂无日志记录
     pause
 )
+goto menu
+
+:build-desktop
+call "%~dp0build-desktop.bat"
+goto menu
+
+:run-desktop
+call "%~dp0run-desktop.bat"
 goto menu
 
 :end

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -26,7 +27,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     private readonly bool _ownsResources; // 只有独立构造时才负责 Dispose
 
     // 缓存已创建的向量表维度
-    private readonly Dictionary<string, int> _modelDimensions = new();
+    private readonly ConcurrentDictionary<string, int> _modelDimensions = new();
 
     // 全局顺序锁（可与其他 Store 共享，通过 SharedSqliteConnection 注入）
     private readonly SemaphoreSlim _writeLock;
@@ -232,13 +233,24 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 created_at TEXT,
                 updated_at TEXT,
                 indexed_at TEXT,
-                indexed_status TEXT NOT NULL DEFAULT 'complete'
+                indexed_status TEXT NOT NULL DEFAULT 'complete',
+                chunking_hash TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
         ";
 
         ExecuteNonQuery(createFilesTable, transaction);
+
+        // 旧库迁移：为已存在的 files 表补充 chunking_hash 列（幂等）
+        try
+        {
+            ExecuteNonQuery("ALTER TABLE files ADD COLUMN chunking_hash TEXT", transaction);
+        }
+        catch
+        {
+            // 列已存在（新库或已迁移），忽略
+        }
 
         // 分段表
         var createChunksTable = @"
@@ -260,6 +272,11 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 child_chunk_count INTEGER,
                 chunk_order REAL DEFAULT 1.0,
                 content_hash TEXT DEFAULT '',
+                source TEXT DEFAULT '',
+                enhanced_content TEXT,
+                tags TEXT,
+                keywords TEXT,
+                aggregate_range TEXT,
                 FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
@@ -267,6 +284,20 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         ";
 
         ExecuteNonQuery(createChunksTable, transaction);
+
+        // 旧库迁移：为已存在的 chunks 表补充缺失列（幂等，其余 6 列见上）
+        foreach (var column in new[] { "source TEXT DEFAULT ''", "enhanced_content TEXT", "tags TEXT", "keywords TEXT", "aggregate_range TEXT" })
+        {
+            var colName = column.Split(' ')[0];
+            try
+            {
+                ExecuteNonQuery($"ALTER TABLE chunks ADD COLUMN {column}", transaction);
+            }
+            catch
+            {
+                // 列已存在（新库或已迁移），忽略
+            }
+        }
 
         // 模型元数据表（记录每个模型的维度）
         var createModelsTable = @"
@@ -363,9 +394,16 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                     $"模型 '{modelName}' 已存在，维度为 {existingDim}，但传入维度为 {dimension}。" +
                     $"请先删除旧向量后再切换。");
             }
-            return; // 表已存在且维度匹配
+            // 维度匹配但表可能缺失（如新库预注册的默认模型），幂等补建
+            EnsureModelTableExistsInternal(modelName, dimension);
+            return;
         }
 
+        EnsureModelTableExistsInternal(modelName, dimension);
+    }
+
+    private void EnsureModelTableExistsInternal(string modelName, int dimension)
+    {
         var tableName = ModelToTableName(modelName);
 
         // 创建 vec0 虚拟表（sqlite-vec 向量索引）
@@ -421,9 +459,9 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         {
             var sql = @"
                 INSERT OR REPLACE INTO files
-                (id, path, file_name, title, content_hash, content_length, tags, parent_folder, source, chunk_count, total_tokens, created_at, updated_at, indexed_at, indexed_status)
+                (id, path, file_name, title, content_hash, content_length, tags, parent_folder, source, chunk_count, total_tokens, created_at, updated_at, indexed_at, indexed_status, chunking_hash)
                 VALUES
-                (@id, @path, @fileName, @title, @contentHash, @contentLength, @tags, @parentFolder, @source, @chunkCount, @totalTokens, @createdAt, @updatedAt, @indexedAt, @indexedStatus)
+                (@id, @path, @fileName, @title, @contentHash, @contentLength, @tags, @parentFolder, @source, @chunkCount, @totalTokens, @createdAt, @updatedAt, @indexedAt, @indexedStatus, @chunkingHash)
             ";
 
             using var command = _connection.CreateCommand();
@@ -443,6 +481,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             AddParameter(command, "@updatedAt", file.ModifiedAt?.ToString("O") ?? "");
             AddParameter(command, "@indexedAt", file.IndexedAt.ToString("O"));
             AddParameter(command, "@indexedStatus", file.IndexedStatus);
+            AddParameter(command, "@chunkingHash", file.ChunkingHash ?? "");
 
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -528,30 +567,25 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
     public async Task<IAsyncEnumerable<FileRecord>> StreamAllFilesAsync(CancellationToken cancellationToken = default)
     {
-        var sql = "SELECT * FROM files ORDER BY path";
-        var cmd = _connection.CreateCommand();
-        cmd.CommandText = sql;
-        var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        await _writeLock.WaitAsync(cancellationToken);
 
-        // Return an async enumerable that manages the reader and command lifetime
-        var asyncEnumerable = ReadAllFilesAsync(reader, cmd, cancellationToken);
-        var enumerator = asyncEnumerable.GetAsyncEnumerator(cancellationToken);
+        // Return an async enumerable that holds the shared lock for its entire
+        // iteration lifetime, so concurrent writers cannot corrupt the reader.
+        var asyncEnumerable = ReadAllFilesLockedAsync(cancellationToken);
         return new DisposingAsyncEnumerable<FileRecord>(
-            enumerator: enumerator,
-            disposeAction: () =>
-            {
-                reader?.Dispose();
-                cmd?.Dispose();
-            });
+            enumerator: asyncEnumerable.GetAsyncEnumerator(cancellationToken),
+            disposeAction: () => _writeLock.Release());
     }
 
-    private async IAsyncEnumerable<FileRecord> ReadAllFilesAsync(
-        SqliteDataReader reader,
-        SqliteCommand cmd,
+    private async IAsyncEnumerable<FileRecord> ReadAllFilesLockedAsync(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
         try
         {
+            var sql = "SELECT * FROM files ORDER BY path";
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = sql;
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 yield return ReadFileRecord(reader);
@@ -559,7 +593,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         }
         finally
         {
-            // Cleanup happens in the DisposingAsyncEnumerable
+            // Lock released by the DisposingAsyncEnumerable wrapper when iteration
+            // completes or the consumer disposes early.
         }
     }
 
@@ -708,11 +743,13 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             INSERT OR REPLACE INTO chunks
             (id, file_id, chunk_index, content, token_count, start_line, end_line,
              start_column, end_column, heading_path, level, weight, chunk_type,
-             aggregate_type, child_chunk_count, chunk_order, content_hash)
+             aggregate_type, child_chunk_count, chunk_order, content_hash,
+             source, enhanced_content, tags, keywords, aggregate_range)
             VALUES
             (@id, @fileId, @chunkIndex, @content, @tokenCount, @startLine, @endLine,
              @startColumn, @endColumn, @headingPath, @level, @weight, @chunkType,
-             @aggregateType, @childChunkCount, @chunkOrder, @contentHash)
+             @aggregateType, @childChunkCount, @chunkOrder, @contentHash,
+             @source, @enhancedContent, @tags, @keywords, @aggregateRange)
         ";
 
         using var command = _connection.CreateCommand();
@@ -734,8 +771,18 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         AddParameter(command, "@childChunkCount", chunk.ChildChunkCount);
         AddParameter(command, "@chunkOrder", chunk.ChunkOrder);
         AddParameter(command, "@contentHash", chunk.ContentHash ?? "");
+        AddParameter(command, "@source", chunk.Source ?? "");
+        AddParameter(command, "@enhancedContent", chunk.EnhancedContent);
+        AddParameter(command, "@tags", chunk.Tags is { Count: > 0 } ? System.Text.Json.JsonSerializer.Serialize(chunk.Tags) : "");
+        AddParameter(command, "@keywords", chunk.Keywords is { Count: > 0 } ? System.Text.Json.JsonSerializer.Serialize(chunk.Keywords) : "");
+        AddParameter(command, "@aggregateRange", chunk.AggregateRange);
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally { _writeLock.Release(); }
     }
 
     public async Task UpsertChunksAsync(IEnumerable<ChunkRecord> chunks, CancellationToken cancellationToken = default)
@@ -769,11 +816,13 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 INSERT OR REPLACE INTO chunks
                 (id, file_id, chunk_index, content, token_count, start_line, end_line,
                  start_column, end_column, heading_path, level, weight, chunk_type,
-                 aggregate_type, child_chunk_count, chunk_order, content_hash)
+                 aggregate_type, child_chunk_count, chunk_order, content_hash,
+                 source, enhanced_content, tags, keywords, aggregate_range)
                 VALUES
                 (@id, @fileId, @chunkIndex, @content, @tokenCount, @startLine, @endLine,
                  @startColumn, @endColumn, @headingPath, @level, @weight, @chunkType,
-                 @aggregateType, @childChunkCount, @chunkOrder, @contentHash)
+                 @aggregateType, @childChunkCount, @chunkOrder, @contentHash,
+                 @source, @enhancedContent, @tags, @keywords, @aggregateRange)
             ";
 
             using var command = _connection.CreateCommand();
@@ -800,6 +849,11 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                 AddParameter(command, "@childChunkCount", chunk.ChildChunkCount);
                 AddParameter(command, "@chunkOrder", chunk.ChunkOrder);
                 AddParameter(command, "@contentHash", chunk.ContentHash ?? "");
+                AddParameter(command, "@source", chunk.Source ?? "");
+                AddParameter(command, "@enhancedContent", chunk.EnhancedContent);
+                AddParameter(command, "@tags", chunk.Tags is { Count: > 0 } ? System.Text.Json.JsonSerializer.Serialize(chunk.Tags) : "");
+                AddParameter(command, "@keywords", chunk.Keywords is { Count: > 0 } ? System.Text.Json.JsonSerializer.Serialize(chunk.Keywords) : "");
+                AddParameter(command, "@aggregateRange", chunk.AggregateRange);
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -967,22 +1021,27 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         var modelName = vector.ModelName ?? "default";
         var dimension = vector.Vector.Length;
 
-        EnsureModelTableExists(modelName, dimension);
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureModelTableExists(modelName, dimension);
 
-        var tableName = ModelToTableName(modelName);
-        var embeddingJson = VectorToJson(vector.Vector);
+            var tableName = ModelToTableName(modelName);
+            var embeddingJson = VectorToJson(vector.Vector);
 
-        var sql = $@"
-            INSERT OR REPLACE INTO {tableName} (chunk_id, embedding)
-            VALUES (@chunkId, @embedding)
-        ";
+            var sql = $@"
+                INSERT OR REPLACE INTO {tableName} (chunk_id, embedding)
+                VALUES (@chunkId, @embedding)
+            ";
 
-        using var command = _connection.CreateCommand();
-        command.CommandText = sql;
-        AddParameter(command, "@chunkId", vector.ChunkId);
-        AddParameter(command, "@embedding", embeddingJson);
+            using var command = _connection.CreateCommand();
+            command.CommandText = sql;
+            AddParameter(command, "@chunkId", vector.ChunkId);
+            AddParameter(command, "@embedding", embeddingJson);
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally { _writeLock.Release(); }
 
         // 更新模型统计
         await UpdateModelStatsAsync(modelName, cancellationToken);
@@ -1071,41 +1130,46 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     public async Task<VectorRecord?> GetVectorByChunkIdAsync(string chunkId, CancellationToken cancellationToken = default)
     {
         // 遍历所有模型表查找
-        foreach (var modelName in _modelDimensions.Keys)
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            var tableName = ModelToTableName(modelName);
-            var dimension = _modelDimensions[modelName];
-
-            var sql = $"SELECT chunk_id, embedding FROM {tableName} WHERE chunk_id = @chunkId";
-
-            try
+            foreach (var modelName in _modelDimensions.Keys)
             {
-                using var command = _connection.CreateCommand();
-                command.CommandText = sql;
-                AddParameter(command, "@chunkId", chunkId);
+                var tableName = ModelToTableName(modelName);
+                var dimension = _modelDimensions[modelName];
 
-                using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                if (await reader.ReadAsync(cancellationToken))
+                var sql = $"SELECT chunk_id, embedding FROM {tableName} WHERE chunk_id = @chunkId";
+
+                try
                 {
-                    var embeddingBytes = reader.GetFieldValue<byte[]>(1);
-                    var vector = BlobToVector(embeddingBytes);
+                    using var command = _connection.CreateCommand();
+                    command.CommandText = sql;
+                    AddParameter(command, "@chunkId", chunkId);
 
-                    return new VectorRecord
+                    using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    if (await reader.ReadAsync(cancellationToken))
                     {
-                        Id = $"vec_{chunkId}",
-                        ChunkId = chunkId,
-                        Vector = vector,
-                        ModelName = modelName,
-                        Dimension = dimension,
-                        CreatedAt = DateTime.UtcNow
-                    };
+                        var embeddingBytes = reader.GetFieldValue<byte[]>(1);
+                        var vector = BlobToVector(embeddingBytes);
+
+                        return new VectorRecord
+                        {
+                            Id = $"vec_{chunkId}",
+                            ChunkId = chunkId,
+                            Vector = vector,
+                            ModelName = modelName,
+                            Dimension = dimension,
+                            CreatedAt = DateTime.UtcNow
+                        };
+                    }
+                }
+                catch
+                {
+                    // 表可能不存在，继续尝试下一个模型
                 }
             }
-            catch
-            {
-                // 表可能不存在，继续尝试下一个模型
-            }
         }
+        finally { _writeLock.Release(); }
 
         return null;
     }
@@ -1121,53 +1185,58 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             return result;
         }
 
-        foreach (var modelName in _modelDimensions.Keys)
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            var tableName = ModelToTableName(modelName);
-            var dimension = _modelDimensions[modelName];
-
-            const int batchSize = 200;
-            for (int offset = 0; offset < idList.Count; offset += batchSize)
+            foreach (var modelName in _modelDimensions.Keys.ToList())
             {
-                var batch = idList.Skip(offset).Take(batchSize).ToList();
-                if (batch.Count == 0) continue;
+                var tableName = ModelToTableName(modelName);
+                var dimension = _modelDimensions[modelName];
 
-                var placeholders = string.Join(",", batch.Select((_, idx) => $"@id{idx}"));
-                var sql = $@"SELECT chunk_id, embedding FROM {tableName} WHERE chunk_id IN ({placeholders})";
-
-                try
+                const int batchSize = 200;
+                for (int offset = 0; offset < idList.Count; offset += batchSize)
                 {
-                    using var command = _connection.CreateCommand();
-                    command.CommandText = sql;
-                    for (int i = 0; i < batch.Count; i++)
-                    {
-                        AddParameter(command, $"@id{i}", batch[i]);
-                    }
+                    var batch = idList.Skip(offset).Take(batchSize).ToList();
+                    if (batch.Count == 0) continue;
 
-                    using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                    while (await reader.ReadAsync(cancellationToken))
-                    {
-                        var foundChunkId = reader.GetString(0);
-                        if (result.ContainsKey(foundChunkId)) continue;
+                    var placeholders = string.Join(",", batch.Select((_, idx) => $"@id{idx}"));
+                    var sql = $@"SELECT chunk_id, embedding FROM {tableName} WHERE chunk_id IN ({placeholders})";
 
-                        var embeddingBytes = reader.GetFieldValue<byte[]>(1);
-                        result[foundChunkId] = new VectorRecord
+                    try
+                    {
+                        using var command = _connection.CreateCommand();
+                        command.CommandText = sql;
+                        for (int i = 0; i < batch.Count; i++)
                         {
-                            Id = $"vec_{foundChunkId}",
-                            ChunkId = foundChunkId,
-                            Vector = BlobToVector(embeddingBytes),
-                            ModelName = modelName,
-                            Dimension = dimension,
-                            CreatedAt = DateTime.UtcNow
-                        };
+                            AddParameter(command, $"@id{i}", batch[i]);
+                        }
+
+                        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                        while (await reader.ReadAsync(cancellationToken))
+                        {
+                            var foundChunkId = reader.GetString(0);
+                            if (result.ContainsKey(foundChunkId)) continue;
+
+                            var embeddingBytes = reader.GetFieldValue<byte[]>(1);
+                            result[foundChunkId] = new VectorRecord
+                            {
+                                Id = $"vec_{foundChunkId}",
+                                ChunkId = foundChunkId,
+                                Vector = BlobToVector(embeddingBytes),
+                                ModelName = modelName,
+                                Dimension = dimension,
+                                CreatedAt = DateTime.UtcNow
+                            };
+                        }
                     }
-                }
-                catch
-                {
-                    // 某些模型表可能不存在，继续尝试下一个
+                    catch
+                    {
+                        // 某些模型表可能不存在，继续尝试下一个
+                    }
                 }
             }
         }
+        finally { _writeLock.Release(); }
 
         return result;
     }
@@ -1176,16 +1245,21 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     {
         var chunkId = id.StartsWith("vec_") ? id[4..] : id;
 
-        foreach (var modelName in _modelDimensions.Keys)
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            var tableName = ModelToTableName(modelName);
-            var sql = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
+            foreach (var modelName in _modelDimensions.Keys.ToList())
+            {
+                var tableName = ModelToTableName(modelName);
+                var sql = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
 
-            using var command = _connection.CreateCommand();
-            command.CommandText = sql;
-            AddParameter(command, "@chunkId", chunkId);
-            await command.ExecuteNonQueryAsync(cancellationToken);
+                using var command = _connection.CreateCommand();
+                command.CommandText = sql;
+                AddParameter(command, "@chunkId", chunkId);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
         }
+        finally { _writeLock.Release(); }
     }
 
     // ==================== 检索操作（使用 sqlite-vec 向量索引）====================
@@ -1255,10 +1329,13 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             ) knn
             LEFT JOIN chunks c ON knn.chunk_id = c.id
             LEFT JOIN files f ON c.file_id = f.id
+            WHERE f.indexed_status = 'complete'   -- 过滤半完成（pending）文件，避免新旧混合
         ";
 
         var searchResults = new List<SearchResult>();
+        var pendingRows = new List<(int Index, string ChunkId)>();  // 锁外补全的行
 
+        await _writeLock.WaitAsync(cancellationToken);
         try
         {
             using var command = _connection.CreateCommand();
@@ -1283,18 +1360,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
                 if (string.IsNullOrEmpty(fileId) || string.IsNullOrEmpty(filePath))
                 {
-                var chunk = await GetChunkAsync(chunkId, cancellationToken);
-                if (chunk != null)
-                {
-                    fileId = chunk.FileId;
-                    var file = await GetFileAsync(chunk.FileId, cancellationToken);
-                    if (file != null)
-                    {
-                        filePath = file.Path;
-                        fileSource = file.Source ?? string.Empty;
-                        fileTitle = file.Title ?? string.Empty;
-                    }
-                }
+                    // 延迟到锁外补全：GetChunkAsync/GetFileAsync 自身需要写锁，不能在持锁期间调用（SemaphoreSlim 不可重入）
+                    pendingRows.Add((searchResults.Count, chunkId));
                 }
 
                 searchResults.Add(new SearchResult
@@ -1320,6 +1387,22 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             _logger?.LogError(ex, "向量搜索失败: {Message}", ex.Message);
             return Enumerable.Empty<SearchResult>();
         }
+        finally { _writeLock.Release(); }
+
+        // 锁外补全缺失的 file 信息
+        foreach (var (index, chunkId) in pendingRows)
+        {
+            var chunk = await GetChunkAsync(chunkId, cancellationToken);
+            if (chunk == null) continue;
+            var file = await GetFileAsync(chunk.FileId, cancellationToken);
+            if (file == null) continue;
+
+            var row = searchResults[index];
+            row.FileId = chunk.FileId;
+            row.FilePath = file.Path;
+            row.Source = file.Source ?? string.Empty;
+            row.Title = file.Title ?? string.Empty;
+        }
 
         return searchResults;
     }
@@ -1334,16 +1417,21 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         var chunkIds = new List<string>();
         var getChunksSql = "SELECT id FROM chunks WHERE aggregate_type = @aggregateType";
 
-        using (var cmd = _connection.CreateCommand())
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            cmd.CommandText = getChunksSql;
-            cmd.Parameters.AddWithValue("@aggregateType", (int)aggregateType);
-            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            using (var cmd = _connection.CreateCommand())
             {
-                chunkIds.Add(reader.GetString(0));
+                cmd.CommandText = getChunksSql;
+                cmd.Parameters.AddWithValue("@aggregateType", (int)aggregateType);
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    chunkIds.Add(reader.GetString(0));
+                }
             }
         }
+        finally { _writeLock.Release(); }
 
         return await SearchInIdsAsync(queryVector, chunkIds, topK, cancellationToken);
     }
@@ -1392,10 +1480,13 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             ) knn
             LEFT JOIN chunks c ON knn.chunk_id = c.id
             LEFT JOIN files  f ON c.file_id = f.id
+            WHERE f.indexed_status = 'complete'   -- 过滤半完成（pending）文件，避免新旧混合
         ";
 
         var searchResults = new List<SearchResult>();
+        var pendingRows = new List<(int Index, string ChunkId)>();  // 锁外补全的行
 
+        await _writeLock.WaitAsync(cancellationToken);
         try
         {
             using var command = _connection.CreateCommand();
@@ -1420,18 +1511,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
                 if (string.IsNullOrEmpty(fileId) || string.IsNullOrEmpty(filePath))
                 {
-                var chunk = await GetChunkAsync(cId, cancellationToken);
-                if (chunk != null)
-                {
-                    fileId = chunk.FileId;
-                    var file = await GetFileAsync(chunk.FileId, cancellationToken);
-                    if (file != null)
-                    {
-                        filePath = file.Path;
-                        fileSource = file.Source ?? string.Empty;
-                        fileTitle = file.Title ?? string.Empty;
-                    }
-                }
+                    // 延迟到锁外补全：GetChunkAsync/GetFileAsync 自身需要写锁，不能在持锁期间调用
+                    pendingRows.Add((searchResults.Count, cId));
                 }
 
                 searchResults.Add(new SearchResult
@@ -1458,6 +1539,22 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         {
             _logger?.LogError(ex, "SearchInIdsAsync 失败: {Message}", ex.Message);
             return Enumerable.Empty<SearchResult>();
+        }
+        finally { _writeLock.Release(); }
+
+        // 锁外补全缺失的 file 信息
+        foreach (var (index, nChunkId) in pendingRows)
+        {
+            var chunk = await GetChunkAsync(nChunkId, cancellationToken);
+            if (chunk == null) continue;
+            var file = await GetFileAsync(chunk.FileId, cancellationToken);
+            if (file == null) continue;
+
+            var row = searchResults[index];
+            row.FileId = chunk.FileId;
+            row.FilePath = file.Path;
+            row.Source = file.Source ?? string.Empty;
+            row.Title = file.Title ?? string.Empty;
         }
 
         return searchResults;
@@ -1605,7 +1702,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             foreach (var kv in freshDimensions)
                 _modelDimensions[kv.Key] = kv.Value;
             foreach (var key in _modelDimensions.Keys.Except(freshDimensions.Keys).ToList())
-                _modelDimensions.Remove(key);
+                _modelDimensions.TryRemove(key, out _);
 
             return stats;
         }
@@ -1645,7 +1742,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                     cmd.Parameters.AddWithValue("@name", modelName);
                     await cmd.ExecuteNonQueryAsync(cancellationToken);
                 }
-                _modelDimensions.Remove(modelName);
+                _modelDimensions.TryRemove(modelName, out _);
             }
             catch { }
             return count;
@@ -1769,18 +1866,35 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             CreatedAt = DateTime.TryParse(reader.GetString(reader.GetOrdinal("created_at")), out var createdAt) ? createdAt : null,
             ModifiedAt = DateTime.TryParse(reader.GetString(reader.GetOrdinal("updated_at")), out var modifiedAt) ? modifiedAt : null,
             IndexedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("indexed_at"))),
-            IndexedStatus = reader.IsDBNull(reader.GetOrdinal("indexed_status")) ? "complete" : reader.GetString(reader.GetOrdinal("indexed_status"))
+            IndexedStatus = reader.IsDBNull(reader.GetOrdinal("indexed_status")) ? "complete" : reader.GetString(reader.GetOrdinal("indexed_status")),
+            ChunkingHash = reader.IsDBNull(reader.GetOrdinal("chunking_hash")) ? null : reader.GetString(reader.GetOrdinal("chunking_hash"))
         };
     }
 
     private ChunkRecord ReadChunkRecord(SqliteDataReader reader)
     {
+        static List<string>? ReadStringList(SqliteDataReader r, string column)
+        {
+            var value = r.GetString(r.GetOrdinal(column));
+            if (string.IsNullOrEmpty(value)) return null;
+            try
+            {
+                return System.Text.Json.JsonSerializer.Deserialize<List<string>>(value);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         return new ChunkRecord
         {
             Id = reader.GetString(reader.GetOrdinal("id")),
             FileId = reader.GetString(reader.GetOrdinal("file_id")),
             ChunkIndex = reader.GetInt32(reader.GetOrdinal("chunk_index")),
+            Source = reader.GetString(reader.GetOrdinal("source")),
             Content = reader.GetString(reader.GetOrdinal("content")),
+            EnhancedContent = reader.IsDBNull(reader.GetOrdinal("enhanced_content")) ? null : reader.GetString(reader.GetOrdinal("enhanced_content")),
             TokenCount = reader.GetInt32(reader.GetOrdinal("token_count")),
             StartLine = reader.GetInt32(reader.GetOrdinal("start_line")),
             EndLine = reader.GetInt32(reader.GetOrdinal("end_line")),
@@ -1791,9 +1905,12 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             Weight = reader.GetFloat(reader.GetOrdinal("weight")),
             ChunkType = (ChunkType)reader.GetInt32(reader.GetOrdinal("chunk_type")),
             AggregateType = (AggregateType)reader.GetInt32(reader.GetOrdinal("aggregate_type")),
+            AggregateRange = reader.IsDBNull(reader.GetOrdinal("aggregate_range")) ? null : reader.GetString(reader.GetOrdinal("aggregate_range")),
             ChildChunkCount = reader.GetInt32(reader.GetOrdinal("child_chunk_count")),
             ChunkOrder = reader.GetDouble(reader.GetOrdinal("chunk_order")),
-            ContentHash = reader.GetString(reader.GetOrdinal("content_hash"))
+            ContentHash = reader.GetString(reader.GetOrdinal("content_hash")),
+            Tags = ReadStringList(reader, "tags"),
+            Keywords = ReadStringList(reader, "keywords")
         };
     }
 

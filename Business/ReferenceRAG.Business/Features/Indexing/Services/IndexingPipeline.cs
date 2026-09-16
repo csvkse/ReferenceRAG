@@ -19,6 +19,7 @@ public class IndexingPipeline : IDisposable
     private readonly Channel<ChunkBatch> _tokenizeChannel;
     private readonly Channel<EmbeddedBatch> _embedChannel;
     private readonly CancellationTokenSource _cts;
+    private IReadOnlyDictionary<string, string>? _embeddingInputs;
     private bool _disposed;
 
     public event EventHandler<IndexingProgressEventArgs>? Progress;
@@ -51,13 +52,16 @@ public class IndexingPipeline : IDisposable
     public async Task<IndexingResult> ExecuteAsync(
         IEnumerable<ChunkRecord> chunks,
         string source,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, string>? embeddingInputs = null)
     {
         var chunkList = chunks.ToList();
         if (chunkList.Count == 0)
         {
             return new IndexingResult { TotalChunks = 0, TotalVectors = 0 };
         }
+
+        _embeddingInputs = embeddingInputs;
 
         var result = new IndexingResult
         {
@@ -239,7 +243,9 @@ public class IndexingPipeline : IDisposable
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var texts = chunkBatch.Chunks.Select(c => c.EnhancedContent ?? c.Content).ToList();
+                var texts = chunkBatch.Chunks
+                    .Select(c => _embeddingInputs != null && _embeddingInputs.TryGetValue(c.Id, out var t) ? t : (c.EnhancedContent ?? c.Content))
+                    .ToList();
 
                 // GPU 推理（上一批的 embedChannel.WriteAsync 在此期间后台完成）
                 var vectors = await _embeddingService.EncodeBatchAsync(texts, EmbeddingMode.Document, cancellationToken);

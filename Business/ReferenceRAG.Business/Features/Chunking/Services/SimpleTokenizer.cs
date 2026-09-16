@@ -1,74 +1,21 @@
 using System.Collections.Concurrent;
-using System.Text.RegularExpressions;
+using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 
 namespace ReferenceRAG.Core.Services;
 
 /// <summary>
-/// 简单 Token 计数器（估算）- 线程安全，支持并行，低内存分配
+/// 简单 Token 计数器（估算）- 线程安全，支持并行，低内存分配。
+/// 统一委托 TokenEstimator，保证与分块/搜索侧口径一致。
 /// </summary>
 public class SimpleTokenizer : ITokenizer
 {
-    // 预编译正则（线程安全）
-    private static readonly Regex ChineseRegex = new(@"[\u4e00-\u9fff]", RegexOptions.Compiled);
-    private static readonly Regex EnglishWordRegex = new(@"[a-zA-Z]+", RegexOptions.Compiled);
-    private static readonly Regex NumberRegex = new(@"\d+", RegexOptions.Compiled);
-
     /// <summary>
-    /// 计算 token 数量（低分配版本）
+    /// 计算 token 数量
     /// </summary>
     public int CountTokens(string text)
     {
-        if (string.IsNullOrEmpty(text)) return 0;
-
-        // 使用 Span 直接遍历，避免正则分配
-        return CountTokensSpan(text.AsSpan());
-    }
-
-    /// <summary>
-    /// Span 版本的 token 计数（零分配）
-    /// </summary>
-    private static int CountTokensSpan(ReadOnlySpan<char> text)
-    {
-        var chineseCount = 0;
-        var englishChars = 0;
-        var numberChars = 0;
-
-        for (int i = 0; i < text.Length; i++)
-        {
-            var c = text[i];
-
-            if (IsChineseFast(c))
-            {
-                chineseCount++;
-            }
-            else if (char.IsAsciiLetter(c))
-            {
-                englishChars++;
-            }
-            else if (char.IsAsciiDigit(c))
-            {
-                numberChars++;
-            }
-        }
-
-        // 计算各部分 token
-        var chineseTokens = (int)(chineseCount / 1.5);
-        var englishTokens = (int)(englishChars / 4.0);
-        var numberTokens = (int)(numberChars / 3.0);
-        var otherChars = text.Length - chineseCount - englishChars - numberChars;
-        var otherTokens = (int)(otherChars / 2.0);
-
-        return chineseTokens + englishTokens + numberTokens + otherTokens;
-    }
-
-    /// <summary>
-    /// 快速判断中文字符（内联优化）
-    /// </summary>
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    private static bool IsChineseFast(char c)
-    {
-        return (uint)(c - 0x4E00) <= (0x9FFF - 0x4E00);
+        return TokenEstimator.EstimateTokens(text);
     }
 
     /// <summary>

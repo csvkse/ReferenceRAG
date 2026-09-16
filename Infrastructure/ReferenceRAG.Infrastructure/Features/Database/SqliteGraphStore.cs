@@ -150,11 +150,12 @@ public class SqliteGraphStore : IGraphStore, IDisposable
         await _lock.WaitAsync(ct);
         try
         {
-            var prefix = fileNodeId + "#%";
+            // fileNodeId 可能含路径（含 _ 或 %），LIKE 需转义通配符，避免误删其它节点
+            var prefix = EscapeLikePattern(fileNodeId) + "#%";
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
-                DELETE FROM graph_edges WHERE from_id LIKE @p OR to_id LIKE @p;
-                DELETE FROM graph_nodes WHERE id LIKE @p;
+                DELETE FROM graph_edges WHERE from_id LIKE @p ESCAPE '\' OR to_id LIKE @p ESCAPE '\';
+                DELETE FROM graph_nodes WHERE id LIKE @p ESCAPE '\';
             ";
             cmd.Parameters.AddWithValue("@p", prefix);
             cmd.ExecuteNonQuery();
@@ -171,7 +172,8 @@ public class SqliteGraphStore : IGraphStore, IDisposable
     {
         var nodeList = extraNodes.ToList();
         var edgeList = edges.ToList();
-        var prefix   = fileNodeId + "#%";
+        // fileNodeId 可能含 _ / %，LIKE 通配符转义后再拼接前缀（尾部 % 保留为前缀通配）
+        var prefix   = EscapeLikePattern(fileNodeId) + "#%";
 
         await _lock.WaitAsync(ct);
         try
@@ -190,9 +192,9 @@ public class SqliteGraphStore : IGraphStore, IDisposable
 
             Exec("DELETE FROM graph_edges WHERE from_id = @id",
                 c => c.Parameters.AddWithValue("@id", fileNodeId));
-            Exec("DELETE FROM graph_edges WHERE from_id LIKE @p OR to_id LIKE @p",
+            Exec("DELETE FROM graph_edges WHERE from_id LIKE @p ESCAPE '\\' OR to_id LIKE @p ESCAPE '\\'",
                 c => c.Parameters.AddWithValue("@p", prefix));
-            Exec("DELETE FROM graph_nodes WHERE id LIKE @p",
+            Exec("DELETE FROM graph_nodes WHERE id LIKE @p ESCAPE '\\'",
                 c => c.Parameters.AddWithValue("@p", prefix));
 
             // ── 写节点（文件节点 + heading/tag/external 节点）──
@@ -480,6 +482,18 @@ public class SqliteGraphStore : IGraphStore, IDisposable
         ChunkIds = JsonSerializer.Deserialize<List<string>>(r.GetString(3)) ?? new(),
         Metadata = JsonSerializer.Deserialize<Dictionary<string, string>>(r.GetString(4)) ?? new()
     };
+
+    /// <summary>
+    /// 转义 LIKE 通配符（% _ \），配合 ESCAPE '\' 使用。
+    /// 节点 ID 内含路径（含 _ / %）时必须转义，否则前缀匹配会误删其它节点。
+    /// </summary>
+    private static string EscapeLikePattern(string value)
+    {
+        return value
+            .Replace("\\", "\\\\")
+            .Replace("%", "\\%")
+            .Replace("_", "\\_");
+    }
 
     public void Dispose()
     {

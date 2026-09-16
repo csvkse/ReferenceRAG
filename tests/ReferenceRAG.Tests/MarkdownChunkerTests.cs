@@ -150,15 +150,30 @@ public class MarkdownChunkerTests
         });
 
         Assert.NotEmpty(chunks);
-        Assert.All(chunks, chunk =>
-        {
-            var fenceCount = CountOccurrences(chunk.Content, "```");
-            Assert.True(fenceCount == 0 || fenceCount % 2 == 0,
-                $"chunk {chunk.ChunkIndex} 内 fence 未配对: {fenceCount}");
-        });
-        var fullBlock = "```csharp\n" + codeBody + "\n```";
-        Assert.Contains(chunks, chunk => chunk.Content.Contains(fullBlock));
+
+        // 代码块超限时按行拆分成多个 Code 子块，块内围栏允许单侧
+        // （开围栏在首块、闭围栏在末块），但任意子块不得再超限。
+        var codeChunks = chunks.Where(c => c.ChunkType == ChunkType.Code).ToList();
+        Assert.NotEmpty(codeChunks);
+        Assert.All(codeChunks, chunk =>
+            Assert.True(
+                _chunkerTokenCount(chunk.Content) <= 40,
+                $"code chunk {chunk.ChunkIndex} 超过 MaxTokens: {_chunkerTokenCount(chunk.Content)}"));
+
+        // 拆分块按 ChunkIndex 顺序拼接应还原完整代码块
+        var joined = string.Join("\n", codeChunks.OrderBy(c => c.ChunkIndex).Select(c => c.Content));
+        var fenceCount = CountOccurrences(joined, "```");
+        Assert.Equal(2, fenceCount);   // 开/闭围栏各一次
+        Assert.Contains("```csharp\n", joined);
+        Assert.Contains("\n```", joined);
+        Assert.Contains(codeBody.Split('\n')[0], joined);
+
+        // 非代码块仍保持完整
+        Assert.Contains(chunks, chunk => chunk.Content.Contains("After the block."));
     }
+
+    private static int _chunkerTokenCount(string text)
+        => ReferenceRAG.Core.Helpers.TokenEstimator.EstimateTokens(text);
 
     [Fact]
     public void Chunk_PreserveCodeBlocksFalse_AllowsSplittingFencedBlock()

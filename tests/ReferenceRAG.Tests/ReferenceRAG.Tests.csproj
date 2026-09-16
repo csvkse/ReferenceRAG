@@ -5,6 +5,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="jieba.NET" GeneratePathProperty="true" />
     <PackageReference Include="coverlet.collector">
       <PrivateAssets>all</PrivateAssets>

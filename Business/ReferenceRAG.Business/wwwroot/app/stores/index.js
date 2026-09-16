@@ -56,10 +56,25 @@ export const useIndexStore = defineStore('index', () => {
             activeJobIds.value.add(data.indexId);
             isIndexing.value = true;
         });
-        // IndexProgress：进度更新
-        connection.value.on('IndexProgress', (_data) => {
+        // IndexProgress：进度更新（保存 payload 供 Dashboard 展示）
+        connection.value.on('IndexProgress', (data) => {
             // 有进度说明仍在运行
             isIndexing.value = activeJobIds.value.size > 0;
+            if (data && data.indexId) {
+                const existing = progressUpdates.value.findIndex(p => p.indexId === data.indexId);
+                const entry = {
+                    indexId: data.indexId,
+                    processedFiles: data.processedFiles ?? 0,
+                    totalFiles: data.totalFiles ?? 0,
+                    currentFile: data.currentFile || '',
+                    timestamp: data.timestamp || new Date().toISOString()
+                };
+                if (existing >= 0) {
+                    progressUpdates.value[existing] = entry;
+                } else {
+                    progressUpdates.value.push(entry);
+                }
+            }
         });
         // IndexCompleted：任务完成
         connection.value.on('IndexCompleted', (data) => {

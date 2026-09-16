@@ -28,6 +28,8 @@ public class IndexService : IHostedService
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _jobCancellationTokens = new();
     private readonly ConcurrentQueue<IndexJob> _completedJobs = new();
     private readonly ConcurrentDictionary<string, Task> _runningJobs = new();
+    // jobId → 正在处理中的文件集合（Phase1 加入、Phase3 完成移除）
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _activeFiles = new();
     private readonly CancellationTokenSource _stopping = new();
     private const int MaxCompletedJobs = 20;
 
@@ -121,7 +123,10 @@ public class IndexService : IHostedService
                 var sw = Stopwatch.StartNew();
                 var errors = new ConcurrentBag<string>();
                 var processedCount = 0;
+                var skippedCount = 0;
                 var errorsCount = 0;
+                // job 级 active files（Phase1 加入、Phase3 完成移除），支持并发查看"正在处理"
+                var activeFiles = _activeFiles.GetOrAdd(indexId, _ => new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase));
 
                 // ── Phase 1: CPU 并行 ── 读文件、hash检测、分块、清旧数据
                 const int maxPrepParallelism = 8;
@@ -130,21 +135,32 @@ public class IndexService : IHostedService
                 var prepTasks = allFiles.Select(async file =>
                 {
                     if (cts.Token.IsCancellationRequested) return null;
-                    if (!_guard.TryAcquire(file)) return null;
+                    if (!_guard.TryAcquire(file))
+                    {
+                        Interlocked.Increment(ref skippedCount);   // 已被其它任务处理，跳过
+                        return null;
+                    }
                     FileProcessContext? prepared = null;
                     var enteredSemaphore = false;
                     try
                     {
                         await prepSemaphore.WaitAsync(cts.Token);
                         enteredSemaphore = true;
+                        activeFiles.TryAdd(file, 0);
                         prepared = request.VectorOnly
                             ? await _pipeline.PrepareVectorOnlyAsync(file, cts.Token)
                             : await _pipeline.PrepareAsync(file, sources, request.Force, cts.Token);
                         if (prepared is not null)
                             heldFiles.TryAdd(file, 0);
+                        else
+                            Interlocked.Increment(ref skippedCount);   // 内容未变化/无 chunk，跳过
                         return prepared;
                     }
-                    catch (OperationCanceledException) { return null; }
+                    catch (OperationCanceledException)
+                    {
+                        Interlocked.Increment(ref skippedCount);
+                        return null;
+                    }
                     catch (Exception ex)
                     {
                         errors.Add($"{file}: {ex.Message}");
@@ -156,6 +172,7 @@ public class IndexService : IHostedService
                     {
                         if (enteredSemaphore)
                             prepSemaphore.Release();
+                        activeFiles.TryRemove(file, out _);
                         if (prepared is null)
                             _guard.Release(file);
                     }
@@ -192,6 +209,8 @@ public class IndexService : IHostedService
 
                 // ── Phase 2: GPU 统一大批次推理 ──
                 var allChunks = contexts.SelectMany(c => c!.Chunks).ToList();
+                var totalVectorsCount = 0;
+                var totalChunksCount = allChunks.Count;
                 if (allChunks.Count > 0)
                 {
                     cts.Token.ThrowIfCancellationRequested();
@@ -199,9 +218,19 @@ public class IndexService : IHostedService
                         embeddingService,
                         vectorStore,
                         batchSize: config.Embedding.BatchSize);
-                    var pipelineResult = await indexingPipeline.ExecuteAsync(allChunks, "batch", cts.Token);
+                    // VectorOnly 等场景的临时嵌入输入（未持久化的截断文本）随批次传入
+                    var embeddingInputs = contexts
+                        .Where(c => c!.EmbeddingInputs != null)
+                        .SelectMany(c => c!.EmbeddingInputs!)
+                        .ToDictionary(kv => kv.Key, kv => kv.Value);
+                    var pipelineResult = await indexingPipeline.ExecuteAsync(
+                        allChunks,
+                        "batch",
+                        cts.Token,
+                        embeddingInputs: embeddingInputs.Count > 0 ? embeddingInputs : null);
                     if (!pipelineResult.Success)
                         throw new InvalidOperationException($"向量管道失败: {pipelineResult.ErrorMessage}");
+                    totalVectorsCount = pipelineResult.TotalVectors;
                 }
 
                 // ── Phase 3: BM25 + 图谱后处理 ──
@@ -211,14 +240,23 @@ public class IndexService : IHostedService
                 const int maxFinalizeParallelism = 4;
                 using var finSemaphore = new SemaphoreSlim(maxFinalizeParallelism);
 
+                // Phase3 期间记录最近处理的文件（用于 job.CurrentFile 展示）
+                var currentFileName = "";
+
                 var finalizeTasks = contexts.Select(async ctx =>
                 {
                     if (cts.Token.IsCancellationRequested) return;
                     await finSemaphore.WaitAsync(cts.Token);
                     try
                     {
-                        // P4: VectorOnly 时跳过图谱但仍更新 BM25
-                        await _pipeline.FinalizeAsync(ctx!, filenameMap, cts.Token, updateGraph: !request.VectorOnly);
+                        currentFileName = ctx!.FileRecord.FileName;
+                        // VectorOnly 时跳过图谱与 BM25 重写（仅重推向量）
+                        await _pipeline.FinalizeAsync(
+                            ctx!,
+                            filenameMap,
+                            cts.Token,
+                            updateGraph: !request.VectorOnly,
+                            updateBm25: !request.VectorOnly);
 
                         var count = Interlocked.Increment(ref processedCount);
                         await _events.PublishAsync("IndexProgress", new IndexProgressEvent
@@ -226,7 +264,7 @@ public class IndexService : IHostedService
                             IndexId = indexId,
                             ProcessedFiles = count,
                             TotalFiles = job.TotalFiles,
-                            CurrentFile = ctx!.FileRecord.FileName,
+                            CurrentFile = currentFileName,
                             Timestamp = DateTime.UtcNow
                         });
                     }
@@ -247,8 +285,14 @@ public class IndexService : IHostedService
 
                 await Task.WhenAll(finalizeTasks);
 
+                // 聚合 job 状态：currentFile 用最近完成的一个，currentFiles 为仍在处理的集合
+                job.CurrentFile = currentFileName;
+                job.CurrentFiles = activeFiles.Keys.ToList();
                 job.ProcessedFiles = processedCount;
+                job.SkippedFiles = skippedCount;
                 job.Errors = errorsCount;
+                job.TotalChunks = totalChunksCount;
+                job.TotalVectors = totalVectorsCount;
                 sw.Stop();
 
                 job.Status = cts.Token.IsCancellationRequested ? IndexStatus.Cancelled : IndexStatus.Completed;
@@ -259,8 +303,8 @@ public class IndexService : IHostedService
                 {
                     IndexId = indexId,
                     TotalFiles = job.TotalFiles,
-                    TotalChunks = job.ProcessedFiles,
-                    TotalVectors = job.ProcessedFiles,
+                    TotalChunks = job.TotalChunks,
+                    TotalVectors = job.TotalVectors,
                     Duration = sw.Elapsed,
                     CompletedAt = job.EndTime.Value,
                     Errors = errors.ToList()
@@ -277,8 +321,8 @@ public class IndexService : IHostedService
                 {
                     IndexId = indexId,
                     TotalFiles = job.TotalFiles,
-                    TotalChunks = job.ProcessedFiles,
-                    TotalVectors = job.ProcessedFiles,
+                    TotalChunks = job.TotalChunks,
+                    TotalVectors = job.TotalVectors,
                     Duration = job.Duration,
                     CompletedAt = job.EndTime.Value
                 });
@@ -294,8 +338,8 @@ public class IndexService : IHostedService
                 {
                     IndexId = indexId,
                     TotalFiles = job.TotalFiles,
-                    TotalChunks = job.ProcessedFiles,
-                    TotalVectors = job.ProcessedFiles,
+                    TotalChunks = job.TotalChunks,
+                    TotalVectors = job.TotalVectors,
                     Duration = job.Duration,
                     CompletedAt = job.EndTime.Value,
                     Errors = new List<string> { ex.Message }
@@ -305,6 +349,7 @@ public class IndexService : IHostedService
             {
                 foreach (var file in heldFiles.Keys)
                     _guard.Release(file);
+                _activeFiles.TryRemove(indexId, out _);
                 if (_jobCancellationTokens.TryRemove(indexId, out var removedCts))
                     removedCts.Dispose();
                 if (job.Status is IndexStatus.Completed or IndexStatus.Failed or IndexStatus.Cancelled)
@@ -380,10 +425,22 @@ public class IndexJob
     public TimeSpan Duration { get; set; }
     public int TotalFiles { get; set; }
     public int ProcessedFiles { get; set; }
+    public int SkippedFiles { get; set; }
     public int Errors { get; set; }
+    public int TotalChunks { get; set; }
+    public int TotalVectors { get; set; }
     public string CurrentFile { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 正在处理中的文件（Phase1 加入、Phase3 完成移除），供 /api/index/jobs 展示
+    /// </summary>
+    public List<string> CurrentFiles { get; set; } = new();
+
+    /// <summary>
+    /// 跳过计数包含：内容未变化、无 chunk、文件被占用、取消等未进入向量阶段的部分
+    /// </summary>
     public string? ErrorMessage { get; set; }
-    public double ProgressPercent => TotalFiles > 0 ? (double)ProcessedFiles / TotalFiles * 100 : 0;
+    public double ProgressPercent => TotalFiles > 0 ? (double)(ProcessedFiles + SkippedFiles) / TotalFiles * 100 : 0;
 }
 
 public enum IndexStatus

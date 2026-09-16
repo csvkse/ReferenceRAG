@@ -153,15 +153,18 @@ public class StartupSyncService : IHostedService
             // 6. 修改检测：mtime 晚于 IndexedAt 的文件
             await ProcessModifiedFilesAsync(storedFilesDict, diskFiles, result, cancellationToken);
 
-            // 7. 触发增量索引：新增 + 修改文件
-            if (result.NewFiles.Count > 0 || result.ModifiedFiles.Count > 0)
+            // 6.5 未完成恢复：上次索引中断遗留的 pending 文件（hash 一致也会被跳过，必须显式纳入）
+            await ProcessPendingFilesAsync(storedFilesDict, result, cancellationToken);
+
+            // 7. 触发增量索引：新增 + 修改 + pending 文件
+            if (result.NewFiles.Count > 0 || result.ModifiedFiles.Count > 0 || result.PendingFiles.Count > 0)
             {
                 _logger.LogInformation(
-                    "检测到 {NewCount} 个新增文件, {ModCount} 个修改文件，启动增量索引",
-                    result.NewFiles.Count, result.ModifiedFiles.Count);
+                    "检测到 {NewCount} 个新增文件, {ModCount} 个修改文件, {PendingCount} 个未完成文件，启动增量索引",
+                    result.NewFiles.Count, result.ModifiedFiles.Count, result.PendingFiles.Count);
 
                 // 只对有变更文件的源触发索引，避免扫描未变更的源目录
-                var changedPaths = result.NewFiles.Concat(result.ModifiedFiles).ToList();
+                var changedPaths = result.NewFiles.Concat(result.ModifiedFiles).Concat(result.PendingFiles).ToList();
                 var affectedSourceNames = enabledSources
                     .Where(s => changedPaths.Any(p =>
                         p.StartsWith(PathUtility.NormalizePath(s.Path), StringComparison.OrdinalIgnoreCase)))
@@ -184,11 +187,12 @@ public class StartupSyncService : IHostedService
             result.Success = true;
 
             _logger.LogInformation(
-                "启动同步完成: 清理孤立源索引 {OrphanedCount} 个, 删除文件索引 {DeletedCount} 个, 新增 {NewCount} 个文件, 修改 {ModifiedCount} 个文件, 耗时 {Duration}ms",
+                "启动同步完成: 清理孤立源索引 {OrphanedCount} 个, 删除文件索引 {DeletedCount} 个, 新增 {NewCount} 个文件, 修改 {ModifiedCount} 个文件, 未完成恢复 {PendingCount} 个文件, 耗时 {Duration}ms",
                 result.OrphanedSourceFiles.Count,
                 result.DeletedFiles.Count,
                 result.NewFiles.Count,
                 result.ModifiedFiles.Count,
+                result.PendingFiles.Count,
                 sw.ElapsedMilliseconds);
 
             LastSyncResult = result;
@@ -467,6 +471,45 @@ public class StartupSyncService : IHostedService
     }
 
     /// <summary>
+    /// 处理未完成的文件（IndexedStatus == pending）
+    /// 上次索引在 Phase1 后/Phase3 前中断，或 VectorOnly 删除向量后崩溃，文件停留在 pending。
+    /// 这类文件即使 hash 一致也会被跳过条件拦截，必须在启动同步中显式纳入重跑。
+    /// </summary>
+    private async Task ProcessPendingFilesAsync(
+        Dictionary<string, FileRecord> storedFilesDict,
+        StartupSyncResult result,
+        CancellationToken cancellationToken)
+    {
+        var pendingFiles = storedFilesDict.Values
+            .Where(f => !string.Equals(f.IndexedStatus, "complete", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (pendingFiles.Count == 0)
+        {
+            _logger.LogDebug("没有未完成的文件需要恢复");
+            return;
+        }
+
+        _logger.LogInformation("检测到 {Count} 个未完成（pending）的文件，启动时自动恢复索引", pendingFiles.Count);
+
+        foreach (var file in pendingFiles)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            result.PendingFiles.Add(file.Path);
+
+            SyncProgress?.Invoke(this, new StartupSyncProgressEventArgs
+            {
+                Phase = "未完成恢复",
+                CurrentFile = file.Path,
+                ProcessedCount = result.PendingFiles.Count,
+                TotalCount = pendingFiles.Count
+            });
+        }
+    }
+
+    /// <summary>
     /// 匹配文件模式
     /// </summary>
     private static bool MatchesPattern(string filePath, string pattern)
@@ -536,6 +579,11 @@ public class StartupSyncResult
     /// 修改的文件列表
     /// </summary>
     public List<string> ModifiedFiles { get; set; } = [];
+
+    /// <summary>
+    /// 未完成（pending）的文件列表，启动时纳入重跑
+    /// </summary>
+    public List<string> PendingFiles { get; set; } = [];
 
     /// <summary>
     /// 孤立源文件索引列表（源已从配置中删除，清理了索引信息但不删除磁盘文件）

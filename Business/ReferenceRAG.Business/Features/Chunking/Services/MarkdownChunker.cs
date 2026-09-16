@@ -137,15 +137,26 @@ public class MarkdownChunker : IMarkdownChunker
         var headingStack = new Stack<(int Level, string Text)>();
         var currentContent = new List<string>();
         int? sectionStart = null;
+        var inFence = false;   // fenced code 状态：围栏内的 "#" 不是标题
 
         for (int i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
             var lineNum = i + 1;
 
-            var headingMatch = HeadingPattern.Match(line);
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith("```", StringComparison.Ordinal))
+            {
+                // 维护围栏状态后再判断标题
+                inFence = !inFence;
+                currentContent.Add(line);
+                if (sectionStart == null) sectionStart = lineNum;
+                continue;
+            }
 
-            if (headingMatch.Success)
+            var headingMatch = !inFence ? HeadingPattern.Match(line) : null;
+
+            if (headingMatch?.Success == true)
             {
                 if (sectionStart.HasValue && currentContent.Count > 0)
                 {
@@ -252,8 +263,19 @@ public class MarkdownChunker : IMarkdownChunker
 
                 if (para.IsCode && options.PreserveCodeBlocks)
                 {
-                    // 代码块完整性优先：整块单独成 chunk，不按句子拆分
-                    result.Add(CreateChunkFromParagraphs([para], allLines, chunkIndex++, section, fileId));
+                    // 代码块完整性优先：整块单独成 chunk；超限时按行拆分避免嵌入截断
+                    if (paraTokens <= options.MaxTokens)
+                    {
+                        result.Add(CreateChunkFromParagraphs([para], allLines, chunkIndex++, section, fileId));
+                    }
+                    else
+                    {
+                        foreach (var subChunk in SplitOversizedCodeBlock(para, allLines, chunkIndex, section, fileId, options))
+                        {
+                            result.Add(subChunk);
+                            chunkIndex++;
+                        }
+                    }
                 }
                 else
                 {
@@ -274,7 +296,17 @@ public class MarkdownChunker : IMarkdownChunker
                 bufferTokens = overlap.Sum(p => _tokenizer?.CountTokens(p.Content) ?? TokenEstimator.EstimateTokens(p.Content));
 
                 buffer.Add(para);
-                bufferTokens += paraTokens;
+
+                // overlap + 新段落合并后可能超过 MaxTokens，从最旧的 overlap 段落开始缩减。
+                // 判定用候选整块估算，避免逐段累加与整块估算的整数除舍入差异
+                while (overlap.Count > 0 && (
+                        _tokenizer?.CountTokens(CountBufferContent(buffer)) ?? TokenEstimator.EstimateTokens(CountBufferContent(buffer)))
+                    > options.MaxTokens)
+                {
+                    buffer.RemoveAt(0);
+                    overlap.RemoveAt(0);
+                }
+                bufferTokens = buffer.Sum(p => _tokenizer?.CountTokens(p.Content) ?? TokenEstimator.EstimateTokens(p.Content));
             }
             else
             {
@@ -376,6 +408,43 @@ public class MarkdownChunker : IMarkdownChunker
         {
             var sentenceTokens = _tokenizer?.CountTokens(sentence) ?? TokenEstimator.EstimateTokens(sentence);
 
+            if (sentenceTokens > options.MaxTokens)
+            {
+                // 单句超过 MaxTokens：先落盘缓冲区，再按预算强制拆分该句
+                if (buffer.Count > 0)
+                {
+                    result.Add(CreateChunk(
+                        string.Join("", buffer),
+                        allLines,
+                        currentLine,
+                        currentLine,
+                        chunkIndex++,
+                        section.HeadingPath,
+                        section.Level,
+                        fileId,
+                        ChunkType.Forced
+                    ));
+                    buffer.Clear();
+                    bufferTokens = 0;
+                }
+
+                foreach (var part in SplitOversizedText(sentence, options.MaxTokens))
+                {
+                    result.Add(CreateChunk(
+                        part,
+                        allLines,
+                        para.StartLine,
+                        para.EndLine,
+                        chunkIndex++,
+                        section.HeadingPath,
+                        section.Level,
+                        fileId,
+                        ChunkType.Forced
+                    ));
+                }
+                continue;
+            }
+
             if (bufferTokens + sentenceTokens > options.MaxTokens && buffer.Count > 0)
             {
                 result.Add(CreateChunk(
@@ -416,6 +485,105 @@ public class MarkdownChunker : IMarkdownChunker
     }
 
     // ── Chunk 构建 ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 按 token 预算强制拆分超长文本（单句/单行级别，无法再按语义边界切分时使用）。
+    /// 基于估算器自适应推进，保证每个片段估算 token 数 ≤ 预算。
+    /// </summary>
+    private List<string> SplitOversizedText(string text, int maxTokens)
+    {
+        var parts = new List<string>();
+        if (string.IsNullOrEmpty(text)) return parts;
+
+        var start = 0;
+        while (start < text.Length)
+        {
+            // 初始步长按最保守口径（每 token 1 字符）估算，再自适应调整
+            var length = Math.Min(maxTokens + 1, text.Length - start);
+            var candidate = text.Substring(start, length);
+            var tokens = _tokenizer?.CountTokens(candidate) ?? TokenEstimator.EstimateTokens(candidate);
+
+            while (tokens > Math.Max(1, maxTokens) && length > 1)
+            {
+                var adjusted = Math.Max(1, (int)((double)length * maxTokens / tokens));
+                length = Math.Min(length - 1, adjusted);
+                candidate = text.Substring(start, length);
+                tokens = _tokenizer?.CountTokens(candidate) ?? TokenEstimator.EstimateTokens(candidate);
+            }
+
+            if (length <= 0) length = 1;
+            parts.Add(text.Substring(start, length));
+            start += length;
+        }
+
+        return parts;
+    }
+
+    /// <summary>
+    /// 超长代码块：按行分组拆分，保证每个子块估算 token 数 ≤ 预算。
+    /// 围栏行保留在各自所属的子块中（首块含开围栏、末块含闭围栏）。
+    /// </summary>
+    private List<ChunkRecord> SplitOversizedCodeBlock(
+        Paragraph para,
+        string[] allLines,
+        int startChunkIndex,
+        Section section,
+        string fileId,
+        ChunkingOptions options)
+    {
+        var result = new List<ChunkRecord>();
+        var lines = para.Content.Split('\n');
+        var buffer = new List<string>();
+        var bufferStartLine = para.StartLine;
+        var nextLine = para.StartLine;
+        var chunkIndex = startChunkIndex;
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            // 判定基于候选整块的估算，避免逐行累加与整块估算的整数除舍入差异
+            if (buffer.Count > 0)
+            {
+                var candidate = string.Join("\n", buffer) + "\n" + lines[i];
+                var candidateTokens = _tokenizer?.CountTokens(candidate) ?? TokenEstimator.EstimateTokens(candidate);
+                if (candidateTokens > options.MaxTokens)
+                {
+                    result.Add(CreateChunk(
+                        string.Join("\n", buffer),
+                        allLines,
+                        bufferStartLine,
+                        nextLine - 1,
+                        chunkIndex++,
+                        section.HeadingPath,
+                        section.Level,
+                        fileId,
+                        ChunkType.Code
+                    ));
+                    buffer.Clear();
+                    bufferStartLine = nextLine;
+                }
+            }
+
+            buffer.Add(lines[i]);
+            nextLine++;
+        }
+
+        if (buffer.Count > 0)
+        {
+            result.Add(CreateChunk(
+                string.Join("\n", buffer),
+                allLines,
+                bufferStartLine,
+                nextLine - 1,
+                chunkIndex,
+                section.HeadingPath,
+                section.Level,
+                fileId,
+                ChunkType.Code
+            ));
+        }
+
+        return result;
+    }
 
     private ChunkRecord CreateChunk(
         string content,
@@ -474,6 +642,9 @@ public class MarkdownChunker : IMarkdownChunker
             fileId
         );
     }
+
+    private static string CountBufferContent(List<Paragraph> paragraphs)
+        => string.Join("\n\n", paragraphs.Select(p => p.Content));
 
     // ── 权重计算 (P1: 删除错误的短内容加权) ──────────────────────────────────
 

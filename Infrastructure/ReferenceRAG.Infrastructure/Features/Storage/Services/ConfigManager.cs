@@ -336,7 +336,43 @@ public class ConfigManager
             errors.Add($"无效的端口号: {config.Service.Port}");
         }
 
+        ValidateChunkingEmbeddingBudget(config, errors, warnings);
+
         return (errors.Count == 0, errors, warnings);
+    }
+
+    /// <summary>
+    /// 校验分块预算与嵌入预算的一致性：
+    /// chunk 的 MaxTokens 必须 ≤ 嵌入模型的序列上限，并预留特殊 token（BOS/EOS/[CLS]/[SEP]）
+    /// 与增强文本（标题/章节/标签等）的空间，否则嵌入会被 tokenizer 静默截断。
+    /// </summary>
+    private static void ValidateChunkingEmbeddingBudget(ObsidianRagConfig config, List<string> errors, List<string> warnings)
+    {
+        var maxTokens = config.Chunking.MaxTokens;
+        if (maxTokens <= 0) return;
+
+        // 对嵌入输入的有效预算：嵌入序列上限 - 特殊 token 预留
+        var embeddingBudget = config.Embedding.Mode.Equals("openai", StringComparison.OrdinalIgnoreCase)
+            ? config.Embedding.ApiMaxInputTokens ?? config.Embedding.MaxSequenceLength
+            : config.Embedding.MaxSequenceLength;
+        if (embeddingBudget <= 0) return;
+
+        const int specialTokens = 2;   // BOS/EOS 或 [CLS]/[SEP]
+        const int enhanceReserve = 32; // 标题/章节/标签/要点句增强前缀的保守预留
+        var effectiveBudget = embeddingBudget - specialTokens - enhanceReserve;
+
+        if (maxTokens > effectiveBudget)
+        {
+            errors.Add(
+                $"分块 MaxTokens={maxTokens} 超过了嵌入预算（序列上限 {embeddingBudget} - 特殊token {specialTokens} - 增强文本预留 {enhanceReserve} = {effectiveBudget}）。" +
+                "请调低 Chunking.MaxTokens 或调高 Embedding.MaxSequenceLength/ApiMaxInputTokens，否则长 chunk 会被嵌入 tokenizer 截断。");
+        }
+        else if (maxTokens > embeddingBudget - specialTokens)
+        {
+            warnings.Add(
+                $"分块 MaxTokens={maxTokens} 接近嵌入序列上限 {embeddingBudget}，" +
+                "配合增强文本（标题/章节/标签）时仍可能被 tokenizer 截断，建议 ≤ " + effectiveBudget + "。");
+        }
     }
 
     /// <summary>

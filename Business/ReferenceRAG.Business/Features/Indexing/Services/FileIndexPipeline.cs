@@ -51,8 +51,12 @@ public class FileIndexPipeline : IFileIndexPipeline
         bool force,
         CancellationToken ct = default)
     {
+        var config = _configManager.Load();
+        var chunking = config.Chunking;
+
         var content = await File.ReadAllTextAsync(filePath, ct);
         var contentHash = ComputeHash(content);
+        var chunkingHash = ComputeChunkingHash(chunking);
 
         var matchedSource = sources
             .OrderByDescending(s => s.Path.Length)
@@ -65,18 +69,18 @@ public class FileIndexPipeline : IFileIndexPipeline
         var existingFile = await _vectorStore.GetFileByPathAsync(filePath, ct);
         var fileId = existingFile?.Id ?? Guid.NewGuid().ToString();
 
-        // 跳过条件：hash 匹配 AND 上次已完整完成（status='complete'）
+        // 跳过条件：hash 匹配 AND 上次已完整完成（status='complete'） AND 分块配置未变更
         // status='pending' 说明上次中断，即使 hash 一致也必须重新索引
+        // chunking hash 不一致说明分块参数变更，必须重新分块
         if (!force && existingFile != null
             && existingFile.ContentHash == contentHash
-            && existingFile.IndexedStatus == "complete")
+            && existingFile.IndexedStatus == "complete"
+            && existingFile.ChunkingHash == chunkingHash)
         {
             _logger?.LogDebug("内容未变化，跳过: {FileName}", Path.GetFileName(filePath));
             return null;
         }
 
-        var config = _configManager.Load();
-        var chunking = config.Chunking;
         var chunks = _chunker.Chunk(content, new ChunkingOptions
         {
             MaxTokens = chunking.MaxTokens,
@@ -97,6 +101,7 @@ public class FileIndexPipeline : IFileIndexPipeline
             Source = sourceName,
             ContentHash = contentHash,
             ContentLength = content.Length,
+            ChunkingHash = chunkingHash,
             Title = Path.GetFileNameWithoutExtension(filePath),
             ModifiedAt = File.GetLastWriteTime(filePath),
             ChunkCount = chunks.Count,
@@ -156,18 +161,17 @@ public class FileIndexPipeline : IFileIndexPipeline
         await _vectorStore.DeleteVectorsByFileAsync(existingFile.Id, ct);
         await _vectorStore.MarkFileStatusAsync(existingFile.Id, "pending", ct);
 
-        var (changedCount, exact) = await LimitEmbeddingInputAsync(chunks, _configManager.Load(), ct);
-        if (changedCount > 0)
-        {
-            existingFile.ChunkCount = chunks.Count;
-            await _vectorStore.UpsertFileAsync(existingFile, ct);
-        }
+        // VectorOnly 不修改已存 chunk：截断结果只保存在临时嵌入输入（EmbeddingInputs），
+        // 不写回 chunks 表，保证"仅重推向量"语义，图谱/BM25 引用不变。
+        var config = _configManager.Load();
+        var inputs = await BuildVectorOnlyEmbeddingInputsAsync(chunks, config, ct);
+        var changedCount = inputs.Count;
 
         if (changedCount > 0)
         {
             _logger?.LogWarning(
-                "{Action} {Count}/{Total} 条存量嵌入输入: {File}",
-                exact ? "已精确拆分" : "已截断", changedCount, chunks.Count, filePath);
+                "已截断 {Count}/{Total} 条存量嵌入输入: {File}",
+                changedCount, chunks.Count, filePath);
         }
 
         return new FileProcessContext
@@ -175,7 +179,8 @@ public class FileIndexPipeline : IFileIndexPipeline
             FileRecord = existingFile,
             Content = "",
             Chunks = chunks,
-            OldChunkIds = new List<string>()
+            OldChunkIds = new List<string>(),
+            EmbeddingInputs = inputs
         };
     }
 
@@ -183,10 +188,12 @@ public class FileIndexPipeline : IFileIndexPipeline
         FileProcessContext ctx,
         IReadOnlyDictionary<string, string> filenameMap,
         CancellationToken ct = default,
-        bool updateGraph = true)
+        bool updateGraph = true,
+        bool updateBm25 = true)
     {
-        // P4: BM25 总是更新（含 VectorOnly 场景）；图谱仅在 updateGraph=true 时更新
-        await _bm25Store.IndexBatchAsync(ctx.Chunks.Select(c => (c.Id, c.Content)));
+        // VectorOnly：只重推向量，不改 BM25/图谱（updateBm25=false 由调用方传入）
+        if (updateBm25)
+            await _bm25Store.IndexBatchAsync(ctx.Chunks.Select(c => (c.Id, c.Content)));
 
         if (updateGraph && _graphIndexing != null)
         {
@@ -198,7 +205,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         // 新向量/BM25/图谱都已写入后再清理旧版本，避免推理失败造成搜索空窗。
         foreach (var oldChunkId in ctx.OldChunkIds)
             await _vectorStore.DeleteChunkAsync(oldChunkId, ct);
-        if (ctx.OldChunkIds.Count > 0)
+        if (ctx.OldChunkIds.Count > 0 && updateBm25)
             await _bm25Store.DeleteDocumentsByIdsAsync(ctx.OldChunkIds);
 
         // 所有阶段完成，标记为 complete，防止中断后因 hash 匹配被跳过
@@ -311,13 +318,28 @@ public class FileIndexPipeline : IFileIndexPipeline
         return Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(content)));
     }
 
+    /// <summary>
+    /// 分块配置指纹：影响分块结果的参数变更后，文件必须重新分块。
+    /// 与具体参数值一致即可，无关顺序（拼接后统一哈希）。
+    /// </summary>
+    private static string ComputeChunkingHash(Core.Models.ChunkingConfig chunking)
+    {
+        using var sha = SHA256.Create();
+        var text = string.Join("|",
+            chunking.MaxTokens,
+            chunking.MinTokens,
+            chunking.OverlapTokens,
+            chunking.PreserveHeadings,
+            chunking.PreserveCodeBlocks);
+        return Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(text)));
+    }
+
     private async Task<(int ChangedCount, bool Exact)> LimitEmbeddingInputAsync(
         List<ChunkRecord> chunks,
         Core.Models.ObsidianRagConfig config,
         CancellationToken ct)
     {
-        if (!string.Equals(config.Embedding.Mode, "openai", StringComparison.OrdinalIgnoreCase))
-            return (0, false);
+        var maxInputTokens = config.Embedding.ApiMaxInputTokens ?? config.Embedding.MaxSequenceLength;
 
         if (_tokenCounter != null)
         {
@@ -330,10 +352,67 @@ public class FileIndexPipeline : IFileIndexPipeline
             {
                 _logger?.LogDebug("嵌入服务不支持精确分词，回退到保守字符截断。");
             }
+            catch (HttpRequestException ex)
+            {
+                // 401/400/500 等非"不支持"响应：不阻断索引，降级为字符截断
+                _logger?.LogWarning(ex, "嵌入服务 tokenize 探测失败（{Status}），回退到字符截断。",
+                    ex.StatusCode?.ToString() ?? "无状态码");
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger?.LogWarning(ex, "嵌入服务 tokenize 响应异常，回退到字符截断。");
+            }
+            catch (TimeoutException ex)
+            {
+                _logger?.LogWarning(ex, "嵌入服务 tokenize 超时，回退到字符截断。");
+            }
         }
 
-        var truncatedCount = TruncateEmbeddingInput(chunks, config);
+        // ONNX 与降级路径统一按字符预算截断（maxInputTokens 已含 MaxSequenceLength 兜底）
+        var truncatedCount = TruncateEmbeddingInput(chunks, Math.Max(1, maxInputTokens - 2));
         return (truncatedCount, false);
+    }
+
+    /// <summary>
+    /// VectorOnly：用精确 token 计数逐条检查，超限 chunk 生成临时嵌入输入（截断文本）。
+    /// 不修改 chunk 对象、不写回仓库；返回值 chunkId → 嵌入文本，供嵌入阶段使用。
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, string>> BuildVectorOnlyEmbeddingInputsAsync(
+        List<ChunkRecord> chunks,
+        Core.Models.ObsidianRagConfig config,
+        CancellationToken ct)
+    {
+        var maxInputTokens = config.Embedding.ApiMaxInputTokens ?? config.Embedding.MaxSequenceLength;
+        var budget = Math.Max(1, maxInputTokens - 2);
+        var inputs = new Dictionary<string, string>();
+
+        foreach (var chunk in chunks)
+        {
+            var text = chunk.EnhancedContent ?? chunk.Content;
+            var needsTruncate = text.Length > budget;
+
+            if (needsTruncate && _tokenCounter != null)
+            {
+                try
+                {
+                    var tokenCount = await _tokenCounter.CountTokensAsync(text, ct);
+                    needsTruncate = tokenCount > budget;
+                }
+                catch (NotSupportedException)
+                {
+                    _logger?.LogDebug("嵌入服务不支持精确分词，VectorOnly 回退到保守字符截断。");
+                }
+                catch (HttpRequestException ex)
+                {
+                    _logger?.LogWarning(ex, "嵌入服务 tokenize 探测失败，VectorOnly 回退到字符截断。");
+                }
+            }
+
+            if (needsTruncate)
+                inputs[chunk.Id] = TruncateToCharacterBudget(text, budget);
+        }
+
+        return inputs;
     }
 
     private async Task<int> SplitWithExactTokenCounterAsync(
@@ -341,7 +420,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         Core.Models.ObsidianRagConfig config,
         CancellationToken ct)
     {
-        var maxInputTokens = config.Embedding.ApiMaxInputTokens ?? 512;
+        var maxInputTokens = config.Embedding.ApiMaxInputTokens ?? config.Embedding.MaxSequenceLength;
         var tokenBudget = Math.Max(1, maxInputTokens - 2); // llama.cpp embeddings adds BOS/EOS.
         var output = new List<ChunkRecord>(chunks.Count);
 
@@ -356,6 +435,10 @@ public class FileIndexPipeline : IFileIndexPipeline
                 continue;
             }
 
+            // 增强前缀（TextEnhancer 追加的 [标题]/[章节] 等）仅用于嵌入输入，
+            // 拆分时从正文片段中剔除，保证 Content/BM25 仍是原始正文语义。
+            var prefix = ExtractEnhancePrefix(chunk, text);
+
             var parts = await SplitTextByTokenBudgetAsync(text, tokenBudget, ct);
             for (var partIndex = 0; partIndex < parts.Count; partIndex++)
             {
@@ -366,11 +449,15 @@ public class FileIndexPipeline : IFileIndexPipeline
                 if (partTokenCount > tokenBudget)
                     throw new InvalidOperationException($"精确分词拆分后仍超过限制: {partTokenCount} > {tokenBudget}");
 
+                var plainContent = StripPrefix(part, prefix);
+
                 output.Add(new ChunkRecord
                 {
                     Id = partIndex == 0 ? chunk.Id : Guid.NewGuid().ToString(),
                     FileId = chunk.FileId,
-                    Content = part,
+                    // A4: Content 保留原始正文（去除嵌入专用前缀），BM25/展示语义不被破坏
+                    Content = plainContent,
+                    // 嵌入输入：含前缀的拆分文本，单独存放
                     EnhancedContent = part,
                     TokenCount = partTokenCount,
                     StartLine = chunk.StartLine,
@@ -382,7 +469,14 @@ public class FileIndexPipeline : IFileIndexPipeline
                     ChunkType = ChunkType.Forced,
                     Weight = chunk.Weight,
                     Tags = chunk.Tags,
-                    Keywords = chunk.Keywords
+                    Keywords = chunk.Keywords,
+                    Source = chunk.Source,
+                    AggregateType = chunk.AggregateType,
+                    AggregateRange = chunk.AggregateRange,
+                    ChildChunkCount = chunk.ChildChunkCount,
+                    // 保持同源 chunk 的排序连续性
+                    ChunkOrder = chunk.ChunkOrder + partIndex * 0.000001,
+                    ContentHash = chunk.ContentHash
                 });
             }
         }
@@ -394,6 +488,26 @@ public class FileIndexPipeline : IFileIndexPipeline
         chunks.Clear();
         chunks.AddRange(output);
         return Math.Max(0, changedCount);
+    }
+
+    /// <summary>
+    /// 提取嵌入输入的增强前缀：EnhancedContent 以 "\n" 拼接方式追加在原文之后，
+    /// 前缀 = EnhancedContent 中位于原文之前的固定部分。
+    /// </summary>
+    private static string ExtractEnhancePrefix(ChunkRecord chunk, string enhancedText)
+    {
+        if (string.IsNullOrEmpty(chunk.Content) || enhancedText == chunk.Content)
+            return string.Empty;
+        if (enhancedText.EndsWith(chunk.Content, StringComparison.Ordinal))
+            return enhancedText[..^chunk.Content.Length];
+        return string.Empty;
+    }
+
+    private static string StripPrefix(string part, string prefix)
+    {
+        if (!string.IsNullOrEmpty(prefix) && part.StartsWith(prefix, StringComparison.Ordinal))
+            return part[prefix.Length..];
+        return part;
     }
 
     private async Task<List<string>> SplitTextByTokenBudgetAsync(
@@ -518,9 +632,8 @@ public class FileIndexPipeline : IFileIndexPipeline
             yield return text[start..];
     }
 
-    private int TruncateEmbeddingInput(IEnumerable<ChunkRecord> chunks, Core.Models.ObsidianRagConfig config)
+    private int TruncateEmbeddingInput(IEnumerable<ChunkRecord> chunks, int maxCharacters)
     {
-        var maxCharacters = Math.Max(1, (config.Embedding.ApiMaxInputTokens ?? 512) - 2);
         var truncatedCount = 0;
 
         foreach (var chunk in chunks)

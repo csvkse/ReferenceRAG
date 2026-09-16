@@ -28,12 +28,14 @@ public interface IFileIndexPipeline
     /// <summary>
     /// Phase 3: BM25索引 + 图谱更新（GPU推理已在外部完成）。
     /// updateGraph=false 时仅更新 BM25，跳过图谱（VectorOnly 场景）。
+    /// updateBm25=false 时两者都跳过，仅完成状态收尾（VectorOnly 且不想重写 BM25 时使用）。
     /// </summary>
     Task FinalizeAsync(
         FileProcessContext ctx,
         IReadOnlyDictionary<string, string> filenameMap,
         CancellationToken ct = default,
-        bool updateGraph = true);
+        bool updateGraph = true,
+        bool updateBm25 = true);
 
     /// <summary>
     /// 单文件全流程 (Phase1 + GPU + Phase3)。AutoIndexService 使用。
@@ -77,4 +79,11 @@ public class FileProcessContext
     public string Content { get; set; } = "";
     public List<ChunkRecord> Chunks { get; set; } = new();
     public List<string> OldChunkIds { get; set; } = new();
+
+    /// <summary>
+    /// 可选的临时嵌入输入（chunkId → 嵌入文本）。
+    /// 用于 VectorOnly 场景：只改变嵌入 payload，不修改已持久化 chunk（EnhancedContent 保持原值）。
+    /// 为 null 时嵌入文本取自 chunk.EnhancedContent ?? chunk.Content。
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? EmbeddingInputs { get; set; }
 }
