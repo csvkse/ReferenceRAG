@@ -94,42 +94,49 @@ const router = createRouter({
     history: isDesktop ? createWebHashHistory() : createWebHistory(),
     routes
 });
-// 标记是否已检查认证状态
-let authChecked = false;
+// 缓存服务端是否需要认证的状态
+let serverAuthRequired = null;
+
 router.beforeEach(async (to, _from, next) => {
     document.title = `${to.meta.title || 'ReferenceRAG'} - ReferenceRAG`;
-    // 公开页面直接放行
-    if (to.meta.public) {
-        next();
-        return;
-    }
     const authStore = useAuthStore();
-    // 如果已有 API Key，直接放行（header 已在 store 中设置）
-    if (authStore.apiKey) {
+
+    // 首次访问时检查服务端是否启用了 API Key 认证
+    if (serverAuthRequired === null) {
+        try {
+            serverAuthRequired = await authStore.checkAuthRequired();
+        } catch {
+            serverAuthRequired = false;
+        }
+    }
+
+    // 服务端未启用认证时，所有路由皆可自由访问
+    if (!serverAuthRequired) {
+        if (to.path === '/login') {
+            next('/');
+            return;
+        }
         next();
         return;
     }
-    // 只在首次访问时检查是否需要认证
-    if (!authChecked) {
-        authChecked = true;
-        try {
-            // 尝试访问一个简单的 API
-            const response = await fetch(`${API_URL}/system/status`);
-            if (response.status === 401 || response.status === 403) {
-                // 需要认证，跳转登录页
-                next('/login');
-                return;
-            }
-            // 不需要认证，放行
-            next();
+
+    // 服务端启用认证时的公开页面（如登录页）
+    if (to.meta.public) {
+        if (to.path === '/login' && authStore.isAuthenticated) {
+            next('/');
+            return;
         }
-        catch {
-            // 网络错误等，放行
-            next();
-        }
-    }
-    else {
         next();
+        return;
     }
+
+    // 受保护页面：必须具备 API Key
+    if (authStore.isAuthenticated) {
+        next();
+        return;
+    }
+
+    // 未登录，拦截并跳转登录页
+    next({ path: '/login', query: to.fullPath !== '/' ? { redirect: to.fullPath } : undefined });
 });
 export default router;

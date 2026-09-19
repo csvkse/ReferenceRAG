@@ -45,13 +45,6 @@ public static class ApiKeyExtensions
             _logger.LogInformation($"[ApiKey] API Key 认证未启用（未配置 ApiKey）");
         }
 
-        app.Use(async (context, next) =>
-        {
-            context.Items["ApiKeyEnabled"] = enabled;
-            context.Items["ApiKeyValue"] = apiKey;
-            await next();
-        });
-
         app.UseMiddleware<ApiKeyMiddleware>();
         return app;
     }

@@ -60,6 +60,42 @@ public class MafChatMemoryTests
         Assert.False(service.DeleteSession(expired));
     }
 
+    [Fact]
+    public void TrimHistory_DiscardsOrphanToolMessages_ToMaintainOpenAIProtocol()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Chat:ApiKey"] = string.Empty,
+                ["Chat:MaxMessagesPerSession"] = "4"
+            })
+            .Build();
+        var services = new ServiceCollection().AddLogging().AddHttpClient().BuildServiceProvider();
+        var service = new MafChatService(
+            configuration,
+            services.GetRequiredService<IServiceScopeFactory>(),
+            services.GetRequiredService<IHttpClientFactory>(),
+            services.GetRequiredService<ILogger<MafChatService>>());
+
+        var messages = new List<Microsoft.Extensions.AI.ChatMessage>
+        {
+            new(Microsoft.Extensions.AI.ChatRole.System, "System prompt"),
+            new(Microsoft.Extensions.AI.ChatRole.User, "User 1"),
+            new(Microsoft.Extensions.AI.ChatRole.Assistant, "Call tool"),
+            new(Microsoft.Extensions.AI.ChatRole.Tool, "Tool result"),
+            new(Microsoft.Extensions.AI.ChatRole.Assistant, "Answer 1"),
+            new(Microsoft.Extensions.AI.ChatRole.User, "User 2"),
+            new(Microsoft.Extensions.AI.ChatRole.Assistant, "Answer 2")
+        };
+
+        service.TrimHistory(messages);
+
+        Assert.True(messages.Count <= 4);
+        Assert.Equal(Microsoft.Extensions.AI.ChatRole.System, messages[0].Role);
+        Assert.Equal(Microsoft.Extensions.AI.ChatRole.User, messages[1].Role);
+        Assert.Equal("User 2", messages[1].Text);
+    }
+
     private sealed class TestTimeProvider(DateTimeOffset now) : TimeProvider
     {
         private DateTimeOffset _now = now;

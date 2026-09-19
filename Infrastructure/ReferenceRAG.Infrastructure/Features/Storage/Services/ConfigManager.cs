@@ -15,6 +15,23 @@ public class ConfigManager
 {
     private ObsidianRagConfig? _config;
     private static readonly ILogger _logger = StaticLogger.GetLogger("ConfigManager");
+    private static readonly object _fileLock = new();
+
+    public ConfigManager(ObsidianRagConfig? initialConfig = null)
+    {
+        _config = initialConfig;
+    }
+
+    /// <summary>
+    /// 手动设置内存配置（主要用于测试或动态切换）
+    /// </summary>
+    public void SetConfig(ObsidianRagConfig config)
+    {
+        lock (_fileLock)
+        {
+            _config = config;
+        }
+    }
 
     private static readonly JsonSerializerOptions _readOptions = new()
     {
@@ -40,34 +57,39 @@ public class ConfigManager
     {
         if (_config != null) return _config;
 
-        var appSettingsPath = GetAppSettingsPath();
-        if (File.Exists(appSettingsPath))
+        lock (_fileLock)
         {
-            try
+            if (_config != null) return _config;
+
+            var appSettingsPath = GetAppSettingsPath();
+            if (File.Exists(appSettingsPath))
             {
-                var json = File.ReadAllText(appSettingsPath);
-                using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.TryGetProperty("ReferenceRAG", out var ragConfig))
+                try
                 {
-                    _config = ragConfig.Deserialize<ObsidianRagConfig>(_readOptions);
-                    if (_config != null)
+                    var json = File.ReadAllText(appSettingsPath);
+                    using var doc = JsonDocument.Parse(json);
+                    if (doc.RootElement.TryGetProperty("ReferenceRAG", out var ragConfig))
                     {
-                        _logger.LogInformation("[ConfigManager] 已从 appsettings.json 加载配置");
-                        ApplyEnvironmentVariables(_config);
-                        return _config;
+                        _config = ragConfig.Deserialize<ObsidianRagConfig>(_readOptions);
+                        if (_config != null)
+                        {
+                            _logger.LogInformation("[ConfigManager] 已从 appsettings.json 加载配置");
+                            ApplyEnvironmentVariables(_config);
+                            return _config;
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"[ConfigManager] 配置文件解析失败: {ex.Message}");
+                }
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning($"[ConfigManager] 配置文件解析失败: {ex.Message}");
-            }
+
+            _config ??= new ObsidianRagConfig();
+            ApplyEnvironmentVariables(_config);
+
+            return _config;
         }
-
-        _config ??= new ObsidianRagConfig();
-        ApplyEnvironmentVariables(_config);
-
-        return _config;
     }
 
     /// <summary>
@@ -75,31 +97,34 @@ public class ConfigManager
     /// </summary>
     public void Save(ObsidianRagConfig config)
     {
-        var appSettingsPath = GetAppSettingsPath();
-
-        try
+        lock (_fileLock)
         {
-            JsonObject root;
-            if (File.Exists(appSettingsPath))
-            {
-                var json = File.ReadAllText(appSettingsPath);
-                root = JsonNode.Parse(json)?.AsObject() ?? new JsonObject();
-            }
-            else
-            {
-                root = new JsonObject();
-            }
+            var appSettingsPath = GetAppSettingsPath();
 
-            root["ReferenceRAG"] = JsonSerializer.SerializeToNode(config, _writeOptions) ?? new JsonObject();
-            File.WriteAllText(appSettingsPath, root.ToJsonString(_writeOptions));
+            try
+            {
+                JsonObject root;
+                if (File.Exists(appSettingsPath))
+                {
+                    var json = File.ReadAllText(appSettingsPath);
+                    root = JsonNode.Parse(json)?.AsObject() ?? new JsonObject();
+                }
+                else
+                {
+                    root = new JsonObject();
+                }
 
-            _config = config;
-            _logger.LogInformation($"[ConfigManager] 配置已保存到: {appSettingsPath}");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError($"[ConfigManager] 保存配置失败: {ex.Message}");
-            throw;
+                root["ReferenceRAG"] = JsonSerializer.SerializeToNode(config, _writeOptions) ?? new JsonObject();
+                File.WriteAllText(appSettingsPath, root.ToJsonString(_writeOptions));
+
+                _config = config;
+                _logger.LogInformation($"[ConfigManager] 配置已保存到: {appSettingsPath}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ConfigManager] 保存配置失败: {ex.Message}");
+                throw;
+            }
         }
     }
 

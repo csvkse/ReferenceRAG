@@ -16,36 +16,36 @@ const component = /*@__PURE__*/ _defineComponent({
         const handleLogin = async () => {
             loading.value = true;
             errorMsg.value = '';
+            const targetRedirect = router.currentRoute.value.query?.redirect || '/';
             try {
-                // First check if server requires authentication
+                // 检查服务端是否要求认证
                 const authRequired = await authStore.checkAuthRequired();
                 if (!authRequired) {
-                    // Server doesn't require auth, login directly
                     authStore.clearApiKey();
-                    message.success('Login successful');
-                    router.push('/');
+                    message.success('登录成功');
+                    router.push(targetRedirect);
                     return;
                 }
-                // Server requires auth, validate API Key
+                // 服务端需要认证，检查用户输入
                 if (!apiKey.value.trim()) {
-                    errorMsg.value = 'API Key is required. Please enter your API Key.';
+                    errorMsg.value = '服务端已开启认证，请输入 API 密钥。';
                     return;
                 }
-                // Save and verify API Key
+                // 验证 API 密钥
                 authStore.setApiKey(apiKey.value.trim());
                 const valid = await authStore.verifyApiKey();
                 if (valid) {
-                    message.success('Login successful');
-                    router.push('/');
+                    message.success('登录成功');
+                    router.push(targetRedirect);
                 }
                 else {
                     authStore.clearApiKey();
-                    errorMsg.value = 'Invalid API Key. Please try again.';
+                    errorMsg.value = 'API 密钥无效，请重新输入。';
                 }
             }
             catch (error) {
                 authStore.clearApiKey();
-                errorMsg.value = error.response?.data?.error || 'Connection failed. Please check if service is running.';
+                errorMsg.value = error.response?.data?.error || '连接失败，请检查服务是否正常运行。';
             }
             finally {
                 loading.value = false;

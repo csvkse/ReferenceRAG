@@ -316,8 +316,10 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
         }
     }
 
+    private const int MaxRerankBatchSize = 16;
+
     /// <summary>
-    /// 批量计算多个 Query-Document 对的相关性分数
+    /// 批量计算多个 Query-Document 对的相关性分数（支持 Mini-Batch 分批，避免显存 OOM）
     /// </summary>
     private List<RerankDocument> ComputeRelevanceScoresBatch(string query, List<string> documents)
     {
@@ -331,6 +333,26 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
             }).ToList();
         }
 
+        if (documents.Count == 0) return new List<RerankDocument>();
+
+        if (documents.Count <= MaxRerankBatchSize)
+        {
+            return ComputeRelevanceScoresMiniBatch(query, documents, 0);
+        }
+
+        var allScores = new List<RerankDocument>(documents.Count);
+        for (int offset = 0; offset < documents.Count; offset += MaxRerankBatchSize)
+        {
+            var batch = documents.Skip(offset).Take(MaxRerankBatchSize).ToList();
+            var batchScores = ComputeRelevanceScoresMiniBatch(query, batch, offset);
+            allScores.AddRange(batchScores);
+        }
+
+        return allScores;
+    }
+
+    private List<RerankDocument> ComputeRelevanceScoresMiniBatch(string query, List<string> documents, int startIndex)
+    {
         var maxLength = _options.MaxSequenceLength;
         var batchSize = documents.Count;
 
@@ -351,7 +373,7 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
         }
 
         // 构建 ONNX 输入
-        var inputNames = _session.InputNames;
+        var inputNames = _session!.InputNames;
         var hasTokenTypeIds = inputNames.Contains("token_type_ids");
 
         // 使用正确的方式创建 DenseTensor：先创建一维数组再指定维度
@@ -415,7 +437,7 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
 
             scores.Add(new RerankDocument
             {
-                Index = i,
+                Index = startIndex + i,
                 Document = documents[i],
                 RelevanceScore = Math.Clamp(score, 0.0, 1.0)
             });

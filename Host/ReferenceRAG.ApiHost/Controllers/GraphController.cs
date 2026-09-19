@@ -68,13 +68,22 @@ public class GraphController : ControllerBase
                 Func<string, string?> resolver = shortId =>
                     filenameMap.TryGetValue(shortId, out var full) ? full : null;
 
+                // 预先批量获取所有文件的分块，消除 N+1 数据库往返
+                var fileIds = files.Select(f => f.Id).ToList();
+                var chunksByFileId = (await _vectorStore.GetChunksByFileIdsAsync(fileIds))
+                    .GroupBy(c => c.FileId)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
+                // 重建前先清空图谱，避免已删除或改名文件的孤立节点与残留边累积
+                await _graphStore.ClearAllAsync();
+
                 foreach (var file in files)
                 {
                     try
                     {
                         if (!System.IO.File.Exists(file.Path)) continue;
                         var content = await System.IO.File.ReadAllTextAsync(file.Path);
-                        var chunks = await _vectorStore.GetChunksByFileAsync(file.Id);
+                        var chunks = chunksByFileId.GetValueOrDefault(file.Id, new List<ChunkRecord>());
                         await _graphIndexingService.UpdateGraphAsync(file, content, chunks, default, resolver);
                         rebuilt++;
                     }

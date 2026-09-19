@@ -20,7 +20,6 @@ public class MafChatService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly string _systemPrompt;
-    private readonly string _localBaseUrl;
     private readonly AITool[] _tools;
     private readonly ConcurrentDictionary<string, ChatSession> _sessions = new();
     private readonly ILogger<MafChatService> _logger;
@@ -28,8 +27,6 @@ public class MafChatService
     private readonly int _maxSessions;
     private readonly int _maxMessagesPerSession;
     private readonly TimeSpan _sessionIdleTimeout;
-
-    private static readonly JsonSerializerOptions _jsonOpts = new() { PropertyNameCaseInsensitive = true };
 
     public MafChatService(
         IConfiguration config,
@@ -51,9 +48,6 @@ public class MafChatService
         _maxSessions = Math.Max(1, section.GetValue("MaxSessions", 100));
         _maxMessagesPerSession = Math.Max(3, section.GetValue("MaxMessagesPerSession", 50));
         _sessionIdleTimeout = TimeSpan.FromMinutes(Math.Max(1, section.GetValue("SessionIdleMinutes", 60)));
-
-        var port = config.GetSection("ReferenceRAG:Service")["port"] ?? "7897";
-        _localBaseUrl = $"http://localhost:{port}/api";
 
         _tools =
         [
@@ -166,24 +160,25 @@ public class MafChatService
     {
         try
         {
-            var http = _httpClientFactory.CreateClient("Rag.LocalApi");
-            var url = $"{_localBaseUrl}/bm25index/search?query={Uri.EscapeDataString(keyword)}&topK={topK}";
-            var res = await http.GetFromJsonAsync<JsonElement>(url, _jsonOpts);
+            if (string.IsNullOrWhiteSpace(keyword)) return "搜索关键词不能为空。";
+            using var scope = _scopeFactory.CreateScope();
+            var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
+            var results = await bm25Store.SearchAsync(keyword, topK);
 
-            var results = res.TryGetProperty("results", out var r) ? r : res.GetProperty("Results");
+            if (results.Count == 0)
+                return $"未找到关键词「{keyword}」的匹配内容。";
+
             var sb = new StringBuilder();
             sb.AppendLine($"## BM25 精确检索（词：{keyword}）");
             sb.AppendLine();
             int idx = 1;
-            foreach (var item in results.EnumerateArray())
+            foreach (var item in results)
             {
-                var content = GetStr(item, "content", "Content");
-                var score = GetDouble(item, "score", "Score");
-                sb.AppendLine($"[{idx++}] score: {score:F2}");
-                sb.AppendLine(content);
+                sb.AppendLine($"[{idx++}] score: {item.Score:F2}");
+                sb.AppendLine(item.Content);
                 sb.AppendLine();
             }
-            return idx == 1 ? $"未找到关键词「{keyword}」的匹配内容。" : sb.ToString();
+            return sb.ToString();
         }
         catch (Exception ex)
         {
@@ -199,12 +194,13 @@ public class MafChatService
     {
         try
         {
-            var http = _httpClientFactory.CreateClient("Rag.LocalApi");
-            var url = $"{_localBaseUrl}/graph/search?q={Uri.EscapeDataString(titleQuery)}&limit={limit}";
-            var json = await http.GetStringAsync(url);
-            var nodes = JsonSerializer.Deserialize<JsonElement[]>(json, _jsonOpts) ?? [];
+            if (string.IsNullOrWhiteSpace(titleQuery)) return "笔记标题关键词不能为空。";
+            using var scope = _scopeFactory.CreateScope();
+            var graphStore = scope.ServiceProvider.GetRequiredService<IGraphStore>();
+            limit = Math.Clamp(limit, 1, 50);
+            var nodes = await graphStore.SearchNodesAsync(titleQuery, limit);
 
-            if (nodes.Length == 0)
+            if (nodes.Count == 0)
                 return $"未找到标题含「{titleQuery}」的笔记节点。";
 
             var sb = new StringBuilder();
@@ -212,11 +208,8 @@ public class MafChatService
             sb.AppendLine();
             foreach (var node in nodes)
             {
-                var id = GetStr(node, "id", "Id");
-                var title = GetStr(node, "title", "Title");
-                var type = GetStr(node, "type", "Type");
-                sb.AppendLine($"- 《{title}》  类型: {type}");
-                sb.AppendLine($"  ID: {id}");
+                sb.AppendLine($"- 《{node.Title}》  类型: {node.Type}");
+                sb.AppendLine($"  ID: {node.Id}");
             }
             return sb.ToString();
         }
@@ -234,33 +227,47 @@ public class MafChatService
         try
         {
             var paths = filePaths.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            var http = _httpClientFactory.CreateClient("Rag.LocalApi");
-            var body = new StringContent(JsonSerializer.Serialize(new { paths }), Encoding.UTF8, "application/json");
-            var resp = await (await http.PostAsync($"{_localBaseUrl}/sources/files/info", body)).Content
-                .ReadFromJsonAsync<JsonElement>(_jsonOpts);
+            if (paths.Length == 0) return "文件路径列表不能为空。";
+            if (paths.Length > 20) return "单次最多查询 20 个文件。";
 
-            var results = resp.TryGetProperty("results", out var r) ? r : resp.GetProperty("Results");
+            using var scope = _scopeFactory.CreateScope();
+            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+
             var sb = new StringBuilder();
             sb.AppendLine("## 文件章节结构");
             sb.AppendLine();
-            foreach (var item in results.EnumerateArray())
+
+            foreach (var rawPath in paths)
             {
-                var path = GetStr(item, "path", "Path");
-                var title = GetStr(item, "title", "Title");
-                var err = GetStr(item, "error", "Error");
-                if (!string.IsNullOrEmpty(err)) { sb.AppendLine($"- {path}: 错误 {err}"); continue; }
-                sb.AppendLine($"### {(string.IsNullOrEmpty(title) ? path : title)}");
-                sb.AppendLine($"路径: {path}");
-                var sections = item.TryGetProperty("sections", out var s) ? s : item.GetProperty("Sections");
-                foreach (var sec in sections.EnumerateArray())
+                if (string.IsNullOrWhiteSpace(rawPath) || rawPath.Contains(".."))
                 {
-                    var heading = GetStr(sec, "headingPath", "HeadingPath");
-                    var start = GetInt(sec, "startLine", "StartLine");
-                    var end = GetInt(sec, "endLine", "EndLine");
-                    sb.AppendLine($"  - {heading}（行 {start}-{end}）");
+                    sb.AppendLine($"- {rawPath}: 路径无效");
+                    continue;
+                }
+
+                var normalizedPath = Path.GetFullPath(rawPath);
+                var file = await vectorStore.GetFileByPathAsync(normalizedPath)
+                           ?? await vectorStore.GetFileByPathAsync(rawPath);
+
+                if (file == null)
+                {
+                    sb.AppendLine($"- {rawPath}: 文件未被索引");
+                    continue;
+                }
+
+                var chunks = (await vectorStore.GetChunksByFileAsync(file.Id))
+                    .OrderBy(c => c.ChunkOrder)
+                    .ToList();
+
+                sb.AppendLine($"### {(string.IsNullOrEmpty(file.Title) ? file.Path : file.Title)}");
+                sb.AppendLine($"路径: {file.Path}");
+                foreach (var chunk in chunks)
+                {
+                    sb.AppendLine($"  - {chunk.HeadingPath}（行 {chunk.StartLine}-{chunk.EndLine}）");
                 }
                 sb.AppendLine();
             }
+
             return sb.ToString();
         }
         catch (Exception ex)
@@ -278,23 +285,42 @@ public class MafChatService
     {
         try
         {
-            var http = _httpClientFactory.CreateClient("Rag.LocalApi");
-            var body = new StringContent(
-                JsonSerializer.Serialize(new { items = new[] { new { path = filePath, startLine, endLine } } }),
-                Encoding.UTF8, "application/json");
-            var resp = await (await http.PostAsync($"{_localBaseUrl}/sources/file/lines", body)).Content
-                .ReadFromJsonAsync<JsonElement>(_jsonOpts);
+            if (string.IsNullOrWhiteSpace(filePath) || filePath.Contains(".."))
+                return "文件路径无效。";
 
-            var results = resp.TryGetProperty("results", out var r) ? r : resp.GetProperty("Results");
-            var sb = new StringBuilder();
-            foreach (var item in results.EnumerateArray())
+            if (startLine < 0 || endLine < 0)
+                return "startLine / endLine 不能为负数。";
+
+            if (startLine > 0 && endLine > 0 && startLine > endLine)
+                return $"startLine ({startLine}) 不能大于 endLine ({endLine})。";
+
+            using var scope = _scopeFactory.CreateScope();
+            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+
+            var normalizedPath = Path.GetFullPath(filePath);
+            var file = await vectorStore.GetFileByPathAsync(normalizedPath)
+                       ?? await vectorStore.GetFileByPathAsync(filePath);
+
+            if (file == null)
+                return "文件未被索引。";
+
+            var allChunks = await vectorStore.GetChunksByFileAsync(file.Id);
+            var filtered = allChunks.OrderBy(c => c.ChunkOrder);
+            var hasRange = startLine > 0 || endLine > 0;
+            if (hasRange)
             {
-                var err = GetStr(item, "error", "Error");
-                if (!string.IsNullOrEmpty(err)) return $"读取失败：{err}";
-                var chunks = item.TryGetProperty("chunks", out var c) ? c : item.GetProperty("Chunks");
-                foreach (var chunk in chunks.EnumerateArray())
-                    sb.AppendLine(GetStr(chunk, "content", "Content"));
+                var start = startLine > 0 ? startLine : 1;
+                var end = endLine > 0 ? endLine : int.MaxValue;
+                filtered = filtered.Where(c => c.StartLine <= end && c.EndLine >= start)
+                                   .OrderBy(c => c.ChunkOrder);
             }
+
+            var sb = new StringBuilder();
+            foreach (var chunk in filtered)
+            {
+                sb.AppendLine(chunk.Content);
+            }
+
             return sb.Length == 0 ? "未读取到内容。" : sb.ToString();
         }
         catch (Exception ex)
@@ -411,11 +437,19 @@ public class MafChatService
                 _sessions.TryRemove(item.Key, out _);
     }
 
-    private void TrimHistory(List<ChatMessage> messages)
+    internal void TrimHistory(List<ChatMessage> messages)
     {
         var removable = messages.Count - _maxMessagesPerSession;
-        if (removable > 0)
-            messages.RemoveRange(1, Math.Min(removable, messages.Count - 1));
+        if (removable <= 0) return;
+
+        messages.RemoveRange(1, Math.Min(removable, messages.Count - 1));
+
+        // 协议保护：截断后首条非系统消息不能是 Tool 响应，
+        // 必须向前丢弃直到遇到首个 User 消息，保证 OpenAI / MAF 会话协议合法性
+        while (messages.Count > 1 && messages[1].Role != ChatRole.User)
+        {
+            messages.RemoveAt(1);
+        }
     }
 
     private sealed class ChatSession(List<ChatMessage> messages, DateTimeOffset lastAccessUtc)
@@ -423,15 +457,4 @@ public class MafChatService
         public List<ChatMessage> Messages { get; } = messages;
         public DateTimeOffset LastAccessUtc { get; set; } = lastAccessUtc;
     }
-
-    // ── 辅助方法 ──────────────────────────────────────────────────────
-
-    private static string GetStr(JsonElement e, string camel, string pascal)
-        => (e.TryGetProperty(camel, out var v) ? v : e.TryGetProperty(pascal, out v) ? v : default).GetString() ?? "";
-
-    private static double GetDouble(JsonElement e, string camel, string pascal)
-        => (e.TryGetProperty(camel, out var v) ? v : e.TryGetProperty(pascal, out v) ? v : default).GetDouble();
-
-    private static int GetInt(JsonElement e, string camel, string pascal)
-        => (e.TryGetProperty(camel, out var v) ? v : e.TryGetProperty(pascal, out v) ? v : default).GetInt32();
 }

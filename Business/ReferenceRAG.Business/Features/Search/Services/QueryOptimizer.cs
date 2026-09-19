@@ -140,12 +140,18 @@ public class QueryOptimizer
     /// </summary>
     private async Task<List<SearchResult>> ApplyFiltersAsync(List<SearchResult> results, SearchFilter filters)
     {
-        var query = results.AsQueryable();
+        var query = results.AsEnumerable();
 
         // 路径过滤
         if (filters.Folders?.Count > 0)
         {
-            query = query.Where(r => filters.Folders.Any(f => r.FilePath.StartsWith(f)));
+            query = query.Where(r => filters.Folders.Any(f =>
+            {
+                var folder = f.Replace('\\', '/').TrimEnd('/');
+                var filePath = r.FilePath.Replace('\\', '/');
+                return filePath.StartsWith(folder + "/", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(filePath, folder, StringComparison.OrdinalIgnoreCase);
+            }));
         }
 
         var filteredResults = query.ToList();

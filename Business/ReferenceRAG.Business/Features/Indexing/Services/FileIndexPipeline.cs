@@ -54,7 +54,13 @@ public class FileIndexPipeline : IFileIndexPipeline
         var config = _configManager.Load();
         var chunking = config.Chunking;
 
-        var content = await File.ReadAllTextAsync(filePath, ct);
+        var content = await SafeReadFileAsync(filePath, ct);
+        if (content == null)
+        {
+            _logger?.LogWarning("无法读取文件或文件被独占，跳过本次分块处理: {FilePath}", filePath);
+            return null;
+        }
+
         var contentHash = ComputeHash(content);
         var chunkingHash = ComputeChunkingHash(chunking);
 
@@ -657,5 +663,28 @@ public class FileIndexPipeline : IFileIndexPipeline
             length--;
 
         return text[..length];
+    }
+
+    private async Task<string?> SafeReadFileAsync(string path, CancellationToken ct = default)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var sr = new StreamReader(fs);
+                return await sr.ReadToEndAsync(ct);
+            }
+            catch (IOException) when (i < 2)
+            {
+                await Task.Delay(100 * (i + 1), ct);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "读取文件失败: {FileName}", Path.GetFileName(path));
+                return null;
+            }
+        }
+        return null;
     }
 }

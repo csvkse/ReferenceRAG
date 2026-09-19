@@ -1442,8 +1442,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         int topK,
         CancellationToken cancellationToken = default)
     {
-        var idSet = ids.ToHashSet();
-        if (idSet.Count == 0) return Enumerable.Empty<SearchResult>();
+        var idList = ids.Distinct().ToList();
+        if (idList.Count == 0) return Enumerable.Empty<SearchResult>();
 
         // 使用第一个可用模型
         if (_modelDimensions.Count == 0) return Enumerable.Empty<SearchResult>();
@@ -1456,68 +1456,62 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             throw new ArgumentException($"查询向量维度不匹配");
         }
 
-        var tableName = ModelToTableName(modelName);
-        var queryJson = VectorToJson(queryVector);
-        var limitValue = topK * 3; // 多取一些用于内存过滤
+        // 1. 获取指定候选 chunk 的向量
+        var vectors = await GetVectorsByChunkIdsAsync(idList, cancellationToken);
+        if (vectors.Count == 0) return Enumerable.Empty<SearchResult>();
 
-        // 单次 JOIN 查询消除 N+1（对齐 SearchAsync 实现）
-        // vec0 子查询先取 limitValue 个最近邻，外层 JOIN 补充 chunk/file 信息，最终在内存按 idSet 过滤
+        // 2. 精确计算余弦相似度并取 Top-K
+        var scoredList = vectors
+            .Select(kv => (ChunkId: kv.Key, Score: MathHelper.CosineSimilarity(queryVector, kv.Value.Vector)))
+            .OrderByDescending(x => x.Score)
+            .Take(topK)
+            .ToList();
+
+        if (scoredList.Count == 0) return Enumerable.Empty<SearchResult>();
+
+        var topChunkIds = scoredList.Select(s => s.ChunkId).ToList();
+        var scoreMap = scoredList.ToDictionary(s => s.ChunkId, s => s.Score);
+
+        // 3. 批量查询元数据并补充到结果中
+        var placeholders = string.Join(",", topChunkIds.Select((_, idx) => $"@id{idx}"));
         var sql = $@"
             SELECT
-                knn.chunk_id,
                 c.id AS c_id, c.file_id AS c_file_id, c.content, c.token_count,
                 c.start_line, c.end_line, c.start_column, c.end_column,
                 c.heading_path, c.level, c.weight, c.chunk_type,
-                c.aggregate_type, c.child_chunk_count,
-                f.id AS f_id, f.path, f.title, f.source,
-                knn.distance
-            FROM (
-                SELECT chunk_id, distance
-                FROM {tableName}
-                WHERE embedding MATCH @query
-                ORDER BY distance
-                LIMIT {limitValue}
-            ) knn
-            LEFT JOIN chunks c ON knn.chunk_id = c.id
-            LEFT JOIN files  f ON c.file_id = f.id
-            WHERE f.indexed_status = 'complete'   -- 过滤半完成（pending）文件，避免新旧混合
+                c.aggregate_type, c.child_chunk_count, c.chunk_order, c.content_hash,
+                f.id AS f_id, f.path, f.title, f.source
+            FROM chunks c
+            LEFT JOIN files f ON c.file_id = f.id
+            WHERE c.id IN ({placeholders})
+              AND (f.indexed_status = 'complete' OR f.indexed_status IS NULL)
         ";
 
         var searchResults = new List<SearchResult>();
-        var pendingRows = new List<(int Index, string ChunkId)>();  // 锁外补全的行
 
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
             using var command = _connection.CreateCommand();
             command.CommandText = sql;
-            AddParameter(command, "@query", queryJson);
+            for (int i = 0; i < topChunkIds.Count; i++)
+            {
+                AddParameter(command, $"@id{i}", topChunkIds[i]);
+            }
 
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var chunkId = reader.GetString(reader.GetOrdinal("chunk_id"));
-                if (!idSet.Contains(chunkId)) continue;
-
-                var cId = reader.IsDBNull(reader.GetOrdinal("c_id")) ? null : reader.GetString(reader.GetOrdinal("c_id"));
-                if (string.IsNullOrEmpty(cId)) continue;
-
-                var distance = reader.GetFloat(reader.GetOrdinal("distance"));
-                var score = 1f / (1f + distance);
-                var fileId = reader.GetString(reader.GetOrdinal("c_file_id"));
+                var chunkId = reader.GetString(reader.GetOrdinal("c_id"));
+                var fileId = reader.IsDBNull(reader.GetOrdinal("c_file_id")) ? "" : reader.GetString(reader.GetOrdinal("c_file_id"));
                 var filePath = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("path"));
                 var fileSource = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("source"));
                 var fileTitle = reader.IsDBNull(reader.GetOrdinal("f_id")) ? "" : reader.GetString(reader.GetOrdinal("title"));
-
-                if (string.IsNullOrEmpty(fileId) || string.IsNullOrEmpty(filePath))
-                {
-                    // 延迟到锁外补全：GetChunkAsync/GetFileAsync 自身需要写锁，不能在持锁期间调用
-                    pendingRows.Add((searchResults.Count, cId));
-                }
+                var score = scoreMap.TryGetValue(chunkId, out var sc) ? sc : 0f;
 
                 searchResults.Add(new SearchResult
                 {
-                    ChunkId = cId,
+                    ChunkId = chunkId,
                     FileId = fileId,
                     FilePath = filePath,
                     Source = fileSource,
@@ -1531,8 +1525,6 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                     AggregateType = (AggregateType)reader.GetInt32(reader.GetOrdinal("aggregate_type")),
                     ChildChunkCount = reader.GetInt32(reader.GetOrdinal("child_chunk_count"))
                 });
-
-                if (searchResults.Count >= topK) break;
             }
         }
         catch (Exception ex)
@@ -1542,22 +1534,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         }
         finally { _writeLock.Release(); }
 
-        // 锁外补全缺失的 file 信息
-        foreach (var (index, nChunkId) in pendingRows)
-        {
-            var chunk = await GetChunkAsync(nChunkId, cancellationToken);
-            if (chunk == null) continue;
-            var file = await GetFileAsync(chunk.FileId, cancellationToken);
-            if (file == null) continue;
-
-            var row = searchResults[index];
-            row.FileId = chunk.FileId;
-            row.FilePath = file.Path;
-            row.Source = file.Source ?? string.Empty;
-            row.Title = file.Title ?? string.Empty;
-        }
-
-        return searchResults;
+        return searchResults.OrderByDescending(r => r.Score).ToList();
     }
 
     public async Task DeleteBySourceAsync(string source, CancellationToken cancellationToken = default)

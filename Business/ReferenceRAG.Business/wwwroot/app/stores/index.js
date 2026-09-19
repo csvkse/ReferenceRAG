@@ -98,6 +98,8 @@ export const useIndexStore = defineStore('index', () => {
         catch (err) {
             console.error('SignalR connection error:', err);
             isConnected.value = false;
+            try { await connection.value?.stop(); } catch {}
+            connection.value = null;
         }
     };
     const disconnect = async () => {

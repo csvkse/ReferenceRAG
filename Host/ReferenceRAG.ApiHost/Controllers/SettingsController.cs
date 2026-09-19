@@ -14,16 +14,22 @@ public class SettingsController : ControllerBase
 {
     private readonly ConfigManager _configManager;
     private readonly IModelManager _modelManager;
+    private readonly IEmbeddingService? _embeddingService;
+    private readonly IRerankService? _rerankService;
     private readonly ILogger<SettingsController> _logger;
 
     public SettingsController(
         ConfigManager configManager,
         IModelManager modelManager,
-        ILogger<SettingsController> logger)
+        ILogger<SettingsController> logger,
+        IEmbeddingService? embeddingService = null,
+        IRerankService? rerankService = null)
     {
         _configManager = configManager;
         _modelManager = modelManager;
         _logger = logger;
+        _embeddingService = embeddingService;
+        _rerankService = rerankService;
     }
 
     /// <summary>
@@ -114,6 +120,9 @@ public class SettingsController : ControllerBase
             || !string.Equals(current.Rerank.ApiKey, config.Rerank.ApiKey, StringComparison.Ordinal)
             || !string.Equals(current.Rerank.ModelPath, config.Rerank.ModelPath, StringComparison.OrdinalIgnoreCase);
 
+        // 关键保护：数据源由 Sources 模块独立管理，设置保存不能覆盖可能已并发修改的 Sources 列表
+        config.Sources = current.Sources;
+
         _configManager.Save(config);
 
         return Ok(new
@@ -145,9 +154,9 @@ public class SettingsController : ControllerBase
             return BadRequest(new { error = result.Error });
         }
 
-        //// 卸载当前加载的模型，下次使用时将自动加载新路径的模型
-        //_embeddingService.UnloadModel();
-        //_rerankService.UnloadModel();
+        // 卸载当前加载的模型，下次使用时将自动加载新路径的模型
+        _embeddingService?.UnloadModel();
+        _rerankService?.UnloadModel();
         _logger.LogInformation("已卸载嵌入模型和重排模型，新模型将在下次使用时自动加载");
 
         return Ok(new

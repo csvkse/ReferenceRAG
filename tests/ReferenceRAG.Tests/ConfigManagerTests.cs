@@ -202,6 +202,24 @@ public class ConfigManagerTests : IDisposable
         Assert.Equal("0.0.0.0", restored.Service.Host);
     }
 
+    [Fact]
+    public async Task ConcurrentSave_DoesNotCorruptFile()
+    {
+        var cm = CreateConfigManager();
+        var tasks = Enumerable.Range(0, 10).Select(i => Task.Run(() =>
+        {
+            var config = new ObsidianRagConfig();
+            config.DataPath = $"/data/{i}";
+            cm.Save(config);
+        }));
+
+        await Task.WhenAll(tasks);
+
+        var loaded = cm.Load();
+        Assert.NotNull(loaded);
+        Assert.StartsWith("/data/", loaded.DataPath);
+    }
+
     public void Dispose()
     {
         try { Directory.SetCurrentDirectory(_originalDir); } catch { }

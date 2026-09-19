@@ -722,18 +722,18 @@ const component = /*@__PURE__*/ _defineComponent({
             catch {
                 // 忽略恢复失败，不影响正常使用
             }
-            // 监听模型路径变化事件（来自 Settings.vue）
-            const handleStorageChange = (e) => {
-                if (e.key === 'modelsPathChanged') {
-                    loadModels();
-                    loadRerankModels();
-                    loadModelsPath();
-                }
-            };
             window.addEventListener('storage', handleStorageChange);
         });
+        const handleStorageChange = (e) => {
+            if (e.key === 'modelsPathChanged') {
+                loadModels();
+                loadRerankModels();
+                loadModelsPath();
+            }
+        };
         onUnmounted(() => {
             stopProgressPolling();
+            window.removeEventListener('storage', handleStorageChange);
         });
         const __returned__ = { message, modelsPath, modelsPathLoading, savingModelsPath, embeddingApiMode, rerankApiMode, models, currentModel, modelsLoading, currentLoading, showSwitchDialog, showDownloadDialog, showConvertDialog, showAddCustomDialog, showDeleteDialog, selectedModel, switching, converting, deleting, addingCustom, targetFormat, deleteOldVectors, downloadProgress, downloadOptions, selectedFile, loadingOptions, loadModelsPath, handleSaveModelsPath, handleScanModels, customModelForm, rerankModels, currentRerankModel, rerankModelsLoading, rerankCurrentLoading, get progressInterval() { return progressInterval; }, set progressInterval(v) { progressInterval = v; }, activeDownloads, selectedFileDescription, getFormatTagType, getFormatText, rerankModelColumns, modelColumns, getModelDisplayName, getDownloadStatusType, getDownloadStatusText, getProgressStatus, getErrorHelp, formatBytes, loadModels, loadCurrentModel, handleDownload, confirmDownload, handleSwitch, confirmSwitch, handleConvert, confirmConvert, handleDelete, confirmDelete, confirmAddCustom, loadRerankModels, loadCurrentRerankModel, handleRerankDownload, handleRerankSwitch, handleRerankDelete, startProgressPolling, stopProgressPolling, get NTag() { return NTag; }, get NButton() { return NButton; }, get NSpace() { return NSpace; }, get NProgress() { return NProgress; }, get NAlert() { return NAlert; }, get NCode() { return NCode; }, get NIcon() { return NIcon; }, get NRadioGroup() { return NRadioGroup; }, get NRadio() { return NRadio; }, get NFormItem() { return NFormItem; }, get NSpin() { return NSpin; }, get RefreshOutline() { return RefreshOutline; }, get AddOutline() { return AddOutline; }, get InformationCircleOutline() { return InformationCircleOutline; } };
         return __returned__;

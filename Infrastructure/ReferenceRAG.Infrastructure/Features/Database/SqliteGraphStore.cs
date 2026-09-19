@@ -407,30 +407,46 @@ public class SqliteGraphStore : IGraphStore, IDisposable
                 }
             }
 
-            if (orphanIds.Count == 0) return 0;
-
             using var tx = _connection.BeginTransaction();
             try
             {
-                using var edgeCmd = _connection.CreateCommand();
-                edgeCmd.Transaction = tx;
-                edgeCmd.CommandText = "DELETE FROM graph_edges WHERE from_id = @id OR to_id = @id";
-                var ep = edgeCmd.Parameters.Add("@id", SqliteType.Text);
-
-                using var nodeCmd = _connection.CreateCommand();
-                nodeCmd.Transaction = tx;
-                nodeCmd.CommandText = "DELETE FROM graph_nodes WHERE id = @id";
-                var np = nodeCmd.Parameters.Add("@id", SqliteType.Text);
-
-                foreach (var id in orphanIds)
+                if (orphanIds.Count > 0)
                 {
-                    ep.Value = id; edgeCmd.ExecuteNonQuery();
-                    np.Value = id; nodeCmd.ExecuteNonQuery();
+                    using var edgeCmd = _connection.CreateCommand();
+                    edgeCmd.Transaction = tx;
+                    edgeCmd.CommandText = "DELETE FROM graph_edges WHERE from_id = @id OR to_id = @id";
+                    var ep = edgeCmd.Parameters.Add("@id", SqliteType.Text);
+
+                    using var nodeCmd = _connection.CreateCommand();
+                    nodeCmd.Transaction = tx;
+                    nodeCmd.CommandText = "DELETE FROM graph_nodes WHERE id = @id";
+                    var np = nodeCmd.Parameters.Add("@id", SqliteType.Text);
+
+                    foreach (var id in orphanIds)
+                    {
+                        ep.Value = id; edgeCmd.ExecuteNonQuery();
+                        np.Value = id; nodeCmd.ExecuteNonQuery();
+                    }
                 }
+
+                // 3. 清理度数为 0 的孤立 tag 和 external 节点
+                int cleanedTagsAndExternals = 0;
+                using (var cleanCmd = _connection.CreateCommand())
+                {
+                    cleanCmd.Transaction = tx;
+                    cleanCmd.CommandText = """
+                        DELETE FROM graph_nodes
+                        WHERE type IN ('tag', 'external')
+                          AND id NOT IN (SELECT from_id FROM graph_edges)
+                          AND id NOT IN (SELECT to_id FROM graph_edges)
+                        """;
+                    cleanedTagsAndExternals = cleanCmd.ExecuteNonQuery();
+                }
+
                 tx.Commit();
+                return orphanIds.Count + cleanedTagsAndExternals;
             }
             catch { tx.Rollback(); throw; }
-            return orphanIds.Count;
         }
         finally { _lock.Release(); }
     }

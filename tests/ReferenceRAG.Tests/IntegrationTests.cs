@@ -129,7 +129,7 @@ public class IntegrationTests : IDisposable
         var services = new ServiceCollection();
         services.AddLogging(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
         services.AddSingleton(_config);
-        services.AddSingleton<ConfigManager>();
+        services.AddSingleton(new ConfigManager(_config));
         services.AddSingleton<ITokenizer, SimpleTokenizer>();
         services.AddSingleton<ITextEnhancer, TextEnhancer>();
         services.AddSingleton<IVectorStore>(sp => new JsonVectorStore(_config.DataPath));

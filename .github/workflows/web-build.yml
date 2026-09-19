@@ -28,8 +28,10 @@ jobs:
         run: |
           node check.mjs
           node --test
-      - name: Verify transport
+      - name: Verify transport and host contracts
         run: dotnet test tests/ReferenceRAG.Host.Tests -c Release
+      - name: Verify backend quality gate contracts & regression tests
+        run: dotnet test tests/ReferenceRAG.Tests -c Release --filter "FullyQualifiedName~ContractTests|FullyQualifiedName~AuditFixRegressionTests"
       - name: Publish Web
         run: dotnet publish Host/ReferenceRAG.WebHost -c Release -r win-x64 --self-contained true -o support/artifacts/publish/web
       - uses: actions/upload-artifact@v4

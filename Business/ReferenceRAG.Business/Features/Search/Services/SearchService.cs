@@ -122,10 +122,16 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         if ((request.Mode == QueryMode.Hybrid || request.Mode == QueryMode.HybridRerank) && _hybridSearchService != null)
         {
             // 始终使用 RecallFactor 扩大候选池，不管是否重排，更多候选 = 更好的融合结果
-            int recallTopK = request.TopK * rerankConfig.RecallFactor;
+            // 若用户指定了限定源或目录过滤，进一步扩大候选倍率，防止后置过滤导致召回饥饿
+            int recallFactor = rerankConfig.RecallFactor;
+            if (request.Sources?.Count > 0 || request.Filters?.Folders?.Count > 0)
+            {
+                recallFactor = Math.Max(recallFactor, 5);
+            }
+            int recallTopK = request.TopK * recallFactor;
 
             _logger.LogDebug("混合搜索召回: TopK={TopK}, RecallFactor={Factor}, RecallTopK={RecallTopK}",
-                request.TopK, rerankConfig.RecallFactor, recallTopK);
+                request.TopK, recallFactor, recallTopK);
 
             var hybridResults = await _hybridSearchService.SearchAsync(
                 request.Query, recallTopK, request.K1, request.B,
@@ -134,6 +140,12 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
             // 过滤禁用源（source 为空表示旧数据未分配来源，允许通过）
             var filteredHybridResults = hybridResults.Where(r => string.IsNullOrEmpty(r.Source) || enabledSources.Contains(r.Source));
+
+            // 应用用户指定的请求源过滤
+            if (request.Sources?.Count > 0)
+            {
+                filteredHybridResults = filteredHybridResults.Where(r => r.Source != null && request.Sources.Contains(r.Source));
+            }
 
             topResults = filteredHybridResults.Select(h => new SearchResult
             {
@@ -150,6 +162,15 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                 HeadingPath = h.HeadingPath,
                 Source = h.Source
             }).ToList();
+
+            // 应用通用过滤条件（目录、标签等）
+            topResults = ApplyFilters(topResults, request.Filters).ToList();
+
+            // 流行度去偏
+            if (request.Options?.DebiasPopularity ?? true)
+            {
+                topResults = DebiasByPopularity(topResults).ToList();
+            }
         }
         else
         {
@@ -175,7 +196,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var searchConfig = config.Search;
         if (searchConfig.EnableGraphExpansion && _graphStore != null && topResults.Count > 0)
         {
-            topResults = await ExpandWithGraphAsync(topResults, queryVector, searchConfig, cancellationToken);
+            topResults = await ExpandWithGraphAsync(topResults, queryVector, searchConfig, enabledSources, request.Filters, cancellationToken);
         }
 
         // ========== 第二阶段：精排 ==========
@@ -331,9 +352,22 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             .Distinct()
             .ToList();
 
-        var filesByPath = (await _vectorStore.GetFilesByPathsAsync(paths!, cancellationToken))
-            .Where(f => string.IsNullOrEmpty(f.Source) || enabledSources.Contains(f.Source))
-            .ToDictionary(f => f.Path, StringComparer.OrdinalIgnoreCase);
+        var candidateFiles = (await _vectorStore.GetFilesByPathsAsync(paths!, cancellationToken))
+            .Where(f => string.IsNullOrEmpty(f.Source) || enabledSources.Contains(f.Source));
+
+        if (request.Filters?.Folders?.Count > 0)
+        {
+            candidateFiles = candidateFiles.Where(file =>
+                request.Filters.Folders.Any(f =>
+                {
+                    var folder = f.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    return file.Path.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                        || file.Path.StartsWith(folder + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(file.Path, folder, StringComparison.OrdinalIgnoreCase);
+                }));
+        }
+
+        var filesByPath = candidateFiles.ToDictionary(f => f.Path, StringComparer.OrdinalIgnoreCase);
 
         if (filesByPath.Count == 0)
             return new List<SearchResult>();
@@ -478,8 +512,11 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     {
         var queryVector = precomputedQueryVector
             ?? await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
+        int candidateLimit = (request.Sources?.Count > 0 || request.Filters?.Folders?.Count > 0)
+            ? Math.Max(request.TopK * 5, 50)
+            : request.TopK * 2;
         var modelName = _embeddingService.ModelName;
-        var results = await _vectorStore.SearchAsync(queryVector, modelName, request.TopK * 2, cancellationToken);
+        var results = await _vectorStore.SearchAsync(queryVector, modelName, candidateLimit, cancellationToken);
 
         // 首先过滤禁用源（source 为空表示旧数据未分配来源，允许通过）
         results = results.Where(r => string.IsNullOrEmpty(r.Source) || enabledSources.Contains(r.Source));
@@ -487,7 +524,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         // 应用源过滤（用户指定的源）
         if (request.Sources?.Count > 0)
         {
-            results = results.Where(r => request.Sources.Contains(r.Source));
+            results = results.Where(r => r.Source != null && request.Sources.Contains(r.Source));
         }
 
         // 应用其他过滤条件
@@ -542,14 +579,13 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             filtered = filtered.Where(r =>
                 filters.Folders.Any(f =>
                 {
-                    // 标准化：统一分隔符，去除尾部斜杠
-                    var folder = f.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                    var filePath = r.FilePath;
+                    // 标准化：统一使用 '/' 分隔符，去除尾部斜杠
+                    var folder = f.Replace('\\', '/').TrimEnd('/');
+                    var filePath = r.FilePath.Replace('\\', '/');
 
                     // 必须是完整路径段：后面跟着分隔符，或者就是文件本身在该目录下
-                    return filePath.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                        || filePath.StartsWith(folder + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(filePath, folder, StringComparison.OrdinalIgnoreCase); // 精确匹配自身（如果 FilePath 可能是目录）
+                    return filePath.StartsWith(folder + "/", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(filePath, folder, StringComparison.OrdinalIgnoreCase);
                 }));
         }
 
@@ -699,6 +735,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         List<SearchResult> results,
         float[] queryVector,
         SearchConfig config,
+        HashSet<string> enabledSources,
+        SearchFilter? filters,
         CancellationToken ct)
     {
         if (_graphStore == null) return results;
@@ -773,6 +811,18 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
                     var file = await _vectorStore.GetFileAsync(bestChunk.FileId, ct);
                     if (file == null) continue;
+                    if (!string.IsNullOrEmpty(file.Source) && !enabledSources.Contains(file.Source)) continue;
+                    if (filters?.Folders?.Count > 0)
+                    {
+                        bool inFolder = filters.Folders.Any(f =>
+                        {
+                            var folder = f.Replace('\\', '/').TrimEnd('/');
+                            var filePath = file.Path.Replace('\\', '/');
+                            return filePath.StartsWith(folder + "/", StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(filePath, folder, StringComparison.OrdinalIgnoreCase);
+                        });
+                        if (!inFolder) continue;
+                    }
 
                     // 用实际余弦相似度作为初始分；若向量为空则退回保底分
                     var score = bestSim > 0 ? bestSim : fallbackScore;

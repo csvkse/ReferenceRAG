@@ -1,10 +1,14 @@
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Service.Middleware;
 
 /// <summary>
-/// API Key authentication middleware - only authenticates /api/* paths
+/// API Key authentication middleware - supports /api/*, /v1/*, and SignalR /indexHub
+/// Supports X-API-Key header, Authorization: Bearer <key>, and dynamic configuration reload.
 /// </summary>
 public class ApiKeyMiddleware
 {
@@ -20,62 +24,126 @@ public class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        var (enabled, expectedApiKey) = GetApiKeyConfig(context);
+
         // Special endpoint: /api/auth/check - always allowed, returns auth status
         if (context.Request.Path.StartsWithSegments("/api/auth/check"))
         {
-            var authEnabled = context.Items["ApiKeyEnabled"] as bool? ?? false;
             context.Response.StatusCode = StatusCodes.Status200OK;
             await context.Response.WriteAsJsonAsync(new {
-                authRequired = authEnabled,
-                message = authEnabled ? "API Key is required" : "No authentication required"
+                authRequired = enabled,
+                message = enabled ? "API Key is required" : "No authentication required"
             });
             return;
         }
 
-        // Only authenticate /api/* paths, skip static files
-        if (!context.Request.Path.StartsWithSegments("/api"))
+        // Only authenticate protected API and hub paths, skip static files and web pages
+        if (!IsProtectedPath(context.Request.Path))
         {
             await _next(context);
             return;
         }
 
         // Check if API Key authentication is enabled
-        var enabled = context.Items["ApiKeyEnabled"] as bool? ?? false;
-        if (!enabled)
+        if (!enabled || string.IsNullOrEmpty(expectedApiKey))
         {
             await _next(context);
             return;
         }
 
-        var expectedApiKey = context.Items["ApiKeyValue"] as string;
-        if (string.IsNullOrEmpty(expectedApiKey))
-        {
-            await _next(context);
-            return;
-        }
-
-        // Only support Header for API Key (security consideration)
-        string? providedKey = null;
-        if (context.Request.Headers.TryGetValue(ApiKeyHeaderName, out var headerKey))
-        {
-            providedKey = headerKey;
-        }
+        var providedKey = ExtractApiKey(context);
 
         if (string.IsNullOrEmpty(providedKey))
         {
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsJsonAsync(new { error = "Missing API Key. Please add X-API-Key header" });
+            await context.Response.WriteAsJsonAsync(new { error = "Missing API Key. Please provide via X-API-Key header or Authorization: Bearer <key>" });
             return;
         }
 
         if (!string.Equals(providedKey, expectedApiKey, StringComparison.Ordinal))
         {
-            _logger.LogWarning("API Key verification failed, source IP: {RemoteIp}", context.Connection.RemoteIpAddress);
+            _logger.LogWarning("API Key verification failed, source IP: {RemoteIp}, path: {Path}", context.Connection.RemoteIpAddress, context.Request.Path);
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             await context.Response.WriteAsJsonAsync(new { error = "Invalid API Key" });
             return;
         }
 
         await _next(context);
+    }
+
+    private static bool IsProtectedPath(PathString path)
+    {
+        return path.StartsWithSegments("/api")
+            || path.StartsWithSegments("/v1")
+            || path.StartsWithSegments("/indexHub");
+    }
+
+    private static (bool Enabled, string? Key) GetApiKeyConfig(HttpContext context)
+    {
+        // 1. Dynamic check via ConfigManager
+        var configManager = context.RequestServices.GetService<ConfigManager>();
+        if (configManager != null)
+        {
+            var config = configManager.Load();
+            var apiKey = config.Service?.ApiKey;
+            if (!string.IsNullOrEmpty(apiKey))
+            {
+                return (true, apiKey);
+            }
+        }
+
+        // 2. Check via IConfiguration
+        var appConfig = context.RequestServices.GetService<IConfiguration>();
+        if (appConfig != null)
+        {
+            var enabled = appConfig.GetValue<bool>("ApiKey:Enabled", false);
+            var key = appConfig.GetValue<string>("ApiKey:Key", "");
+            if (enabled && !string.IsNullOrEmpty(key))
+            {
+                return (true, key);
+            }
+        }
+
+        // 3. Fallback to HttpContext.Items if present
+        if (context.Items["ApiKeyEnabled"] is bool itemsEnabled && itemsEnabled)
+        {
+            var itemsKey = context.Items["ApiKeyValue"] as string;
+            return (true, itemsKey);
+        }
+
+        return (false, null);
+    }
+
+    private static string? ExtractApiKey(HttpContext context)
+    {
+        // 1. Header: X-API-Key
+        if (context.Request.Headers.TryGetValue(ApiKeyHeaderName, out var headerKey) && !string.IsNullOrWhiteSpace(headerKey))
+        {
+            return headerKey.ToString();
+        }
+
+        // 2. Header: Authorization: Bearer <key>
+        if (context.Request.Headers.TryGetValue("Authorization", out var authHeader))
+        {
+            var authStr = authHeader.ToString();
+            if (authStr.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                var token = authStr["Bearer ".Length..].Trim();
+                if (!string.IsNullOrEmpty(token))
+                {
+                    return token;
+                }
+            }
+        }
+
+        // 3. Query string for SignalR: access_token
+        if (context.Request.Path.StartsWithSegments("/indexHub") &&
+            context.Request.Query.TryGetValue("access_token", out var tokenQuery) &&
+            !string.IsNullOrWhiteSpace(tokenQuery))
+        {
+            return tokenQuery.ToString();
+        }
+
+        return null;
     }
 }

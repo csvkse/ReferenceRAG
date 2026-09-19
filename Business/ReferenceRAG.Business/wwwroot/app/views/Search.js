@@ -59,11 +59,24 @@ const component = /*@__PURE__*/ _defineComponent({
                 }))
             }));
         });
-        // 将选中的路径 key 转换为 folder 路径（folder:/docs -> /docs）
+        // 将选中的路径 key 转换为 folder 路径（包括直接选中的数据源及其子目录）
         const selectedPathFolders = computed(() => {
-            return selectedPaths.value
-                .filter(key => key.startsWith('folder:'))
-                .map(key => key.replace('folder:', ''));
+            const result = new Set();
+            for (const key of selectedPaths.value) {
+                if (key.startsWith('folder:')) {
+                    result.add(key.replace('folder:', ''));
+                } else if (key.startsWith('source:')) {
+                    const sourceName = key.replace('source:', '');
+                    const source = paths.value.find(s => s.name === sourceName);
+                    if (source?.rootPath) {
+                        result.add(source.rootPath);
+                    }
+                    if (source?.folders?.length) {
+                        source.folders.forEach(f => result.add(f));
+                    }
+                }
+            }
+            return Array.from(result);
         });
         // n-tree 选中变化时处理
         const handlePathSelect = (keys) => {
@@ -124,7 +137,7 @@ const component = /*@__PURE__*/ _defineComponent({
                     query: searchQuery.value,
                     mode: searchOptions.value.mode,
                     topK: searchOptions.value.topK,
-                    enableRerank: searchOptions.value.enableRerank === false ? false : undefined,
+                    enableRerank: searchOptions.value.enableRerank,
                     sources: searchOptions.value.sources.length > 0 ? searchOptions.value.sources : undefined,
                     filters: searchOptions.value.folders.length > 0 ? { folders: searchOptions.value.folders } : undefined
                 });

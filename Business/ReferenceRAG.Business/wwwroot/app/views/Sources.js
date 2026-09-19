@@ -1,6 +1,6 @@
 import { defineComponent as _defineComponent } from 'vue';
 import { ref, h, onMounted } from 'vue';
-import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput } from 'naive-ui';
+import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput, NRadioGroup, NRadio, NText } from 'naive-ui';
 import { sourcesApi, indexApi, indexJobsApi, settingsApi } from '/app/api/index.js';
 import {isDesktop,selectFolder} from '/core/platform.js';
 const component = /*@__PURE__*/ _defineComponent({
@@ -248,31 +248,40 @@ const component = /*@__PURE__*/ _defineComponent({
         };
         const handleEdit = (source) => {
             editingSource.value = source;
-            editingName.value = source.name;
+            const currentPatterns = Array.isArray(source.filePatterns) ? source.filePatterns.join(', ') : (source.filePatterns || '');
+            const editingPatterns = ref(currentPatterns);
             dialog.create({
-                title: '编辑源名称',
-                content: () => h(NInput, {
-                    value: editingName.value,
-                    onUpdateValue: (val) => { editingName.value = val; },
-                    placeholder: '请输入新的源名称'
-                }),
-                positiveText: '保存',
+                title: `编辑数据源配置 - ${source.name}`,
+                content: () => h('div', { style: 'display: flex; flex-direction: column; gap: 12px; margin-top: 8px;' }, [
+                    h('div', [
+                        h(NText, { depth: '3', style: 'font-size: 12px; display: block; margin-bottom: 4px;' }, '数据源名称（系统内唯一标识，不支持重命名）：'),
+                        h(NInput, { value: source.name, disabled: true })
+                    ]),
+                    h('div', [
+                        h(NText, { depth: '3', style: 'font-size: 12px; display: block; margin-bottom: 4px;' }, '文件匹配规则（以逗号或分号分隔，留空使用默认）：'),
+                        h(NInput, {
+                            value: editingPatterns.value,
+                            onUpdateValue: (val) => { editingPatterns.value = val; },
+                            placeholder: '例如: *.md, *.txt, *.docx'
+                        })
+                    ])
+                ]),
+                positiveText: '保存配置',
                 negativeText: '取消',
                 onPositiveClick: async () => {
-                    if (!editingName.value.trim()) {
-                        message.error('源名称不能为空');
-                        return false;
-                    }
-                    if (editingName.value === source.name) {
-                        return;
-                    }
+                    const patterns = editingPatterns.value
+                        .split(/[,;\n]/)
+                        .map(p => p.trim())
+                        .filter(Boolean);
                     try {
-                        await sourcesApi.update(source.name, { name: editingName.value });
-                        message.success('源名称已更新');
+                        await sourcesApi.update(source.name, {
+                            filePatterns: patterns.length > 0 ? patterns : []
+                        });
+                        message.success('数据源配置已更新');
                         await loadSources();
                     }
                     catch (error) {
-                        message.error('更新失败');
+                        message.error(error.response?.data?.error || '更新失败');
                         return false;
                     }
                 }
@@ -297,15 +306,30 @@ const component = /*@__PURE__*/ _defineComponent({
             });
         };
         const handleDelete = (source) => {
+            const deleteDataRef = ref(true);
             dialog.warning({
                 title: `删除源 "${source.name}"`,
-                content: '删除后无法恢复配置。\n选择是否同时清除该源的全部索引数据（chunks / 向量 / BM25 / 图谱）。',
-                positiveText: '删除配置 + 索引数据',
-                negativeText: '仅删除配置',
+                content: () => h('div', { style: 'margin-top: 8px;' }, [
+                    h('p', { style: 'margin-bottom: 12px; color: #d03050; font-size: 13px;' }, '注意：删除后配置将无法恢复。请选择清理范围：'),
+                    h(NRadioGroup, {
+                        value: deleteDataRef.value,
+                        'onUpdate:value': (val) => { deleteDataRef.value = val; }
+                    }, {
+                        default: () => h(NSpace, { vertical: true }, {
+                            default: () => [
+                                h(NRadio, { value: true }, { default: () => '删除源配置 + 清空已索引数据（推荐，防止孤立向量）' }),
+                                h(NRadio, { value: false }, { default: () => '仅删除源配置（保留已有索引和分块数据）' })
+                            ]
+                        })
+                    })
+                ]),
+                positiveText: '确认删除',
+                negativeText: '取消',
                 onPositiveClick: async () => {
+                    const deleteData = deleteDataRef.value;
                     try {
-                        await sourcesApi.delete(source.name, true);
-                        message.success(`"${source.name}" 及其索引数据已全部删除`);
+                        await sourcesApi.delete(source.name, deleteData);
+                        message.success(deleteData ? `"${source.name}" 及其索引数据已全部删除` : `"${source.name}" 配置已删除（索引数据保留）`);
                         await loadSources();
                         await loadVectorIndex();
                     }
@@ -313,15 +337,8 @@ const component = /*@__PURE__*/ _defineComponent({
                         message.error('删除失败');
                     }
                 },
-                onNegativeClick: async () => {
-                    try {
-                        await sourcesApi.delete(source.name, false);
-                        message.success(`"${source.name}" 配置已删除（索引数据保留）`);
-                        await loadSources();
-                    }
-                    catch {
-                        message.error('删除失败');
-                    }
+                onNegativeClick: () => {
+                    // 安全取消，不做任何删除
                 }
             });
         };

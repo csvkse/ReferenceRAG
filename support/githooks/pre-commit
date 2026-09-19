@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+# ReferenceRAG pre-commit quality gate hook
+set -e
+
+echo "========================================================"
+echo " [Quality Gate] Running Pre-Commit Checks..."
+echo "========================================================"
+
+# 1. Frontend AST and symbol bindings check
+echo "1. Validating frontend syntax and Vue template AST symbols..."
+node Business/ReferenceRAG.Business/wwwroot/check.mjs
+
+# 2. Frontend unit tests
+echo "2. Running frontend unit tests..."
+(cd Business/ReferenceRAG.Business/wwwroot && npm test)
+
+# 3. Backend contract tests
+echo "3. Running backend architecture & protocol contract tests..."
+dotnet test tests/ReferenceRAG.Tests/ReferenceRAG.Tests.csproj --filter "FullyQualifiedName~ContractTests" -v q --nologo
+dotnet test tests/ReferenceRAG.Host.Tests/ReferenceRAG.Host.Tests.csproj --filter "FullyQualifiedName~ContractTests" -v q --nologo
+
+echo "========================================================"
+echo " [Quality Gate] Pre-commit checks passed successfully!"
+echo "========================================================"
+exit 0

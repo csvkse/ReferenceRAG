@@ -58,18 +58,18 @@ public class BM25IndexController : ControllerBase
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var files = (await _vectorStore.GetAllFilesAsync())
-            .Where(f => enabledSources.Contains(f.Source));
+            .Where(f => enabledSources.Contains(f.Source))
+            .ToList();
+
+        var fileIds = files.Select(f => f.Id).ToList();
+        var allChunks = await _vectorStore.GetChunksByFileIdsAsync(fileIds);
         var chunksList = new List<(string chunkId, string content)>();
 
-        foreach (var file in files)
+        foreach (var chunk in allChunks)
         {
-            var chunks = await _vectorStore.GetChunksByFileAsync(file.Id);
-            foreach (var chunk in chunks)
+            if (!string.IsNullOrWhiteSpace(chunk.Content))
             {
-                if (!string.IsNullOrWhiteSpace(chunk.Content))
-                {
-                    chunksList.Add((chunk.Id, chunk.Content));
-                }
+                chunksList.Add((chunk.Id, chunk.Content));
             }
         }
 

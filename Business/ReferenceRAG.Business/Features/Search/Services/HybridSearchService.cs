@@ -102,14 +102,23 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
             ? FuseWithRRF(allDocIds, bm25RankMap, embeddingRankMap)
             : FuseWithWeightedAverage(allDocIds, bm25Dict, embeddingDict, maxBm25Score, maxEmbeddingScore);
 
-        // 5. 排序并取 Top-K
-        var topResults = fusedScores
+        // 5. 排序候选池并在截取 Top-K 时应用文件夹过滤
+        var orderedCandidates = fusedScores
             .OrderByDescending(s => s.Value)
-            .Take(topK)
             .ToList();
 
-        // 6. 构建最终结果
-        foreach (var (docId, fusedScore) in topResults)
+        List<string>? folderList = null;
+        if (folders?.Any() == true)
+        {
+            folderList = folders
+                .Select(f => f.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
+                              .TrimEnd(Path.DirectorySeparatorChar)
+                            + Path.DirectorySeparatorChar)
+                .ToList();
+        }
+
+        // 6. 构建最终结果（满足目录过滤的 Top-K 结果）
+        foreach (var (docId, fusedScore) in orderedCandidates)
         {
             bm25Dict.TryGetValue(docId, out var bm25Result);
             embeddingDict.TryGetValue(docId, out var embeddingResult);
@@ -152,6 +161,17 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
                 }
             }
 
+            // 若指定了文件夹，必须在目标文件夹内
+            if (folderList != null)
+            {
+                if (string.IsNullOrEmpty(filePath)) continue;
+                var normalizedPath = filePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+                if (!folderList.Any(f => normalizedPath.StartsWith(f, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+            }
+
             results.Add(new HybridSearchResult
             {
                 ChunkId = docId,
@@ -170,25 +190,11 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
                 EndLine = endLine,
                 HeadingPath = headingPath
             });
-        }
 
-        // 7. 应用文件夹过滤
-        if (folders?.Any() == true)
-        {
-            var folderList = folders
-                .Select(f => f.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
-                              .TrimEnd(Path.DirectorySeparatorChar)
-                            + Path.DirectorySeparatorChar)
-                .ToList();
-
-            var beforeCount = results.Count;
-            results = results.Where(r =>
+            if (results.Count >= topK)
             {
-                var filePath = r.FilePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
-                return folderList.Any(f => filePath.StartsWith(f, StringComparison.OrdinalIgnoreCase));
-            }).ToList();
-
-            _logger?.LogDebug("文件夹过滤后: {Before} -> {After}", beforeCount, results.Count);
+                break;
+            }
         }
 
         _logger?.LogDebug(

@@ -113,6 +113,26 @@ public class GraphStoreTests : IDisposable
         Assert.Equal(1, stats.EdgeCount);
     }
 
+    [Fact]
+    public async Task CleanupOrphanNodesAsync_RemovesOrphanTagsAndExternals()
+    {
+        await _store.UpsertNodeAsync(new GraphNode { Id = "doc1.md", Title = "Doc 1", Type = "document" });
+        await _store.UpsertNodeAsync(new GraphNode { Id = "#test-tag", Title = "test-tag", Type = "tag" });
+        await _store.UpsertNodeAsync(new GraphNode { Id = "https://example.com", Title = "Example", Type = "external" });
+        await _store.UpsertEdgesAsync(new[]
+        {
+            new GraphEdge { FromId = "doc1.md", ToId = "#test-tag", Type = "tag" },
+            new GraphEdge { FromId = "doc1.md", ToId = "https://example.com", Type = "link" }
+        });
+
+        var cleaned = await _store.CleanupOrphanNodesAsync(Array.Empty<string>());
+
+        Assert.Equal(3, cleaned);
+        Assert.Null(await _store.GetNodeAsync("doc1.md"));
+        Assert.Null(await _store.GetNodeAsync("#test-tag"));
+        Assert.Null(await _store.GetNodeAsync("https://example.com"));
+    }
+
     public void Dispose()
     {
         _store.Dispose();

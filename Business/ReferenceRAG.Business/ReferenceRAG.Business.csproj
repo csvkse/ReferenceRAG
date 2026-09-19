@@ -13,4 +13,7 @@
     <Using Include="Microsoft.Extensions.DependencyInjection" />
     <EmbeddedResource Include="wwwroot/**/*" Exclude="wwwroot/tests/**;wwwroot/package.json;wwwroot/check.mjs" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ReferenceRAG.Tests" />
+  </ItemGroup>
 </Project>
