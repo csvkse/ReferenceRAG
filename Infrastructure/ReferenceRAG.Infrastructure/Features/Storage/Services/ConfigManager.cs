@@ -146,6 +146,11 @@ public class ConfigManager
             source.Name = Path.GetFileName(source.Path) ?? $"Source{config.Sources.Count + 1}";
         }
 
+        if (source.FilePatterns == null || source.FilePatterns.Count == 0)
+        {
+            source.FilePatterns = new List<string> { "*.md", "*.txt" };
+        }
+
         config.Sources.Add(source);
         Save(config);
 
@@ -340,7 +345,7 @@ public class ConfigManager
 
                 if (source.FilePatterns.Count == 0)
                 {
-                    warnings.Add($"源 '{source.Name}' 未配置文件模式，将使用默认 *.md");
+                    warnings.Add($"源 '{source.Name}' 未配置文件模式，将使用默认 *.md, *.txt");
                 }
             }
         }

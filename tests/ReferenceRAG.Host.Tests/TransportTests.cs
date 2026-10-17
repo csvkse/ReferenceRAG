@@ -36,6 +36,9 @@ public class TransportTests
             await context.Response.WriteAsync("data: started\n\n");
             await Task.Delay(Timeout.Infinite,context.RequestAborted);
         });
+        app.MapDelete("/api/sources/{name}",(string name)=>{
+            return Results.Ok(new{Name=name});
+        });
         await app.StartAsync();return app;
     }
     [Theory]
@@ -92,5 +95,31 @@ public class TransportTests
         using(var second=new ReferenceRAG.Infrastructure.Features.Database.DataDirectoryLease())
         {first.Acquire(path);Assert.Throws<InvalidOperationException>(()=>second.Acquire(path));}
         File.Delete(Path.Combine(path,".referencerag-writer.lock"));Directory.Delete(path);
+    }
+    [Fact]
+    public async Task InProcessRequestsCorrectlyUnescapeEncodedRouteParameters()
+    {
+        await using var app=await StartAsync();
+        var headers=new Dictionary<string,string>{{"X-API-Key","test-key"}};
+        using var input=new MemoryStream();using var output=new MemoryStream();
+        var response=new HttpResponseFeature();
+        await app.Services.GetRequiredService<InProcessServer>().DispatchAsync("DELETE","/api/sources/%E5%B0%8F%E8%AF%B4?deleteData=false",headers,input,output,response,CancellationToken.None);
+        Assert.Equal(200,response.StatusCode);
+        using var json=JsonDocument.Parse(output.ToArray());
+        Assert.Equal("小说",json.RootElement.GetProperty("name").GetString());
+        await app.StopAsync();
+    }
+    [Fact]
+    public async Task InProcessRequestsPreserveDirectUnicodeRouteParameters()
+    {
+        await using var app=await StartAsync();
+        var headers=new Dictionary<string,string>{{"X-API-Key","test-key"}};
+        using var input=new MemoryStream();using var output=new MemoryStream();
+        var response=new HttpResponseFeature();
+        await app.Services.GetRequiredService<InProcessServer>().DispatchAsync("DELETE","/api/sources/小说?deleteData=true",headers,input,output,response,CancellationToken.None);
+        Assert.Equal(200,response.StatusCode);
+        using var json=JsonDocument.Parse(output.ToArray());
+        Assert.Equal("小说",json.RootElement.GetProperty("name").GetString());
+        await app.StopAsync();
     }
 }

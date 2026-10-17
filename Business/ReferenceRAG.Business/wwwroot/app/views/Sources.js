@@ -243,7 +243,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await loadSources();
             }
             catch (error) {
-                message.error('操作失败');
+                message.error(error.response?.data?.error || error.message || '操作失败');
             }
         };
         const handleEdit = (source) => {
@@ -258,11 +258,11 @@ const component = /*@__PURE__*/ _defineComponent({
                         h(NInput, { value: source.name, disabled: true })
                     ]),
                     h('div', [
-                        h(NText, { depth: '3', style: 'font-size: 12px; display: block; margin-bottom: 4px;' }, '文件匹配规则（以逗号或分号分隔，留空使用默认）：'),
+                        h(NText, { depth: '3', style: 'font-size: 12px; display: block; margin-bottom: 4px;' }, '文件匹配规则（以逗号或分号分隔，留空使用默认 *.md, *.txt）：'),
                         h(NInput, {
                             value: editingPatterns.value,
                             onUpdateValue: (val) => { editingPatterns.value = val; },
-                            placeholder: '例如: *.md, *.txt, *.docx'
+                            placeholder: '例如: *.md, *.txt'
                         })
                     ])
                 ]),
@@ -333,8 +333,8 @@ const component = /*@__PURE__*/ _defineComponent({
                         await loadSources();
                         await loadVectorIndex();
                     }
-                    catch {
-                        message.error('删除失败');
+                    catch (error) {
+                        message.error(error.response?.data?.error || error.message || '删除失败');
                     }
                 },
                 onNegativeClick: () => {
@@ -350,7 +350,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await loadVectorIndex();
             }
             catch (error) {
-                message.error('启动增量索引失败');
+                message.error(error.response?.data?.error || error.message || '启动增量索引失败');
             }
             finally {
                 quickIndexing.value = false;
@@ -365,7 +365,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await loadVectorIndex();
             }
             catch (error) {
-                message.error(`${source.name} 增量索引启动失败`);
+                message.error(error.response?.data?.error || error.message || `${source.name} 增量索引启动失败`);
             }
             finally {
                 sourceQuickIndexing.value.delete(source.name);
@@ -380,7 +380,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await loadVectorIndex();
             }
             catch (error) {
-                message.error('启动向量补全失败');
+                message.error(error.response?.data?.error || error.message || '启动向量补全失败');
             }
             finally {
                 vectorOnlyIndexing.value = false;
@@ -395,7 +395,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await loadVectorIndex();
             }
             catch (error) {
-                message.error(`${source.name} 向量补全启动失败`);
+                message.error(error.response?.data?.error || error.message || `${source.name} 向量补全启动失败`);
             }
             finally {
                 sourceVectorOnlyIndexing.value.delete(source.name);
@@ -410,7 +410,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await loadVectorIndex();
             }
             catch (error) {
-                message.error('启动重建失败');
+                message.error(error.response?.data?.error || error.message || '启动重建失败');
             }
             finally {
                 rebuilding.value = false;
@@ -424,7 +424,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await loadVectorIndex();
             }
             catch (error) {
-                message.error('清理失败');
+                message.error(error.response?.data?.error || error.message || '清理失败');
             }
             finally {
                 cleaning.value = false;
@@ -438,7 +438,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await loadVectorIndex();
             }
             catch (error) {
-                message.error('删除失败');
+                message.error(error.response?.data?.error || error.message || '删除失败');
             }
             finally {
                 deletingAll.value = false;
@@ -451,7 +451,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await loadVectorIndex();
             }
             catch (error) {
-                message.error('删除失败');
+                message.error(error.response?.data?.error || error.message || '删除失败');
             }
         };
         onMounted(() => {

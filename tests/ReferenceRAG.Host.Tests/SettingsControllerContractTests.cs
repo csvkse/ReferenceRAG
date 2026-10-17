@@ -9,6 +9,7 @@ using Xunit;
 
 namespace ReferenceRAG.Host.Tests;
 
+[Collection("CurrentDirectoryCollection")]
 public class SettingsControllerContractTests : IDisposable
 {
     private readonly string _testDir;
@@ -24,7 +25,14 @@ public class SettingsControllerContractTests : IDisposable
 
     public void Dispose()
     {
-        Directory.SetCurrentDirectory(_originalDir);
+        try
+        {
+            if (Directory.Exists(_originalDir))
+                Directory.SetCurrentDirectory(_originalDir);
+            else
+                Directory.SetCurrentDirectory(AppContext.BaseDirectory);
+        }
+        catch { }
         try
         {
             if (Directory.Exists(_testDir))

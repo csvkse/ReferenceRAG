@@ -106,6 +106,14 @@ public class SourcesController : ControllerBase
         return Ok(response);
     }
 
+    private static SourceFolder? FindSource(ObsidianRagConfig config, string name)
+    {
+        var decoded = Uri.UnescapeDataString(name);
+        return config.Sources.FirstOrDefault(s =>
+            s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+            s.Name.Equals(decoded, StringComparison.OrdinalIgnoreCase));
+    }
+
     /// <summary>
     /// 获取单个源详情
     /// </summary>
@@ -113,14 +121,14 @@ public class SourcesController : ControllerBase
     public async Task<ActionResult<SourceDetail>> Get(string name)
     {
         var config = _configManager.Load();
-        var source = config.Sources.FirstOrDefault(s => s.Name == name);
+        var source = FindSource(config, name);
 
         if (source == null)
             return NotFound(new { error = $"源 '{name}' 不存在" });
 
         var statsMap = (await _vectorStore.GetSourceStatsAsync())
             .ToDictionary(s => s.Source, StringComparer.OrdinalIgnoreCase);
-        statsMap.TryGetValue(name, out var stat);
+        statsMap.TryGetValue(source.Name, out var stat);
 
         return Ok(new SourceDetail
         {
@@ -142,12 +150,12 @@ public class SourcesController : ControllerBase
     public async Task<ActionResult<List<FileDetail>>> GetFiles(string name, [FromQuery] int page = 1, [FromQuery] int pageSize = 50)
     {
         var config = _configManager.Load();
-        var source = config.Sources.FirstOrDefault(s => s.Name == name);
+        var source = FindSource(config, name);
 
         if (source == null)
             return NotFound(new { error = $"源 '{name}' 不存在" });
 
-        var files = await _vectorStore.GetFilesBySourceAsync(name, page, pageSize);
+        var files = await _vectorStore.GetFilesBySourceAsync(source.Name, page, pageSize);
         var sourceFiles = files.Select(f => new FileDetail
         {
             Path = f.Path,
@@ -205,7 +213,7 @@ public class SourcesController : ControllerBase
             Name = request.Name ?? Path.GetFileName(request.Path) ?? "新源",
             Type = request.Type ?? SourceType.Markdown,
             Enabled = true,
-            FilePatterns = request.FilePatterns?.ToList() ?? new List<string> { "*.md" },
+            FilePatterns = (request.FilePatterns?.Length > 0) ? request.FilePatterns.ToList() : new List<string> { "*.md", "*.txt" },
             ExcludeDirs = new List<string> { ".git", "node_modules" }
         };
 
@@ -226,7 +234,6 @@ public class SourcesController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "添加源失败: {Path}", request.Path);
-            _logger.LogError(ex, "添加源失败: {Path}", request.Path);
             return StatusCode(500, new { error = "添加源失败，请查看服务日志" });
         }
     }
@@ -238,14 +245,14 @@ public class SourcesController : ControllerBase
     public ActionResult Update(string name, [FromBody] UpdateSourceRequest request)
     {
         var config = _configManager.Load();
-        var source = config.Sources.FirstOrDefault(s => s.Name == name);
+        var source = FindSource(config, name);
 
         if (source == null)
         {
             return NotFound(new { error = $"源 '{name}' 不存在" });
         }
 
-        if (request.Name != null && request.Name != name)
+        if (request.Name != null && !request.Name.Equals(source.Name, StringComparison.OrdinalIgnoreCase))
         {
             return BadRequest(new { error = "不支持重命名源，请删除后重新添加" });
         }
@@ -257,11 +264,11 @@ public class SourcesController : ControllerBase
 
         if (request.FilePatterns != null)
         {
-            source.FilePatterns = request.FilePatterns.ToList();
+            source.FilePatterns = (request.FilePatterns.Length > 0) ? request.FilePatterns.ToList() : new List<string> { "*.md", "*.txt" };
         }
 
         _configManager.Save(config);
-        _fileMonitor.RemoveSource(name);
+        _fileMonitor.RemoveSource(source.Name);
         if (source.Enabled)
             _fileMonitor.AddSource(source.Path, source.Name, source.FilePatterns);
 
@@ -275,20 +282,29 @@ public class SourcesController : ControllerBase
     public async Task<ActionResult> Delete(string name, [FromQuery] bool deleteData = false)
     {
         var config = _configManager.Load();
-        var source = config.Sources.FirstOrDefault(s => s.Name == name);
+        var source = FindSource(config, name);
 
         if (source == null)
         {
             return NotFound(new { error = $"源 '{name}' 不存在" });
         }
 
-        _configManager.RemoveSource(name);
-        _fileMonitor.RemoveSource(name);
+        try
+        {
+            if (deleteData)
+                await _pipeline.DeleteSourceAsync(source.Name);
 
-        if (deleteData)
-            await _pipeline.DeleteSourceAsync(name);
+            _configManager.RemoveSource(source.Name);
+            _fileMonitor.RemoveSource(source.Name);
 
-        return NoContent();
+            _logger.LogInformation("已删除源: {Name} (deleteData={DeleteData})", source.Name, deleteData);
+            return NoContent();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "删除源失败: {Name}", source.Name);
+            return StatusCode(500, new { error = $"删除源失败: {ex.Message}" });
+        }
     }
 
     /// <summary>
@@ -297,11 +313,18 @@ public class SourcesController : ControllerBase
     [HttpPatch("{name}/toggle")]
     public ActionResult Toggle(string name, [FromBody] ToggleRequest request)
     {
-        _configManager.ToggleSource(name, request.Enabled);
-        var source = _configManager.Load().Sources.FirstOrDefault(s => s.Name == name);
+        var config = _configManager.Load();
+        var source = FindSource(config, name);
+        if (source == null)
+        {
+            return NotFound(new { error = $"源 '{name}' 不存在" });
+        }
+
+        _configManager.ToggleSource(source.Name, request.Enabled);
+        source = FindSource(_configManager.Load(), source.Name);
         if (source != null)
         {
-            _fileMonitor.RemoveSource(name);
+            _fileMonitor.RemoveSource(source.Name);
             if (request.Enabled)
                 _fileMonitor.AddSource(source.Path, source.Name, source.FilePatterns);
         }
@@ -315,7 +338,7 @@ public class SourcesController : ControllerBase
     public ActionResult<ScanResult> Scan(string name)
     {
         var config = _configManager.Load();
-        var source = config.Sources.FirstOrDefault(s => s.Name == name);
+        var source = FindSource(config, name);
 
         if (source == null)
         {

@@ -60,14 +60,14 @@ export const aiQueryApi = {
 // Sources
 export const sourcesApi = {
     getAll: () => api.get('/Sources'),
-    getByName: (name) => api.get(`/Sources/${name}`),
+    getByName: (name) => api.get(`/Sources/${encodeURIComponent(name)}`),
     create: (data) => api.post('/Sources', data),
-    update: (name, data) => api.put(`/Sources/${name}`, data),
-    delete: (name, deleteData = false) => api.delete(`/Sources/${name}?deleteData=${deleteData}`),
-    toggle: (name, enabled) => api.patch(`/Sources/${name}/toggle`, { enabled }),
-    startIndex: (name, force = false) => api.post(`/Sources/${name}/index`, { force }),
-    scan: (name) => api.get(`/Sources/${name}/scan`),
-    getFiles: (name) => api.get(`/Sources/${name}/files`)
+    update: (name, data) => api.put(`/Sources/${encodeURIComponent(name)}`, data),
+    delete: (name, deleteData = false) => api.delete(`/Sources/${encodeURIComponent(name)}?deleteData=${deleteData}`),
+    toggle: (name, enabled) => api.patch(`/Sources/${encodeURIComponent(name)}/toggle`, { enabled }),
+    startIndex: (name, force = false) => api.post(`/Sources/${encodeURIComponent(name)}/index`, { force }),
+    scan: (name) => api.get(`/Sources/${encodeURIComponent(name)}/scan`),
+    getFiles: (name) => api.get(`/Sources/${encodeURIComponent(name)}/files`)
 };
 // Index Jobs — /api/index/jobs
 export const indexJobsApi = {
@@ -76,19 +76,19 @@ export const indexJobsApi = {
     getAll: () => api.get('/index/jobs/all'),
     getHistory: () => api.get('/index/jobs/history'),
     clearHistory: () => api.delete('/index/jobs/history'),
-    getJob: (jobId) => api.get(`/index/jobs/${jobId}`),
-    cancelJob: (jobId) => api.post(`/index/jobs/${jobId}/cancel`)
+    getJob: (jobId) => api.get(`/index/jobs/${encodeURIComponent(jobId)}`),
+    cancelJob: (jobId) => api.post(`/index/jobs/${encodeURIComponent(jobId)}/cancel`)
 };
 // Index Management — /api/index
 export const indexApi = {
     getSummary: () => api.get('/index/summary'),
     getModels: () => api.get('/index/models'),
     getCurrentModel: () => api.get('/index/models/current'),
-    deleteModel: (modelName) => api.delete(`/index/models/${modelName}`),
+    deleteModel: (modelName) => api.delete(`/index/models/${encodeURIComponent(modelName)}`),
     deleteAllModels: () => api.delete('/index/models'),
     deleteAllData: () => api.delete('/index/data'),
     rebuild: (request) => api.post('/index/rebuild', request || {}),
-    rebuildSource: (sourceName) => api.post(`/index/rebuild/${sourceName}`),
+    rebuildSource: (sourceName) => api.post(`/index/rebuild/${encodeURIComponent(sourceName)}`),
     cleanup: () => api.post('/index/cleanup')
 };
 export const settingsApi = {

@@ -75,7 +75,7 @@ public class SourceFolder
     /// <summary>
     /// 文件匹配模式
     /// </summary>
-    public List<string> FilePatterns { get; set; } = new() { "*.md" };
+    public List<string> FilePatterns { get; set; } = new() { "*.md", "*.txt" };
 
     /// <summary>
     /// 排除的目录

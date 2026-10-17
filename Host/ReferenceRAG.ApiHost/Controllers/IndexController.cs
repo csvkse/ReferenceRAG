@@ -253,17 +253,20 @@ public class IndexController : ControllerBase
     public async Task<ActionResult<RebuildJob>> RebuildSource(string sourceName)
     {
         var config = _configManager.Load();
-        var source = config.Sources.FirstOrDefault(s => s.Name == sourceName);
+        var decoded = Uri.UnescapeDataString(sourceName);
+        var source = config.Sources.FirstOrDefault(s =>
+            s.Name.Equals(sourceName, StringComparison.OrdinalIgnoreCase) ||
+            s.Name.Equals(decoded, StringComparison.OrdinalIgnoreCase));
         if (source == null)
             return NotFound(new { error = $"源 '{sourceName}' 不存在" });
 
         var currentModel = _embeddingService.ModelName;
-        _logger.LogInformation("源重建: {Source}", sourceName);
+        _logger.LogInformation("源重建: {Source}", source.Name);
 
-        await _pipeline.DeleteSourceAsync(sourceName);
+        await _pipeline.DeleteSourceAsync(source.Name);
         var job = await _indexService.StartIndexAsync(new IndexRequest
         {
-            Sources = new List<string> { sourceName },
+            Sources = new List<string> { source.Name },
             Force = true
         });
 

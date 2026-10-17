@@ -1,5 +1,6 @@
 using System.Net;
 using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -30,7 +31,11 @@ public sealed class InProcessServer(IServer networkServer, bool listen) : IServe
         var dispatch=_dispatch ?? throw new InvalidOperationException("Application has not started.");
         if(!path.StartsWith('/') || path.StartsWith("//") || path.Contains('#')) throw new ArgumentException("Only local API paths are allowed.");
         var parts=path.Split('?',2);
-        var request=new HttpRequestFeature { Method=method,Scheme="http",Protocol="HTTP/1.1",Path=parts[0],QueryString=parts.Length==2?"?"+parts[1]:"",Body=input,RawTarget=path };
+        var rawPath=parts[0];
+        string decodedPath;
+        try { decodedPath=PathString.FromUriComponent(rawPath).Value ?? rawPath; }
+        catch (UriFormatException) { decodedPath=rawPath; }
+        var request=new HttpRequestFeature { Method=method,Scheme="http",Protocol="HTTP/1.1",Path=decodedPath,QueryString=parts.Length==2?"?"+parts[1]:"",Body=input,RawTarget=path };
         request.Headers.Host="localhost";
         foreach(var (key,value) in headers) if(!key.Equals("Host",StringComparison.OrdinalIgnoreCase)) request.Headers[key]=value;
         if(input.CanSeek) request.Headers.ContentLength=input.Length;

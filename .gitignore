@@ -30,6 +30,7 @@ resource/
 .tmpobj/
 *.user
 *.suo
+*.lnk
 .claude/
 .qoder/
 
