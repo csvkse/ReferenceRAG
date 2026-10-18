@@ -86,6 +86,9 @@ public class FileMonitorService : IFileMonitorService, IDisposable
     private bool _hybridModeEnabled;
     private int _inotifyLimit = DefaultInotifyLimit;
 
+    // 差异快照比对缓存（避免非活跃目录轮询时重复派发假修改事件）
+    private readonly ConcurrentDictionary<string, (long Size, DateTime LastWriteTimeUtc)> _fileSnapshots = new(StringComparer.OrdinalIgnoreCase);
+
     private readonly Dictionary<string, FileSystemWatcher> _watchers;
     private readonly Dictionary<string, string> _sources;
     private readonly Dictionary<string, List<string>> _sourceFilePatterns; // 每个源的文件模式
@@ -185,20 +188,51 @@ public class FileMonitorService : IFileMonitorService, IDisposable
             if (!Directory.Exists(dirPath))
                 return;
 
-            // 获取该目录对应的文件模式
+            var sourceEntry = _sources.FirstOrDefault(s => PathUtility.NormalizePath(s.Value) == PathUtility.NormalizePath(dirPath));
+            var source = sourceEntry.Key;
+            if (string.IsNullOrEmpty(source))
+                return;
+
             var patterns = GetPatternsForDirectory(dirPath);
+            var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var pattern in patterns)
             {
                 var files = Directory.EnumerateFiles(dirPath, pattern, SearchOption.AllDirectories);
                 foreach (var filePath in files)
                 {
-                    // 为每个文件触发变更事件（带防抖）
-                    var source = _sources.FirstOrDefault(s => s.Value == dirPath).Key;
-                    if (!string.IsNullOrEmpty(source))
+                    seenFiles.Add(filePath);
+                    var fi = new FileInfo(filePath);
+                    if (!fi.Exists) continue;
+
+                    var currentMtime = fi.LastWriteTimeUtc;
+                    var currentLength = fi.Length;
+
+                    if (!_fileSnapshots.TryGetValue(filePath, out var prev))
                     {
+                        // 首次建立快照记录，不派发虚假修改
+                        _fileSnapshots[filePath] = (currentLength, currentMtime);
+                    }
+                    else if (prev.LastWriteTimeUtc != currentMtime || prev.Size != currentLength)
+                    {
+                        // 真实发生了 mtime 或大小变化，触发修改
+                        _fileSnapshots[filePath] = (currentLength, currentMtime);
                         OnFileChanged(filePath, source, ChangeType.Modified);
                     }
                 }
+            }
+
+            // 清理已在磁盘上删除的文件快照并派发删除事件
+            var normalizedDir = PathUtility.NormalizePath(dirPath);
+            var prefix = normalizedDir.EndsWith(Path.DirectorySeparatorChar) ? normalizedDir : normalizedDir + Path.DirectorySeparatorChar;
+            var deletedKeys = _fileSnapshots.Keys
+                .Where(k => (k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || string.Equals(k, normalizedDir, StringComparison.OrdinalIgnoreCase)) && !seenFiles.Contains(k))
+                .ToList();
+
+            foreach (var deleted in deletedKeys)
+            {
+                _fileSnapshots.TryRemove(deleted, out _);
+                OnFileChanged(deleted, source, ChangeType.Deleted);
             }
         }
         catch (Exception ex)
@@ -318,6 +352,9 @@ public class FileMonitorService : IFileMonitorService, IDisposable
             MarkDirectoryActive(path);
         }
 
+        // 预热文件快照，避免首次定时扫描时将所有历史文件误判为变动
+        WarmupFileSnapshots();
+
         // 启动非活跃目录扫描器
         _idleScanner?.Change(TimeSpan.FromSeconds(IdleScanIntervalSeconds), TimeSpan.FromSeconds(IdleScanIntervalSeconds));
     }
@@ -328,6 +365,37 @@ public class FileMonitorService : IFileMonitorService, IDisposable
     public void SetInotifyLimit(int limit)
     {
         _inotifyLimit = limit;
+    }
+
+    private void WarmupFileSnapshots()
+    {
+        try
+        {
+            foreach (var (_, dirPath) in _sources)
+            {
+                if (!Directory.Exists(dirPath)) continue;
+                var patterns = GetPatternsForDirectory(dirPath);
+                foreach (var pattern in patterns)
+                {
+                    foreach (var file in Directory.EnumerateFiles(dirPath, pattern, SearchOption.AllDirectories))
+                    {
+                        try
+                        {
+                            var fi = new FileInfo(file);
+                            if (fi.Exists)
+                            {
+                                _fileSnapshots[file] = (fi.Length, fi.LastWriteTimeUtc);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "预热文件快照异常");
+        }
     }
 
     public Task StopAsync()
@@ -510,6 +578,24 @@ public class FileMonitorService : IFileMonitorService, IDisposable
         if (!string.IsNullOrEmpty(dir))
         {
             MarkDirectoryActive(dir);
+        }
+
+        // 维护快照缓存
+        if (changeType == ChangeType.Deleted || !File.Exists(filePath))
+        {
+            _fileSnapshots.TryRemove(filePath, out _);
+        }
+        else
+        {
+            try
+            {
+                var fi = new FileInfo(filePath);
+                if (fi.Exists)
+                {
+                    _fileSnapshots[filePath] = (fi.Length, fi.LastWriteTimeUtc);
+                }
+            }
+            catch { }
         }
 
         // 使用 per-file 独立防抖

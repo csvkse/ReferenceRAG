@@ -66,6 +66,7 @@ export const useIndexStore = defineStore('index', () => {
                     indexId: data.indexId,
                     processedFiles: data.processedFiles ?? 0,
                     totalFiles: data.totalFiles ?? 0,
+                    progressPercent: data.progressPercent ?? (data.totalFiles > 0 ? (data.processedFiles / data.totalFiles) * 100 : 0),
                     currentFile: data.currentFile || '',
                     timestamp: data.timestamp || new Date().toISOString()
                 };

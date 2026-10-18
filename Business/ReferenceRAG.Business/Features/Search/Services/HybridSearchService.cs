@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Rougamo;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
@@ -67,6 +68,7 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
         var results = new List<HybridSearchResult>();
 
         // 1. BM25 关键词搜索（先做同义词扩展，提升关键词 miss 召回率）
+        var bm25Sw = Stopwatch.StartNew();
         var bm25Query = _synonymService?.ExpandQuery(query) ?? query;
         var bm25Results = await _bm25Store.SearchAsync(bm25Query, topK * 2, k1, b);
         var bm25RankMap = CreateRankMap(bm25Results.Select(r => r.ChunkId).ToList());
@@ -78,8 +80,11 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
         // 获取 BM25 最大分数用于归一化
         var maxBm25Score = bm25Results.Count > 0 ? bm25Results.Max(r => r.Score) : 1.0;
         if (maxBm25Score <= 0) maxBm25Score = 1.0;
+        bm25Sw.Stop();
+        SearchTraceContext.RecordBm25(bm25Sw.ElapsedMilliseconds);
 
         // 2. Embedding 语义搜索（复用调用方预计算的向量，避免重复推理）
+        var vecSw = Stopwatch.StartNew();
         var queryVector = precomputedQueryVector
             ?? await _embeddingService.EncodeAsync(query, EmbeddingMode.Query, cancellationToken);
         var modelName = _embeddingService.ModelName;
@@ -93,8 +98,11 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
         // 获取 Embedding 最大分数用于归一化
         var maxEmbeddingScore = embeddingResults.Any() ? embeddingResults.Max(r => r.Score) : 1.0;
         if (maxEmbeddingScore <= 0) maxEmbeddingScore = 1.0;
+        vecSw.Stop();
+        SearchTraceContext.RecordVector(vecSw.ElapsedMilliseconds);
 
         // 3. 收集所有候选文档ID
+        var fuseSw = Stopwatch.StartNew();
         var allDocIds = bm25RankMap.Keys.Union(embeddingRankMap.Keys).ToHashSet();
 
         // 4. 融合 BM25 和 Embedding 结果
@@ -106,6 +114,8 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
         var orderedCandidates = fusedScores
             .OrderByDescending(s => s.Value)
             .ToList();
+        fuseSw.Stop();
+        SearchTraceContext.RecordHybrid(fuseSw.ElapsedMilliseconds);
 
         List<string>? folderList = null;
         if (folders?.Any() == true)
@@ -172,6 +182,12 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
                 }
             }
 
+            var candidateContent = embeddingResult?.Content ?? sqliteContent ?? bm25Result?.Content ?? string.Empty;
+            if (!string.IsNullOrEmpty(candidateContent) && MarkdownChunker.IsNoiseOrSeparator(candidateContent))
+            {
+                continue;
+            }
+
             results.Add(new HybridSearchResult
             {
                 ChunkId = docId,
@@ -179,7 +195,7 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
                 FilePath = filePath,
                 Title = title,
                 // 优先级：向量搜索内容 > SQLite 原始内容 > BM25 分词内容
-                Content = embeddingResult?.Content ?? sqliteContent ?? bm25Result?.Content ?? string.Empty,
+                Content = candidateContent,
                 Score = fusedScore,
                 BM25Score = (float)(bm25Result?.Score ?? 0),
                 EmbeddingScore = (float)(embeddingResult?.Score ?? 0),

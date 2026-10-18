@@ -33,7 +33,10 @@ public class IndexJobsController : ControllerBase
         StartTime = job.StartTime,
         EndTime = job.EndTime,
         Duration = job.Duration.ToString(),
-        ErrorMessage = job.ErrorMessage
+        ErrorMessage = job.ErrorMessage,
+        Phase = job.StateMachine?.CurrentPhase.ToString() ?? job.Status.ToString(),
+        TargetResource = job.Request?.Sources?.Count == 1 ? $"source:{job.Request.Sources[0]}" : "global",
+        JobType = job.Request?.Rechunk == true ? "Rechunk" : (job.Request?.VectorOnly == true ? "VectorOnly" : (job.Request?.Force == true ? "FullRebuild" : "Incremental"))
     };
 
     /// <summary>启动索引任务（增量或强制）</summary>
@@ -50,7 +53,8 @@ public class IndexJobsController : ControllerBase
         {
             Sources = request?.Sources,
             Force = request?.Force ?? false,
-            VectorOnly = request?.VectorOnly ?? false
+            VectorOnly = request?.VectorOnly ?? false,
+            Rechunk = request?.Rechunk ?? false
         });
 
         return Accepted(ToResponse(job));

@@ -1,7 +1,67 @@
+using ReferenceRAG.Core.Features.ModelManagement.Protobuf;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Adapters;
+using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Coordinator;
+using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.StateMachine;
 
 namespace ReferenceRAG.Core.Services;
+
+/// <summary>
+/// 模型版本/变体信息（同模型多版本：如 Q4_K_M, Q8_0, FP16, ONNX 等）
+/// </summary>
+public class ModelVariantInfo
+{
+    /// <summary>
+    /// 变体唯一标识（如 "Q4_K_M", "Q8_0", "onnx-embedded", "onnx-external"）
+    /// </summary>
+    public string VariantId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 友好显示名称（如 "GGUF Q4_K_M (推荐)", "ONNX 嵌入式"）
+    /// </summary>
+    public string DisplayName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 文件名（如 "Qwen3-Embedding-0.6B-Q4_K_M.gguf", "model.onnx"）
+    /// </summary>
+    public string FileName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 相对模型目录的相对路径
+    /// </summary>
+    public string RelativePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 绝对物理文件路径
+    /// </summary>
+    public string FullPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 模型格式: "gguf" | "onnx"
+    /// </summary>
+    public string Format { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 量化类型（如 "Q4_K_M", "Q8_0", "INT8", "FP16"）
+    /// </summary>
+    public string? Quantization { get; set; }
+
+    /// <summary>
+    /// 文件字节大小
+    /// </summary>
+    public long FileSizeBytes { get; set; }
+
+    /// <summary>
+    /// 本地是否已下载就绪
+    /// </summary>
+    public bool IsDownloaded { get; set; } = true;
+
+    /// <summary>
+    /// 当前是否处于选中激活状态
+    /// </summary>
+    public bool IsActive { get; set; }
+}
 
 /// <summary>
 /// 模型信息
@@ -39,6 +99,16 @@ public class ModelInfo
     /// 是否支持格式转换（模型大小小于 2GB 时为 true）
     /// </summary>
     public bool CanConvertFormat { get; set; }
+
+    /// <summary>
+    /// 该模型已安装/已下载的所有版本变体列表
+    /// </summary>
+    public List<ModelVariantInfo> InstalledVariants { get; set; } = new();
+
+    /// <summary>
+    /// 当前选中的激活变体文件名称（若有）
+    /// </summary>
+    public string? ActiveVariantFileName { get; set; }
 }
 
 /// <summary>
@@ -62,10 +132,21 @@ public interface IModelManager
     List<ModelInfo> GetDownloadedModels();
     ModelInfo? GetCurrentModel();
     Task<bool> SwitchModelAsync(string modelName);
-    Task<(bool Success, string? Error)> DownloadModelAsync(string modelName, IProgress<float>? progress = null, string? targetFormat = null, string? onnxVariantPath = null);
+    Task<(bool Success, string? Error)> DownloadModelAsync(string modelName, IProgress<float>? progress = null, string? targetFormat = null, string? onnxVariantPath = null, string? repository = null);
+    Task<(bool Success, string? Error)> DownloadModelAsync(string modelName, IProgress<DownloadProgress>? progress, string? targetFormat = null, string? onnxVariantPath = null, CancellationToken cancellationToken = default, string? repository = null);
     Task<bool> DeleteModelAsync(string modelName);
     Task<List<ModelInfo>> GetRecommendedModelsAsync(string? language = null, bool preferGpu = true);
     void RefreshLocalModels();
+
+    /// <summary>
+    /// 切换同一模型的特定变体版本（如 Q4_K_M, Q8_0, ONNX 等）
+    /// </summary>
+    Task<bool> SwitchModelVariantAsync(string modelName, string variantFileName, bool isRerank = false);
+
+    /// <summary>
+    /// 删除同一模型的某个特定变体文件（若为最后一个变体则删除整个模型）
+    /// </summary>
+    Task<bool> DeleteModelVariantAsync(string modelName, string variantFileName, bool isRerank = false);
 
     /// <summary>
     /// 检测模型 ONNX 格式
@@ -96,7 +177,7 @@ public interface IModelManager
     /// <summary>
     /// 获取模型的下载选项
     /// </summary>
-    Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName);
+    Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName, CancellationToken cancellationToken = default);
 
     // ========== 重排模型管理 ==========
 
@@ -379,6 +460,94 @@ public class ModelManager : IModelManager, IDisposable
             ModelSizeBytes = 410 * 1024 * 1024,
             HasOnnx = false
         },
+        new ModelInfo
+        {
+            Name = "gte-multilingual-base",
+            DisplayName = "GTE Multilingual Base",
+            Description = "阿里达摩院mGTE多语言多任务向量模型，70+语言，8K长上下文，支持稠密与稀疏混合检索",
+            Dimension = 768,
+            MaxSequenceLength = 8192,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "multilingual" },
+            BenchmarkScore = 0.90f,
+            DownloadUrl = "Alibaba-NLP/gte-multilingual-base",
+            ModelSizeBytes = 600 * 1024 * 1024,
+            HasOnnx = false
+        },
+        // ========== xVITA 繁体中文优化系列 ==========
+        new ModelInfo
+        {
+            Name = "xVITA-Embed-300M-zhTW",
+            DisplayName = "xVITA Embed 300M zh-TW",
+            Description = "xCloudinfo繁体中文/台湾语境优化嵌入模型 (需HF授权Token/Gated)，基于EmbeddingGemma架构，8K上下文与非对称检索",
+            Dimension = 768,
+            MaxSequenceLength = 8192,
+            ModelType = "embedding",
+            Languages = new[] { "zh-TW", "zh", "en" },
+            BenchmarkScore = 0.88f,
+            DownloadUrl = "xCloudinfo/xVITA-Embed-300M-zhTW",
+            ModelSizeBytes = 600 * 1024 * 1024,
+            HasOnnx = false,
+            AsymmetricEncoding = new AsymmetricEncodingConfig
+            {
+                QueryPrefix = "task: search result | query: ",
+                DocumentPrefix = "title: none | text: "
+            }
+        },
+        // ========== Qwen 系列（阿里通义）==========
+        new ModelInfo
+        {
+            Name = "Qwen3-Embedding-0.6B",
+            DisplayName = "Qwen3 Embedding 0.6B",
+            Description = "阿里通义千问Qwen3系列0.6B轻量长文本向量模型，原生预编译GGUF量化，LLamaSharp直接免转加载，32K长上下文",
+            Dimension = 1024,
+            MaxSequenceLength = 32768,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "multilingual", "code" },
+            BenchmarkScore = 0.93f,
+            DownloadUrl = "Qwen/Qwen3-Embedding-0.6B-GGUF",
+            ModelSizeBytes = (long)(450 * 1024 * 1024),
+            HasOnnx = true,
+            AsymmetricEncoding = new AsymmetricEncodingConfig
+            {
+                QueryPrefix = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:",
+                DocumentPrefix = ""
+            }
+        },
+        new ModelInfo
+        {
+            Name = "Qwen3-Embedding-4B",
+            DisplayName = "Qwen3 Embedding 4B",
+            Description = "阿里通义千问Qwen3系列4B大参数高精度向量模型，原生预编译GGUF量化，LLamaSharp直接免转加载，32K长上下文",
+            Dimension = 2560,
+            MaxSequenceLength = 32768,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "multilingual", "code" },
+            BenchmarkScore = 0.96f,
+            DownloadUrl = "Qwen/Qwen3-Embedding-4B-GGUF",
+            ModelSizeBytes = (long)(2.5 * 1024 * 1024 * 1024),
+            HasOnnx = true,
+            AsymmetricEncoding = new AsymmetricEncodingConfig
+            {
+                QueryPrefix = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:",
+                DocumentPrefix = ""
+            }
+        },
+        // ========== Jina 系列 ==========
+        new ModelInfo
+        {
+            Name = "jina-embeddings-v3",
+            DisplayName = "Jina Embeddings v3",
+            Description = "Jina AI多语言嵌入模型，89+语言及代码，8K上下文，支持任务自适应LoRA与MRL弹性维度",
+            Dimension = 1024,
+            MaxSequenceLength = 8192,
+            ModelType = "embedding",
+            Languages = new[] { "zh", "en", "multilingual", "code" },
+            BenchmarkScore = 0.94f,
+            DownloadUrl = "jinaai/jina-embeddings-v3",
+            ModelSizeBytes = (long)(1.1 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
         // ========== E5 系列（微软）==========
         new ModelInfo
         {
@@ -597,6 +766,76 @@ public class ModelManager : IModelManager, IDisposable
         },
         new ModelInfo
         {
+            Name = "Qwen3-Reranker-0.6B",
+            DisplayName = "Qwen3 Reranker 0.6B",
+            Description = "阿里通义千问Qwen3系列0.6B轻量重排模型，100+语言及代码，原生32K超长上下文与深层推理能力",
+            Dimension = 1024,
+            MaxSequenceLength = 32768,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en", "multilingual", "code" },
+            BenchmarkScore = 0.95f,
+            DownloadUrl = "Qwen/Qwen3-Reranker-0.6B",
+            ModelSizeBytes = (long)(1.2 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Qwen3-Reranker-4B",
+            DisplayName = "Qwen3 Reranker 4B",
+            Description = "阿里通义千问Qwen3系列4B大参数高精度重排模型，100+语言及代码，原生32K超长上下文与旗舰级精排质量",
+            Dimension = 2560,
+            MaxSequenceLength = 32768,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en", "multilingual", "code" },
+            BenchmarkScore = 0.97f,
+            DownloadUrl = "Qwen/Qwen3-Reranker-4B",
+            ModelSizeBytes = (long)(8.5 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "jina-reranker-v2-base-multilingual",
+            DisplayName = "Jina Reranker v2 Base Multilingual",
+            Description = "Jina AI多语言极速重排模型，278M轻量参数，支持滑动窗口长文本分块与FlashAttention加速",
+            Dimension = 768,
+            MaxSequenceLength = 1024,
+            ModelType = "reranker",
+            Languages = new[] { "zh", "en", "multilingual" },
+            BenchmarkScore = 0.92f,
+            DownloadUrl = "jinaai/jina-reranker-v2-base-multilingual",
+            ModelSizeBytes = (long)(0.55 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "mxbai-rerank-base-v1",
+            DisplayName = "mxbai Rerank Base v1",
+            Description = "Mixedbread轻量高精度重排模型，内置官方ONNX，137M参数，低延迟高精度，边缘端与高并发RAG首选",
+            Dimension = 768,
+            MaxSequenceLength = 512,
+            ModelType = "reranker",
+            Languages = new[] { "en", "multilingual" },
+            BenchmarkScore = 0.89f,
+            DownloadUrl = "mixedbread-ai/mxbai-rerank-base-v1",
+            ModelSizeBytes = (long)(0.55 * 1024 * 1024 * 1024),
+            HasOnnx = true
+        },
+        new ModelInfo
+        {
+            Name = "mxbai-rerank-xsmall-v1",
+            DisplayName = "mxbai Rerank xSmall v1",
+            Description = "Mixedbread超轻量级重排模型，内置官方ONNX，仅110M微型体积，极致低延迟与资源占用",
+            Dimension = 384,
+            MaxSequenceLength = 512,
+            ModelType = "reranker",
+            Languages = new[] { "en", "multilingual" },
+            BenchmarkScore = 0.85f,
+            DownloadUrl = "mixedbread-ai/mxbai-rerank-xsmall-v1",
+            ModelSizeBytes = (long)(0.22 * 1024 * 1024 * 1024),
+            HasOnnx = true
+        },
+        new ModelInfo
+        {
             Name = "ms-marco-MiniLM-L-6-v2",
             DisplayName = "MS MARCO MiniLM L6 v2",
             Description = "微软轻量级英文重排序模型，速度快资源占用低",
@@ -698,6 +937,111 @@ public class ModelManager : IModelManager, IDisposable
         ScanLocalModels();
     }
 
+    private static readonly System.Text.RegularExpressions.Regex QuantRegex = new(
+        @"(Q\d+_[A-Z0-9_]+|q\d+_[a-z0-9_]+|int8|int4|fp16|fp32|f16|f32)",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// 从文件名中解析量化规格标签（如 Q4_K_M, Q8_0, INT8, FP16）
+    /// </summary>
+    public static string? ExtractQuantizationFromFileName(string fileName)
+    {
+        var match = QuantRegex.Match(fileName);
+        return match.Success ? match.Value.ToUpperInvariant() : null;
+    }
+
+    /// <summary>
+    /// 扫描指定模型目录下的所有变体版本文件（GGUF 及 ONNX），构建已安装变体集合
+    /// </summary>
+    private List<ModelVariantInfo> ScanDirectoryVariants(string dir, string modelType, string? currentConfiguredPath)
+    {
+        var variants = new List<ModelVariantInfo>();
+        if (!Directory.Exists(dir)) return variants;
+
+        // 1. 扫描所有 GGUF 变体文件
+        var ggufFiles = Directory.GetFiles(dir, "*.gguf", SearchOption.AllDirectories);
+        foreach (var file in ggufFiles)
+        {
+            var fileName = Path.GetFileName(file);
+            var fi = new FileInfo(file);
+            var quant = ExtractQuantizationFromFileName(fileName);
+            var varId = !string.IsNullOrEmpty(quant) ? quant : Path.GetFileNameWithoutExtension(fileName);
+
+            variants.Add(new ModelVariantInfo
+            {
+                VariantId = varId,
+                DisplayName = $"GGUF {(!string.IsNullOrEmpty(quant) ? quant : Path.GetFileNameWithoutExtension(fileName))}",
+                FileName = fileName,
+                RelativePath = Path.GetRelativePath(dir, file),
+                FullPath = Path.GetFullPath(file),
+                Format = "gguf",
+                Quantization = quant,
+                FileSizeBytes = fi.Length,
+                IsDownloaded = true
+            });
+        }
+
+        // 2. 扫描所有 ONNX 变体文件
+        var onnxFiles = Directory.GetFiles(dir, "*.onnx", SearchOption.AllDirectories);
+        foreach (var file in onnxFiles)
+        {
+            var fileName = Path.GetFileName(file);
+            var fi = new FileInfo(file);
+            var onnxFormat = DetectOnnxFormat(dir);
+            var quant = ExtractQuantizationFromFileName(fileName);
+
+            string varId;
+            string displayName;
+            if (string.Equals(fileName, "model.onnx", StringComparison.OrdinalIgnoreCase))
+            {
+                varId = onnxFormat == "external" ? "onnx-external" : "onnx-embedded";
+                displayName = onnxFormat == "external" ? "ONNX 外部数据" : "ONNX 嵌入式";
+            }
+            else
+            {
+                varId = Path.GetFileNameWithoutExtension(fileName);
+                displayName = $"ONNX {varId}";
+            }
+
+            variants.Add(new ModelVariantInfo
+            {
+                VariantId = varId,
+                DisplayName = displayName,
+                FileName = fileName,
+                RelativePath = Path.GetRelativePath(dir, file),
+                FullPath = Path.GetFullPath(file),
+                Format = "onnx",
+                Quantization = quant,
+                FileSizeBytes = fi.Length,
+                IsDownloaded = true
+            });
+        }
+
+        // 3. 匹配当前激活状态
+        var matched = false;
+        if (!string.IsNullOrEmpty(currentConfiguredPath))
+        {
+            var normConfigPath = Path.GetFullPath(currentConfiguredPath);
+            foreach (var v in variants)
+            {
+                if (string.Equals(normConfigPath, v.FullPath, StringComparison.OrdinalIgnoreCase) ||
+                    normConfigPath.EndsWith(v.FileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    v.IsActive = true;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+
+        if (!matched && variants.Count > 0)
+        {
+            variants[0].IsActive = true;
+        }
+
+        return variants;
+    }
+
     private void ScanLocalModels()
     {
         if (!Directory.Exists(_modelsPath))
@@ -705,21 +1049,27 @@ public class ModelManager : IModelManager, IDisposable
             Directory.CreateDirectory(_modelsPath);
         }
 
+        var config = _configManager.Load();
+        var configuredEmbPath = config.Embedding?.ModelPath;
+        var configuredRerankPath = config.Rerank?.ModelPath;
+
         // 首先将所有模型的 IsDownloaded 重置为 false（路径变更后需要重新检测）
         foreach (var model in _modelRegistry.Values)
         {
             model.IsDownloaded = false;
             model.LocalPath = null;
+            model.InstalledVariants.Clear();
+            model.ActiveVariantFileName = null;
         }
 
         // 扫描子目录结构（新结构）
         var embeddingPath = Path.Combine(_modelsPath, "Embedding");
         if (Directory.Exists(embeddingPath))
-            ScanModelDirectory(embeddingPath, "embedding");
+            ScanModelDirectory(embeddingPath, "embedding", configuredEmbPath);
 
         var rerankerPath = Path.Combine(_modelsPath, "Reranker");
         if (Directory.Exists(rerankerPath))
-            ScanModelDirectory(rerankerPath, "reranker");
+            ScanModelDirectory(rerankerPath, "reranker", configuredRerankPath);
 
         // 兼容扫描：扁平结构（旧版下载直接放在 _modelsPath/modelName/）
         // 仅处理尚未被子目录扫描命中的已注册模型
@@ -727,14 +1077,17 @@ public class ModelManager : IModelManager, IDisposable
         {
             var flatDir = Path.Combine(_modelsPath, model.Name);
             if (Directory.Exists(flatDir))
-                ScanModelDirectory(_modelsPath, model.ModelType, new[] { model.Name });
+            {
+                var targetConfigPath = model.ModelType == "reranker" ? configuredRerankPath : configuredEmbPath;
+                ScanModelDirectory(_modelsPath, model.ModelType, targetConfigPath, new[] { model.Name });
+            }
         }
     }
 
     /// <summary>
-    /// 扫描指定目录下的模型
+    /// 扫描指定目录下的模型，提取多变体版本
     /// </summary>
-    private void ScanModelDirectory(string basePath, string modelType, string[]? specificDirs = null)
+    private void ScanModelDirectory(string basePath, string modelType, string? currentConfiguredPath = null, string[]? specificDirs = null)
     {
         var dirsToScan = specificDirs ?? Directory.GetDirectories(basePath).Select(d => Path.GetFileName(d));
 
@@ -744,109 +1097,92 @@ public class ModelManager : IModelManager, IDisposable
             if (!Directory.Exists(dir))
                 continue;
 
-            var onnxPath = Path.Combine(dir, "model.onnx");
+            var variants = ScanDirectoryVariants(dir, modelType, currentConfiguredPath);
 
-            // 检查是否有 ONNX 文件（可能在子目录中，如 external 格式的 onnx/model.onnx）
-            var onnxExists = File.Exists(onnxPath);
-            if (!onnxExists)
+            if (variants.Count > 0)
             {
-                // 查找子目录中的 ONNX 文件
-                var subOnnxFiles = Directory.GetFiles(dir, "model.onnx", SearchOption.AllDirectories);
-                onnxExists = subOnnxFiles.Length > 0;
-            }
-
-            if (onnxExists)
-            {
-                var fileInfo = new FileInfo(onnxPath);
                 var directorySize = Directory.GetFiles(dir, "*", SearchOption.AllDirectories)
                     .Sum(f => new FileInfo(f).Length);
-                var onnxFormat = DetectOnnxFormat(dir);
-                var canConvert = directorySize < 2L * 1024 * 1024 * 1024; // < 2GB
-
-                // 如果检测到残缺的 ONNX 文件，标记为未下载（需要重新转换）
+                var activeVariant = variants.FirstOrDefault(v => v.IsActive) ?? variants[0];
+                var onnxFormat = activeVariant.Format == "gguf" ? "gguf" : DetectOnnxFormat(dir);
+                var canConvert = onnxFormat != "gguf" && directorySize < 2L * 1024 * 1024 * 1024;
                 var hasValidOnnx = onnxFormat != "invalid";
 
                 if (_modelRegistry.TryGetValue(modelName, out var model))
                 {
-                    model.IsDownloaded = hasValidOnnx; // 残缺文件视为未下载
+                    model.IsDownloaded = hasValidOnnx;
                     model.LocalPath = dir;
                     model.ModelSizeBytes = directorySize;
                     model.OnnxFormat = onnxFormat;
                     model.HasOnnx = hasValidOnnx;
                     model.CanConvertFormat = canConvert;
+                    model.InstalledVariants = variants;
+                    model.ActiveVariantFileName = activeVariant.FileName;
                 }
                 else
                 {
-                    // 发现未注册的本地模型，尝试从配置推断维度
                     var dimension = DetectModelDimension(dir);
-
                     _modelRegistry[modelName] = new ModelInfo
                     {
                         Name = modelName,
                         DisplayName = modelName,
-                        Description = "本地模型",
-                        Dimension = dimension,
+                        Description = activeVariant.Format == "gguf" ? "本地 GGUF 模型" : "本地模型",
+                        Dimension = dimension > 0 ? dimension : 0,
                         ModelType = modelType,
-                        IsDownloaded = hasValidOnnx, // 残缺文件视为未下载
+                        IsDownloaded = hasValidOnnx,
                         LocalPath = dir,
                         ModelSizeBytes = directorySize,
                         HasOnnx = hasValidOnnx,
                         OnnxFormat = onnxFormat,
-                        CanConvertFormat = canConvert
+                        CanConvertFormat = canConvert,
+                        InstalledVariants = variants,
+                        ActiveVariantFileName = activeVariant.FileName
                     };
                 }
-
-                // 如果是残缺文件，尝试自动重新转换
-                if (onnxFormat == "invalid")
-                {
-                    Console.WriteLine($"[ModelManager] 检测到残缺 ONNX 文件，建议重新转换: {modelName}");
-                    // 可以在这里触发自动重新转换，但目前先标记状态让用户手动处理
-                }
             }
-            else
-            {
-                // 没有找到 ONNX 文件，尝试检测是否为 external 格式（只有权重文件）
-                var onnxDirPath = Path.Combine(dir, "onnx");
-                if (Directory.Exists(onnxDirPath))
-                {
-                    var onnxFiles = Directory.GetFiles(onnxDirPath, "*.onnx", SearchOption.AllDirectories);
-                    if (onnxFiles.Length > 0)
-                    {
-                        // 这是 external 格式（只有权重文件）
-                        var directorySize = Directory.GetFiles(dir, "*", SearchOption.AllDirectories)
-                            .Sum(f => new FileInfo(f).Length);
-                        var onnxFormat = "external";
-                        var canConvert = directorySize < 2L * 1024 * 1024 * 1024; // < 2GB
+        }
 
-                        if (_modelRegistry.TryGetValue(modelName, out var model))
-                        {
-                            model.IsDownloaded = true; // external 格式视为已下载
-                            model.LocalPath = dir;
-                            model.ModelSizeBytes = directorySize;
-                            model.OnnxFormat = onnxFormat;
-                            model.HasOnnx = true;
-                            model.CanConvertFormat = canConvert;
-                        }
-                        else
-                        {
-                            var dimension = DetectModelDimension(dir);
-                            _modelRegistry[modelName] = new ModelInfo
-                            {
-                                Name = modelName,
-                                DisplayName = modelName,
-                                Description = "本地模型",
-                                Dimension = dimension,
-                                ModelType = modelType,
-                                IsDownloaded = true,
-                                LocalPath = dir,
-                                ModelSizeBytes = directorySize,
-                                HasOnnx = true,
-                                OnnxFormat = onnxFormat,
-                                CanConvertFormat = canConvert
-                            };
-                        }
-                    }
-                }
+        // 兼容扫描：根目录下直接存放的独立 .gguf 模型文件
+        if (specificDirs == null && Directory.Exists(basePath))
+        {
+            var looseGgufFiles = Directory.GetFiles(basePath, "*.gguf");
+            foreach (var ggufFile in looseGgufFiles)
+            {
+                var looseModelName = Path.GetFileNameWithoutExtension(ggufFile);
+                if (_modelRegistry.ContainsKey(looseModelName)) continue;
+
+                var fileInfo = new FileInfo(ggufFile);
+                var quant = ExtractQuantizationFromFileName(looseModelName);
+                var singleVariant = new ModelVariantInfo
+                {
+                    VariantId = !string.IsNullOrEmpty(quant) ? quant : looseModelName,
+                    DisplayName = $"GGUF {(!string.IsNullOrEmpty(quant) ? quant : looseModelName)}",
+                    FileName = Path.GetFileName(ggufFile),
+                    RelativePath = Path.GetFileName(ggufFile),
+                    FullPath = Path.GetFullPath(ggufFile),
+                    Format = "gguf",
+                    Quantization = quant,
+                    FileSizeBytes = fileInfo.Length,
+                    IsDownloaded = true,
+                    IsActive = true
+                };
+
+                _modelRegistry[looseModelName] = new ModelInfo
+                {
+                    Name = looseModelName,
+                    DisplayName = looseModelName,
+                    Description = "本地 GGUF 模型文件",
+                    Dimension = 0,
+                    ModelType = modelType,
+                    IsDownloaded = true,
+                    LocalPath = ggufFile,
+                    ModelSizeBytes = fileInfo.Length,
+                    HasOnnx = true,
+                    OnnxFormat = "gguf",
+                    CanConvertFormat = false,
+                    InstalledVariants = new List<ModelVariantInfo> { singleVariant },
+                    ActiveVariantFileName = singleVariant.FileName
+                };
             }
         }
     }
@@ -910,6 +1246,41 @@ public class ModelManager : IModelManager, IDisposable
         return null;
     }
 
+    /// <summary>
+    /// 解析模型所在物理文件路径（自动识别 .gguf 或 .onnx 文件，优先匹配指定的激活变体文件名）
+    /// </summary>
+    public static string ResolveModelFilePath(string? localPath, string? preferredVariantFileName = null)
+    {
+        if (string.IsNullOrEmpty(localPath)) return string.Empty;
+        if (File.Exists(localPath)) return localPath;
+
+        if (Directory.Exists(localPath))
+        {
+            if (!string.IsNullOrEmpty(preferredVariantFileName))
+            {
+                var targetFile = Path.Combine(localPath, preferredVariantFileName);
+                if (File.Exists(targetFile)) return targetFile;
+
+                var subMatches = Directory.GetFiles(localPath, preferredVariantFileName, SearchOption.AllDirectories);
+                if (subMatches.Length > 0) return subMatches[0];
+            }
+
+            var ggufFiles = Directory.GetFiles(localPath, "*.gguf", SearchOption.AllDirectories);
+            if (ggufFiles.Length > 0) return ggufFiles[0];
+
+            var onnxPath = Path.Combine(localPath, "model.onnx");
+            if (File.Exists(onnxPath)) return onnxPath;
+
+            var subOnnxFiles = Directory.GetFiles(localPath, "model.onnx", SearchOption.AllDirectories);
+            if (subOnnxFiles.Length > 0) return subOnnxFiles[0];
+
+            var anyOnnxFiles = Directory.GetFiles(localPath, "*.onnx", SearchOption.AllDirectories);
+            if (anyOnnxFiles.Length > 0) return anyOnnxFiles[0];
+        }
+
+        return Path.Combine(localPath, "model.onnx");
+    }
+
     public async Task<bool> SwitchModelAsync(string modelName)
     {
         if (!_modelRegistry.TryGetValue(modelName, out var model))
@@ -927,19 +1298,20 @@ public class ModelManager : IModelManager, IDisposable
         try
         {
             var config = await LoadConfigAsync();
-            config.Embedding.ModelPath = Path.Combine(model.LocalPath ?? "", "model.onnx");
+            var resolvedPath = ResolveModelFilePath(model.LocalPath, model.ActiveVariantFileName);
+            config.Embedding.ModelPath = resolvedPath;
             config.Embedding.ModelName = modelName;
             config.Embedding.MaxSequenceLength = model.MaxSequenceLength;
             await SaveConfigAsync(config);
 
             _currentModel = model;
-            Console.WriteLine($"[ModelManager] 已切换到模型: {model.DisplayName} (MaxSeqLen={model.MaxSequenceLength})");
+            Console.WriteLine($"[ModelManager] 已切换到模型: {model.DisplayName} (Path={resolvedPath}, MaxSeqLen={model.MaxSequenceLength})");
 
             // 触发模型切换事件，通知外部服务重新加载
             EmbeddingModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
             {
                 ModelName = modelName,
-                ModelPath = model.LocalPath ?? ""
+                ModelPath = resolvedPath
             });
 
             return true;
@@ -951,7 +1323,170 @@ public class ModelManager : IModelManager, IDisposable
         }
     }
 
-    public async Task<(bool Success, string? Error)> DownloadModelAsync(string modelName, IProgress<float>? progress = null, string? targetFormat = null, string? onnxVariantPath = null)
+    /// <summary>
+    /// 切换同一模型的特定变体版本（如 Q4_K_M, Q8_0, ONNX 等）
+    /// </summary>
+    public async Task<bool> SwitchModelVariantAsync(string modelName, string variantFileName, bool isRerank = false)
+    {
+        if (!_modelRegistry.TryGetValue(modelName, out var model))
+        {
+            Console.WriteLine($"[ModelManager] 模型不存在: {modelName}");
+            return false;
+        }
+
+        if (!model.IsDownloaded || model.InstalledVariants.Count == 0)
+        {
+            Console.WriteLine($"[ModelManager] 模型未下载或无变体: {modelName}");
+            return false;
+        }
+
+        var variant = model.InstalledVariants.FirstOrDefault(v =>
+            string.Equals(v.FileName, variantFileName, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(v.VariantId, variantFileName, StringComparison.OrdinalIgnoreCase));
+
+        if (variant == null)
+        {
+            Console.WriteLine($"[ModelManager] 未找到变体: {variantFileName} 于模型 {modelName}");
+            return false;
+        }
+
+        try
+        {
+            var config = await LoadConfigAsync();
+            if (isRerank || model.ModelType == "reranker")
+            {
+                if (config.Rerank == null) config.Rerank = new RerankConfig();
+                config.Rerank.CurrentModel = modelName;
+                config.Rerank.ModelPath = variant.FullPath;
+                _currentRerankModel = model;
+            }
+            else
+            {
+                if (config.Embedding == null) config.Embedding = new EmbeddingConfig();
+                config.Embedding.ModelName = modelName;
+                config.Embedding.ModelPath = variant.FullPath;
+                config.Embedding.MaxSequenceLength = model.MaxSequenceLength;
+                _currentModel = model;
+            }
+            await SaveConfigAsync(config);
+
+            // 更新变体激活状态
+            foreach (var v in model.InstalledVariants)
+            {
+                v.IsActive = (v == variant);
+            }
+            model.ActiveVariantFileName = variant.FileName;
+            model.OnnxFormat = variant.Format == "gguf" ? "gguf" : DetectOnnxFormat(model.LocalPath ?? "");
+
+            Console.WriteLine($"[ModelManager] 成功切换模型变体: {modelName} -> {variant.FileName} (Path={variant.FullPath})");
+
+            if (isRerank || model.ModelType == "reranker")
+            {
+                RerankModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
+                {
+                    ModelName = modelName,
+                    ModelPath = variant.FullPath
+                });
+            }
+            else
+            {
+                EmbeddingModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
+                {
+                    ModelName = modelName,
+                    ModelPath = variant.FullPath
+                });
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 切换模型变体异常: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 删除同一模型的某个特定变体文件（若为最后一个变体则删除整个模型）
+    /// </summary>
+    public async Task<bool> DeleteModelVariantAsync(string modelName, string variantFileName, bool isRerank = false)
+    {
+        if (!_modelRegistry.TryGetValue(modelName, out var model))
+            return false;
+
+        if (!model.IsDownloaded || model.InstalledVariants.Count == 0)
+            return false;
+
+        var variant = model.InstalledVariants.FirstOrDefault(v =>
+            string.Equals(v.FileName, variantFileName, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(v.VariantId, variantFileName, StringComparison.OrdinalIgnoreCase));
+
+        if (variant == null)
+            return false;
+
+        // 如果是仅有的一个变体，则直接删除整个模型
+        if (model.InstalledVariants.Count <= 1)
+        {
+            return await DeleteModelAsync(modelName);
+        }
+
+        try
+        {
+            if (File.Exists(variant.FullPath))
+            {
+                File.Delete(variant.FullPath);
+                var dataFile = variant.FullPath + "_data";
+                if (File.Exists(dataFile)) File.Delete(dataFile);
+            }
+
+            model.InstalledVariants.Remove(variant);
+
+            // 如果删除的是当前激活变体，自动切到第一个剩余变体
+            if (variant.IsActive && model.InstalledVariants.Count > 0)
+            {
+                var nextActive = model.InstalledVariants[0];
+                await SwitchModelVariantAsync(modelName, nextActive.FileName, isRerank);
+            }
+
+            model.ModelSizeBytes = model.InstalledVariants.Sum(v => v.FileSizeBytes);
+            Console.WriteLine($"[ModelManager] 已删除变体: {modelName}/{variant.FileName}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 删除变体失败: {ex.Message}");
+            return false;
+        }
+    }
+
+    public Task<(bool Success, string? Error)> DownloadModelAsync(
+        string modelName, 
+        IProgress<float>? progress = null, 
+        string? targetFormat = null, 
+        string? onnxVariantPath = null,
+        string? repository = null)
+    {
+        var wrapper = progress != null ? new Progress<DownloadProgress>(p => progress.Report(p.Progress)) : null;
+        return DownloadModelAsync(modelName, wrapper, targetFormat, onnxVariantPath, default, repository);
+    }
+
+    private IModelSourceAdapter CreateModelSourceAdapter()
+    {
+        var hub = _configManager.Load().ModelHub;
+        var token = !string.IsNullOrWhiteSpace(hub?.HfToken)
+            ? hub.HfToken
+            : Environment.GetEnvironmentVariable("HF_TOKEN");
+        var endpoint = hub?.HfEndpoint;
+        return new HuggingFaceSourceAdapter(token, endpoint);
+    }
+
+    public async Task<(bool Success, string? Error)> DownloadModelAsync(
+        string modelName,
+        IProgress<DownloadProgress>? progress,
+        string? targetFormat = null,
+        string? onnxVariantPath = null,
+        CancellationToken cancellationToken = default,
+        string? repository = null)
     {
         if (!_modelRegistry.TryGetValue(modelName, out var model))
         {
@@ -961,8 +1496,26 @@ public class ModelManager : IModelManager, IDisposable
 
         if (model.IsDownloaded)
         {
-            Console.WriteLine($"[ModelManager] 模型已存在: {modelName}");
-            return (true, null);
+            // 如果用户指定了具体变体，检查该具体变体是否已存在
+            // 如果未指定具体变体，或者具体变体已存在，才跳过下载；否则允许增量下载新变体！
+            bool variantAlreadyExists = false;
+            if (!string.IsNullOrEmpty(onnxVariantPath))
+            {
+                var fileName = Path.GetFileName(onnxVariantPath);
+                variantAlreadyExists = model.InstalledVariants.Any(v =>
+                    string.Equals(v.FileName, fileName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(v.RelativePath, onnxVariantPath, StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                variantAlreadyExists = true;
+            }
+
+            if (variantAlreadyExists)
+            {
+                Console.WriteLine($"[ModelManager] 模型变体已存在: {modelName} ({onnxVariantPath})");
+                return (true, null);
+            }
         }
 
         // 新下载写入子目录（Embedding/ 或 Reranker/），与 ScanLocalModels 保持一致
@@ -972,25 +1525,21 @@ public class ModelManager : IModelManager, IDisposable
         try
         {
             Console.WriteLine($"[ModelManager] 开始下载模型: {model.DisplayName}");
-            
-            if (!model.HasOnnx)
-            {
-                Console.WriteLine($"[ModelManager] 注意: 此模型需要从 PyTorch 转换为 ONNX");
-                Console.WriteLine($"[ModelManager] 请确保已安装 Python 和相关依赖 (pip install torch transformers)");
-            }
-            
-            progress?.Report(0);
-
             Directory.CreateDirectory(modelDir);
 
-            var downloader = new HuggingFaceModelDownloader();
-            await downloader.DownloadAsync(
+            var adapter = CreateModelSourceAdapter();
+            var coordinator = new ModelDownloadCoordinator(defaultAdapterFactory: () => CreateModelSourceAdapter());
+            var stateMachine = new DownloadStateMachine(modelName, model.ModelSizeBytes, progress);
+
+            await coordinator.DownloadModelAsync(
                 model.DownloadUrl ?? $"BAAI/{modelName}",
                 modelDir,
-                new Progress<float>(p => progress?.Report(p)),
-                default,
+                stateMachine,
+                adapter,
                 targetFormat,
-                onnxVariantPath
+                onnxVariantPath,
+                cancellationToken,
+                repository
             );
 
             // 验证 ONNX 文件
@@ -1005,14 +1554,11 @@ public class ModelManager : IModelManager, IDisposable
                     var srcDir = Path.GetDirectoryName(srcOnnx)!;
                     Console.WriteLine($"[ModelManager] 在子目录中找到 ONNX 文件: {srcOnnx}");
                     File.Copy(srcOnnx, onnxPath, true);
-                    // 如果有配套的 _data 文件也一并复制
-                    // ONNX Runtime 期望外部数据文件名为 model.onnx_data（下划线）
                     var srcData = Path.Combine(srcDir, "model.onnx_data");
                     if (File.Exists(srcData))
                     {
                         File.Copy(srcData, Path.Combine(modelDir, "model.onnx_data"), true);
                     }
-                    // 如果有 1_Pooling 配置也复制（sentence-transformers 模型需要）
                     var srcPoolingDir = Path.Combine(Path.GetDirectoryName(srcDir)!, "1_Pooling");
                     if (Directory.Exists(srcPoolingDir))
                     {
@@ -1029,7 +1575,26 @@ public class ModelManager : IModelManager, IDisposable
                 }
                 else
                 {
-                    throw new InvalidOperationException("模型文件下载不完整，缺少 model.onnx");
+                    // 检查是否为 GGUF 模型
+                    var ggufFiles = Directory.GetFiles(modelDir, "*.gguf", SearchOption.AllDirectories);
+                    if (ggufFiles.Length > 0)
+                    {
+                        var mainGguf = ggufFiles[0];
+                        Console.WriteLine($"[ModelManager] 检测到下载的 GGUF 模型: {mainGguf}");
+                        model.IsDownloaded = true;
+                        model.LocalPath = modelDir;
+                        model.ModelSizeBytes = new FileInfo(mainGguf).Length;
+                        model.Dimension = DetectModelDimension(modelDir);
+                        model.OnnxFormat = "gguf";
+                        model.HasOnnx = true;
+                        model.CanConvertFormat = false;
+
+                        Console.WriteLine($"[ModelManager] GGUF 模型下载完成: {model.DisplayName}");
+                        ScanLocalModels();
+                        return (true, null);
+                    }
+
+                    throw new InvalidOperationException("模型文件下载不完整，缺少 model.onnx 或 .gguf 文件");
                 }
             }
 
@@ -1041,8 +1606,8 @@ public class ModelManager : IModelManager, IDisposable
             model.HasOnnx = model.OnnxFormat != "invalid";
             model.CanConvertFormat = model.ModelSizeBytes < 2L * 1024 * 1024 * 1024;
 
-            progress?.Report(100);
             Console.WriteLine($"[ModelManager] 模型下载完成: {model.DisplayName}");
+            ScanLocalModels();
             return (true, null);
         }
         catch (Exception ex)
@@ -1261,17 +1826,15 @@ public class ModelManager : IModelManager, IDisposable
 
             progress?.Report(10);
 
-            // 使用 HuggingFaceModelDownloader 进行转换
-            var downloader = new HuggingFaceModelDownloader();
-            var success = await downloader.ConvertToOnnxAsync(
+            // 使用纯 C# 原生 OnnxFormatConverter 进行转换（零 Python 依赖）
+            var (success, error) = await OnnxFormatConverter.ConvertFormatAsync(
                 model.LocalPath,
-                onnxPath,
                 targetFormat,
                 new Progress<float>(p => progress?.Report(10 + p * 0.8f)));
 
             if (success)
             {
-                // 验证转换后的实际格式（PyTorch 可能自动回退到 external 格式）
+                // 验证转换后的实际格式
                 var actualFormat = DetectOnnxFormat(model.LocalPath);
                 if (actualFormat != targetFormat)
                 {
@@ -1286,12 +1849,9 @@ public class ModelManager : IModelManager, IDisposable
                     return (false, hint);
                 }
 
-                // 删除外部数据文件（仅在实际确认为嵌入式时）
-                if (targetFormat == "embedded" && File.Exists(onnxDataPath))
-                {
-                    File.Delete(onnxDataPath);
-                    Console.WriteLine($"[ModelManager] 已删除外部数据文件: {onnxDataPath}");
-                }
+                // 清理备份文件
+                if (File.Exists(backupPath)) File.Delete(backupPath);
+                if (File.Exists(backupDataPath)) File.Delete(backupDataPath);
 
                 // 清理备份文件
                 if (File.Exists(backupPath)) File.Delete(backupPath);
@@ -1350,7 +1910,12 @@ public class ModelManager : IModelManager, IDisposable
         try
         {
             // 获取模型信息
-            var downloader = new HuggingFaceModelDownloader();
+            var hub = _configManager.Load().ModelHub;
+            var token = !string.IsNullOrWhiteSpace(hub?.HfToken)
+                ? hub.HfToken
+                : Environment.GetEnvironmentVariable("HF_TOKEN");
+            var endpoint = hub?.HfEndpoint;
+            var downloader = new HuggingFaceModelDownloader(token, endpoint);
             var files = await downloader.GetModelFilesAsync(huggingFaceId);
 
             if (files.Count == 0)
@@ -1396,7 +1961,7 @@ public class ModelManager : IModelManager, IDisposable
     /// <summary>
     /// 获取模型的下载选项
     /// </summary>
-    public async Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName)
+    public async Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName, CancellationToken cancellationToken = default)
     {
         if (!_modelRegistry.TryGetValue(modelName, out var model))
         {
@@ -1406,10 +1971,15 @@ public class ModelManager : IModelManager, IDisposable
 
         try
         {
-            var downloader = new HuggingFaceModelDownloader();
-            var options = await downloader.GetDownloadOptionsAsync(model.DownloadUrl ?? $"BAAI/{modelName}");
+            var adapter = CreateModelSourceAdapter();
+            var coordinator = new ModelDownloadCoordinator(defaultAdapterFactory: () => CreateModelSourceAdapter());
+            var options = await coordinator.GetDownloadOptionsAsync(model.DownloadUrl ?? $"BAAI/{modelName}", adapter, cancellationToken);
             Console.WriteLine($"[ModelManager] 获取下载选项: {modelName}, HasOnnx={options.HasOnnx}, Options={options.AllOptions.Count}");
             return options;
+        }
+        catch (OperationCanceledException)
+        {
+            return new ModelDownloadOptions { ModelName = modelName };
         }
         catch (Exception ex)
         {
@@ -1698,17 +2268,18 @@ public class ModelManager : IModelManager, IDisposable
             {
                 config.Rerank = new RerankConfig();
             }
+            var resolvedPath = ResolveModelFilePath(model.LocalPath, model.ActiveVariantFileName);
             config.Rerank.CurrentModel = modelName;
-            config.Rerank.ModelPath = Path.Combine(model.LocalPath ?? "", "model.onnx");
+            config.Rerank.ModelPath = resolvedPath;
             await SaveConfigAsync(config);
 
-            Console.WriteLine($"[ModelManager] 已切换重排模型: {model.DisplayName}");
+            Console.WriteLine($"[ModelManager] 已切换重排模型: {model.DisplayName} (Path={resolvedPath})");
 
             // 触发重排模型切换事件
             RerankModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
             {
                 ModelName = modelName,
-                ModelPath = model.LocalPath ?? ""
+                ModelPath = resolvedPath
             });
 
             return true;

@@ -69,16 +69,19 @@ public class OrphanCleanupService : BackgroundService
         // 2. 清理孤立向量（分块已删除但向量残留）
         var chunkDeleted = await vectorStore.CleanupOrphanChunkVectorsAsync();
 
-        // 3. 清理孤立 BM25 文档
+        // 3. 清理历史无意义纯噪声/分隔符分块
+        var noiseDeleted = await vectorStore.CleanupNoiseChunksAsync();
+
+        // 4. 清理孤立 BM25 文档
         var validChunkIds = await vectorStore.GetAllChunkIdsAsync();
         var bm25Deleted = await bm25Store.CleanupOrphanDocumentsAsync(validChunkIds);
 
-        // 4. 清理孤立图谱节点
+        // 5. 清理孤立图谱节点
         var allFiles = await vectorStore.GetAllFilesAsync();
         var validFileNodeIds = allFiles.Select(f => f.Path.Replace('\\', '/').TrimStart('/'));
         var graphDeleted = await graphStore.CleanupOrphanNodesAsync(validFileNodeIds);
 
-        var total = modelDeleted + chunkDeleted + bm25Deleted + graphDeleted;
+        var total = modelDeleted + chunkDeleted + noiseDeleted + bm25Deleted + graphDeleted;
 
         if (total > 0)
         {

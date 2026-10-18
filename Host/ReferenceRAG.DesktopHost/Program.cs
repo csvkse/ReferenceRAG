@@ -19,6 +19,7 @@ using ReferenceRAG.Service.Extensions;
 using ReferenceRAG.Service.Middleware;
 using ReferenceRAG.Service.Controllers;
 using ReferenceRAG.Service.Hubs;
+using ReferenceRAG.Core.Interfaces;
 using WebApiWindowsService;
 using McpHelper.Extensions;
 
@@ -55,7 +56,9 @@ internal static class Program
         var platform = new DesktopPlatformActions();
         builder.Services.AddSingleton<ReferenceRAG.Business.Features.App.Contracts.IPlatformActions>(platform);
         builder.Services.AddControllers().AddApplicationPart(typeof(AIQueryController).Assembly).AddJsonOptions(o=>{
-            o.JsonSerializerOptions.PropertyNamingPolicy=null;o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+            o.JsonSerializerOptions.PropertyNamingPolicy=null;
+            o.JsonSerializerOptions.NumberHandling=JsonNumberHandling.AllowNamedFloatingPointLiterals;
+            o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
         });
         builder.Services.AddEndpointsApiExplorer();builder.Services.AddSwaggerGen();
         builder.Services.AddRagCoreServices(builder.Configuration);
@@ -69,6 +72,7 @@ internal static class Program
         LogStartup("Initializing search");
         Task.Run(async()=>{await app.InitializeSearchAsync();await app.StartAsync();}).GetAwaiter().GetResult();
         LogStartup("Business host started");
+        var windowState = app.Services.GetService<IWindowStateService>();
 
         var events=new InfiniFrameEventsStore();
         var resources=typeof(ReferenceRAG.Business.Composition.BusinessComposition).Assembly;
@@ -97,7 +101,12 @@ internal static class Program
         windowBuilder.SetTemporaryFilesPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ReferenceRAG","WebView"));
         windowBuilder.Debugging.EnableDevTools(builder.Environment.EnvironmentName=="Development");
         var exiting=false;IntPtr handle=IntPtr.Zero;
-        windowBuilder.RegisterWindowClosingHandler((_,_)=>{if(exiting)return WindowClosingResult.Close;ShowWindow(handle,0);return WindowClosingResult.Cancel;});
+        windowBuilder.RegisterWindowClosingHandler((_,_)=>{
+            if(exiting)return WindowClosingResult.Close;
+            ShowWindow(handle,0);
+            windowState?.SetMinimizedToTray(true);
+            return WindowClosingResult.Cancel;
+        });
         LogStartup("Creating InfiniFrame window");
         var window=windowBuilder.Build();handle=window.WindowHandle;
         platform.Window=window;
@@ -111,7 +120,11 @@ internal static class Program
             trayContext=new ApplicationContext();
             var menu=new ContextMenuStrip();
             _ = menu.Handle; // Ensure shutdown can marshal to this tray thread before the menu is opened.
-            void Show(){ShowWindow(handle,9);SetForegroundWindow(handle);}
+            void Show(){
+                ShowWindow(handle,9);
+                SetForegroundWindow(handle);
+                windowState?.SetMinimizedToTray(false);
+            }
             menu.Items.Add("打开 ReferenceRAG",null,(_,_)=>Show());
             var autoStart=new ToolStripMenuItem("开机启动"){Checked=ReferenceRAG.Desktop.StartupManager.GetAutoStart(),CheckOnClick=true};
             autoStart.Click+=(_,_)=>ReferenceRAG.Desktop.StartupManager.SetAutoStart(autoStart.Checked);menu.Items.Add(autoStart);
@@ -123,7 +136,24 @@ internal static class Program
             Application.Run(trayContext);tray.Dispose();menu.Dispose();
         }){IsBackground=true};
         trayThread.SetApartmentState(ApartmentState.STA);trayThread.Start();
-        if(args.Contains("--minimized") || args.Contains("--silent") || ReferenceRAG.Desktop.StartupManager.GetStartMinimized()) ShowWindow(handle,0);
+        var startMinimized = args.Contains("--minimized") || args.Contains("--silent") || ReferenceRAG.Desktop.StartupManager.GetStartMinimized();
+        if(startMinimized) {
+            ShowWindow(handle,0);
+            windowState?.SetMinimizedToTray(true);
+        } else {
+            windowState?.SetMinimizedToTray(false);
+        }
+        using var stateCheckTimer = new System.Threading.Timer(_ =>
+        {
+            if (handle != IntPtr.Zero && windowState != null)
+            {
+                var isTrayOrMinimized = !IsWindowVisible(handle) || IsIconic(handle);
+                if (windowState.IsMinimizedToTray != isTrayOrMinimized)
+                {
+                    windowState.SetMinimizedToTray(isTrayOrMinimized);
+                }
+            }
+        }, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
         try {window.WaitForClose();}
         finally {
             publisher.Published-=ipc.Publish;
@@ -136,5 +166,7 @@ internal static class Program
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr handle,int command);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr handle);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern bool SetWindowText(IntPtr handle,string text);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
     private static void LogStartup(string message)=>File.AppendAllText(Path.Combine(AppContext.BaseDirectory,"desktop-startup.log"),DateTimeOffset.Now+" "+message+Environment.NewLine);
 }

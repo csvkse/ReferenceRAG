@@ -7,6 +7,8 @@ using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services.Tokenizers;
 using ReferenceRAG.Core.Tracing;
 using System.Diagnostics;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Injection;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Scanning;
 
 namespace ReferenceRAG.Core.Services.Rerank;
 
@@ -64,7 +66,17 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
     {
         // 设置 CUDA 库路径（必须在加载 ONNX Runtime 之前）
         // 只要有配置就设置 PATH，不管当前是否启用 CUDA（为热切换做准备）
-        if (!string.IsNullOrEmpty(_options.CudaLibraryPath))
+        // 智能探查与动态环境注入：若启用 CUDA，自动探测系统、注册表及本地 AI 环境并动态注入
+        if (_options.UseCuda)
+        {
+            var scanner = new CudaEnvironmentScanner(new Win32EnvironmentInjector());
+            var scanResult = scanner.ScanAndInject(_options.CudaLibraryPath);
+            if (scanResult.Found)
+            {
+                _logger.LogInformation("[OnnxRerankService] 已自动探查并注入 CUDA 12 运行环境: {Path}", scanResult.MainDllDirectory);
+            }
+        }
+        else if (!string.IsNullOrEmpty(_options.CudaLibraryPath))
         {
             var currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
             var existingPaths = new HashSet<string>(
@@ -435,11 +447,20 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
                 score = Sigmoid(outputTensor[i]);
             }
 
+            if (double.IsNaN(score) || double.IsInfinity(score))
+            {
+                score = 0.5;
+            }
+            else
+            {
+                score = Math.Clamp(score, 0.0, 1.0);
+            }
+
             scores.Add(new RerankDocument
             {
                 Index = startIndex + i,
                 Document = documents[i],
-                RelevanceScore = Math.Clamp(score, 0.0, 1.0)
+                RelevanceScore = score
             });
         }
 
@@ -502,6 +523,11 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
         {
             // 尝试取第一个值
             score = Sigmoid(outputTensor[0]);
+        }
+
+        if (double.IsNaN(score) || double.IsInfinity(score))
+        {
+            return 0.5;
         }
 
         return Math.Clamp(score, 0.0, 1.0);
@@ -625,4 +651,5 @@ public class RerankOptions
     public int CudaDeviceId { get; set; } = 0;
     public string? CudaLibraryPath { get; set; }
     public int MaxSequenceLength { get; set; } = 512;
+    public int IdleTimeoutSeconds { get; set; } = 30;
 }

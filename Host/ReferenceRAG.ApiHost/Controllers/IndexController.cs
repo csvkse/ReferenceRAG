@@ -281,6 +281,67 @@ public class IndexController : ControllerBase
         });
     }
 
+    /// <summary>重建指定源的所有切片（按最新分块设置重新分块，原子替换旧切片并重算向量）。</summary>
+    [HttpPost("rechunk/{sourceName}")]
+    public async Task<ActionResult<RebuildJob>> RechunkSource(string sourceName)
+    {
+        var config = _configManager.Load();
+        var decoded = Uri.UnescapeDataString(sourceName);
+        var source = config.Sources.FirstOrDefault(s =>
+            s.Name.Equals(sourceName, StringComparison.OrdinalIgnoreCase) ||
+            s.Name.Equals(decoded, StringComparison.OrdinalIgnoreCase));
+        if (source == null)
+            return NotFound(new { error = $"源 '{sourceName}' 不存在" });
+
+        var currentModel = _embeddingService.ModelName;
+        _logger.LogInformation("源重建切片: {Source}", source.Name);
+
+        var job = await _indexService.StartIndexAsync(new IndexRequest
+        {
+            Sources = new List<string> { source.Name },
+            Rechunk = true,
+            Force = true
+        });
+
+        return Accepted(new RebuildJob
+        {
+            JobId = job.Id,
+            Status = job.Status.ToString(),
+            ModelName = currentModel,
+            Dimension = _embeddingService.Dimension,
+            Sources = new List<string> { sourceName },
+            Message = $"源 '{sourceName}' 重建切片任务已启动"
+        });
+    }
+
+    /// <summary>全局重建所有切片（按最新分块设置重新分块，原子替换旧切片并重算向量）。</summary>
+    [HttpPost("rechunk")]
+    public async Task<ActionResult<RebuildJob>> RechunkAll([FromBody] RechunkRequest? request = null)
+    {
+        var config = _configManager.Load();
+        var sources = request?.Sources ?? config.Sources.Where(s => s.Enabled).Select(s => s.Name).ToList();
+
+        var currentModel = _embeddingService.ModelName;
+        _logger.LogInformation("全局重建切片: sources={Sources}", string.Join(",", sources));
+
+        var job = await _indexService.StartIndexAsync(new IndexRequest
+        {
+            Sources = sources,
+            Rechunk = true,
+            Force = true
+        });
+
+        return Accepted(new RebuildJob
+        {
+            JobId = job.Id,
+            Status = job.Status.ToString(),
+            ModelName = currentModel,
+            Dimension = _embeddingService.Dimension,
+            Sources = sources,
+            Message = "全局重建切片任务已启动"
+        });
+    }
+
     // ==================== 清理 ====================
 
     /// <summary>清理孤立索引（向量 + BM25 + 图谱，含 heading 孤儿节点）。</summary>
@@ -292,6 +353,7 @@ public class IndexController : ControllerBase
         var existingModels = new List<string> { _embeddingService.ModelName };
         var modelDeleted = await _vectorStore.DeleteOrphanedVectorsAsync(existingModels);
         var chunkDeleted = await _vectorStore.CleanupOrphanChunkVectorsAsync();
+        var noiseDeleted = await _vectorStore.CleanupNoiseChunksAsync();
 
         // BM25 / Graph 现在各自独立 DB，需调用方提供有效 ID 集合
         var validChunkIds = await _vectorStore.GetAllChunkIdsAsync();
@@ -301,15 +363,15 @@ public class IndexController : ControllerBase
         var validFileNodeIds = allFiles.Select(f => f.Path.Replace('\\', '/').TrimStart('/'));
         var graphDeleted = await _graphStore.CleanupOrphanNodesAsync(validFileNodeIds);
 
-        var total = modelDeleted + chunkDeleted + bm25Deleted + graphDeleted;
-        _logger.LogInformation("清理完成（模型级: {M}, chunk级: {C}, BM25: {B}, 图谱: {G}）",
-            modelDeleted, chunkDeleted, bm25Deleted, graphDeleted);
+        var total = modelDeleted + chunkDeleted + noiseDeleted + bm25Deleted + graphDeleted;
+        _logger.LogInformation("清理完成（模型级: {M}, chunk级: {C}, 噪声chunk: {N}, BM25: {B}, 图谱: {G}）",
+            modelDeleted, chunkDeleted, noiseDeleted, bm25Deleted, graphDeleted);
 
         return Ok(new CleanupResult
         {
             DeletedCount = total,
             Message = total > 0
-                ? $"已清理孤立数据（向量: {modelDeleted + chunkDeleted}, BM25: {bm25Deleted}, 图谱: {graphDeleted}）"
+                ? $"已清理孤立数据（向量: {modelDeleted + chunkDeleted + noiseDeleted}, BM25: {bm25Deleted}, 图谱: {graphDeleted}）"
                 : "没有发现孤立数据"
         });
     }

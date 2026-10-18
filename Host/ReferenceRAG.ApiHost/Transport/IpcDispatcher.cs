@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace ReferenceRAG.ApiHost.Transport;
@@ -11,7 +12,10 @@ public sealed class IpcDispatcher(InProcessServer server, Action<string> send, I
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _requests = new();
     private readonly ConcurrentDictionary<string, Task> _running = new();
     private readonly CancellationTokenSource _lifetime = new();
-    private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)
+    {
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+    };
     private bool _disposed;
     private void Send(object value) { if(!_disposed) send(JsonSerializer.Serialize(value,Options)); }
 

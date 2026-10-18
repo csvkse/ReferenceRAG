@@ -191,6 +191,45 @@ public class SearchStats
     public int EstimatedTokens { get; set; }
     /// <summary>各阶段耗时明细（由 SearchTraceAttribute 自动填充）</summary>
     public SearchPhaseStats? Phases { get; set; }
+    /// <summary>搜索流水线状态机与模型遥测信息</summary>
+    public SearchPipelineTelemetry? PipelineTelemetry { get; set; }
+}
+
+/// <summary>
+/// 搜索执行流水线状态机遥测信息
+/// </summary>
+public class SearchPipelineTelemetry
+{
+    public string StrategyName { get; set; } = string.Empty;
+    public ModelExecutionInfo? EmbeddingModel { get; set; }
+    public ModelExecutionInfo? RerankModel { get; set; }
+    public List<SearchPipelineStepTelemetry> Steps { get; set; } = new();
+}
+
+/// <summary>
+/// 搜索执行所依赖的模型信息
+/// </summary>
+public class ModelExecutionInfo
+{
+    public string ModelName { get; set; } = string.Empty;
+    public string? Variant { get; set; }
+    public string Format { get; set; } = string.Empty;
+    public string Device { get; set; } = string.Empty;
+    public bool IsGpu { get; set; }
+    public string State { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 搜索状态机单阶段执行步骤遥测
+/// </summary>
+public class SearchPipelineStepTelemetry
+{
+    public string Phase { get; set; } = string.Empty;
+    public string PhaseName { get; set; } = string.Empty;
+    public long DurationMs { get; set; }
+    public int InputCandidates { get; set; }
+    public int OutputCandidates { get; set; }
+    public string? Details { get; set; }
 }
 
 /// <summary>
@@ -198,17 +237,21 @@ public class SearchStats
 /// </summary>
 public class SearchPhaseStats
 {
-    /// <summary>ONNX Embedding 推理</summary>
+    /// <summary>模型加载/冷启动就绪耗时（若已在内存常驻则为 0）</summary>
+    public long ModelLoadMs { get; set; }
+    /// <summary>ONNX / GGUF Embedding 向量推理</summary>
     public long EmbedMs { get; set; }
+    /// <summary>BM25 关键词召回</summary>
+    public long Bm25Ms { get; set; }
     /// <summary>标题图搜索（TryTitleFirstSearch）</summary>
     public long TitleMs { get; set; }
-    /// <summary>纯向量相似检索（ExecuteStandardSearch）</summary>
+    /// <summary>纯向量相似检索（ExecuteStandardSearch 或混合中的向量召回）</summary>
     public long VectorMs { get; set; }
-    /// <summary>混合搜索 BM25+向量融合（HybridSearchService）</summary>
+    /// <summary>混合搜索融合与排序（HybridSearchService）</summary>
     public long HybridMs { get; set; }
     /// <summary>图扩展（ExpandWithGraph）</summary>
     public long GraphMs { get; set; }
-    /// <summary>Cross-Encoder 重排（OnnxRerankService）</summary>
+    /// <summary>Cross-Encoder 重排（RerankService）</summary>
     public long RerankMs { get; set; }
 }
 

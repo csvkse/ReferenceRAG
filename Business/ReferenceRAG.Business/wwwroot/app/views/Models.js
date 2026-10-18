@@ -1,6 +1,6 @@
 import { defineComponent as _defineComponent } from 'vue';
 import { ref, h, onMounted, onUnmounted, computed } from 'vue';
-import { NTag, NButton, NSpace, NProgress, NAlert, NCode, NIcon, NPopconfirm, NRadioGroup, NRadio, NFormItem, NSpin, useMessage } from 'naive-ui';
+import { NTag, NButton, NSpace, NProgress, NAlert, NCode, NIcon, NPopconfirm, NRadioGroup, NRadio, NFormItem, NSpin, NSteps, NStep, useMessage } from 'naive-ui';
 import { RefreshOutline, AddOutline, InformationCircleOutline } from '@vicons/ionicons5';
 import { modelsApi, settingsApi } from '/app/api/index.js';
 const component = /*@__PURE__*/ _defineComponent({
@@ -33,6 +33,117 @@ const component = /*@__PURE__*/ _defineComponent({
         const downloadOptions = ref(null);
         const selectedFile = ref(null);
         const loadingOptions = ref(false);
+        const rowLoadingMap = ref({});
+        const downloadState = ref('idle');
+        const showDownloadModal = ref(false);
+        const activeDownloadModel = ref(null);
+        const currentAbortController = ref(null);
+        const runtimeStatus = ref(null);
+        const runtimeStatusLoading = ref(false);
+        const switchVariantDialog = ref({
+            show: false,
+            model: null,
+            variant: null,
+            isRerank: false,
+            loading: false
+        });
+
+        const loadRuntimeStatus = async () => {
+            runtimeStatusLoading.value = true;
+            try {
+                const response = await modelsApi.getRuntimeStatus();
+                runtimeStatus.value = response.data;
+            } catch (error) {
+                console.error('Failed to load models runtime status:', error);
+            } finally {
+                runtimeStatusLoading.value = false;
+            }
+        };
+
+        const handleSwitchVariant = (model, variant, isRerank = false) => {
+            switchVariantDialog.value = {
+                show: true,
+                model,
+                variant,
+                isRerank,
+                loading: false
+            };
+        };
+
+        const confirmSwitchVariant = async () => {
+            const { model, variant, isRerank } = switchVariantDialog.value;
+            if (!model || !variant) return;
+            switchVariantDialog.value.loading = true;
+            try {
+                const res = await modelsApi.switchVariant(model.name, variant.fileName, isRerank);
+                message.success(res.data?.message || `已成功切换到版本 ${variant.fileName}`);
+                switchVariantDialog.value.show = false;
+                await loadRuntimeStatus();
+                if (isRerank) {
+                    await loadCurrentRerankModel();
+                    await loadRerankModels();
+                } else {
+                    await loadCurrentModel();
+                    await loadModels();
+                }
+            } catch (error) {
+                console.error('Failed to switch variant:', error);
+                message.error(`切换版本失败: ${error.response?.data?.error || error.message}`);
+            } finally {
+                switchVariantDialog.value.loading = false;
+            }
+        };
+
+        const handleDeleteVariant = async (model, variant, isRerank = false) => {
+            if (!model || !variant) return;
+            try {
+                const res = await modelsApi.deleteVariant(model.name, variant.fileName, isRerank);
+                message.success(res.data?.message || `已删除版本变体 ${variant.fileName}`);
+                await loadRuntimeStatus();
+                if (isRerank) {
+                    await loadRerankModels();
+                    await loadCurrentRerankModel();
+                } else {
+                    await loadModels();
+                    await loadCurrentModel();
+                }
+            } catch (error) {
+                console.error('Failed to delete variant:', error);
+                message.error(`删除版本失败: ${error.response?.data?.error || error.message}`);
+            }
+        };
+
+        const getRuntimeStatusTagType = (state) => {
+            switch (state) {
+                case 2: return 'success';
+                case 3: return 'info';
+                case 1: return 'warning';
+                case 4: return 'warning';
+                case 5: return 'error';
+                case 0:
+                default: return 'default';
+            }
+        };
+
+        const getRuntimeStatusText = (statusObj) => {
+            if (!statusObj) return '未加载';
+            if (statusObj.stateName === 'Ready') return '常驻就绪';
+            if (statusObj.stateName === 'Inferring') return '推理中';
+            if (statusObj.stateName === 'Unloaded') return '未加载 / 休眠释放';
+            if (statusObj.stateName === 'Loading') return '加载中...';
+            if (statusObj.stateName === 'Faulted') return '故障异常';
+            return statusObj.stateDescription || statusObj.stateName || '未加载';
+        };
+
+        const getRetentionText = (statusObj) => {
+            if (!statusObj || !statusObj.retentionStrategy) return '未配置';
+            if (statusObj.retentionStrategy === 'Permanent') return '常驻 (永不自动释放)';
+            if (statusObj.retentionStrategy === 'SlidingExpiration') {
+                const timeout = statusObj.idleTimeoutSeconds;
+                return `滑动过期 (${timeout}s空闲释放${statusObj.unloadOnlyWhenMinimizedToTray ? '，仅托盘生效' : ''})`;
+            }
+            return statusObj.retentionStrategy;
+        };
         const loadModelsPath = async () => {
             modelsPathLoading.value = true;
             try {
@@ -102,9 +213,36 @@ const component = /*@__PURE__*/ _defineComponent({
         const rerankModelsLoading = ref(false);
         const rerankCurrentLoading = ref(false);
         let progressInterval = null;
+        const selectedFormatFilter = ref('all');
         const activeDownloads = computed(() => {
             return Array.from(downloadProgress.value.values()).filter(d => d.status === 'downloading' || d.status === 'completed' || d.status === 'failed');
         });
+        const displayOptions = computed(() => {
+            if (!downloadOptions.value || !downloadOptions.value.allOptions)
+                return [];
+            if (selectedFormatFilter.value === 'gguf') {
+                return (downloadOptions.value.ggufOptions && downloadOptions.value.ggufOptions.length > 0)
+                    ? downloadOptions.value.ggufOptions
+                    : downloadOptions.value.allOptions.filter(o => o.format === 'gguf');
+            }
+            if (selectedFormatFilter.value === 'onnx') {
+                return (downloadOptions.value.onnxOptions && downloadOptions.value.onnxOptions.length > 0)
+                    ? downloadOptions.value.onnxOptions
+                    : downloadOptions.value.allOptions.filter(o => o.format === 'onnx');
+            }
+            return downloadOptions.value.allOptions;
+        });
+        const onFormatFilterChange = (filter) => {
+            selectedFormatFilter.value = filter;
+            const currentList = displayOptions.value;
+            if (currentList.length > 0) {
+                const found = currentList.find(o => o.path === selectedFile.value);
+                if (!found) {
+                    const rec = currentList.find(o => o.isRecommended) || currentList[0];
+                    selectedFile.value = rec.path;
+                }
+            }
+        };
         const selectedFileDescription = computed(() => {
             if (!selectedFile.value || !downloadOptions.value)
                 return null;
@@ -115,6 +253,7 @@ const component = /*@__PURE__*/ _defineComponent({
             switch (format) {
                 case 'embedded': return 'success';
                 case 'external': return 'warning';
+                case 'gguf': return 'info';
                 default: return 'default';
             }
         };
@@ -122,7 +261,8 @@ const component = /*@__PURE__*/ _defineComponent({
             switch (format) {
                 case 'embedded': return '嵌入式';
                 case 'external': return '外部数据';
-                default: return '未知';
+                case 'gguf': return 'GGUF (免转)';
+                default: return format || '未知';
             }
         };
         // Rerank model table columns
@@ -168,6 +308,62 @@ const component = /*@__PURE__*/ _defineComponent({
                 }
             },
             {
+                title: '已安装变体',
+                key: 'installedVariants',
+                width: 250,
+                render(row) {
+                    if (!row.installedVariants || row.installedVariants.length === 0) {
+                        return h('span', { style: 'color: #999; font-size: 12px' }, row.isDownloaded ? '单一默认版本' : '-');
+                    }
+                    const nodes = [];
+                    for (const v of row.installedVariants) {
+                        const isCurrentActive = v.isActive;
+                        const label = v.quantization || v.format?.toUpperCase() || '版本';
+                        const sizeStr = v.fileSizeBytes > 0 ? ` (${formatBytes(v.fileSizeBytes)})` : '';
+                        if (isCurrentActive) {
+                            nodes.push(h(NTag, {
+                                type: 'success',
+                                size: 'small',
+                                style: 'margin-right: 4px; margin-bottom: 4px;'
+                            }, {
+                                default: () => `✓ ${label}${sizeStr}`
+                            }));
+                        } else {
+                            nodes.push(h(NSpace, { inline: true, size: 2, style: 'margin-right: 4px; margin-bottom: 4px' }, {
+                                default: () => [
+                                    h(NButton, {
+                                        size: 'tiny',
+                                        secondary: true,
+                                        type: 'default',
+                                        onClick: () => handleSwitchVariant(row, v, true)
+                                    }, {
+                                        default: () => `${label}${sizeStr}`
+                                    }),
+                                    h(NPopconfirm, {
+                                        onPositiveClick: () => handleDeleteVariant(row, v, true)
+                                    }, {
+                                        trigger: () => h(NButton, { size: 'tiny', text: true, type: 'error', style: 'padding: 0 2px' }, { default: () => '×' }),
+                                        default: () => `确定删除变体文件 ${v.fileName}？此操作不可恢复。`
+                                    })
+                                ]
+                            }));
+                        }
+                    }
+                    if (row.isDownloaded) {
+                        nodes.push(h(NButton, {
+                            size: 'tiny',
+                            ghost: true,
+                            type: 'primary',
+                            style: 'margin-bottom: 4px',
+                            onClick: () => handleRerankDownload(row)
+                        }, {
+                            default: () => '+ 下载新变体'
+                        }));
+                    }
+                    return h('div', { style: 'display: flex; flex-wrap: wrap; align-items: center;' }, nodes);
+                }
+            },
+            {
                 title: '路径',
                 key: 'localPath',
                 ellipsis: { tooltip: true },
@@ -183,11 +379,22 @@ const component = /*@__PURE__*/ _defineComponent({
                     }
                     const buttons = [];
                     if (!row.isDownloaded) {
-                        buttons.push(h(NButton, {
-                            type: 'primary',
-                            size: 'small',
-                            onClick: () => handleRerankDownload(row)
-                        }, { default: () => '下载' }));
+                        const isDownloading = downloadProgress.value.get(`rerank_${row.name}`)?.status === 'downloading';
+                        if (isDownloading) {
+                            buttons.push(h(NButton, {
+                                type: 'warning',
+                                size: 'small',
+                                ghost: true,
+                                onClick: () => openDownloadModalForModel(row, true)
+                            }, { default: () => '查看进度' }));
+                        } else {
+                            buttons.push(h(NButton, {
+                                type: 'primary',
+                                size: 'small',
+                                loading: !!rowLoadingMap.value[row.name],
+                                onClick: () => handleRerankDownload(row)
+                            }, { default: () => '下载' }));
+                        }
                     }
                     if (row.isDownloaded) {
                         if (row.name !== currentRerankModel.value?.name) {
@@ -272,6 +479,62 @@ const component = /*@__PURE__*/ _defineComponent({
                 }
             },
             {
+                title: '已安装变体',
+                key: 'installedVariants',
+                width: 250,
+                render(row) {
+                    if (!row.installedVariants || row.installedVariants.length === 0) {
+                        return h('span', { style: 'color: #999; font-size: 12px' }, row.isDownloaded ? '单一默认版本' : '-');
+                    }
+                    const nodes = [];
+                    for (const v of row.installedVariants) {
+                        const isCurrentActive = v.isActive;
+                        const label = v.quantization || v.format?.toUpperCase() || '版本';
+                        const sizeStr = v.fileSizeBytes > 0 ? ` (${formatBytes(v.fileSizeBytes)})` : '';
+                        if (isCurrentActive) {
+                            nodes.push(h(NTag, {
+                                type: 'success',
+                                size: 'small',
+                                style: 'margin-right: 4px; margin-bottom: 4px;'
+                            }, {
+                                default: () => `✓ ${label}${sizeStr}`
+                            }));
+                        } else {
+                            nodes.push(h(NSpace, { inline: true, size: 2, style: 'margin-right: 4px; margin-bottom: 4px' }, {
+                                default: () => [
+                                    h(NButton, {
+                                        size: 'tiny',
+                                        secondary: true,
+                                        type: 'default',
+                                        onClick: () => handleSwitchVariant(row, v, false)
+                                    }, {
+                                        default: () => `${label}${sizeStr}`
+                                    }),
+                                    h(NPopconfirm, {
+                                        onPositiveClick: () => handleDeleteVariant(row, v, false)
+                                    }, {
+                                        trigger: () => h(NButton, { size: 'tiny', text: true, type: 'error', style: 'padding: 0 2px' }, { default: () => '×' }),
+                                        default: () => `确定删除变体文件 ${v.fileName}？此操作不可恢复。`
+                                    })
+                                ]
+                            }));
+                        }
+                    }
+                    if (row.isDownloaded) {
+                        nodes.push(h(NButton, {
+                            size: 'tiny',
+                            ghost: true,
+                            type: 'primary',
+                            style: 'margin-bottom: 4px',
+                            onClick: () => handleDownload(row)
+                        }, {
+                            default: () => '+ 下载新变体'
+                        }));
+                    }
+                    return h('div', { style: 'display: flex; flex-wrap: wrap; align-items: center;' }, nodes);
+                }
+            },
+            {
                 title: '操作',
                 key: 'actions',
                 width: 200,
@@ -284,14 +547,17 @@ const component = /*@__PURE__*/ _defineComponent({
                     const buttons = [];
                     if (isDownloading) {
                         buttons.push(h(NButton, {
+                            type: 'warning',
                             size: 'small',
-                            disabled: true
-                        }, { default: () => '处理中...' }));
+                            ghost: true,
+                            onClick: () => openDownloadModalForModel(row, false)
+                        }, { default: () => '查看进度' }));
                     }
                     else if (!row.isDownloaded) {
                         buttons.push(h(NButton, {
                             type: 'primary',
                             size: 'small',
+                            loading: !!rowLoadingMap.value[row.name],
                             onClick: () => handleDownload(row)
                         }, { default: () => '下载' }));
                     }
@@ -348,6 +614,50 @@ const component = /*@__PURE__*/ _defineComponent({
                 default: return 'default';
             }
         };
+        const getStageTagType = (stage) => {
+            switch (stage) {
+                case 1: case 'ResolvingManifest': return 'info';
+                case 2: case 'ProbingMirrors': return 'warning';
+                case 3: case 'DownloadingFiles': return 'primary';
+                case 4: case 'VerifyingFiles': return 'info';
+                case 5: case 'Converting': return 'warning';
+                case 6: case 'Completed': return 'success';
+                case 7: case 'Failed': return 'error';
+                case 8: case 'Cancelled': return 'default';
+                default: return 'default';
+            }
+        };
+        const getStageText = (stage) => {
+            switch (stage) {
+                case 1: case 'ResolvingManifest': return '解析清单';
+                case 2: case 'ProbingMirrors': return '探测镜像';
+                case 3: case 'DownloadingFiles': return '正在下载';
+                case 4: case 'VerifyingFiles': return '校验文件';
+                case 5: case 'Converting': return '格式转换';
+                case 6: case 'Completed': return '已完成';
+                case 7: case 'Failed': return '失败';
+                case 8: case 'Cancelled': return '已取消';
+                default: return '准备中';
+            }
+        };
+        const handleCancelDownload = async (download) => {
+            const isRerank = download.modelName?.startsWith('rerank_') || download.isRerank;
+            const modelName = isRerank ? download.modelName.replace('rerank_', '') : download.modelName;
+            try {
+                if (isRerank) {
+                    await modelsApi.cancelRerankDownload(modelName);
+                } else {
+                    await modelsApi.cancelDownload(modelName);
+                }
+                message.warning(`已取消模型 ${getModelDisplayName(modelName)} 的下载`);
+                download.status = 'cancelled';
+                download.stage = 'Cancelled';
+                download.stageMessage = '下载已由用户取消';
+            } catch (error) {
+                console.error('Failed to cancel download:', error);
+                message.error('取消下载失败');
+            }
+        };
         // 错误码对应的帮助信息
         const getErrorHelp = (errorCode) => {
             switch (errorCode) {
@@ -358,6 +668,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 case 7: return '模型过大不适合嵌入式格式，请使用"外部数据"格式重试。';
                 case 8: return '网络错误，请检查网络连接后重试。';
                 case 9: return '存储空间不足，请清理磁盘空间后重试。';
+                case 10: return '模型属于 HuggingFace 协议限制/授权私有模型 (HTTP 401)。请前往【系统设置 - 模型仓库】配置有效的 HF_TOKEN。';
                 default: return null;
             }
         };
@@ -388,6 +699,7 @@ const component = /*@__PURE__*/ _defineComponent({
             try {
                 const response = await modelsApi.getCurrent();
                 currentModel.value = response.data;
+                loadRuntimeStatus();
             }
             catch (error) {
                 console.error('Failed to load current model:', error);
@@ -396,44 +708,169 @@ const component = /*@__PURE__*/ _defineComponent({
                 currentLoading.value = false;
             }
         };
-        const handleDownload = async (model) => {
+        const formatSpeed = (speed) => {
+            if (!speed || speed <= 0) return '-';
+            return formatBytes(speed) + '/s';
+        };
+
+        const formatRemainingTime = (sec) => {
+            if (sec == null || sec < 0) return '-';
+            if (sec < 60) return `${Math.round(sec)} 秒`;
+            const m = Math.floor(sec / 60);
+            const s = Math.round(sec % 60);
+            return `${m} 分 ${s} 秒`;
+        };
+
+        const modalTitle = computed(() => {
+            const name = selectedModel.value?.displayName || selectedModel.value?.name || '';
+            switch (downloadState.value) {
+                case 'probing': return `探测模型镜像源 - ${name}`;
+                case 'options_ready': return `选择模型格式与变体 - ${name}`;
+                case 'downloading': return `正在下载模型 - ${name}`;
+                case 'verifying': return `正在校验模型 - ${name}`;
+                case 'converting': return `正在转换模型格式 - ${name}`;
+                case 'completed': return `模型已就绪 - ${name}`;
+                case 'failed': return `下载未完成 - ${name}`;
+                case 'cancelling': return `正在取消下载 - ${name}`;
+                default: return `模型下载 - ${name}`;
+            }
+        });
+
+        const modalCurrentStepNumber = computed(() => {
+            switch (downloadState.value) {
+                case 'probing': return 1;
+                case 'options_ready': return 2;
+                case 'downloading': return 3;
+                case 'verifying': case 'converting': case 'completed': return 4;
+                default: return 1;
+            }
+        });
+
+        const modalStepStatus = computed(() => {
+            if (downloadState.value === 'failed') return 'error';
+            if (downloadState.value === 'completed') return 'finish';
+            return 'process';
+        });
+
+        const modalProgressStatus = computed(() => {
+            if (downloadState.value === 'completed') return 'success';
+            if (downloadState.value === 'failed') return 'error';
+            if (downloadState.value === 'cancelling') return 'warning';
+            return 'default';
+        });
+
+        const currentModalProgress = computed(() => {
+            if (!selectedModel.value?.name) return null;
+            const isRerank = selectedModel.value.modelType === 'reranker';
+            const key = isRerank ? `rerank_${selectedModel.value.name}` : selectedModel.value.name;
+            return downloadProgress.value.get(key) || null;
+        });
+
+        const openDownloadModalForModel = (model, isRerank = false) => {
+            activeDownloadModel.value = model;
+            selectedModel.value = model;
+            const progressKey = isRerank ? `rerank_${model.name}` : model.name;
+            const current = downloadProgress.value.get(progressKey);
+            if (current) {
+                if (current.status === 'completed') downloadState.value = 'completed';
+                else if (current.status === 'failed') downloadState.value = 'failed';
+                else if (current.stage === 'VerifyingFiles' || current.stage === 4) downloadState.value = 'verifying';
+                else if (current.stage === 'Converting' || current.stage === 5) downloadState.value = 'converting';
+                else downloadState.value = 'downloading';
+            } else {
+                downloadState.value = 'downloading';
+            }
+            showDownloadModal.value = true;
+        };
+
+        const openDownloadModalByProgressKey = (progressKey) => {
+            const isRerank = progressKey.startsWith('rerank_');
+            const modelName = isRerank ? progressKey.replace('rerank_', '') : progressKey;
+            const model = isRerank
+                ? rerankModels.value.find(m => m.name === modelName)
+                : models.value.find(m => m.name === modelName);
+            const targetModel = model || { name: modelName, displayName: getModelDisplayName(modelName), modelType: isRerank ? 'reranker' : 'embedding' };
+            openDownloadModalForModel(targetModel, isRerank);
+        };
+
+        const startDownloadFlow = async (model, isRerank = false) => {
+            if (!model || !model.name) return;
+            const progressKey = isRerank ? `rerank_${model.name}` : model.name;
+            const existing = downloadProgress.value.get(progressKey);
+            if (existing && existing.status === 'downloading') {
+                openDownloadModalForModel(model, isRerank);
+                return;
+            }
+
+            rowLoadingMap.value[model.name] = true;
+            activeDownloadModel.value = model;
             selectedModel.value = model;
             selectedFile.value = null;
             downloadOptions.value = null;
-            // 获取下载选项
-            loadingOptions.value = true;
+            downloadState.value = 'probing';
+            showDownloadModal.value = true;
+
+            currentAbortController.value = new AbortController();
+
             try {
-                const response = await modelsApi.getDownloadOptions(model.name || '');
+                const response = isRerank
+                    ? await modelsApi.getRerankDownloadOptions(model.name, { signal: currentAbortController.value.signal })
+                    : await modelsApi.getDownloadOptions(model.name, { signal: currentAbortController.value.signal });
+
                 downloadOptions.value = response.data;
-                // 如果只有一个选项或不需要用户选择，自动选择推荐选项
+                if (downloadOptions.value?.hasBothFormats) {
+                    selectedFormatFilter.value = 'all';
+                } else if (downloadOptions.value?.hasGguf) {
+                    selectedFormatFilter.value = 'gguf';
+                } else {
+                    selectedFormatFilter.value = 'onnx';
+                }
+
                 if (downloadOptions.value && !downloadOptions.value.needsUserSelection && downloadOptions.value.recommendedOption) {
                     selectedFile.value = downloadOptions.value.recommendedOption.path;
-                }
-                else if (downloadOptions.value && downloadOptions.value.allOptions.length > 0) {
-                    // 有多个选项，选择推荐项
+                } else if (downloadOptions.value && downloadOptions.value.allOptions.length > 0) {
                     const recommended = downloadOptions.value.allOptions.find(o => o.isRecommended);
                     selectedFile.value = recommended?.path || downloadOptions.value.allOptions[0].path;
                 }
+
+                downloadState.value = 'options_ready';
+            } catch (error) {
+                if (error.name === 'CanceledError' || error.name === 'AbortError') {
+                    downloadState.value = 'idle';
+                    showDownloadModal.value = false;
+                } else {
+                    console.error('Failed to get download options:', error);
+                    message.error(`探测下载选项失败: ${error.response?.data?.error || error.message}`);
+                    downloadState.value = 'failed';
+                }
+            } finally {
+                rowLoadingMap.value[model.name] = false;
+                currentAbortController.value = null;
             }
-            catch (error) {
-                console.error('Failed to get download options:', error);
-                downloadOptions.value = null;
-            }
-            finally {
-                loadingOptions.value = false;
-            }
-            showDownloadDialog.value = true;
         };
-        const confirmDownload = async () => {
-            if (!selectedModel.value || !selectedModel.value.name)
-                return;
-            showDownloadDialog.value = false;
-            message.info(`开始下载模型: ${selectedModel.value.displayName}`);
+
+        const handleDownload = (model) => startDownloadFlow(model, false);
+        const handleRerankDownload = (model) => startDownloadFlow(model, true);
+
+        const confirmModalDownload = async () => {
+            if (!selectedModel.value || !selectedModel.value.name) return;
+            const isRerank = selectedModel.value.modelType === 'reranker';
+            const modelName = selectedModel.value.name;
+            const progressKey = isRerank ? `rerank_${modelName}` : modelName;
+
+            downloadState.value = 'downloading';
+            message.info(`开始下载模型: ${selectedModel.value.displayName || modelName}`);
+
             try {
-                await modelsApi.download(selectedModel.value.name, selectedFile.value || undefined);
-                downloadProgress.value.set(selectedModel.value.name, {
-                    modelName: selectedModel.value.name,
+                const selectedOpt = downloadOptions.value?.allOptions?.find(o => o.path === selectedFile.value);
+                const format = selectedOpt?.format;
+                const repository = selectedOpt?.repository;
+
+                downloadProgress.value.set(progressKey, {
+                    modelName: modelName,
                     status: 'downloading',
+                    stage: 1,
+                    stageMessage: '正在连接模型源解析清单...',
                     progress: 0,
                     bytesReceived: 0,
                     totalBytes: selectedModel.value.modelSizeBytes || 0,
@@ -441,10 +878,82 @@ const component = /*@__PURE__*/ _defineComponent({
                     estimatedSecondsRemaining: null
                 });
                 startProgressPolling();
-            }
-            catch (error) {
+
+                if (isRerank) {
+                    await modelsApi.downloadRerankModel(modelName, selectedFile.value || undefined, format, repository);
+                } else {
+                    await modelsApi.download(modelName, selectedFile.value || undefined, format, repository);
+                }
+            } catch (error) {
                 console.error('Failed to start download:', error);
-                message.error(`下载失败: ${error.response?.data?.error || error.message}`);
+                message.error(`下载启动失败: ${error.response?.data?.error || error.message}`);
+                downloadState.value = 'failed';
+            }
+        };
+
+        const cancelModalDownload = async () => {
+            if (downloadState.value === 'probing') {
+                if (currentAbortController.value) {
+                    currentAbortController.value.abort();
+                }
+                downloadState.value = 'idle';
+                showDownloadModal.value = false;
+                message.info('已取消探测');
+                return;
+            }
+
+            if (!selectedModel.value) {
+                showDownloadModal.value = false;
+                return;
+            }
+
+            const isRerank = selectedModel.value.modelType === 'reranker';
+            const modelName = selectedModel.value.name;
+            const progressKey = isRerank ? `rerank_${modelName}` : modelName;
+
+            downloadState.value = 'cancelling';
+            try {
+                if (isRerank) {
+                    await modelsApi.cancelRerankDownload(modelName);
+                } else {
+                    await modelsApi.cancelDownload(modelName);
+                }
+                message.warning(`已取消模型 ${getModelDisplayName(modelName)} 的下载`);
+                const item = downloadProgress.value.get(progressKey);
+                if (item) {
+                    item.status = 'cancelled';
+                    item.stage = 'Cancelled';
+                    item.stageMessage = '下载已由用户取消';
+                }
+                downloadState.value = 'cancelled';
+                setTimeout(() => {
+                    if (showDownloadModal.value && downloadState.value === 'cancelled') {
+                        showDownloadModal.value = false;
+                        downloadState.value = 'idle';
+                    }
+                }, 800);
+            } catch (error) {
+                console.error('Failed to cancel download:', error);
+                message.error('取消下载失败');
+                downloadState.value = 'downloading';
+            }
+        };
+
+        const retryDownload = () => {
+            if (selectedModel.value) {
+                const isRerank = selectedModel.value.modelType === 'reranker';
+                startDownloadFlow(selectedModel.value, isRerank);
+            }
+        };
+
+        const handleSwitchFromModal = async () => {
+            if (!selectedModel.value) return;
+            showDownloadModal.value = false;
+            const isRerank = selectedModel.value.modelType === 'reranker';
+            if (isRerank) {
+                await handleRerankSwitch(selectedModel.value);
+            } else {
+                handleSwitch(selectedModel.value);
             }
         };
         const handleSwitch = (model) => {
@@ -589,34 +1098,13 @@ const component = /*@__PURE__*/ _defineComponent({
             try {
                 const response = await modelsApi.getCurrentRerankModel();
                 currentRerankModel.value = response.data;
+                loadRuntimeStatus();
             }
             catch (error) {
                 console.error('Failed to load current rerank model:', error);
             }
             finally {
                 rerankCurrentLoading.value = false;
-            }
-        };
-        const handleRerankDownload = async (model) => {
-            if (!model.name)
-                return;
-            message.info(`开始下载重排模型: ${model.displayName || model.name}`);
-            try {
-                await modelsApi.downloadRerankModel(model.name);
-                downloadProgress.value.set(`rerank_${model.name}`, {
-                    modelName: model.name,
-                    status: 'downloading',
-                    progress: 0,
-                    bytesReceived: 0,
-                    totalBytes: model.modelSizeBytes || 0,
-                    speedBytesPerSecond: 0,
-                    estimatedSecondsRemaining: null
-                });
-                startProgressPolling();
-            }
-            catch (error) {
-                console.error('Failed to start rerank model download:', error);
-                message.error(`下载失败: ${error.response?.data?.error || error.message}`);
             }
         };
         const handleRerankSwitch = async (model) => {
@@ -627,6 +1115,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 message.success(response.data.message || `已切换到重排模型: ${model.displayName || model.name}`);
                 await loadCurrentRerankModel();
                 await loadRerankModels();
+                await loadRuntimeStatus();
             }
             catch (error) {
                 console.error('Failed to switch rerank model:', error);
@@ -640,6 +1129,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 await modelsApi.deleteRerankModel(model.name);
                 message.success(`已删除重排模型: ${model.displayName || model.name}`);
                 await loadRerankModels();
+                await loadRuntimeStatus();
             }
             catch (error) {
                 console.error('Failed to delete rerank model:', error);
@@ -670,6 +1160,13 @@ const component = /*@__PURE__*/ _defineComponent({
                             ? await modelsApi.getRerankDownloadProgress(modelName)
                             : await modelsApi.getDownloadProgress(modelName);
                         downloadProgress.value.set(progressKey, response.data);
+                        if (selectedModel.value && (selectedModel.value.name === modelName)) {
+                            if (response.data.status === 'completed') downloadState.value = 'completed';
+                            else if (response.data.status === 'failed') downloadState.value = 'failed';
+                            else if (response.data.stage === 'VerifyingFiles' || response.data.stage === 4) downloadState.value = 'verifying';
+                            else if (response.data.stage === 'Converting' || response.data.stage === 5) downloadState.value = 'converting';
+                            else if (response.data.status === 'downloading' && downloadState.value !== 'cancelling') downloadState.value = 'downloading';
+                        }
                         if (response.data.status === 'completed') {
                             message.success(`模型 ${getModelDisplayName(modelName)} 下载完成`);
                             // 刷新对应的模型列表
@@ -679,7 +1176,9 @@ const component = /*@__PURE__*/ _defineComponent({
                             }
                             else {
                                 await loadModels();
+                                await loadCurrentModel();
                             }
+                            await loadRuntimeStatus();
                         }
                         else if (response.data.status === 'failed') {
                             message.error(`模型 ${getModelDisplayName(modelName)} 下载失败`);
@@ -709,6 +1208,7 @@ const component = /*@__PURE__*/ _defineComponent({
             loadCurrentModel();
             loadRerankModels();
             loadCurrentRerankModel();
+            loadRuntimeStatus();
             // 恢复页面导航前正在进行的下载（前端内存被清空，从后端重建）
             try {
                 const res = await modelsApi.getActiveDownloads();
@@ -729,16 +1229,17 @@ const component = /*@__PURE__*/ _defineComponent({
                 loadModels();
                 loadRerankModels();
                 loadModelsPath();
+                loadRuntimeStatus();
             }
         };
         onUnmounted(() => {
             stopProgressPolling();
             window.removeEventListener('storage', handleStorageChange);
         });
-        const __returned__ = { message, modelsPath, modelsPathLoading, savingModelsPath, embeddingApiMode, rerankApiMode, models, currentModel, modelsLoading, currentLoading, showSwitchDialog, showDownloadDialog, showConvertDialog, showAddCustomDialog, showDeleteDialog, selectedModel, switching, converting, deleting, addingCustom, targetFormat, deleteOldVectors, downloadProgress, downloadOptions, selectedFile, loadingOptions, loadModelsPath, handleSaveModelsPath, handleScanModels, customModelForm, rerankModels, currentRerankModel, rerankModelsLoading, rerankCurrentLoading, get progressInterval() { return progressInterval; }, set progressInterval(v) { progressInterval = v; }, activeDownloads, selectedFileDescription, getFormatTagType, getFormatText, rerankModelColumns, modelColumns, getModelDisplayName, getDownloadStatusType, getDownloadStatusText, getProgressStatus, getErrorHelp, formatBytes, loadModels, loadCurrentModel, handleDownload, confirmDownload, handleSwitch, confirmSwitch, handleConvert, confirmConvert, handleDelete, confirmDelete, confirmAddCustom, loadRerankModels, loadCurrentRerankModel, handleRerankDownload, handleRerankSwitch, handleRerankDelete, startProgressPolling, stopProgressPolling, get NTag() { return NTag; }, get NButton() { return NButton; }, get NSpace() { return NSpace; }, get NProgress() { return NProgress; }, get NAlert() { return NAlert; }, get NCode() { return NCode; }, get NIcon() { return NIcon; }, get NRadioGroup() { return NRadioGroup; }, get NRadio() { return NRadio; }, get NFormItem() { return NFormItem; }, get NSpin() { return NSpin; }, get RefreshOutline() { return RefreshOutline; }, get AddOutline() { return AddOutline; }, get InformationCircleOutline() { return InformationCircleOutline; } };
+        const __returned__ = { message, modelsPath, modelsPathLoading, savingModelsPath, embeddingApiMode, rerankApiMode, models, currentModel, modelsLoading, currentLoading, runtimeStatus, runtimeStatusLoading, loadRuntimeStatus, switchVariantDialog, handleSwitchVariant, confirmSwitchVariant, handleDeleteVariant, getRuntimeStatusTagType, getRuntimeStatusText, getRetentionText, showSwitchDialog, showDownloadDialog, showDownloadModal, downloadState, activeDownloadModel, rowLoadingMap, modalTitle, modalCurrentStepNumber, modalStepStatus, modalProgressStatus, currentModalProgress, formatSpeed, formatRemainingTime, openDownloadModalForModel, openDownloadModalByProgressKey, confirmModalDownload, cancelModalDownload, retryDownload, handleSwitchFromModal, showConvertDialog, showAddCustomDialog, showDeleteDialog, selectedModel, switching, converting, deleting, addingCustom, targetFormat, deleteOldVectors, downloadProgress, downloadOptions, selectedFile, loadingOptions, selectedFormatFilter, displayOptions, onFormatFilterChange, loadModelsPath, handleSaveModelsPath, handleScanModels, customModelForm, rerankModels, currentRerankModel, rerankModelsLoading, rerankCurrentLoading, get progressInterval() { return progressInterval; }, set progressInterval(v) { progressInterval = v; }, activeDownloads, selectedFileDescription, getFormatTagType, getFormatText, rerankModelColumns, modelColumns, getModelDisplayName, getDownloadStatusType, getDownloadStatusText, getProgressStatus, getStageTagType, getStageText, handleCancelDownload, getErrorHelp, formatBytes, loadModels, loadCurrentModel, handleDownload, handleSwitch, confirmSwitch, handleConvert, confirmConvert, handleDelete, confirmDelete, confirmAddCustom, loadRerankModels, loadCurrentRerankModel, handleRerankDownload, handleRerankSwitch, handleRerankDelete, startProgressPolling, stopProgressPolling, get NTag() { return NTag; }, get NButton() { return NButton; }, get NSpace() { return NSpace; }, get NProgress() { return NProgress; }, get NAlert() { return NAlert; }, get NCode() { return NCode; }, get NIcon() { return NIcon; }, get NRadioGroup() { return NRadioGroup; }, get NRadio() { return NRadio; }, get NFormItem() { return NFormItem; }, get NSpin() { return NSpin; }, get NSteps() { return NSteps; }, get NStep() { return NStep; }, get RefreshOutline() { return RefreshOutline; }, get AddOutline() { return AddOutline; }, get InformationCircleOutline() { return InformationCircleOutline; } };
         return __returned__;
     }
 });
 
-component.template = "\n  <n-space vertical :size=\"20\">\n    <!-- Model Root Directory -->\n    <n-card title=\"模型根目录\">\n      <n-form label-placement=\"left\" label-width=\"120\">\n        <n-form-item label=\"模型存储路径\">\n          <n-space align=\"center\" style=\"width: 100%\">\n            <n-input\n              v-model:value=\"modelsPath\"\n              placeholder=\"默认: models\"\n              style=\"width: 300px\"\n            />\n            <n-button\n              type=\"primary\"\n              :loading=\"savingModelsPath\"\n              @click=\"handleSaveModelsPath\"\n            >\n              保存\n            </n-button>\n            <n-button\n              @click=\"handleScanModels\"\n              :loading=\"modelsPathLoading\"\n            >\n              扫描模型目录\n            </n-button>\n          </n-space>\n        </n-form-item>\n      </n-form>\n      <n-text depth=\"3\" style=\"font-size: 12px\">\n        设置模型文件的存储根路径，修改后需要重新扫描以更新模型列表\n      </n-text>\n    </n-card>\n\n    <!-- Current Model -->\n    <n-card title=\"当前模型\">\n      <n-spin :show=\"currentLoading\">\n        <n-alert v-if=\"embeddingApiMode\" type=\"info\" :show-icon=\"false\" style=\"margin-bottom: 12px\">\n          当前为 <strong>OpenAI 兼容 API 模式</strong>，本地模型管理不适用。\n          请在「设置 → 嵌入模型」中配置 API 地址和模型名称。\n        </n-alert>\n        <n-descriptions v-if=\"currentModel && !embeddingApiMode\" :column=\"5\" label-placement=\"left\">\n          <n-descriptions-item label=\"模型名称\">\n            <n-tag type=\"primary\">{{ currentModel.displayName || currentModel.name }}</n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"维度\">{{ currentModel.dimension }}</n-descriptions-item>\n          <n-descriptions-item label=\"最大序列长度\">{{ currentModel.maxSequenceLength }}</n-descriptions-item>\n          <n-descriptions-item label=\"格式\">\n            <n-tag :type=\"getFormatTagType(currentModel.onnxFormat)\" size=\"small\">\n              {{ getFormatText(currentModel.onnxFormat) }}\n            </n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"状态\">\n            <n-tag :type=\"currentModel.isDownloaded ? 'success' : 'warning'\">\n              {{ currentModel.isDownloaded ? '已下载' : '未下载' }}\n            </n-tag>\n          </n-descriptions-item>\n        </n-descriptions>\n        <n-text v-else depth=\"3\">未配置模型</n-text>\n      </n-spin>\n    </n-card>\n\n    <!-- Current Rerank Model -->\n    <n-card title=\"当前重排模型\">\n      <n-spin :show=\"rerankCurrentLoading\">\n        <n-alert v-if=\"rerankApiMode\" type=\"info\" :show-icon=\"false\" style=\"margin-bottom: 12px\">\n          当前为 <strong>OpenAI 兼容 API 模式</strong>，本地重排模型管理不适用。\n          请在「设置 → 重排模型」中配置 API 地址和模型名称。\n        </n-alert>\n        <n-descriptions v-if=\"currentRerankModel && !rerankApiMode\" :column=\"3\" label-placement=\"left\">\n          <n-descriptions-item label=\"模型名称\">\n            <n-tag type=\"info\">{{ currentRerankModel.displayName || currentRerankModel.name }}</n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"维度\">{{ currentRerankModel.dimension }}</n-descriptions-item>\n          <n-descriptions-item label=\"最大序列长度\">{{ currentRerankModel.maxSequenceLength }}</n-descriptions-item>\n          <n-descriptions-item label=\"状态\">\n            <n-tag :type=\"currentRerankModel.isDownloaded ? 'success' : 'warning'\">\n              {{ currentRerankModel.isDownloaded ? '已下载' : '未下载' }}\n            </n-tag>\n          </n-descriptions-item>\n        </n-descriptions>\n        <n-text v-else depth=\"3\">未配置重排模型</n-text>\n      </n-spin>\n    </n-card>\n\n    <!-- Rerank Models -->\n    <n-card title=\"重排模型管理\">\n      <template #header-extra>\n        <n-button text @click=\"loadRerankModels\">\n          <template #icon><n-icon :component=\"RefreshOutline\" /></template>\n          刷新\n        </n-button>\n      </template>\n      \n      <n-alert type=\"info\" style=\"margin-bottom: 16px\">\n        <template #header>说明</template>\n        <n-text>\n          重排模型（Reranker）用于对检索结果进行二次排序，提升检索精度。<br>\n          基于 Cross-Encoder 架构，能够更精确地计算 Query-Document 相关性。\n        </n-text>\n      </n-alert>\n      \n      <n-data-table\n        :columns=\"rerankModelColumns\"\n        :data=\"rerankModels\"\n        :loading=\"rerankModelsLoading\"\n        :row-key=\"(row) => row.name || ''\"\n      />\n    </n-card>\n\n    <!-- Download/Convert Progress -->\n    <n-card v-if=\"activeDownloads.length > 0\" title=\"任务进度\">\n      <n-list>\n        <n-list-item v-for=\"download in activeDownloads\" :key=\"download.modelName\">\n          <n-thing>\n            <template #header>\n              <n-space align=\"center\">\n                <span>{{ getModelDisplayName(download.modelName) }}</span>\n                <n-tag :type=\"getDownloadStatusType(download.status)\" size=\"small\">\n                  {{ getDownloadStatusText(download.status) }}\n                </n-tag>\n              </n-space>\n            </template>\n            \n            <!-- Progress bar -->\n            <n-progress \n              type=\"line\" \n              :percentage=\"download.progress\" \n              :status=\"getProgressStatus(download.status)\"\n              :indicator-placement=\"'inside'\"\n              style=\"margin: 12px 0\"\n            />\n            \n            <!-- Error message -->\n            <n-alert v-if=\"download.status === 'failed' && download.errorMessage\" type=\"error\" style=\"margin-top: 8px\">\n              <template #header>操作失败</template>\n              <n-text>{{ download.errorMessage }}</n-text>\n              <n-text v-if=\"getErrorHelp(download.errorCode)\" depth=\"3\" style=\"display: block; margin-top: 8px; font-size: 12px\">\n                <n-icon :component=\"InformationCircleOutline\" style=\"vertical-align: middle; margin-right: 4px\" />\n                {{ getErrorHelp(download.errorCode) }}\n              </n-text>\n            </n-alert>\n          </n-thing>\n        </n-list-item>\n      </n-list>\n    </n-card>\n\n    <!-- Available Models -->\n    <n-card title=\"可用模型\">\n      <template #header-extra>\n        <n-space>\n          <n-button text @click=\"showAddCustomDialog = true\">\n            <template #icon><n-icon :component=\"AddOutline\" /></template>\n            添加模型\n          </n-button>\n          <n-button text @click=\"loadModels\">\n            <template #icon><n-icon :component=\"RefreshOutline\" /></template>\n            刷新\n          </n-button>\n        </n-space>\n      </template>\n      \n      <!-- Info alert -->\n      <n-alert type=\"info\" style=\"margin-bottom: 16px\">\n        <template #header>提示</template>\n        <n-text>\n          部分模型需要从 PyTorch 格式转换为 ONNX 格式，转换过程需要 Python 环境。<br>\n          请确保已安装：<n-code code=\"pip install torch transformers onnx\" language=\"bash\" :inline=\"true\" />\n        </n-text>\n      </n-alert>\n      \n      <n-data-table\n        :columns=\"modelColumns\"\n        :data=\"models\"\n        :loading=\"modelsLoading\"\n        :row-key=\"(row) => row.name || ''\"\n      />\n    </n-card>\n\n    <!-- Switch Model Dialog -->\n    <n-modal v-model:show=\"showSwitchDialog\" preset=\"dialog\" title=\"切换模型\">\n      <n-space vertical>\n        <n-text>确定要切换到模型 <strong>{{ selectedModel?.displayName }}</strong> 吗？</n-text>\n        <n-alert v-if=\"selectedModel && !selectedModel.isDownloaded\" type=\"warning\" title=\"注意\">\n          该模型尚未下载，将先下载模型文件。<br>\n          <n-text depth=\"3\" v-if=\"!selectedModel.hasOnnx\">\n            此模型需要从 PyTorch 转换为 ONNX，请确保 Python 环境已配置。\n          </n-text>\n        </n-alert>\n        <n-alert type=\"info\" title=\"提示\">\n          切换模型后需要重新索引数据以获得最佳效果。\n        </n-alert>\n        <n-form-item v-if=\"selectedModel && currentModel && selectedModel.dimension !== currentModel.dimension\" label=\"旧向量数据\">\n          <n-radio-group v-model:value=\"deleteOldVectors\">\n            <n-space>\n              <n-radio :value=\"false\">保留旧向量数据</n-radio>\n              <n-radio :value=\"true\">删除旧向量数据</n-radio>\n            </n-space>\n          </n-radio-group>\n        </n-form-item>\n        <n-alert v-if=\"deleteOldVectors && selectedModel && currentModel && selectedModel.dimension !== currentModel.dimension\" type=\"error\" style=\"margin-top: 8px\">\n          删除后将无法恢复旧模型的向量数据\n        </n-alert>\n      </n-space>\n      <template #action>\n        <n-button @click=\"showSwitchDialog = false\">取消</n-button>\n        <n-button type=\"primary\" :loading=\"switching\" @click=\"confirmSwitch\">确认切换</n-button>\n      </template>\n    </n-modal>\n\n    <!-- Download Confirm Dialog -->\n    <n-modal v-model:show=\"showDownloadDialog\" preset=\"dialog\" title=\"下载模型\" style=\"width: 600px\">\n      <n-spin :show=\"loadingOptions\">\n        <n-space vertical>\n          <n-text>即将下载模型 <strong>{{ selectedModel?.displayName }}</strong></n-text>\n\n          <!-- 显示下载选项 -->\n          <template v-if=\"downloadOptions\">\n            <!-- 需要 PyTorch 转换 -->\n            <n-alert v-if=\"downloadOptions.needsConversion\" type=\"warning\" title=\"需要转换\">\n              <n-text>\n                此模型没有预转换的 ONNX 文件，需要从 PyTorch 转换。<br>\n                请确保已安装 Python 和相关依赖：<br>\n                <n-code code=\"pip install torch transformers onnx\" language=\"bash\" style=\"margin-top: 8px\" />\n              </n-text>\n            </n-alert>\n\n            <!-- 有多个选项需要用户选择 -->\n            <template v-else-if=\"downloadOptions.needsUserSelection\">\n              <n-form-item label=\"选择要下载的版本\">\n                <n-radio-group v-model:value=\"selectedFile\" style=\"width: 100%\">\n                  <n-space vertical style=\"width: 100%\">\n\n                    <!-- 根目录选项 -->\n                    <template v-if=\"downloadOptions.rootOptions.length > 0\">\n                      <n-text depth=\"3\" style=\"font-size: 12px; margin-top: 8px\">根目录</n-text>\n                      <n-radio\n                        v-for=\"option in downloadOptions.rootOptions\"\n                        :key=\"option.path\"\n                        :value=\"option.path\"\n                        style=\"width: 100%\"\n                      >\n                        <n-space align=\"center\" justify=\"space-between\" style=\"width: 100%\">\n                          <n-space align=\"center\">\n                            <span>{{ option.displayName }}</span>\n                            <n-tag v-if=\"option.isRecommended\" type=\"success\" size=\"small\">推荐</n-tag>\n                            <n-tag v-if=\"option.hasExternalData\" type=\"warning\" size=\"small\">外部格式</n-tag>\n                            <n-tag v-else type=\"info\" size=\"small\">嵌入式</n-tag>\n                            <n-tag v-if=\"option.isQuantized\" type=\"warning\" size=\"small\">量化</n-tag>\n                            <n-tag v-if=\"option.targetPlatform\" type=\"default\" size=\"small\">{{ option.targetPlatform }}</n-tag>\n                          </n-space>\n                        </n-space>\n                      </n-radio>\n                    </template>\n\n                    <!-- 子目录选项 -->\n                    <template v-if=\"downloadOptions.subfolderOptions.length > 0\">\n                      <n-text depth=\"3\" style=\"font-size: 12px; margin-top: 12px\">onnx/ 子目录</n-text>\n                      <n-radio\n                        v-for=\"option in downloadOptions.subfolderOptions\"\n                        :key=\"option.path\"\n                        :value=\"option.path\"\n                        style=\"width: 100%\"\n                      >\n                        <n-space align=\"center\" justify=\"space-between\" style=\"width: 100%\">\n                          <n-space align=\"center\">\n                            <span>{{ option.displayName }}</span>\n                            <n-tag v-if=\"option.isRecommended\" type=\"success\" size=\"small\">推荐</n-tag>\n                            <n-tag v-if=\"option.hasExternalData\" type=\"warning\" size=\"small\">外部格式</n-tag>\n                            <n-tag v-else type=\"info\" size=\"small\">嵌入式</n-tag>\n                            <n-tag v-if=\"option.isQuantized\" type=\"warning\" size=\"small\">量化</n-tag>\n                            <n-tag v-if=\"option.targetPlatform\" type=\"default\" size=\"small\">{{ option.targetPlatform }}</n-tag>\n                          </n-space>\n                        </n-space>\n                      </n-radio>\n                    </template>\n\n                  </n-space>\n                </n-radio-group>\n              </n-form-item>\n\n              <!-- 选中项的描述 -->\n              <n-alert v-if=\"selectedFileDescription\" type=\"info\" style=\"margin-top: 8px\">\n                {{ selectedFileDescription }}\n              </n-alert>\n            </template>\n\n            <!-- 只有一个选项，无需选择 -->\n            <template v-else>\n              <n-descriptions :column=\"1\" label-placement=\"left\">\n                <n-descriptions-item label=\"版本\">\n                  <n-space align=\"center\">\n                    <span>{{ downloadOptions.recommendedOption?.displayName }}</span>\n                    <n-tag v-if=\"downloadOptions.recommendedOption?.hasExternalData\" type=\"warning\" size=\"small\">外部格式</n-tag>\n                    <n-tag v-else type=\"info\" size=\"small\">嵌入式</n-tag>\n                  </n-space>\n                </n-descriptions-item>\n                <n-descriptions-item label=\"维度\">{{ selectedModel?.dimension }}</n-descriptions-item>\n                <n-descriptions-item label=\"大小\">{{ formatBytes(selectedModel?.modelSizeBytes || 0) }}</n-descriptions-item>\n              </n-descriptions>\n            </template>\n          </template>\n\n          <!-- 格式说明 -->\n          <n-alert type=\"info\" style=\"margin-top: 8px\">\n            <template #header>格式说明</template>\n            <n-text style=\"font-size: 13px\">\n              <strong>嵌入式</strong>：单个 ONNX 文件，兼容性好，有 2GB 限制。<br>\n              <strong>外部格式</strong>：分离的权重文件，支持大模型，下载后可转换为嵌入式。\n            </n-text>\n          </n-alert>\n        </n-space>\n      </n-spin>\n\n      <template #action>\n        <n-button @click=\"showDownloadDialog = false\">取消</n-button>\n        <n-button type=\"primary\" @click=\"confirmDownload\" :disabled=\"!selectedFile && !downloadOptions?.needsConversion\">开始下载</n-button>\n      </template>\n    </n-modal>\n\n    <!-- Convert Format Dialog -->\n    <n-modal v-model:show=\"showConvertDialog\" preset=\"dialog\" title=\"转换模型格式\">\n      <n-space vertical>\n        <n-text>转换模型 <strong>{{ selectedModel?.displayName }}</strong> 的 ONNX 格式</n-text>\n        <n-descriptions :column=\"1\" label-placement=\"left\">\n          <n-descriptions-item label=\"当前格式\">\n            <n-tag :type=\"getFormatTagType(selectedModel?.onnxFormat)\" size=\"small\">\n              {{ getFormatText(selectedModel?.onnxFormat) }}\n            </n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"目标格式\">\n            <n-radio-group v-model:value=\"targetFormat\">\n              <n-space>\n                <n-radio value=\"embedded\">\n                  <n-space align=\"center\">\n                    <span>嵌入式</span>\n                    <n-text depth=\"3\" style=\"font-size: 12px\">(CUDA 兼容性好)</n-text>\n                  </n-space>\n                </n-radio>\n                <n-radio value=\"external\">\n                  <n-space align=\"center\">\n                    <span>外部数据</span>\n                    <n-text depth=\"3\" style=\"font-size: 12px\">(支持大模型)</n-text>\n                  </n-space>\n                </n-radio>\n              </n-space>\n            </n-radio-group>\n          </n-descriptions-item>\n        </n-descriptions>\n        <n-alert type=\"info\" title=\"说明\">\n          <n-text>\n            <strong>嵌入式格式</strong>：单个 ONNX 文件，CUDA 兼容性好，但有 2GB 限制。<br>\n            <strong>外部数据格式</strong>：分离的权重文件，支持大模型，但 CUDA 动态 batch 可能有问题。\n          </n-text>\n        </n-alert>\n        <n-alert v-if=\"selectedModel && selectedModel.onnxFormat === targetFormat\" type=\"warning\">\n          模型已是目标格式，无需转换。\n        </n-alert>\n      </n-space>\n      <template #action>\n        <n-button @click=\"showConvertDialog = false\">取消</n-button>\n        <n-button \n          type=\"primary\" \n          :disabled=\"selectedModel?.onnxFormat === targetFormat\"\n          :loading=\"converting\" \n          @click=\"confirmConvert\">\n          开始转换\n        </n-button>\n      </template>\n    </n-modal>\n\n    <!-- Add Custom Model Dialog -->\n    <n-modal v-model:show=\"showAddCustomDialog\" preset=\"dialog\" title=\"添加自定义模型\">\n      <n-space vertical>\n        <n-form :model=\"customModelForm\">\n          <n-form-item label=\"HuggingFace 模型 ID\" required>\n            <n-input \n              v-model:value=\"customModelForm.huggingFaceId\" \n              placeholder=\"例如: BAAI/bge-base-zh-v1.5\"\n            />\n          </n-form-item>\n          <n-form-item label=\"显示名称（可选）\">\n            <n-input \n              v-model:value=\"customModelForm.displayName\" \n              placeholder=\"留空则使用模型名称\"\n            />\n          </n-form-item>\n        </n-form>\n        <n-alert type=\"info\">\n          <n-text>\n            输入 HuggingFace 上的模型 ID，系统将自动获取模型信息并添加到列表中。<br>\n            格式：<n-code code=\"owner/model-name\" :inline=\"true\" />\n          </n-text>\n        </n-alert>\n      </n-space>\n      <template #action>\n        <n-button @click=\"showAddCustomDialog = false\">取消</n-button>\n        <n-button type=\"primary\" :loading=\"addingCustom\" @click=\"confirmAddCustom\">添加</n-button>\n      </template>\n    </n-modal>\n\n    <!-- Delete Model Dialog -->\n    <n-modal v-model:show=\"showDeleteDialog\" preset=\"dialog\" title=\"删除模型\">\n      <n-space vertical>\n        <n-text>确定要删除模型 <strong>{{ selectedModel?.displayName }}</strong> 吗？</n-text>\n        <n-alert type=\"warning\" title=\"警告\">\n          删除后将同时删除模型文件夹及其所有内容，此操作不可恢复。\n        </n-alert>\n      </n-space>\n      <template #action>\n        <n-button @click=\"showDeleteDialog = false\">取消</n-button>\n        <n-button type=\"error\" :loading=\"deleting\" @click=\"confirmDelete\">确认删除</n-button>\n      </template>\n    </n-modal>\n  </n-space>\n";
+component.template = "\n  <n-space vertical :size=\"20\">\n    <!-- Model Root Directory -->\n    <n-card title=\"模型根目录\">\n      <n-form label-placement=\"left\" label-width=\"120\">\n        <n-form-item label=\"模型存储路径\">\n          <n-space align=\"center\" style=\"width: 100%\">\n            <n-input\n              v-model:value=\"modelsPath\"\n              placeholder=\"默认: models\"\n              style=\"width: 300px\"\n            />\n            <n-button\n              type=\"primary\"\n              :loading=\"savingModelsPath\"\n              @click=\"handleSaveModelsPath\"\n            >\n              保存\n            </n-button>\n            <n-button\n              @click=\"handleScanModels\"\n              :loading=\"modelsPathLoading\"\n            >\n              扫描模型目录\n            </n-button>\n          </n-space>\n        </n-form-item>\n      </n-form>\n      <n-text depth=\"3\" style=\"font-size: 12px\">\n        设置模型文件的存储根路径，修改后需要重新扫描以更新模型列表\n      </n-text>\n    </n-card>\n\n    <!-- Current Model -->\n    <n-card title=\"当前嵌入模型\">\n      <template #header-extra>\n        <n-space align=\"center\">\n          <n-tag v-if=\"runtimeStatus?.embedding\" :type=\"getRuntimeStatusTagType(runtimeStatus.embedding.state)\" size=\"small\" round>\n            {{ getRuntimeStatusText(runtimeStatus.embedding) }}\n            <span v-if=\"runtimeStatus.embedding.activeLeases > 0\"> [{{ runtimeStatus.embedding.activeLeases }} 借用]</span>\n          </n-tag>\n          <n-tag v-if=\"runtimeStatus?.embedding?.isGpuMode\" type=\"success\" size=\"small\" round>\n            🚀 {{ runtimeStatus.embedding.executionDevice || 'GPU' }}\n          </n-tag>\n          <n-tag v-else-if=\"runtimeStatus?.embedding\" type=\"default\" size=\"small\" round>\n            💻 CPU\n          </n-tag>\n          <n-button text size=\"small\" @click=\"loadRuntimeStatus\" :loading=\"runtimeStatusLoading\">\n            <template #icon><n-icon :component=\"RefreshOutline\" /></template>\n            刷新状态\n          </n-button>\n        </n-space>\n      </template>\n      <n-spin :show=\"currentLoading || runtimeStatusLoading\">\n        <n-alert v-if=\"embeddingApiMode\" type=\"info\" :show-icon=\"false\" style=\"margin-bottom: 12px\">\n          当前为 <strong>OpenAI 兼容 API 模式</strong>，本地模型管理不适用。\n          请在「设置 → 嵌入模型」中配置 API 地址和模型名称。\n        </n-alert>\n        <n-descriptions v-if=\"currentModel && !embeddingApiMode\" :column=\"4\" label-placement=\"left\">\n          <n-descriptions-item label=\"模型名称\">\n            <n-tag type=\"primary\">{{ currentModel.displayName || currentModel.name }}</n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"当前激活变体\">\n            <n-tag type=\"info\" size=\"small\">\n              {{ runtimeStatus?.embedding?.activeVariant || currentModel.activeVariantFileName || '-' }}\n            </n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"量化与格式\">\n            <n-space :size=\"4\">\n              <n-tag v-if=\"runtimeStatus?.embedding?.quantization\" size=\"small\">\n                {{ runtimeStatus.embedding.quantization }}\n              </n-tag>\n              <n-tag :type=\"getFormatTagType(currentModel.onnxFormat)\" size=\"small\">\n                {{ getFormatText(currentModel.onnxFormat) }}\n              </n-tag>\n            </n-space>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"规格\">\n            {{ currentModel.dimension }} 维 / {{ currentModel.maxSequenceLength }} tokens\n          </n-descriptions-item>\n          <n-descriptions-item label=\"驻留策略\" :span=\"2\">\n            {{ getRetentionText(runtimeStatus?.embedding) }}\n          </n-descriptions-item>\n          <n-descriptions-item label=\"硬件加速\" :span=\"2\">\n            {{ runtimeStatus?.embedding?.offloadDescription || (runtimeStatus?.embedding?.isGpuMode ? 'GPU 模式' : '纯 CPU 模式') }}\n            <span v-if=\"runtimeStatus?.embedding?.totalVramGb\" style=\"color: #888; font-size: 11px; margin-left: 6px\">\n              (显存: {{ runtimeStatus.embedding.totalVramGb }} GB)\n            </span>\n          </n-descriptions-item>\n        </n-descriptions>\n        <n-text v-else depth=\"3\">未配置模型</n-text>\n      </n-spin>\n    </n-card>\n\n    <!-- Current Rerank Model -->\n    <n-card title=\"当前重排模型\">\n      <template #header-extra>\n        <n-space align=\"center\">\n          <n-tag v-if=\"runtimeStatus?.rerank\" :type=\"getRuntimeStatusTagType(runtimeStatus.rerank.state)\" size=\"small\" round>\n            {{ getRuntimeStatusText(runtimeStatus.rerank) }}\n            <span v-if=\"runtimeStatus.rerank.activeLeases > 0\"> [{{ runtimeStatus.rerank.activeLeases }} 借用]</span>\n          </n-tag>\n          <n-tag v-if=\"runtimeStatus?.rerank?.isGpuMode\" type=\"success\" size=\"small\" round>\n            🚀 {{ runtimeStatus.rerank.executionDevice || 'GPU' }}\n          </n-tag>\n          <n-tag v-else-if=\"runtimeStatus?.rerank\" type=\"default\" size=\"small\" round>\n            💻 CPU\n          </n-tag>\n          <n-button text size=\"small\" @click=\"loadRuntimeStatus\" :loading=\"runtimeStatusLoading\">\n            <template #icon><n-icon :component=\"RefreshOutline\" /></template>\n            刷新状态\n          </n-button>\n        </n-space>\n      </template>\n      <n-spin :show=\"rerankCurrentLoading || runtimeStatusLoading\">\n        <n-alert v-if=\"rerankApiMode\" type=\"info\" :show-icon=\"false\" style=\"margin-bottom: 12px\">\n          当前为 <strong>OpenAI 兼容 API 模式</strong>，本地重排模型管理不适用。\n          请在「设置 → 重排模型」中配置 API 地址和模型名称。\n        </n-alert>\n        <n-descriptions v-if=\"currentRerankModel && !rerankApiMode\" :column=\"4\" label-placement=\"left\">\n          <n-descriptions-item label=\"模型名称\">\n            <n-tag type=\"info\">{{ currentRerankModel.displayName || currentRerankModel.name }}</n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"当前激活变体\">\n            <n-tag type=\"info\" size=\"small\">\n              {{ runtimeStatus?.rerank?.activeVariant || currentRerankModel.activeVariantFileName || '-' }}\n            </n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"量化与格式\">\n            <n-space :size=\"4\">\n              <n-tag v-if=\"runtimeStatus?.rerank?.quantization\" size=\"small\">\n                {{ runtimeStatus.rerank.quantization }}\n              </n-tag>\n              <n-tag size=\"small\">\n                {{ runtimeStatus?.rerank?.modelFormat?.toUpperCase() || (currentRerankModel.localPath?.endsWith('.gguf') ? 'GGUF' : 'ONNX') }}\n              </n-tag>\n            </n-space>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"规格\">\n            Cross-Encoder / {{ currentRerankModel.maxSequenceLength }} tokens\n          </n-descriptions-item>\n          <n-descriptions-item label=\"驻留策略\" :span=\"2\">\n            {{ getRetentionText(runtimeStatus?.rerank) }}\n          </n-descriptions-item>\n          <n-descriptions-item label=\"硬件状态\" :span=\"2\">\n            {{ runtimeStatus?.rerank?.offloadDescription || (runtimeStatus?.rerank?.isGpuMode ? 'GPU 模式' : '纯 CPU 模式') }}\n          </n-descriptions-item>\n        </n-descriptions>\n        <n-text v-else depth=\"3\">未配置重排模型</n-text>\n      </n-spin>\n    </n-card>\n\n    <!-- Rerank Models -->\n    <n-card title=\"重排模型管理\">\n      <template #header-extra>\n        <n-button text @click=\"loadRerankModels\">\n          <template #icon><n-icon :component=\"RefreshOutline\" /></template>\n          刷新\n        </n-button>\n      </template>\n      \n      <n-alert type=\"info\" style=\"margin-bottom: 16px\">\n        <template #header>说明</template>\n        <n-text>\n          重排模型（Reranker）用于对检索结果进行二次排序，提升检索精度。<br>\n          基于 Cross-Encoder 架构，能够更精确地计算 Query-Document 相关性。支持同一个模型下载与共存多个量化版本并即时切换。\n        </n-text>\n      </n-alert>\n      \n      <n-data-table\n        :columns=\"rerankModelColumns\"\n        :data=\"rerankModels\"\n        :loading=\"rerankModelsLoading\"\n        :row-key=\"(row) => row.name || ''\"\n      />\n    </n-card>\n\n    <!-- Download/Convert Progress -->\n    <n-card v-if=\"activeDownloads.length > 0\" title=\"任务进度\">\n      <n-list>\n        <n-list-item v-for=\"download in activeDownloads\" :key=\"download.modelName\">\n          <n-thing>\n            <template #header>\n              <n-space align=\"center\" justify=\"space-between\" style=\"width: 100%\">\n                <n-space align=\"center\">\n                  <span style=\"font-weight: 500\">{{ getModelDisplayName(download.modelName) }}</span>\n                  <n-tag :type=\"getDownloadStatusType(download.status)\" size=\"small\">\n                    {{ getDownloadStatusText(download.status) }}\n                  </n-tag>\n                  <n-tag v-if=\"download.stage\" :type=\"getStageTagType(download.stage)\" size=\"small\">\n                    {{ getStageText(download.stage) }}\n                  </n-tag>\n                </n-space>\n                <n-space align=\"center\">\n                  <n-button \n                    size=\"tiny\" \n                    type=\"info\" \n                    ghost \n                    @click=\"openDownloadModalByProgressKey(download.modelName)\">\n                    展开监控\n                  </n-button>\n                  <n-button \n                    v-if=\"download.status === 'downloading'\" \n                    size=\"tiny\" \n                    type=\"warning\" \n                    ghost \n                    @click=\"handleCancelDownload(download)\">\n                    取消下载\n                  </n-button>\n                </n-space>\n              </n-space>\n            </template>\n            \n            <!-- Progress bar -->\n            <n-progress \n              type=\"line\" \n              :percentage=\"download.progress\" \n              :status=\"getProgressStatus(download.status)\"\n              :indicator-placement=\"'inside'\"\n              style=\"margin: 12px 0\"\n            />\n            \n            <!-- Stage message & file details -->\n            <div v-if=\"download.stageMessage\" style=\"font-size: 12px; color: #666; margin-bottom: 6px\">\n              {{ download.stageMessage }}\n            </div>\n            \n            <!-- Error message -->\n            <n-alert v-if=\"download.status === 'failed' && download.errorMessage\" type=\"error\" style=\"margin-top: 8px\">\n              <template #header>操作失败</template>\n              <n-text>{{ download.errorMessage }}</n-text>\n              <n-text v-if=\"getErrorHelp(download.errorCode)\" depth=\"3\" style=\"display: block; margin-top: 8px; font-size: 12px\">\n                <n-icon :component=\"InformationCircleOutline\" style=\"vertical-align: middle; margin-right: 4px\" />\n                {{ getErrorHelp(download.errorCode) }}\n              </n-text>\n            </n-alert>\n          </n-thing>\n        </n-list-item>\n      </n-list>\n    </n-card>\n\n    <!-- Available Models -->\n    <n-card title=\"可用模型\">\n      <template #header-extra>\n        <n-space>\n          <n-button text @click=\"showAddCustomDialog = true\">\n            <template #icon><n-icon :component=\"AddOutline\" /></template>\n            添加模型\n          </n-button>\n          <n-button text @click=\"loadModels\">\n            <template #icon><n-icon :component=\"RefreshOutline\" /></template>\n            刷新\n          </n-button>\n        </n-space>\n      </template>\n      \n      <!-- Info alert -->\n      <n-alert type=\"info\" style=\"margin-bottom: 16px\">\n        <template #header>提示</template>\n        <n-text>\n          部分模型需要从 PyTorch 格式转换为 ONNX 格式，转换过程需要 Python 环境。<br>\n          支持同一个模型目录下载多个 GGUF 量化版本 (如 Q4_K_M / Q8_0) 并即时切换使用。\n        </n-text>\n      </n-alert>\n      \n      <n-data-table\n        :columns=\"modelColumns\"\n        :data=\"models\"\n        :loading=\"modelsLoading\"\n        :row-key=\"(row) => row.name || ''\"\n      />\n    </n-card>\n\n    <!-- Switch Model Dialog -->\n    <n-modal v-model:show=\"showSwitchDialog\" preset=\"dialog\" title=\"切换模型\">\n      <n-space vertical>\n        <n-text>确定要切换到模型 <strong>{{ selectedModel?.displayName }}</strong> 吗？</n-text>\n        <n-alert v-if=\"selectedModel && !selectedModel.isDownloaded\" type=\"warning\" title=\"注意\">\n          该模型尚未下载，将先下载模型文件。<br>\n          <n-text depth=\"3\" v-if=\"!selectedModel.hasOnnx\">\n            此模型需要从 PyTorch 转换为 ONNX，请确保 Python 环境已配置。\n          </n-text>\n        </n-alert>\n        <n-alert type=\"info\" title=\"提示\">\n          切换模型后需要重新索引数据以获得最佳效果。\n        </n-alert>\n        <n-form-item v-if=\"selectedModel && currentModel && selectedModel.dimension !== currentModel.dimension\" label=\"旧向量数据\">\n          <n-radio-group v-model:value=\"deleteOldVectors\">\n            <n-space>\n              <n-radio :value=\"false\">保留旧向量数据</n-radio>\n              <n-radio :value=\"true\">删除旧向量数据</n-radio>\n            </n-space>\n          </n-radio-group>\n        </n-form-item>\n        <n-alert v-if=\"deleteOldVectors && selectedModel && currentModel && selectedModel.dimension !== currentModel.dimension\" type=\"error\" style=\"margin-top: 8px\">\n          删除后将无法恢复旧模型的向量数据\n        </n-alert>\n      </n-space>\n      <template #action>\n        <n-button @click=\"showSwitchDialog = false\">取消</n-button>\n        <n-button type=\"primary\" :loading=\"switching\" @click=\"confirmSwitch\">确认切换</n-button>\n      </template>\n    </n-modal>\n\n    <!-- Switch Variant Dialog -->\n    <n-modal v-model:show=\"switchVariantDialog.show\" preset=\"dialog\" title=\"切换模型版本变体\">\n      <n-space vertical>\n        <n-text>\n          确定将模型 <strong>{{ switchVariantDialog.model?.displayName || switchVariantDialog.model?.name }}</strong> 切换为以下版本变体吗？\n        </n-text>\n        <n-descriptions :column=\"1\" bordered size=\"small\" style=\"margin: 8px 0\">\n          <n-descriptions-item label=\"变体文件名\">\n            <code>{{ switchVariantDialog.variant?.fileName }}</code>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"量化等级\">\n            <n-tag size=\"small\">{{ switchVariantDialog.variant?.quantization || '未标注' }}</n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"模型格式\">\n            <n-tag size=\"small\" type=\"info\">{{ switchVariantDialog.variant?.format?.toUpperCase() }}</n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"文件大小\">\n            {{ formatBytes(switchVariantDialog.variant?.fileSizeBytes || 0) }}\n          </n-descriptions-item>\n        </n-descriptions>\n        <n-alert type=\"info\">\n          切换后，模型服务将平滑释放旧版本并即时加载新变体，无需重启应用。\n        </n-alert>\n      </n-space>\n      <template #action>\n        <n-button @click=\"switchVariantDialog.show = false\">取消</n-button>\n        <n-button type=\"primary\" :loading=\"switchVariantDialog.loading\" @click=\"confirmSwitchVariant\">确认切换</n-button>\n      </template>\n    </n-modal>\n\n    <!-- Download State Machine Modal -->\n    <n-modal v-model:show=\"showDownloadModal\" preset=\"card\" :title=\"modalTitle\" style=\"width: 680px; max-width: 95vw\" :mask-closable=\"false\">\n      <!-- Steps Progress Indicator -->\n      <n-steps :current=\"modalCurrentStepNumber\" :status=\"modalStepStatus\" size=\"small\" style=\"margin-bottom: 20px\">\n        <n-step title=\"探测源\" description=\"短路探测镜像源\" />\n        <n-step title=\"选格式\" description=\"GGUF/ONNX选择\" />\n        <n-step title=\"下载中\" description=\"高速流式拉取\" />\n        <n-step title=\"就绪\" description=\"校验或格式就绪\" />\n      </n-steps>\n\n      <!-- Step 1: Probing State -->\n      <div v-if=\"downloadState === 'probing'\" style=\"text-align: center; padding: 28px 0\">\n        <n-spin size=\"large\">\n          <template #description>\n            <div style=\"margin-top: 14px; font-weight: 500; font-size: 14px\">正在并发探测可用镜像源与模型格式 (GGUF / ONNX)...</div>\n            <div style=\"margin-top: 6px; color: #888; font-size: 12px\">已启用 3.5s 超时短路机制，如需放弃可随时取消探测</div>\n          </template>\n        </n-spin>\n      </div>\n\n      <!-- Step 2: Options Ready -->\n      <div v-else-if=\"downloadState === 'options_ready'\">\n        <n-space vertical :size=\"12\">\n          <n-text>即将下载模型 <strong>{{ selectedModel?.displayName || selectedModel?.name }}</strong></n-text>\n\n          <template v-if=\"downloadOptions\">\n            <!-- Gated 受限授权警告 -->\n            <n-alert v-if=\"downloadOptions.isGatedOrUnauthorized\" type=\"error\" title=\"受限授权模型 (Gated Repository)\">\n              <n-text>\n                此模型在 HuggingFace 属于受限模型，未授权请求将返回 401 错误。<br>\n                请在系统设置中配置 <code>HF_TOKEN</code>，或在 HuggingFace 页面先申请并同意协议。\n              </n-text>\n            </n-alert>\n\n            <!-- 需要 PyTorch 转换 -->\n            <n-alert v-else-if=\"downloadOptions.needsConversion\" type=\"warning\" title=\"官方仅提供 PyTorch 权重\">\n              <n-text>\n                此模型官方仅发布了 PyTorch 原生权重，未提供预构建的 ONNX 或 GGUF 文件。<br>\n                系统将尝试通过本地 Python 环境导出为 ONNX，请确保已安装 Python 依赖：<br>\n                <n-code code=\"pip install torch transformers onnx\" language=\"bash\" style=\"margin-top: 8px\" /><br>\n                <n-text depth=\"3\">提示：系统原生支持 GGUF 格式。若存在社区量化版，可点击【添加自定义模型】输入对应 -GGUF 仓库免转换直接运行。</n-text>\n              </n-text>\n            </n-alert>\n\n            <!-- 有多个选项需要用户选择 -->\n            <template v-else-if=\"downloadOptions.needsUserSelection || downloadOptions.hasBothFormats\">\n              <n-form-item v-if=\"downloadOptions.hasBothFormats\" label=\"格式选择\">\n                <n-radio-group v-model:value=\"selectedFormatFilter\" @update:value=\"onFormatFilterChange\">\n                  <n-space>\n                    <n-radio value=\"all\">全部 ({{ downloadOptions.allOptions.length }})</n-radio>\n                    <n-radio value=\"gguf\">GGUF 免转推荐 ({{ downloadOptions.ggufOptions.length }})</n-radio>\n                    <n-radio value=\"onnx\">ONNX ({{ downloadOptions.onnxOptions.length }})</n-radio>\n                  </n-space>\n                </n-radio-group>\n              </n-form-item>\n\n              <n-form-item label=\"选择要下载的具体模型\">\n                <n-radio-group v-model:value=\"selectedFile\" style=\"width: 100%\">\n                  <n-space vertical style=\"width: 100%\">\n                    <n-radio\n                      v-for=\"option in displayOptions\"\n                      :key=\"option.path\"\n                      :value=\"option.path\"\n                      style=\"width: 100%\"\n                    >\n                      <n-space align=\"center\" justify=\"space-between\" style=\"width: 100%\">\n                        <n-space align=\"center\">\n                          <span>{{ option.displayName }}</span>\n                          <n-tag v-if=\"option.isRecommended\" type=\"success\" size=\"small\">推荐</n-tag>\n                          <n-tag v-if=\"option.format === 'gguf'\" type=\"info\" size=\"small\">GGUF 免转</n-tag>\n                          <n-tag v-else-if=\"option.hasExternalData\" type=\"warning\" size=\"small\">外部格式</n-tag>\n                          <n-tag v-else type=\"info\" size=\"small\">嵌入式</n-tag>\n                          <n-tag v-if=\"option.isQuantized\" type=\"warning\" size=\"small\">量化</n-tag>\n                          <n-tag v-if=\"option.targetPlatform\" type=\"default\" size=\"small\">{{ option.targetPlatform }}</n-tag>\n                          <n-text depth=\"3\" v-if=\"option.size\" style=\"font-size: 12px\">({{ formatBytes(option.size) }})</n-text>\n                          <n-text depth=\"3\" v-if=\"option.repository && option.repository !== selectedModel?.name && option.repository !== selectedModel?.downloadUrl\" style=\"font-size: 11px; color: #888\">[{{ option.repository }}]</n-text>\n                        </n-space>\n                      </n-space>\n                    </n-radio>\n                  </n-space>\n                </n-radio-group>\n              </n-form-item>\n\n              <n-alert v-if=\"selectedFileDescription\" type=\"info\" style=\"margin-top: 8px\">\n                {{ selectedFileDescription }}\n              </n-alert>\n            </template>\n\n            <!-- 只有一个选项，无需选择 -->\n            <template v-else>\n              <n-descriptions :column=\"1\" label-placement=\"left\">\n                <n-descriptions-item label=\"版本\">\n                  <n-space align=\"center\">\n                    <span>{{ downloadOptions.recommendedOption?.displayName }}</span>\n                    <n-tag v-if=\"downloadOptions.recommendedOption?.format === 'gguf'\" type=\"info\" size=\"small\">GGUF 免转</n-tag>\n                    <n-tag v-else-if=\"downloadOptions.recommendedOption?.hasExternalData\" type=\"warning\" size=\"small\">外部格式</n-tag>\n                    <n-tag v-else type=\"info\" size=\"small\">嵌入式</n-tag>\n                  </n-space>\n                </n-descriptions-item>\n                <n-descriptions-item label=\"维度\">{{ selectedModel?.dimension }}</n-descriptions-item>\n                <n-descriptions-item label=\"大小\">{{ formatBytes(selectedModel?.modelSizeBytes || 0) }}</n-descriptions-item>\n              </n-descriptions>\n            </template>\n          </template>\n\n          <n-alert type=\"info\" style=\"margin-top: 8px\">\n            <template #header>格式说明</template>\n            <n-text style=\"font-size: 12px\">\n              <strong>GGUF</strong>：LLamaSharp 原生免转加载，支持动态 GPU Offload，零 Python 依赖。<br>\n              <strong>嵌入式 ONNX</strong>：单个 ONNX 文件，兼容性好，适合 2GB 内模型。<br>\n              <strong>外部格式 ONNX</strong>：分离的权重文件，支持大模型，下载后可转换为嵌入式。\n            </n-text>\n          </n-alert>\n        </n-space>\n      </div>\n\n      <!-- Step 3 & 4: Downloading / Verifying / Converting / Completed / Failed / Cancelling -->\n      <div v-else>\n        <n-space vertical :size=\"14\">\n          <n-alert v-if=\"downloadState === 'completed'\" type=\"success\" title=\"模型下载完成\">\n            模型文件校验通过，已成功加入本地模型库并就绪可用！\n          </n-alert>\n          <n-alert v-else-if=\"downloadState === 'failed'\" type=\"error\" title=\"下载遇到问题\">\n            <n-text>{{ currentModalProgress?.errorMessage || '下载或校验失败，请检查网络后重试。' }}</n-text>\n            <n-text v-if=\"getErrorHelp(currentModalProgress?.errorCode)\" depth=\"3\" style=\"display: block; margin-top: 6px; font-size: 12px\">\n              <n-icon :component=\"InformationCircleOutline\" style=\"vertical-align: middle; margin-right: 4px\" />\n              {{ getErrorHelp(currentModalProgress.errorCode) }}\n            </n-text>\n          </n-alert>\n          <n-alert v-else-if=\"downloadState === 'cancelling'\" type=\"warning\" title=\"正在取消下载\">\n            正在停止后台下载任务并释放网络与文件资源...\n          </n-alert>\n\n          <n-progress\n            type=\"line\"\n            :percentage=\"currentModalProgress ? currentModalProgress.progress : (downloadState === 'completed' ? 100 : 0)\"\n            :status=\"modalProgressStatus\"\n            :indicator-placement=\"'inside'\"\n            style=\"margin: 8px 0\"\n          />\n\n          <n-descriptions :column=\"2\" label-placement=\"left\" size=\"small\" bordered>\n            <n-descriptions-item label=\"当前阶段\">\n              <n-tag v-if=\"currentModalProgress?.stage\" :type=\"getStageTagType(currentModalProgress.stage)\" size=\"small\">\n                {{ getStageText(currentModalProgress.stage) }}\n              </n-tag>\n              <span v-else style=\"color: #888\">-</span>\n            </n-descriptions-item>\n            <n-descriptions-item label=\"下载状态\">\n              <n-tag :type=\"getDownloadStatusType(currentModalProgress?.status || (downloadState === 'completed' ? 'completed' : 'downloading'))\" size=\"small\">\n                {{ getDownloadStatusText(currentModalProgress?.status || (downloadState === 'completed' ? 'completed' : 'downloading')) }}\n              </n-tag>\n            </n-descriptions-item>\n            <n-descriptions-item label=\"传输速率\">\n              {{ formatSpeed(currentModalProgress?.speed) }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"预估剩余时间\">\n              {{ formatRemainingTime(currentModalProgress?.remainingSeconds) }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"已下载大小\" :span=\"2\">\n              <span>{{ formatBytes(currentModalProgress?.downloadedBytes || 0) }}</span>\n              <span v-if=\"currentModalProgress?.totalBytes\" style=\"color: #888\"> / {{ formatBytes(currentModalProgress.totalBytes) }}</span>\n            </n-descriptions-item>\n          </n-descriptions>\n\n          <div v-if=\"currentModalProgress?.stageMessage\" style=\"font-size: 12px; color: #666; background: #f9f9f9; padding: 8px; border-radius: 4px\">\n            {{ currentModalProgress.stageMessage }}\n          </div>\n        </n-space>\n      </div>\n\n      <!-- Action Footer -->\n      <template #action>\n        <n-space justify=\"space-between\" align=\"center\" style=\"width: 100%\">\n          <div>\n            <n-button\n              v-if=\"['downloading', 'verifying', 'converting'].includes(downloadState)\"\n              size=\"small\"\n              @click=\"showDownloadModal = false\"\n            >\n              后台运行（收起弹窗）\n            </n-button>\n          </div>\n          <n-space>\n            <!-- 探测阶段取消 -->\n            <n-button\n              v-if=\"downloadState === 'probing'\"\n              @click=\"cancelModalDownload\"\n            >\n              取消探测\n            </n-button>\n\n            <!-- 选项就绪阶段：取消 or 开始下载 -->\n            <template v-else-if=\"downloadState === 'options_ready'\">\n              <n-button @click=\"cancelModalDownload\">取消</n-button>\n              <n-button\n                type=\"primary\"\n                @click=\"confirmModalDownload\"\n                :disabled=\"!selectedFile && !downloadOptions?.needsConversion\"\n              >\n                开始下载\n              </n-button>\n            </template>\n\n            <!-- 下载中：取消下载 -->\n            <template v-else-if=\"['downloading', 'verifying', 'converting'].includes(downloadState)\">\n              <n-button\n                type=\"warning\"\n                ghost\n                @click=\"cancelModalDownload\"\n              >\n                取消下载\n              </n-button>\n            </template>\n\n            <!-- 取消中 -->\n            <template v-else-if=\"downloadState === 'cancelling'\">\n              <n-button disabled loading>正在取消...</n-button>\n            </template>\n\n            <!-- 失败：重试 or 关闭 -->\n            <template v-else-if=\"downloadState === 'failed'\">\n              <n-button @click=\"showDownloadModal = false\">关闭</n-button>\n              <n-button type=\"primary\" @click=\"retryDownload\">重新尝试</n-button>\n            </template>\n\n            <!-- 完成：立即切换 or 关闭 -->\n            <template v-else-if=\"downloadState === 'completed'\">\n              <n-button @click=\"showDownloadModal = false\">关闭</n-button>\n              <n-button type=\"primary\" @click=\"handleSwitchFromModal\">立即切换使用</n-button>\n            </template>\n          </n-space>\n        </n-space>\n      </template>\n    </n-modal>\n\n    <!-- Convert Format Dialog -->\n    <n-modal v-model:show=\"showConvertDialog\" preset=\"dialog\" title=\"转换模型格式\">\n      <n-space vertical>\n        <n-text>转换模型 <strong>{{ selectedModel?.displayName }}</strong> 的 ONNX 格式</n-text>\n        <n-descriptions :column=\"1\" label-placement=\"left\">\n          <n-descriptions-item label=\"当前格式\">\n            <n-tag :type=\"getFormatTagType(selectedModel?.onnxFormat)\" size=\"small\">\n              {{ getFormatText(selectedModel?.onnxFormat) }}\n            </n-tag>\n          </n-descriptions-item>\n          <n-descriptions-item label=\"目标格式\">\n            <n-radio-group v-model:value=\"targetFormat\">\n              <n-space>\n                <n-radio value=\"embedded\">\n                  <n-space align=\"center\">\n                    <span>嵌入式</span>\n                    <n-text depth=\"3\" style=\"font-size: 12px\">(CUDA 兼容性好)</n-text>\n                  </n-space>\n                </n-radio>\n                <n-radio value=\"external\">\n                  <n-space align=\"center\">\n                    <span>外部数据</span>\n                    <n-text depth=\"3\" style=\"font-size: 12px\">(支持大模型)</n-text>\n                  </n-space>\n                </n-radio>\n              </n-space>\n            </n-radio-group>\n          </n-descriptions-item>\n        </n-descriptions>\n        <n-alert type=\"info\" title=\"说明\">\n          <n-text>\n            <strong>嵌入式格式</strong>：单个 ONNX 文件，CUDA 兼容性好，但有 2GB 限制。<br>\n            <strong>外部数据格式</strong>：分离的权重文件，支持大模型，但 CUDA 动态 batch 可能有问题。\n          </n-text>\n        </n-alert>\n        <n-alert v-if=\"selectedModel && selectedModel.onnxFormat === targetFormat\" type=\"warning\">\n          模型已是目标格式，无需转换。\n        </n-alert>\n      </n-space>\n      <template #action>\n        <n-button @click=\"showConvertDialog = false\">取消</n-button>\n        <n-button \n          type=\"primary\" \n          :disabled=\"selectedModel?.onnxFormat === targetFormat\"\n          :loading=\"converting\" \n          @click=\"confirmConvert\">\n          开始转换\n        </n-button>\n      </template>\n    </n-modal>\n\n    <!-- Add Custom Model Dialog -->\n    <n-modal v-model:show=\"showAddCustomDialog\" preset=\"dialog\" title=\"添加自定义模型\">\n      <n-space vertical>\n        <n-form :model=\"customModelForm\">\n          <n-form-item label=\"HuggingFace 模型 ID\" required>\n            <n-input \n              v-model:value=\"customModelForm.huggingFaceId\" \n              placeholder=\"例如: BAAI/bge-base-zh-v1.5\"\n            />\n          </n-form-item>\n          <n-form-item label=\"显示名称（可选）\">\n            <n-input \n              v-model:value=\"customModelForm.displayName\" \n              placeholder=\"留空则使用模型名称\"\n            />\n          </n-form-item>\n        </n-form>\n        <n-alert type=\"info\">\n          <n-text>\n            输入 HuggingFace 上的模型 ID，系统将自动获取模型信息并添加到列表中。<br>\n            格式：<n-code code=\"owner/model-name\" :inline=\"true\" />\n          </n-text>\n        </n-alert>\n      </n-space>\n      <template #action>\n        <n-button @click=\"showAddCustomDialog = false\">取消</n-button>\n        <n-button type=\"primary\" :loading=\"addingCustom\" @click=\"confirmAddCustom\">添加</n-button>\n      </template>\n    </n-modal>\n\n    <!-- Delete Model Dialog -->\n    <n-modal v-model:show=\"showDeleteDialog\" preset=\"dialog\" title=\"删除模型\">\n      <n-space vertical>\n        <n-text>确定要删除模型 <strong>{{ selectedModel?.displayName }}</strong> 吗？</n-text>\n        <n-alert type=\"warning\" title=\"警告\">\n          删除后将同时删除模型文件夹及其所有内容，此操作不可恢复。\n        </n-alert>\n      </n-space>\n      <template #action>\n        <n-button @click=\"showDeleteDialog = false\">取消</n-button>\n        <n-button type=\"error\" :loading=\"deleting\" @click=\"confirmDelete\">确认删除</n-button>\n      </template>\n    </n-modal>\n  </n-space>\n";
 export default component;

@@ -9,6 +9,8 @@ using ReferenceRAG.Core.Services.Tokenizers;
 using ReferenceRAG.Core.Tracing;
 using System.Diagnostics;
 using System.Numerics;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Injection;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Scanning;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -73,7 +75,17 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
     {
         // 设置 CUDA/TensorRT 库路径（必须在加载 ONNX Runtime 之前）
         // 只要有配置就设置 PATH，不管当前是否启用 CUDA（为热切换做准备）
-        if (!string.IsNullOrEmpty(_options.CudaLibraryPath))
+        // 智能探查与动态环境注入：若启用 CUDA，自动探测系统、注册表及本地 AI 环境并动态注入
+        if (_options.UseCuda)
+        {
+            var scanner = new CudaEnvironmentScanner(new Win32EnvironmentInjector());
+            var scanResult = scanner.ScanAndInject(_options.CudaLibraryPath);
+            if (scanResult.Found)
+            {
+                _logger.LogInformation("[EmbeddingService] 已自动探查并注入 CUDA 12 运行环境: {Path}", scanResult.MainDllDirectory);
+            }
+        }
+        else if (!string.IsNullOrEmpty(_options.CudaLibraryPath))
         {
             var currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
             var existingPaths = new HashSet<string>(
@@ -303,7 +315,10 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
                 {
                     if (!File.Exists(modelPath))
                         return false;
-                    using (var validationSession = new InferenceSession(modelPath)) { }
+                    if (!modelPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
+                    {
+                        using (var validationSession = new InferenceSession(modelPath)) { }
+                    }
                     Console.WriteLine($"[EmbeddingService] 正在切换模型: {modelName}");
                     if (maxSequenceLength.HasValue)
                     {
@@ -865,4 +880,5 @@ public class EmbeddingOptions
     public int MaxSequenceLength { get; set; } = 512;
     public int BatchSize { get; set; } = 32;
     public AsymmetricEncodingConfig? AsymmetricEncoding { get; set; }
+    public int IdleTimeoutSeconds { get; set; } = 30;
 }

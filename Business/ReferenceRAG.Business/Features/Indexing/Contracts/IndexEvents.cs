@@ -8,6 +8,8 @@ public class IndexStartedEvent
     public string IndexId { get; set; } = string.Empty;
     public int TotalFiles { get; set; }
     public DateTime StartTime { get; set; }
+    public string? TargetResource { get; set; }
+    public string? JobType { get; set; }
 }
 
 /// <summary>
@@ -15,11 +17,20 @@ public class IndexStartedEvent
 /// </summary>
 public class IndexProgressEvent
 {
+    private double? _progressPercent;
+
     public string IndexId { get; set; } = string.Empty;
     public int ProcessedFiles { get; set; }
     public int TotalFiles { get; set; }
     public string CurrentFile { get; set; } = string.Empty;
-    public double ProgressPercent => TotalFiles > 0 ? (double)ProcessedFiles / TotalFiles * 100 : 0;
+    public double ProgressPercent
+    {
+        get => _progressPercent ?? (TotalFiles > 0 ? (double)ProcessedFiles / TotalFiles * 100 : 0);
+        set => _progressPercent = value;
+    }
+    public string? Phase { get; set; }
+    public string? TargetResource { get; set; }
+    public string? JobType { get; set; }
     public DateTime Timestamp { get; set; }
 }
 
@@ -35,6 +46,10 @@ public class IndexCompletedEvent
     public TimeSpan Duration { get; set; }
     public DateTime CompletedAt { get; set; }
     public List<string> Errors { get; set; } = new();
+    public string? Phase { get; set; }
+    public string? TargetResource { get; set; }
+    public string? JobType { get; set; }
+    public bool Success { get; set; } = true;
 }
 
 /// <summary>

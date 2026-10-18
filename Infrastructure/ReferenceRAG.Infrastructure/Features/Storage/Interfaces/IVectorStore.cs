@@ -114,6 +114,11 @@ public interface IVectorStore
     /// 删除单个分段
     /// </summary>
     Task DeleteChunkAsync(string id, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 批量删除分段及其在所有模型虚拟表中的向量
+    /// </summary>
+    Task<int> DeleteChunksAsync(IEnumerable<string> chunkIds, CancellationToken cancellationToken = default);
     
     // ==================== 向量操作 ====================
     
@@ -214,6 +219,11 @@ public interface IVectorStore
     Task DeleteVectorsByFileAsync(string fileId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 删除指定文件下除保留集合之外的所有历史分块及其向量记录（用于重新分块的原子清理防护）
+    /// </summary>
+    Task<int> DeleteStaleChunksForFileAsync(string fileId, IEnumerable<string> activeChunkIds, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 删除无关联模型的向量（孤立项清理）
     /// </summary>
     Task<int> DeleteOrphanedVectorsAsync(IEnumerable<string> existingModelNames, CancellationToken cancellationToken = default);
@@ -222,6 +232,11 @@ public interface IVectorStore
     /// 删除向量表中 chunk_id 不在 chunks 表的孤儿向量
     /// </summary>
     Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 清理无独立语义的纯噪声/分隔符分块及其向量数据
+    /// </summary>
+    Task<int> CleanupNoiseChunksAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// 返回 chunks 表中所有 chunk id（供跨 DB 孤儿清理使用）

@@ -247,6 +247,190 @@ public class SqliteVectorStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task DeleteChunkAsync_DeletesVectorFromModelTable()
+    {
+        var file = new FileRecord
+        {
+            Id = "file-del-test",
+            Path = "/test/file-del.md",
+            ChunkCount = 1,
+            IndexedAt = DateTime.UtcNow
+        };
+        await _vectorStore.UpsertFileAsync(file);
+
+        var chunk = new ChunkRecord
+        {
+            Id = "chunk-del-1",
+            FileId = "file-del-test",
+            ChunkIndex = 0,
+            Content = "Delete test content"
+        };
+        await _vectorStore.UpsertChunkAsync(chunk);
+
+        var vector = new VectorRecord
+        {
+            Id = "vec-del-1",
+            ChunkId = "chunk-del-1",
+            Vector = new float[384],
+            ModelName = "test-model"
+        };
+        await _vectorStore.UpsertVectorAsync(vector);
+
+        var statsBefore = await _vectorStore.GetVectorStatsAsync();
+        var modelBefore = statsBefore.FirstOrDefault(s => s.ModelName == "test-model");
+        Assert.NotNull(modelBefore);
+        Assert.Equal(1, modelBefore.VectorCount);
+
+        // Act: Delete chunk
+        await _vectorStore.DeleteChunkAsync("chunk-del-1");
+
+        // Assert: Vector should be gone!
+        var statsAfter = await _vectorStore.GetVectorStatsAsync();
+        var modelAfter = statsAfter.FirstOrDefault(s => s.ModelName == "test-model");
+        Assert.Equal(0, modelAfter?.VectorCount ?? 0);
+    }
+
+    [Fact]
+    public async Task DeleteChunkAsync_WhenModelTableDoesNotExist_DoesNotThrow()
+    {
+        var file = new FileRecord
+        {
+            Id = "file-xyz",
+            Path = "/test/file-xyz.md",
+            ChunkCount = 1,
+            IndexedAt = DateTime.UtcNow
+        };
+        await _vectorStore.UpsertFileAsync(file);
+
+        var chunk = new ChunkRecord
+        {
+            Id = "chunk-xyz",
+            FileId = "file-xyz",
+            ChunkIndex = 0,
+            Content = "Test"
+        };
+        await _vectorStore.UpsertChunkAsync(chunk);
+
+        // Insert for "my-model" (table vec_my_model exists)
+        var vector = new VectorRecord
+        {
+            Id = "vec-1",
+            ChunkId = "chunk-xyz",
+            Vector = new float[384],
+            ModelName = "my-model"
+        };
+        await _vectorStore.UpsertVectorAsync(vector);
+
+        // DeleteChunkAsync will iterate _modelDimensions which contains "default" (no vec_default table!)
+        // Does this throw or succeed?
+        await _vectorStore.DeleteChunkAsync("chunk-xyz");
+
+        var stats = await _vectorStore.GetVectorStatsAsync();
+        var model = stats.FirstOrDefault(s => s.ModelName == "my-model");
+        Assert.Equal(0, model?.VectorCount ?? 0);
+    }
+
+    [Fact]
+    public async Task DeleteChunksAsync_BatchDeletesChunksAndVectors()
+    {
+        var file = new FileRecord
+        {
+            Id = "file-batch",
+            Path = "/test/file-batch.md",
+            ChunkCount = 3,
+            IndexedAt = DateTime.UtcNow
+        };
+        await _vectorStore.UpsertFileAsync(file);
+
+        for (int i = 0; i < 3; i++)
+        {
+            await _vectorStore.UpsertChunkAsync(new ChunkRecord
+            {
+                Id = $"chunk-batch-{i}",
+                FileId = "file-batch",
+                ChunkIndex = i,
+                Content = $"Test {i}"
+            });
+            await _vectorStore.UpsertVectorAsync(new VectorRecord
+            {
+                Id = $"vec-batch-{i}",
+                ChunkId = $"chunk-batch-{i}",
+                Vector = new float[384],
+                ModelName = "batch-model"
+            });
+        }
+
+        var deleted = await _vectorStore.DeleteChunksAsync(new[] { "chunk-batch-0", "chunk-batch-1" });
+        Assert.Equal(2, deleted);
+
+        var remainingChunks = await _vectorStore.GetChunksByFileAsync("file-batch");
+        Assert.Single(remainingChunks);
+        Assert.Equal("chunk-batch-2", remainingChunks.First().Id);
+
+        var stats = await _vectorStore.GetVectorStatsAsync();
+        var model = stats.FirstOrDefault(s => s.ModelName == "batch-model");
+        Assert.Equal(1, model?.VectorCount ?? 0);
+    }
+
+    [Fact]
+    public async Task CleanupOrphanChunkVectorsAsync_CleansDuplicateChunksAndVectors()
+    {
+        var file = new FileRecord
+        {
+            Id = "file-dup",
+            Path = "/test/file-dup.md",
+            ChunkCount = 1,
+            IndexedAt = DateTime.UtcNow
+        };
+        await _vectorStore.UpsertFileAsync(file);
+
+        // Old chunk (earlier rowid)
+        await _vectorStore.UpsertChunkAsync(new ChunkRecord
+        {
+            Id = "chunk-dup-old",
+            FileId = "file-dup",
+            ChunkIndex = 0,
+            Content = "Old"
+        });
+        await _vectorStore.UpsertVectorAsync(new VectorRecord
+        {
+            Id = "vec-dup-old",
+            ChunkId = "chunk-dup-old",
+            Vector = new float[384],
+            ModelName = "dup-model"
+        });
+
+        // New chunk (later rowid, same file_id and chunk_index)
+        await _vectorStore.UpsertChunkAsync(new ChunkRecord
+        {
+            Id = "chunk-dup-new",
+            FileId = "file-dup",
+            ChunkIndex = 0,
+            Content = "New"
+        });
+        await _vectorStore.UpsertVectorAsync(new VectorRecord
+        {
+            Id = "vec-dup-new",
+            ChunkId = "chunk-dup-new",
+            Vector = new float[384],
+            ModelName = "dup-model"
+        });
+
+        // Act: Cleanup orphans
+        var cleaned = await _vectorStore.CleanupOrphanChunkVectorsAsync();
+        Assert.True(cleaned > 0);
+
+        // Assert: only chunk-dup-new remains
+        var chunks = await _vectorStore.GetChunksByFileAsync("file-dup");
+        Assert.Single(chunks);
+        Assert.Equal("chunk-dup-new", chunks.First().Id);
+
+        var stats = await _vectorStore.GetVectorStatsAsync();
+        var model = stats.FirstOrDefault(s => s.ModelName == "dup-model");
+        Assert.Equal(1, model?.VectorCount ?? 0);
+    }
+
+    [Fact]
     public async Task GetAllFilesAsync_ReturnsAllFiles()
     {
         var files = new[]
@@ -264,6 +448,122 @@ public class SqliteVectorStoreTests : IDisposable
         var allFiles = await _vectorStore.GetAllFilesAsync();
 
         Assert.Equal(3, allFiles.Count());
+    }
+
+    [Fact]
+    public async Task CleanupNoiseChunksAsync_RemovesNoiseAndSeparatorChunks()
+    {
+        var file = new FileRecord
+        {
+            Id = "file-noise-test",
+            Path = "/test/noise.md",
+            IndexedStatus = "complete"
+        };
+        await _vectorStore.UpsertFileAsync(file);
+
+        var validChunk = new ChunkRecord
+        {
+            Id = "chunk-valid-1",
+            FileId = "file-noise-test",
+            ChunkIndex = 0,
+            Content = "这是非常有意义且重要的文档核心正文内容。"
+        };
+        var separatorChunk1 = new ChunkRecord
+        {
+            Id = "chunk-noise-1",
+            FileId = "file-noise-test",
+            ChunkIndex = 1,
+            Content = "=== (43-48) ==="
+        };
+        var separatorChunk2 = new ChunkRecord
+        {
+            Id = "chunk-noise-2",
+            FileId = "file-noise-test",
+            ChunkIndex = 2,
+            Content = "-------------------"
+        };
+
+        await _vectorStore.UpsertChunksAsync(new[] { validChunk, separatorChunk1, separatorChunk2 });
+
+        var cleanedCount = await _vectorStore.CleanupNoiseChunksAsync();
+        Assert.Equal(2, cleanedCount);
+
+        var remainingChunks = (await _vectorStore.GetChunksByFileAsync("file-noise-test")).ToList();
+        Assert.Single(remainingChunks);
+        Assert.Equal("chunk-valid-1", remainingChunks[0].Id);
+    }
+
+    [Fact]
+    public async Task DeleteStaleChunksForFileAsync_CleansHistoricalChunksAndVectors()
+    {
+        var file = new FileRecord
+        {
+            Id = "file-rechunk-test",
+            Path = "/test/file-rechunk.md",
+            ChunkCount = 2,
+            IndexedStatus = "complete",
+            IndexedAt = DateTime.UtcNow
+        };
+        await _vectorStore.UpsertFileAsync(file);
+
+        // Version 1 chunks and vectors
+        await _vectorStore.UpsertChunkAsync(new ChunkRecord
+        {
+            Id = "chunk-v1-0",
+            FileId = "file-rechunk-test",
+            ChunkIndex = 0,
+            Content = "Old 0"
+        });
+        await _vectorStore.UpsertVectorAsync(new VectorRecord
+        {
+            Id = "vec-v1-0",
+            ChunkId = "chunk-v1-0",
+            Vector = new float[384],
+            ModelName = "rechunk-model"
+        });
+
+        await _vectorStore.UpsertChunkAsync(new ChunkRecord
+        {
+            Id = "chunk-v1-1",
+            FileId = "file-rechunk-test",
+            ChunkIndex = 1,
+            Content = "Old 1"
+        });
+        await _vectorStore.UpsertVectorAsync(new VectorRecord
+        {
+            Id = "vec-v1-1",
+            ChunkId = "chunk-v1-1",
+            Vector = new float[384],
+            ModelName = "rechunk-model"
+        });
+
+        // Version 2 chunks and vectors (new ids)
+        await _vectorStore.UpsertChunkAsync(new ChunkRecord
+        {
+            Id = "chunk-v2-0",
+            FileId = "file-rechunk-test",
+            ChunkIndex = 0,
+            Content = "New 0"
+        });
+        await _vectorStore.UpsertVectorAsync(new VectorRecord
+        {
+            Id = "vec-v2-0",
+            ChunkId = "chunk-v2-0",
+            Vector = new float[384],
+            ModelName = "rechunk-model"
+        });
+
+        // Act: Delete stale chunks for this file, keeping only chunk-v2-0
+        var deleted = await _vectorStore.DeleteStaleChunksForFileAsync("file-rechunk-test", new[] { "chunk-v2-0" });
+        Assert.Equal(2, deleted);
+
+        var chunks = await _vectorStore.GetChunksByFileAsync("file-rechunk-test");
+        Assert.Single(chunks);
+        Assert.Equal("chunk-v2-0", chunks.First().Id);
+
+        var stats = await _vectorStore.GetVectorStatsAsync();
+        var model = stats.FirstOrDefault(s => s.ModelName == "rechunk-model");
+        Assert.Equal(1, model?.VectorCount ?? 0);
     }
 
     [Fact]

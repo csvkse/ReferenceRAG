@@ -29,11 +29,13 @@ using ReferenceRAG.Core.Models;
 namespace ReferenceRAG.Core.Tracing;
 
 // ------------------------------------------------------------------
-// 每次搜索请求的阶段耗时（字段直接赋值，无需 volatile：各字段由不同方法写入）
+// 每次搜索请求的阶段耗时（字段直接赋值，通过 Interlocked 保证并发安全）
 // ------------------------------------------------------------------
 internal sealed class SearchPhaseTimings
 {
+    public long ModelLoadMs;
     public long EmbedMs;
+    public long Bm25Ms;
     public long TitleMs;
     public long VectorMs;
     public long HybridMs;
@@ -44,9 +46,57 @@ internal sealed class SearchPhaseTimings
 // ------------------------------------------------------------------
 // AsyncLocal 容器 — 随 async 调用链自动传递，无需手动传参
 // ------------------------------------------------------------------
-internal static class SearchTraceContext
+public static class SearchTraceContext
 {
     internal static readonly AsyncLocal<SearchPhaseTimings?> Current = new();
+
+    public static void RecordModelLoad(long ms)
+    {
+        var t = Current.Value;
+        if (t != null && ms > 0) Interlocked.Add(ref t.ModelLoadMs, ms);
+    }
+
+    public static void RecordEmbed(long ms)
+    {
+        var t = Current.Value;
+        if (t != null && ms > 0) Interlocked.Add(ref t.EmbedMs, ms);
+    }
+
+    public static void RecordBm25(long ms)
+    {
+        var t = Current.Value;
+        if (t != null && ms > 0) Interlocked.Add(ref t.Bm25Ms, ms);
+    }
+
+    public static void RecordVector(long ms)
+    {
+        var t = Current.Value;
+        if (t != null && ms > 0) Interlocked.Add(ref t.VectorMs, ms);
+    }
+
+    public static void RecordHybrid(long ms)
+    {
+        var t = Current.Value;
+        if (t != null && ms > 0) Interlocked.Add(ref t.HybridMs, ms);
+    }
+
+    public static void RecordTitle(long ms)
+    {
+        var t = Current.Value;
+        if (t != null && ms > 0) Interlocked.Add(ref t.TitleMs, ms);
+    }
+
+    public static void RecordGraph(long ms)
+    {
+        var t = Current.Value;
+        if (t != null && ms > 0) Interlocked.Add(ref t.GraphMs, ms);
+    }
+
+    public static void RecordRerank(long ms)
+    {
+        var t = Current.Value;
+        if (t != null && ms > 0) Interlocked.Add(ref t.RerankMs, ms);
+    }
 }
 
 // ------------------------------------------------------------------
@@ -54,41 +104,46 @@ internal static class SearchTraceContext
 // ------------------------------------------------------------------
 public static class SearchPhaseCollector
 {
-    private static readonly Services.BoundedHistogram _embed  = new(2000);
-    private static readonly Services.BoundedHistogram _title  = new(2000);
-    private static readonly Services.BoundedHistogram _vector = new(2000);
-    private static readonly Services.BoundedHistogram _hybrid = new(2000);
-    private static readonly Services.BoundedHistogram _graph  = new(2000);
+    private static readonly Services.BoundedHistogram _modelLoad = new(2000);
+    private static readonly Services.BoundedHistogram _embed     = new(2000);
+    private static readonly Services.BoundedHistogram _bm25      = new(2000);
+    private static readonly Services.BoundedHistogram _title     = new(2000);
+    private static readonly Services.BoundedHistogram _vector    = new(2000);
+    private static readonly Services.BoundedHistogram _hybrid    = new(2000);
+    private static readonly Services.BoundedHistogram _graph     = new(2000);
+    private static readonly Services.BoundedHistogram _rerank    = new(2000);
     private static long _totalSearches;
-
-    private static readonly Services.BoundedHistogram _rerank = new(2000);
 
     internal static void Record(SearchPhaseStats phases)
     {
         Interlocked.Increment(ref _totalSearches);
-        if (phases.EmbedMs  > 0) _embed .Add(phases.EmbedMs);
-        if (phases.TitleMs  > 0) _title .Add(phases.TitleMs);
-        if (phases.VectorMs > 0) _vector.Add(phases.VectorMs);
-        if (phases.HybridMs > 0) _hybrid.Add(phases.HybridMs);
-        if (phases.GraphMs  > 0) _graph .Add(phases.GraphMs);
-        if (phases.RerankMs > 0) _rerank.Add(phases.RerankMs);
+        if (phases.ModelLoadMs > 0) _modelLoad.Add(phases.ModelLoadMs);
+        if (phases.EmbedMs     > 0) _embed    .Add(phases.EmbedMs);
+        if (phases.Bm25Ms      > 0) _bm25     .Add(phases.Bm25Ms);
+        if (phases.TitleMs     > 0) _title    .Add(phases.TitleMs);
+        if (phases.VectorMs    > 0) _vector   .Add(phases.VectorMs);
+        if (phases.HybridMs    > 0) _hybrid   .Add(phases.HybridMs);
+        if (phases.GraphMs     > 0) _graph    .Add(phases.GraphMs);
+        if (phases.RerankMs    > 0) _rerank   .Add(phases.RerankMs);
     }
 
     public static SearchPhaseReport GetReport() => new()
     {
         TotalSearches = Interlocked.Read(ref _totalSearches),
-        Embed  = _embed .GetStatistics(),
-        Title  = _title .GetStatistics(),
-        Vector = _vector.GetStatistics(),
-        Hybrid = _hybrid.GetStatistics(),
-        Graph  = _graph .GetStatistics(),
-        Rerank = _rerank.GetStatistics(),
+        ModelLoad = _modelLoad.GetStatistics(),
+        Embed     = _embed    .GetStatistics(),
+        Bm25      = _bm25     .GetStatistics(),
+        Title     = _title    .GetStatistics(),
+        Vector    = _vector   .GetStatistics(),
+        Hybrid    = _hybrid   .GetStatistics(),
+        Graph     = _graph    .GetStatistics(),
+        Rerank    = _rerank   .GetStatistics(),
     };
 
     public static void Reset()
     {
         Interlocked.Exchange(ref _totalSearches, 0);
-        _embed.Clear(); _title.Clear(); _vector.Clear();
+        _modelLoad.Clear(); _embed.Clear(); _bm25.Clear(); _title.Clear(); _vector.Clear();
         _hybrid.Clear(); _graph.Clear(); _rerank.Clear();
     }
 }
@@ -99,12 +154,14 @@ public static class SearchPhaseCollector
 public sealed class SearchPhaseReport
 {
     public long TotalSearches { get; init; }
-    public Services.HistogramStatistics Embed  { get; init; } = new();
-    public Services.HistogramStatistics Title  { get; init; } = new();
-    public Services.HistogramStatistics Vector { get; init; } = new();
-    public Services.HistogramStatistics Hybrid { get; init; } = new();
-    public Services.HistogramStatistics Graph  { get; init; } = new();
-    public Services.HistogramStatistics Rerank { get; init; } = new();
+    public Services.HistogramStatistics ModelLoad { get; init; } = new();
+    public Services.HistogramStatistics Embed     { get; init; } = new();
+    public Services.HistogramStatistics Bm25      { get; init; } = new();
+    public Services.HistogramStatistics Title     { get; init; } = new();
+    public Services.HistogramStatistics Vector    { get; init; } = new();
+    public Services.HistogramStatistics Hybrid    { get; init; } = new();
+    public Services.HistogramStatistics Graph     { get; init; } = new();
+    public Services.HistogramStatistics Rerank    { get; init; } = new();
 }
 
 // ------------------------------------------------------------------
@@ -147,12 +204,14 @@ public sealed class SearchTraceAttribute : MoAttribute
             {
                 var phases = new SearchPhaseStats
                 {
-                    EmbedMs  = t.EmbedMs,
-                    TitleMs  = t.TitleMs,
-                    VectorMs = t.VectorMs,
-                    HybridMs = t.HybridMs,
-                    GraphMs  = t.GraphMs,
-                    RerankMs = t.RerankMs,
+                    ModelLoadMs = t.ModelLoadMs,
+                    EmbedMs     = t.EmbedMs,
+                    Bm25Ms      = t.Bm25Ms,
+                    TitleMs     = t.TitleMs,
+                    VectorMs    = t.VectorMs,
+                    HybridMs    = t.HybridMs,
+                    GraphMs     = t.GraphMs,
+                    RerankMs    = t.RerankMs,
                 };
                 response.Stats.Phases = phases;
                 SearchPhaseCollector.Record(phases);
@@ -192,18 +251,18 @@ public sealed class SearchTraceAttribute : MoAttribute
 
         switch (ctx.Method.Name)
         {
-            case "EncodeAsync":
-                t.EmbedMs  += ms; break;                   // ONNX 推理（可能多次，用 +=）
-            case "TryTitleFirstSearchAsync":
+            case "EncodeAsync" when t.EmbedMs == 0:
+                t.EmbedMs  += ms; break;                   // ONNX 推理兜底（未显式打点时）
+            case "TryTitleFirstSearchAsync" when t.TitleMs == 0:
                 t.TitleMs   = ms; break;                   // 标题图搜索
-            case "ExecuteStandardSearchAsync":
+            case "ExecuteStandardSearchAsync" when t.VectorMs == 0:
                 t.VectorMs  = ms; break;                   // 纯向量检索
-            case "ExpandWithGraphAsync":
+            case "ExpandWithGraphAsync" when t.GraphMs == 0:
                 t.GraphMs   = ms; break;                   // 图扩展
-            case "SearchAsync" when typeName.Contains("Hybrid"):
-                t.HybridMs  = ms; break;                   // BM25+向量融合
-            case "RerankBatchAsync":
-                t.RerankMs += ms; break;                   // Cross-Encoder 重排
+            case "SearchAsync" when typeName.Contains("Hybrid") && t.HybridMs == 0:
+                t.HybridMs  = ms; break;                   // BM25+向量融合兜底
+            case "RerankBatchAsync" when t.RerankMs == 0:
+                t.RerankMs += ms; break;                   // Cross-Encoder 重排兜底
         }
     }
 

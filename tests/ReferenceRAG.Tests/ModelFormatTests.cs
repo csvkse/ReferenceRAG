@@ -368,14 +368,14 @@ public class ModelFormatTests : IDisposable
         Assert.Contains("未下载", error);
     }
 
-    [Fact(Skip = "CI 环境缺少本地模型文件")]
+    [Fact]
     public async Task ConvertFormat_SameFormat_ReturnsError()
     {
         // Arrange
         var configManager = CreateTestConfigManager();
         var modelManager = new ModelManager(_modelsPath, configManager);
 
-        var modelDir = Path.Combine(_modelsPath, "test-convert-model");
+        var modelDir = Path.Combine(_modelsPath, "Embedding", "test-convert-model");
         Directory.CreateDirectory(modelDir);
         File.WriteAllText(Path.Combine(modelDir, "model.onnx"), "fake onnx");
         File.WriteAllText(Path.Combine(modelDir, "config.json"), "{\"hidden_size\": 512}");
@@ -522,13 +522,13 @@ public class ModelFormatTests : IDisposable
     /// 场景：模型只有 .onnx 文件，没有 .data 文件（embedded 格式）。
     /// 验证：从 embedded 尝试转换为 embedded 时返回错误（已是目标格式）。
     /// </summary>
-    [Fact(Skip = "CI 环境缺少本地模型文件")]
+    [Fact]
     public async Task ConvertFormat_AlreadyEmbedded_NoDataFile_ReturnsError()
     {
         var configManager = CreateTestConfigManager();
         var modelManager = new ModelManager(_modelsPath, configManager);
 
-        var modelDir = Path.Combine(_modelsPath, "test-no-data-embedded");
+        var modelDir = Path.Combine(_modelsPath, "Embedding", "test-no-data-embedded");
         Directory.CreateDirectory(modelDir);
 
         // 只有 model.onnx，没有 .data
@@ -547,13 +547,13 @@ public class ModelFormatTests : IDisposable
     /// 场景：external 格式模型（有 .data 文件），尝试转换为 external。
     /// 验证：返回错误（已是目标格式），且 .data 文件未被触及。
     /// </summary>
-    [Fact(Skip = "CI 环境缺少本地模型文件")]
+    [Fact]
     public async Task ConvertFormat_AlreadyExternal_WithExternalData_ReturnsError()
     {
         var configManager = CreateTestConfigManager();
         var modelManager = new ModelManager(_modelsPath, configManager);
 
-        var modelDir = Path.Combine(_modelsPath, "test-already-external");
+        var modelDir = Path.Combine(_modelsPath, "Embedding", "test-already-external");
         Directory.CreateDirectory(modelDir);
 
         var dataContent = new string('X', 5000);

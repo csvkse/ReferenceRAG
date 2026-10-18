@@ -414,6 +414,9 @@ public class AuditFixRegressionTests
         vectorStore
             .Setup(s => s.DeleteChunkAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
+        vectorStore
+            .Setup(s => s.DeleteChunksAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(0);
 
         chunker = new Mock<IMarkdownChunker>();
         chunker

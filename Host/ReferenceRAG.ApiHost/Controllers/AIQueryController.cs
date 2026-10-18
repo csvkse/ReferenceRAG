@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -16,6 +17,31 @@ public class SearchStatusResponse
     public string? EmbeddingModel { get; set; }
 
     /// <summary>
+    /// 当前生效嵌入模型变体（如 Q4_K_M, FP16）
+    /// </summary>
+    public string? EmbeddingVariant { get; set; }
+
+    /// <summary>
+    /// 嵌入模型文件格式（gguf / onnx）
+    /// </summary>
+    public string EmbeddingFormat { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 嵌入模型硬件执行设备（如 CUDA 0 (GPU), DirectML, CPU）
+    /// </summary>
+    public string EmbeddingDevice { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 是否为 GPU 硬件加速
+    /// </summary>
+    public bool EmbeddingIsGpu { get; set; }
+
+    /// <summary>
+    /// 嵌入模型生命周期状态（Ready, Idle, Busy 等）
+    /// </summary>
+    public string EmbeddingState { get; set; } = string.Empty;
+
+    /// <summary>
     /// 嵌入模型维度
     /// </summary>
     public int EmbeddingDimension { get; set; }
@@ -26,6 +52,31 @@ public class SearchStatusResponse
     /// 当前重排模型名称
     /// </summary>
     public string? RerankModel { get; set; }
+
+    /// <summary>
+    /// 当前生效重排模型变体（如 Q4_K_M, Q8_0）
+    /// </summary>
+    public string? RerankVariant { get; set; }
+
+    /// <summary>
+    /// 重排模型文件格式（gguf / onnx）
+    /// </summary>
+    public string RerankFormat { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 重排模型硬件执行设备
+    /// </summary>
+    public string RerankDevice { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 重排是否为 GPU 硬件加速
+    /// </summary>
+    public bool RerankIsGpu { get; set; }
+
+    /// <summary>
+    /// 重排模型生命周期状态
+    /// </summary>
+    public string RerankState { get; set; } = string.Empty;
 
     /// <summary>
     /// 重排是否启用
@@ -88,6 +139,8 @@ public class AIQueryController : ControllerBase
     private readonly IRerankService _rerankService;
     private readonly ConfigManager _configManager;
     private readonly ILogger<AIQueryController> _logger;
+    private readonly IModelManager? _modelManager;
+    private readonly IModelTelemetryService? _telemetryService;
 
     public AIQueryController(
         ISearchService searchService,
@@ -97,7 +150,9 @@ public class AIQueryController : ControllerBase
         IBM25Store bm25Store,
         IRerankService rerankService,
         ConfigManager configManager,
-        ILogger<AIQueryController> logger)
+        ILogger<AIQueryController> logger,
+        IModelManager? modelManager = null,
+        IModelTelemetryService? telemetryService = null)
     {
         _searchService = searchService;
         _statsService = statsService;
@@ -107,6 +162,8 @@ public class AIQueryController : ControllerBase
         _rerankService = rerankService;
         _configManager = configManager;
         _logger = logger;
+        _modelManager = modelManager;
+        _telemetryService = telemetryService;
     }
 
     /// <summary>
@@ -188,8 +245,8 @@ public class AIQueryController : ControllerBase
             Options = request.Options,
             K1 = request.K1,
             B = request.B,
-            // HybridRerank 模式强制启用重排
-            EnableRerank = request.Mode == QueryMode.HybridRerank ? true : request.EnableRerank,
+            // HybridRerank 与 Deep 模式强制启用重排
+            EnableRerank = (request.Mode == QueryMode.HybridRerank || request.Mode == QueryMode.Deep) ? true : request.EnableRerank,
             RerankTopN = request.RerankTopN,
             Slim = request.Slim
         };
@@ -212,13 +269,44 @@ public class AIQueryController : ControllerBase
             // 获取向量索引统计
             var vectorStats = await _vectorStore.GetVectorStatsAsync();
 
+            var currentEmb = _modelManager?.GetCurrentModel();
+            var currentRerank = _modelManager?.GetCurrentRerankModel();
+            var embTel = _telemetryService?.GetCurrentEmbeddingTelemetry();
+            var rerankTel = _telemetryService?.GetCurrentRerankTelemetry();
+
+            var embVariant = currentEmb?.ActiveVariantFileName ?? embTel?.Configuration.Quantization;
+            var embFormat = currentEmb?.InstalledVariants.FirstOrDefault(v => v.IsActive)?.Format
+                ?? embTel?.Configuration.ModelFormat
+                ?? (currentEmb?.LocalPath?.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) == true ? "gguf" : "onnx");
+            var embDevice = embTel?.Hardware.ExecutionDevice ?? "CPU";
+            var embIsGpu = embTel?.Hardware.IsGpuMode ?? false;
+            var embState = embTel?.StateMachine.StateName ?? "就绪";
+
+            var rerankVariant = currentRerank?.ActiveVariantFileName ?? rerankTel?.Configuration.Quantization;
+            var rerankFormat = currentRerank?.InstalledVariants.FirstOrDefault(v => v.IsActive)?.Format
+                ?? rerankTel?.Configuration.ModelFormat
+                ?? (currentRerank?.LocalPath?.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) == true ? "gguf" : "onnx");
+            var rerankDevice = rerankTel?.Hardware.ExecutionDevice ?? "CPU";
+            var rerankIsGpu = rerankTel?.Hardware.IsGpuMode ?? false;
+            var rerankState = rerankTel?.StateMachine.StateName ?? (rerankStatus.Loaded ? "已加载" : "未加载");
+
             var response = new SearchStatusResponse
             {
-                EmbeddingModel = _embeddingService.ModelName,
+                EmbeddingModel = !string.IsNullOrEmpty(embTel?.Configuration.ModelName) ? embTel.Configuration.ModelName : _embeddingService.ModelName,
+                EmbeddingVariant = embVariant,
+                EmbeddingFormat = embFormat,
+                EmbeddingDevice = embDevice,
+                EmbeddingIsGpu = embIsGpu,
+                EmbeddingState = embState,
                 EmbeddingDimension = _embeddingService.Dimension,
-                EmbeddingProvider = GetProviderName(_embeddingService),
-                RerankModel = rerankStatus.Model,
-                RerankProvider = GetProviderName(_rerankService),
+                EmbeddingProvider = GetProviderName(_embeddingService, embFormat),
+                RerankModel = !string.IsNullOrEmpty(rerankTel?.Configuration.ModelName) ? rerankTel.Configuration.ModelName : rerankStatus.Model,
+                RerankVariant = rerankVariant,
+                RerankFormat = rerankFormat,
+                RerankDevice = rerankDevice,
+                RerankIsGpu = rerankIsGpu,
+                RerankState = rerankState,
+                RerankProvider = GetProviderName(_rerankService, rerankFormat),
                 RerankEnabled = rerankStatus.Enabled,
                 RerankLoaded = rerankStatus.Loaded,
                 Bm25IndexedDocuments = bm25Stats.TotalDocuments,
@@ -243,6 +331,13 @@ public class AIQueryController : ControllerBase
         }
     }
 
-    private static string GetProviderName(object service)
-        => service.GetType().Name.StartsWith("OpenAI", StringComparison.Ordinal) ? "openai" : "onnx";
+    private static string GetProviderName(object? service, string format = "")
+    {
+        if (service == null) return "none";
+        if (service.GetType().Name.StartsWith("OpenAI", StringComparison.Ordinal)) return "openai";
+        if (string.Equals(format, "gguf", StringComparison.OrdinalIgnoreCase) ||
+            service.GetType().Name.Contains("Llama", StringComparison.OrdinalIgnoreCase))
+            return "gguf";
+        return "onnx";
+    }
 }

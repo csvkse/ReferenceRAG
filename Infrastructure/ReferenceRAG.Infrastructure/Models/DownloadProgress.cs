@@ -15,6 +15,7 @@ public enum DownloadErrorCode
     ModelTooLargeForEmbedded = 7,// 模型过大不适合嵌入式
     NetworkError = 8,           // 网络错误
     StorageError = 9,           // 存储错误
+    AuthorizationRequired = 10, // 需要授权/Token (401/403)
     Unknown = 99                 // 未知错误
 }
 
@@ -72,6 +73,16 @@ public class OnnxFileOption
     /// 是否推荐使用
     /// </summary>
     public bool IsRecommended { get; set; }
+
+    /// <summary>
+    /// 文件格式: "onnx" 或 "gguf"
+    /// </summary>
+    public string Format { get; set; } = "onnx";
+
+    /// <summary>
+    /// 来源模型仓库（主仓库或社区候选源）
+    /// </summary>
+    public string? Repository { get; set; }
 }
 
 /// <summary>
@@ -90,12 +101,37 @@ public class ModelDownloadOptions
     public bool HasOnnx { get; set; }
 
     /// <summary>
+    /// 是否有可用的 GGUF 格式文件 (可供 LLamaSharp 原生加载)
+    /// </summary>
+    public bool HasGguf { get; set; }
+
+    /// <summary>
+    /// 是否同时支持 GGUF 与 ONNX 两种格式供用户选择
+    /// </summary>
+    public bool HasBothFormats => HasGguf && HasOnnx;
+
+    /// <summary>
     /// 是否需要从 PyTorch 转换
     /// </summary>
     public bool NeedsConversion { get; set; }
 
     /// <summary>
-    /// 根目录的 ONNX 文件选项
+    /// 是否为受限/需授权仓库 (Hugging Face Gated Model, HTTP 401/403)
+    /// </summary>
+    public bool IsGatedOrUnauthorized { get; set; }
+
+    /// <summary>
+    /// GGUF 格式文件选项
+    /// </summary>
+    public List<OnnxFileOption> GgufOptions { get; set; } = new();
+
+    /// <summary>
+    /// ONNX 格式文件选项
+    /// </summary>
+    public List<OnnxFileOption> OnnxOptions { get; set; } = new();
+
+    /// <summary>
+    /// 根目录的 ONNX/GGUF 文件选项
     /// </summary>
     public List<OnnxFileOption> RootOptions { get; set; } = new();
 
@@ -126,15 +162,79 @@ public class ModelDownloadOptions
 }
 
 /// <summary>
+/// 模型下载全生命周期细粒度阶段
+/// </summary>
+public enum DownloadStage
+{
+    Idle = 0,               // 空闲状态
+    ResolvingManifest = 1,  // 正在解析模型清单与元数据
+    ProbingMirrors = 2,     // 正在探测社区免转镜像源 (ONNX/GGUF)
+    DownloadingFiles = 3,   // 正在传输模型权重及配置文件
+    VerifyingFiles = 4,     // 正在校验下载文件结构与完整性
+    Converting = 5,         // 正在执行格式转换与优化 (PyTorch -> ONNX / 权重合并)
+    Completed = 6,          // 下载与就绪全部完成
+    Failed = 7,             // 下载或转换过程失败
+    Cancelled = 8           // 用户主动取消
+}
+
+/// <summary>
 /// 下载进度状态
 /// </summary>
 public class DownloadProgress
 {
     public string ModelName { get; set; } = string.Empty;
-    public string Status { get; set; } = "idle"; // idle, downloading, completed, failed
-    public float Progress { get; set; } // 0-100
+    public string Status { get; set; } = "idle"; // idle, downloading, completed, failed, cancelled
+
+    /// <summary>
+    /// 细粒度下载阶段
+    /// </summary>
+    public DownloadStage Stage { get; set; } = DownloadStage.Idle;
+
+    /// <summary>
+    /// 阶段详细描述文本（面向前端展示，例如：“正在从 onnx-community 镜像下载 model.onnx (125.4 MB / 612.0 MB)...”）
+    /// </summary>
+    public string StageMessage { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 当前正在传输的文件名称
+    /// </summary>
+    public string? CurrentFileName { get; set; }
+
+    /// <summary>
+    /// 当前文件序号 (从 1 开始)
+    /// </summary>
+    public int CurrentFileIndex { get; set; }
+
+    /// <summary>
+    /// 总文件数
+    /// </summary>
+    public int TotalFiles { get; set; }
+
+    /// <summary>
+    /// 当前文件已传输字节数
+    /// </summary>
+    public long CurrentFileBytes { get; set; }
+
+    /// <summary>
+    /// 当前文件总字节数
+    /// </summary>
+    public long CurrentFileTotalBytes { get; set; }
+
+    /// <summary>
+    /// 综合进度百分比 (0-100)
+    /// </summary>
+    public float Progress { get; set; }
+
+    /// <summary>
+    /// 累计已传输总字节数
+    /// </summary>
     public long BytesReceived { get; set; }
+
+    /// <summary>
+    /// 准确总字节数
+    /// </summary>
     public long TotalBytes { get; set; }
+
     public string? ErrorMessage { get; set; }
 
     /// <summary>

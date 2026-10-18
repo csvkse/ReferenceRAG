@@ -50,7 +50,39 @@ public class ObsidianRagConfig
     /// </summary>
     public IndexingConfig Indexing { get; set; } = new();
 
+    /// <summary>
+    /// 模型中心与下载配置 (HuggingFace / 镜像源 / Token)
+    /// </summary>
+    public ModelHubConfig ModelHub { get; set; } = new();
+
+    /// <summary>
+    /// 模型常规驻留方案：Permanent（固定常驻）或 SlidingExpiration（滑动过期）
+    /// </summary>
+    public ModelRetentionStrategy ModelRetentionStrategy { get; set; } = ModelRetentionStrategy.SlidingExpiration;
+
+    /// <summary>
+    /// 模型无使用滑动过期自动卸载显存时间（秒，默认 300 即 5 分钟，<=0 表示常驻不卸载）
+    /// </summary>
+    public int ModelIdleTimeoutSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// 仅在最小化到托盘时才启用滑动过期（窗口打开使用期间保持常驻）
+    /// </summary>
+    public bool UnloadOnlyWhenMinimizedToTray { get; set; } = true;
 }
+
+/// <summary>
+/// 模型常规驻留方案
+/// </summary>
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+public enum ModelRetentionStrategy
+{
+    /// <summary>固定常驻（首次加载后长久驻留显存/内存，零冷启动等待）</summary>
+    Permanent = 0,
+    /// <summary>滑动过期（超时无调用后自动释放显存/内存）</summary>
+    SlidingExpiration = 1
+}
+
 
 /// <summary>
 /// 源文件夹配置
@@ -240,6 +272,31 @@ public class ChunkingConfig
     /// 是否保留代码块
     /// </summary>
     public bool PreserveCodeBlocks { get; set; } = true;
+
+    /// <summary>
+    /// 分段模式：Fixed（固定）| Adaptive（自适应）
+    /// </summary>
+    public string Mode { get; set; } = "Fixed";
+
+    /// <summary>
+    /// 自适应等级：Level1（模型感知）| Level2（结构句法）| Level3（深度语义）
+    /// </summary>
+    public string AdaptiveLevel { get; set; } = "Level2";
+
+    /// <summary>
+    /// 自适应风格类型：Balanced（通用平衡）| PrecisionDense（高精度）| DeepNarrative（长文叙事）| CodeFirst（代码优先）
+    /// </summary>
+    public string AdaptiveStrategyType { get; set; } = "Balanced";
+
+    /// <summary>
+    /// 目标模型窗口利用率百分比（50~90，默认 70）
+    /// </summary>
+    public int TargetWindowUtilizationPercent { get; set; } = 70;
+
+    /// <summary>
+    /// 动态重叠率百分比（0~25，默认 10）
+    /// </summary>
+    public int AdaptiveOverlapPercent { get; set; } = 10;
 }
 
 /// <summary>
@@ -460,4 +517,25 @@ public class IndexingConfig
     /// 上下文窗口大小（用于搜索结果的上下文展示）
     /// </summary>
     public int ContextWindowSize { get; set; } = 1;
+}
+
+/// <summary>
+/// 模型中心与下载配置（HuggingFace / 国内镜像源）
+/// </summary>
+public class ModelHubConfig
+{
+    /// <summary>
+    /// Hugging Face API 访问令牌 (User Access Token，用于访问 Gated 协议限制或私有模型)
+    /// </summary>
+    public string? HfToken { get; set; }
+
+    /// <summary>
+    /// Hugging Face 端点/镜像源地址（默认 https://hf-mirror.com）
+    /// </summary>
+    public string HfEndpoint { get; set; } = "https://hf-mirror.com";
+
+    /// <summary>
+    /// 元数据与下载连接超时时间（秒，默认 30）
+    /// </summary>
+    public int TimeoutSeconds { get; set; } = 30;
 }

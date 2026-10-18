@@ -67,11 +67,17 @@ public class RebuildRequest
     public bool DeleteExisting { get; set; } = true;
 }
 
+public class RechunkRequest
+{
+    public List<string>? Sources { get; set; }
+}
+
 public class IndexJobRequest
 {
     public List<string>? Sources { get; set; }
     public bool Force { get; set; }
     public bool VectorOnly { get; set; }
+    public bool Rechunk { get; set; }
 }
 
 public class IndexJobResponse
@@ -90,6 +96,9 @@ public class IndexJobResponse
     public DateTime? EndTime { get; set; }
     public string? Duration { get; set; }
     public string? ErrorMessage { get; set; }
+    public string? Phase { get; set; }
+    public string? TargetResource { get; set; }
+    public string? JobType { get; set; }
 }
 
 public class AllJobsResponse

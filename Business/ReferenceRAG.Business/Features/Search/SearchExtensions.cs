@@ -1,5 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Business.Features.Search.Strategies;
+using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
 
@@ -29,6 +31,9 @@ public static class SearchExtensions
                 synonymService: new SynonymService());
         });
 
+        services.AddSingleton<ISearchStrategyFactory>(sp =>
+            new SearchStrategyFactory(sp.GetService<IHybridSearchService>()));
+
         services.AddScoped<ISearchService>(sp => new SearchService(
             sp.GetRequiredService<IVectorStore>(),
             sp.GetRequiredService<IEmbeddingService>(),
@@ -37,7 +42,8 @@ public static class SearchExtensions
             sp.GetRequiredService<ILogger<SearchService>>(),
             sp.GetRequiredService<IHybridSearchService>(),
             sp.GetRequiredService<IRerankService>(),
-            sp.GetService<IGraphStore>()));
+            sp.GetService<IGraphStore>(),
+            sp.GetService<IModelTelemetryService>()));
 
         return services;
     }

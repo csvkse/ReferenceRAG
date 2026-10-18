@@ -26,6 +26,37 @@ export function extractReturnedKeys(source) {
   return keys;
 }
 
+export function checkReturnedScope(source) {
+  const rMatch = source.match(/const\s+__returned__\s*=\s*\{([\s\S]*?)\};?\s*return\s+__returned__;/);
+  if (!rMatch) return [];
+
+  const body = rMatch[1];
+  const returnedKeys = [];
+  for (const m of body.matchAll(/(?:get\s+([a-zA-Z0-9_$]+)\s*\(\)|([a-zA-Z0-9_$]+)(?:\s*:|\s*,|\s*$))/g)) {
+    const k = m[1] || m[2];
+    if (k && k !== 'get' && k !== 'set') returnedKeys.push(k);
+  }
+
+  const setupParamMatch = source.match(/setup\s*\(([^)]*)\)/);
+  const setupParams = new Set();
+  if (setupParamMatch) {
+    for (const pm of setupParamMatch[1].matchAll(/\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g)) {
+      setupParams.add(pm[1]);
+    }
+  }
+
+  const beforeSource = source.substring(0, rMatch.index);
+  const undefinedKeys = [];
+  for (const key of returnedKeys) {
+    if (JS_GLOBALS.has(key) || setupParams.has(key)) continue;
+    const declRegex = new RegExp(`(?:const|let|var)\\s+[^;=]*?\\b${key}\\b|(?:function|class)\\s+${key}\\b|import\\s+[^;]*?\\b${key}\\b`);
+    if (!declRegex.test(beforeSource)) {
+      undefinedKeys.push(key);
+    }
+  }
+  return undefinedKeys;
+}
+
 export function checkTemplateBindings(templateStr, returnedKeysSet) {
   const keysSet = returnedKeysSet instanceof Set ? returnedKeysSet : new Set(returnedKeysSet);
   for (const g of JS_GLOBALS) keysSet.add(g);
@@ -143,6 +174,12 @@ export function runQualityGate(rootDirectory) {
           errors.push(`Template compile error in ${relPath}: ${err.message}`);
         }
       }
+
+      // 4. Returned keys existence check (verify __returned__ does not shorthand undeclared identifiers causing ReferenceError at runtime)
+      const undeclaredReturned = checkReturnedScope(source);
+      if (undeclaredReturned.length > 0) {
+        errors.push(`Undeclared identifier(s) in ${relPath} __returned__: [${undeclaredReturned.join(', ')}] will throw ReferenceError at runtime`);
+      }
     }
   }
 
@@ -160,5 +197,5 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(currentFil
     for (const err of errors) console.error(`  - ${err}`);
     process.exit(1);
   }
-  console.log(`Validated ${files} JS modules and ${templates} executable Vue templates (AST symbol bindings verified); no build output generated.`);
+  console.log(`Validated ${files} JS modules and ${templates} executable Vue templates (AST symbol bindings & setup exports verified); no build output generated.`);
 }

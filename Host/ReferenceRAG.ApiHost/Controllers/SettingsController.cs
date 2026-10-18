@@ -2,6 +2,9 @@ using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Detection;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Injection;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Scanning;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -75,27 +78,48 @@ public class SettingsController : ControllerBase
     [HttpGet("cuda-availability")]
     public ActionResult<CudaAvailability> GetCudaAvailability()
     {
-        var cudaAvailable = CheckCudaAvailability();
-        return Ok(new CudaAvailability
-        {
-            IsAvailable = cudaAvailable,
-            Message = cudaAvailable ? "CUDA 可用" : "未检测到 CUDA/GPU，需要安装 NVIDIA 驱动和 CUDA 运行时"
-        });
+        var config = _configManager.Load();
+        var result = CheckCudaAvailability(config?.Embedding?.CudaLibraryPath, config?.Embedding?.CudaDeviceId ?? 0);
+        return Ok(result);
     }
 
-    private static bool CheckCudaAvailability()
+    private static CudaAvailability CheckCudaAvailability(string? configuredPath = null, int deviceId = 0)
     {
+        var detector = new HardwareDetector();
+        var hwContext = detector.GetContext();
+        var primaryGpu = hwContext.PrimaryGpu;
+
+        var scanner = new CudaEnvironmentScanner(new Win32EnvironmentInjector());
+        var scanResult = scanner.ScanAndInject(configuredPath);
+
         try
         {
-            // 尝试创建 CUDA 执行选项来检测 CUDA 是否可用
-            var sessionOptions = new Microsoft.ML.OnnxRuntime.SessionOptions();
-            sessionOptions.AppendExecutionProvider_CUDA(0);
-            sessionOptions.Dispose();
-            return true;
+            using var sessionOptions = new Microsoft.ML.OnnxRuntime.SessionOptions();
+            sessionOptions.AppendExecutionProvider_CUDA(deviceId);
+            return new CudaAvailability
+            {
+                IsAvailable = true,
+                GpuName = primaryGpu?.Name ?? "NVIDIA GPU",
+                Strategy = "NativeCuda",
+                DetectedPath = scanResult.MainDllDirectory,
+                HasPortableCuda = hwContext.HasPortableCuda,
+                Message = $"已检测到 {primaryGpu?.Name ?? "NVIDIA GPU"}，已成功激活 CUDA 12 硬件加速"
+            };
         }
-        catch
+        catch (Exception ex)
         {
-            return false;
+            var msg = hwContext.HasNvidiaGpu
+                ? $"检测到 {primaryGpu?.Name ?? "NVIDIA 显卡"}，但无法加载 CUDA 12 运行库 ({ex.Message})"
+                : "未检测到支持的 NVIDIA GPU，硬件加速不可用";
+
+            return new CudaAvailability
+            {
+                IsAvailable = false,
+                GpuName = primaryGpu?.Name,
+                Strategy = "None",
+                HasPortableCuda = hwContext.HasPortableCuda,
+                Message = msg
+            };
         }
     }
 
@@ -124,6 +148,16 @@ public class SettingsController : ControllerBase
         config.Sources = current.Sources;
 
         _configManager.Save(config);
+
+        // 热更新模型驻留与滑动过期策略（无需重启服务即时生效）
+        if (_embeddingService is IModelRetentionPolicyTarget embeddingRetention)
+        {
+            embeddingRetention.UpdateRetentionPolicy(config);
+        }
+        if (_rerankService is IModelRetentionPolicyTarget rerankRetention)
+        {
+            rerankRetention.UpdateRetentionPolicy(config);
+        }
 
         return Ok(new
         {
@@ -168,6 +202,111 @@ public class SettingsController : ControllerBase
             rerankModels = result.RerankModels
         });
     }
+
+    /// <summary>
+    /// 验证 Hugging Face Access Token 有效性与身份
+    /// </summary>
+    [HttpPost("verify-hf-token")]
+    public async Task<ActionResult> VerifyHfToken([FromBody] VerifyHfTokenRequest request, CancellationToken cancellationToken = default)
+    {
+        var token = request.Token?.Trim();
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return BadRequest(new { valid = false, message = "Token 不能为空" });
+        }
+
+        var endpoint = !string.IsNullOrWhiteSpace(request.Endpoint)
+            ? request.Endpoint.Trim().TrimEnd('/')
+            : "https://hf-mirror.com";
+
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("ReferenceRAG/2.0 (TokenValidator)");
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            // 优先尝试提供的端点，若失败尝试官方端点
+            var urls = new List<string> { $"{endpoint}/api/whoami-v2" };
+            if (!urls.Contains("https://huggingface.co/api/whoami-v2", StringComparer.OrdinalIgnoreCase))
+            {
+                urls.Add("https://huggingface.co/api/whoami-v2");
+            }
+
+            HttpResponseMessage? response = null;
+            string? responseBody = null;
+
+            foreach (var url in urls)
+            {
+                try
+                {
+                    response = await client.GetAsync(url, cancellationToken);
+                    responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                    if (response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.Unauthorized || response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                    {
+                        break;
+                    }
+                }
+                catch
+                {
+                    // 尝试下一个端点
+                }
+            }
+
+            if (response == null)
+            {
+                return Ok(new { valid = false, message = "网络请求失败，无法连接至 Hugging Face 或镜像源端点" });
+            }
+
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                return Ok(new { valid = false, message = "Token 认证失败 (HTTP 401/403)：Token 无效、已过期或缺少读取权限" });
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return Ok(new { valid = false, message = $"端点返回异常状态码: {(int)response.StatusCode} {response.ReasonPhrase}" });
+            }
+
+            // 解析 whoami 返回
+            using var doc = System.Text.Json.JsonDocument.Parse(responseBody ?? "{}");
+            var root = doc.RootElement;
+            var username = root.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "Authenticated User";
+            var role = "read";
+            if (root.TryGetProperty("auth", out var authProp) &&
+                authProp.TryGetProperty("accessToken", out var atProp) &&
+                atProp.TryGetProperty("role", out var roleProp))
+            {
+                role = roleProp.GetString() ?? "read";
+            }
+
+            return Ok(new
+            {
+                valid = true,
+                username,
+                role,
+                message = $"Token 验证成功！授权用户: {username} (权限: {role})"
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            return Ok(new { valid = false, message = "验证请求超时，请检查网络连接" });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "验证 HF Token 异常");
+            return Ok(new { valid = false, message = $"验证异常: {ex.Message}" });
+        }
+    }
+}
+
+/// <summary>
+/// 验证 Hugging Face Token 请求
+/// </summary>
+public class VerifyHfTokenRequest
+{
+    public string? Token { get; set; }
+    public string? Endpoint { get; set; }
 }
 
 /// <summary>
@@ -200,4 +339,24 @@ public class CudaAvailability
     /// 状态消息
     /// </summary>
     public string Message { get; set; } = "";
+
+    /// <summary>
+    /// 检测到的显卡设备名称
+    /// </summary>
+    public string? GpuName { get; set; }
+
+    /// <summary>
+    /// 加速策略名称
+    /// </summary>
+    public string? Strategy { get; set; }
+
+    /// <summary>
+    /// 探测到的 CUDA DLL 所在主路径
+    /// </summary>
+    public string? DetectedPath { get; set; }
+
+    /// <summary>
+    /// 是否存在本地便携式运行库
+    /// </summary>
+    public bool HasPortableCuda { get; set; }
 }

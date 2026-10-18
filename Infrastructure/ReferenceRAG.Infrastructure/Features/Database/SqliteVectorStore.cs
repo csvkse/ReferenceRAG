@@ -432,6 +432,18 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         insertCmd.ExecuteNonQuery();
 
         _modelDimensions[modelName] = dimension;
+
+        // 如果之前有占位的 default 且它并未在 models 表中，清理掉
+        if (modelName != "default" && _modelDimensions.ContainsKey("default"))
+        {
+            using var checkDefaultCmd = _connection.CreateCommand();
+            checkDefaultCmd.CommandText = "SELECT COUNT(*) FROM models WHERE name = 'default'";
+            var defaultExistsInDb = Convert.ToInt32(checkDefaultCmd.ExecuteScalar()) > 0;
+            if (!defaultExistsInDb)
+            {
+                _modelDimensions.TryRemove("default", out _);
+            }
+        }
     }
 
     /// <summary>
@@ -448,6 +460,42 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     public IReadOnlyDictionary<string, int> GetRegisteredModels()
     {
         return _modelDimensions;
+    }
+
+    /// <summary>
+    /// 获取当前数据库中真实存在的全部 vec0 虚拟向量表表名（彻底杜绝仅依赖内存字典导致的漏表/漏删）
+    /// </summary>
+    private List<string> GetAllVectorTableNames()
+    {
+        var tables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                SELECT name FROM sqlite_master 
+                WHERE type = 'table' 
+                  AND name LIKE 'vec_%' 
+                  AND name NOT LIKE 'vec_%_chunks' 
+                  AND name NOT LIKE 'vec_%_rowids' 
+                  AND name NOT LIKE 'vec_%_info' 
+                  AND name NOT LIKE 'vec_%_vector_chunks%'";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                tables.Add(reader.GetString(0));
+            }
+        }
+        catch { }
+
+        // 同时并入内存已知模型表作为补充
+        foreach (var modelName in _modelDimensions.Keys)
+        {
+            var tableName = ModelToTableName(modelName);
+            if (DoesTableExist(tableName))
+                tables.Add(tableName);
+        }
+
+        return tables.ToList();
     }
 
     // ==================== 文件操作 ====================
@@ -954,18 +1002,98 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
-            foreach (var modelName in _modelDimensions.Keys.ToList())
+            await DeleteChunksInternalAsync(new[] { id }, cancellationToken);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<int> DeleteChunksAsync(IEnumerable<string> chunkIds, CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            return await DeleteChunksInternalAsync(chunkIds, cancellationToken);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    private async Task<int> DeleteChunksInternalAsync(IEnumerable<string> chunkIds, CancellationToken cancellationToken)
+    {
+        var idList = chunkIds.Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
+        if (idList.Count == 0) return 0;
+
+        using var transaction = _connection.BeginTransaction();
+        try
+        {
+            // 1. 删除全部真实存在的模型虚拟表中的向量（直接依据物理表，彻底避免内存字典未预热导致漏删）
+            var vectorTables = GetAllVectorTableNames();
+            foreach (var tableName in vectorTables)
             {
-                var tableName = ModelToTableName(modelName);
                 using var cmd = _connection.CreateCommand();
+                cmd.Transaction = transaction;
                 cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
-                cmd.Parameters.AddWithValue("@chunkId", id);
+                var param = cmd.Parameters.Add("@chunkId", SqliteType.Text);
+                foreach (var chunkId in idList)
+                {
+                    param.Value = chunkId;
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+
+            // 2. 批量删除 chunks 主表记录
+            const int batchSize = 500;
+            for (int i = 0; i < idList.Count; i += batchSize)
+            {
+                var batch = idList.Skip(i).Take(batchSize).ToList();
+                using var cmd = _connection.CreateCommand();
+                cmd.Transaction = transaction;
+                var paramNames = batch.Select((_, idx) => $"@p{idx}").ToList();
+                cmd.CommandText = $"DELETE FROM chunks WHERE id IN ({string.Join(",", paramNames)})";
+                for (int j = 0; j < batch.Count; j++)
+                {
+                    cmd.Parameters.AddWithValue(paramNames[j], batch[j]);
+                }
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
-            using var command = _connection.CreateCommand();
-            command.CommandText = "DELETE FROM chunks WHERE id = @id";
-            AddParameter(command, "@id", id);
-            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            transaction.Commit();
+            return idList.Count;
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// 删除指定文件下除保留集合之外的所有历史分块及其向量记录（用于重新分块的原子清理防护）
+    /// </summary>
+    public async Task<int> DeleteStaleChunksForFileAsync(string fileId, IEnumerable<string> activeChunkIds, CancellationToken cancellationToken = default)
+    {
+        var activeSet = new HashSet<string>(activeChunkIds);
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var staleChunkIds = new List<string>();
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = "SELECT id FROM chunks WHERE file_id = @fileId";
+                cmd.Parameters.AddWithValue("@fileId", fileId);
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var id = reader.GetString(0);
+                    if (!activeSet.Contains(id))
+                        staleChunkIds.Add(id);
+                }
+            }
+
+            if (staleChunkIds.Count > 0)
+            {
+                return await DeleteChunksInternalAsync(staleChunkIds, cancellationToken);
+            }
+            return 0;
         }
         finally { _writeLock.Release(); }
     }
@@ -993,19 +1121,7 @@ public class SqliteVectorStore : IVectorStore, IDisposable
 
         if (chunkIds.Count > 0)
         {
-            foreach (var modelName in _modelDimensions.Keys.ToList())
-            {
-                var tableName = ModelToTableName(modelName);
-                // vec0 虚拟表不支持 IN (...) 批删，必须逐条 = ? 删除
-                using var cmd = _connection.CreateCommand();
-                cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
-                var param = cmd.Parameters.Add("@chunkId", SqliteType.Text);
-                foreach (var chunkId in chunkIds)
-                {
-                    param.Value = chunkId;
-                    await cmd.ExecuteNonQueryAsync(cancellationToken);
-                }
-            }
+            await DeleteChunksInternalAsync(chunkIds, cancellationToken);
         }
 
         using var command = _connection.CreateCommand();
@@ -1251,6 +1367,8 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             foreach (var modelName in _modelDimensions.Keys.ToList())
             {
                 var tableName = ModelToTableName(modelName);
+                if (!DoesTableExist(tableName)) continue;
+
                 var sql = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
 
                 using var command = _connection.CreateCommand();
@@ -1560,9 +1678,9 @@ public class SqliteVectorStore : IVectorStore, IDisposable
             }
 
             // 删除所有模型表中的向量（vec0 不支持 IN(...)，逐条 = ? 删除）
-            foreach (var modelName in _modelDimensions.Keys.ToList())
+            var vectorTables = GetAllVectorTableNames();
+            foreach (var tableName in vectorTables)
             {
-                var tableName = ModelToTableName(modelName);
                 try
                 {
                     using var cmd = _connection.CreateCommand();
@@ -1612,9 +1730,9 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
-            foreach (var modelName in _modelDimensions.Keys.ToList())
+            var vectorTables = GetAllVectorTableNames();
+            foreach (var tableName in vectorTables)
             {
-                var tableName = ModelToTableName(modelName);
                 using var cmd = _connection.CreateCommand();
                 cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
                 var param = cmd.Parameters.Add("@chunkId", SqliteType.Text);
@@ -1658,9 +1776,40 @@ public class SqliteVectorStore : IVectorStore, IDisposable
                     long count = 0;
                     try
                     {
-                        using var countCmd = _connection.CreateCommand();
-                        countCmd.CommandText = $"SELECT COUNT(*) FROM {ModelToTableName(modelName)}";
-                        count = (long)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                        var tableName = ModelToTableName(modelName);
+                        if (DoesTableExist(tableName))
+                        {
+                            using var checkPendingCmd = _connection.CreateCommand();
+                            checkPendingCmd.CommandText = "SELECT COUNT(*) FROM files WHERE indexed_status = 'pending'";
+                            var hasPending = Convert.ToInt32(await checkPendingCmd.ExecuteScalarAsync(cancellationToken)) > 0;
+
+                            if (DoesTableExist($"{tableName}_rowids"))
+                            {
+                                using var countCmd = _connection.CreateCommand();
+                                if (hasPending)
+                                {
+                                    countCmd.CommandText = $@"
+                                        SELECT COUNT(*) FROM {tableName}_rowids r
+                                        JOIN chunks c ON r.id = c.id
+                                        JOIN files f ON c.file_id = f.id
+                                        WHERE f.indexed_status = 'complete'";
+                                }
+                                else
+                                {
+                                    // 统计真实关联有效 chunks 的向量数，彻底杜绝孤儿向量统计泄漏
+                                    countCmd.CommandText = $@"
+                                        SELECT COUNT(*) FROM {tableName}_rowids r
+                                        JOIN chunks c ON r.id = c.id";
+                                }
+                                count = (long)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                            }
+                            else
+                            {
+                                using var countCmd = _connection.CreateCommand();
+                                countCmd.CommandText = $"SELECT COUNT(*) FROM {tableName}";
+                                count = (long)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                            }
+                        }
                     }
                     catch { }
 
@@ -1759,10 +1908,48 @@ public class SqliteVectorStore : IVectorStore, IDisposable
     {
         var totalDeleted = 0;
 
-        foreach (var modelName in _modelDimensions.Keys.ToList())
+        // 1. 查找孤儿 chunks（file_id 不存在于 files 表，或因先前操作中断而残留的历史重复版本 chunk）
+        var staleChunkIds = new List<string>();
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            var tableName = ModelToTableName(modelName);
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT id FROM chunks WHERE file_id NOT IN (SELECT id FROM files)
+                    UNION
+                    SELECT id FROM chunks WHERE rowid NOT IN (
+                        SELECT MAX(rowid) FROM chunks GROUP BY file_id, chunk_index
+                    )";
+                try
+                {
+                    using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                        staleChunkIds.Add(reader.GetString(0));
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "[SqliteVectorStore] 查询残留重复分块失败");
+                }
+            }
+
+            if (staleChunkIds.Count > 0)
+            {
+                totalDeleted += await DeleteChunksInternalAsync(staleChunkIds, cancellationToken);
+                _logger?.LogInformation("[SqliteVectorStore] 已清理 {Count} 条残留/重复分块及其向量", staleChunkIds.Count);
+            }
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+
+        // 2. 找出 vec0 表中存在但 chunks 表无对应记录的孤立向量
+        var vectorTables = GetAllVectorTableNames();
+        foreach (var tableName in vectorTables)
+        {
             var rowidsTable = $"{tableName}_rowids";
+            if (!DoesTableExist(tableName) || !DoesTableExist(rowidsTable)) continue;
 
             // 找出孤儿 chunk_id（vec0 rowids 表有记录但 chunks 表无对应）
             var orphanIds = new List<string>();
@@ -1795,6 +1982,71 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         }
 
         return totalDeleted;
+    }
+
+    public async Task<int> CleanupNoiseChunksAsync(CancellationToken cancellationToken = default)
+    {
+        var noiseIds = new List<string>();
+
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT id, content FROM chunks";
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var id = reader.GetString(0);
+                var content = reader.GetString(1);
+                if (NoiseChunkDetector.IsNoiseOrSeparator(content))
+                {
+                    noiseIds.Add(id);
+                }
+            }
+        }
+
+        if (noiseIds.Count == 0) return 0;
+
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            // 1. vec0 虚拟表中逐条删除（仅对已初始化的虚拟表执行）
+            var vectorTables = GetAllVectorTableNames();
+            foreach (var tableName in vectorTables)
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {tableName} WHERE chunk_id = @chunkId";
+                var param = cmd.Parameters.Add("@chunkId", SqliteType.Text);
+                foreach (var id in noiseIds)
+                {
+                    param.Value = id;
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+
+            // 2. 主 chunks 表删除
+            using var delCmd = _connection.CreateCommand();
+            delCmd.CommandText = "DELETE FROM chunks WHERE id = @id";
+            var idParam = delCmd.Parameters.Add("@id", SqliteType.Text);
+            foreach (var id in noiseIds)
+            {
+                idParam.Value = id;
+                await delCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            _logger?.LogInformation("[SqliteVectorStore] 已成功清理 {Count} 条无独立语义的历史纯噪声/分隔符分块及其向量", noiseIds.Count);
+            return noiseIds.Count;
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    private bool DoesTableExist(string tableName)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name = @name LIMIT 1";
+        cmd.Parameters.AddWithValue("@name", tableName);
+        return cmd.ExecuteScalar() != null;
     }
 
     /// <summary>

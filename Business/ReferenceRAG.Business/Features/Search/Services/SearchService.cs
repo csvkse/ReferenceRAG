@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using Rougamo;
+using ReferenceRAG.Business.Features.Search.StateMachine;
+using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
@@ -22,6 +24,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     private readonly IGraphStore? _graphStore;
     private readonly ConfigManager _configManager;
     private readonly ILogger<SearchService> _logger;
+    private readonly IModelTelemetryService? _telemetryService;
 
     public SearchService(
         IVectorStore vectorStore,
@@ -31,7 +34,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         ILogger<SearchService> logger,
         IHybridSearchService? hybridSearchService = null,
         IRerankService? rerankService = null,
-        IGraphStore? graphStore = null)
+        IGraphStore? graphStore = null,
+        IModelTelemetryService? telemetryService = null)
     {
         _vectorStore = vectorStore;
         _embeddingService = embeddingService;
@@ -41,6 +45,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         _hybridSearchService = hybridSearchService;
         _rerankService = rerankService;
         _graphStore = graphStore;
+        _telemetryService = telemetryService;
     }
 
     /// <summary>
@@ -99,6 +104,60 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         // 判断是否需要执行两阶段搜索
         bool shouldRerank = DetermineRerankExecution(request, rerankConfig);
 
+        // 初始化搜索状态机与模型遥测
+        var stateMachine = new SearchPipelineStateMachine(request.Mode.ToString());
+        if (_telemetryService != null)
+        {
+            var embTel = _telemetryService.GetCurrentEmbeddingTelemetry();
+            stateMachine.EmbeddingModel = new ModelExecutionInfo
+            {
+                ModelName = !string.IsNullOrEmpty(embTel.Configuration.ModelName) ? embTel.Configuration.ModelName : _embeddingService.ModelName,
+                Variant = embTel.Configuration.Quantization,
+                Format = embTel.Configuration.ModelFormat,
+                Device = embTel.Hardware.ExecutionDevice,
+                IsGpu = embTel.Hardware.IsGpuMode,
+                State = embTel.StateMachine.StateName
+            };
+
+            if (_rerankService != null)
+            {
+                var rerankTel = _telemetryService.GetCurrentRerankTelemetry();
+                stateMachine.RerankModel = new ModelExecutionInfo
+                {
+                    ModelName = !string.IsNullOrEmpty(rerankTel.Configuration.ModelName) ? rerankTel.Configuration.ModelName : _rerankService.ModelName,
+                    Variant = rerankTel.Configuration.Quantization,
+                    Format = rerankTel.Configuration.ModelFormat,
+                    Device = rerankTel.Hardware.ExecutionDevice,
+                    IsGpu = rerankTel.Hardware.IsGpuMode,
+                    State = rerankTel.StateMachine.StateName
+                };
+            }
+        }
+        else
+        {
+            stateMachine.EmbeddingModel = new ModelExecutionInfo
+            {
+                ModelName = _embeddingService.ModelName,
+                Format = "onnx",
+                Device = "CPU",
+                IsGpu = false,
+                State = "Ready"
+            };
+            if (_rerankService != null)
+            {
+                stateMachine.RerankModel = new ModelExecutionInfo
+                {
+                    ModelName = _rerankService.ModelName,
+                    Format = "onnx",
+                    Device = "CPU",
+                    IsGpu = false,
+                    State = _rerankService.IsLoaded ? "Ready" : "Idle"
+                };
+            }
+        }
+
+        stateMachine.TransitionTo(SearchPipelinePhase.QueryPrepared, 0, 1, "查询分析与同义词准备");
+
         // 获取启用的源列表
         var enabledSources = await GetEnabledSourceNamesAsync();
 
@@ -119,24 +178,31 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var queryVector = await embeddingTask;
 
         // ========== 第一阶段：召回 ==========
-        if ((request.Mode == QueryMode.Hybrid || request.Mode == QueryMode.HybridRerank) && _hybridSearchService != null)
+        if ((request.Mode == QueryMode.Hybrid || request.Mode == QueryMode.HybridRerank || request.Mode == QueryMode.Deep) && _hybridSearchService != null)
         {
             // 始终使用 RecallFactor 扩大候选池，不管是否重排，更多候选 = 更好的融合结果
-            // 若用户指定了限定源或目录过滤，进一步扩大候选倍率，防止后置过滤导致召回饥饿
-            int recallFactor = rerankConfig.RecallFactor;
+            // 若为 Deep 模式，候选倍率扩大到至少 10 倍（以 TopK=20 计算，至少召回 200 个混合候选）
+            int recallFactor = request.Mode == QueryMode.Deep
+                ? Math.Max(rerankConfig.RecallFactor, 10)
+                : rerankConfig.RecallFactor;
+
             if (request.Sources?.Count > 0 || request.Filters?.Folders?.Count > 0)
             {
-                recallFactor = Math.Max(recallFactor, 5);
+                recallFactor = Math.Max(recallFactor, request.Mode == QueryMode.Deep ? 10 : 5);
             }
             int recallTopK = request.TopK * recallFactor;
 
             _logger.LogDebug("混合搜索召回: TopK={TopK}, RecallFactor={Factor}, RecallTopK={RecallTopK}",
                 request.TopK, recallFactor, recallTopK);
 
+            stateMachine.TransitionTo(SearchPipelinePhase.ParallelRetrieving, 1, recallTopK, "BM25与Dense向量并行双路检索");
+
             var hybridResults = await _hybridSearchService.SearchAsync(
                 request.Query, recallTopK, request.K1, request.B,
                 request.Filters?.Folders, cancellationToken,
                 precomputedQueryVector: queryVector);
+
+            stateMachine.TransitionTo(SearchPipelinePhase.HybridFusing, hybridResults.Count, hybridResults.Count, "双路归一化加权融合与源过滤");
 
             // 过滤禁用源（source 为空表示旧数据未分配来源，允许通过）
             var filteredHybridResults = hybridResults.Where(r => string.IsNullOrEmpty(r.Source) || enabledSources.Contains(r.Source));
@@ -174,6 +240,13 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         }
         else
         {
+            // 单路向量检索：保证充足的初始召回池，彻底防止后置噪声/禁用源/目录过滤后候选饥饿归零
+            int standardLimit = Math.Max(request.TopK * 10, 50);
+            if (request.Sources?.Count > 0 || request.Filters?.Folders?.Count > 0)
+            {
+                standardLimit = Math.Max(standardLimit, 100);
+            }
+            stateMachine.TransitionTo(SearchPipelinePhase.ParallelRetrieving, 1, standardLimit, "Dense向量单路相似检索");
             // 标准向量搜索（复用预计算向量）
             topResults = await ExecuteStandardSearchAsync(request, enabledSources, cancellationToken, queryVector);
         }
@@ -196,15 +269,19 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var searchConfig = config.Search;
         if (searchConfig.EnableGraphExpansion && _graphStore != null && topResults.Count > 0)
         {
+            int beforeGraphCount = topResults.Count;
             topResults = await ExpandWithGraphAsync(topResults, queryVector, searchConfig, enabledSources, request.Filters, cancellationToken);
+            stateMachine.TransitionTo(SearchPipelinePhase.GraphExpanding, beforeGraphCount, topResults.Count, "图谱实体与关联文档扩展");
         }
 
         // ========== 第二阶段：精排 ==========
         if (shouldRerank && _rerankService != null && topResults.Count > 0)
         {
             var rerankSw = Stopwatch.StartNew();
-            var topN = request.RerankTopN ?? rerankConfig.TopN;
-            var rerankCandidateLimit = Math.Clamp(topN * Math.Max(2, rerankConfig.RecallFactor), topN, 50);
+            var topN = request.RerankTopN ?? (request.Mode == QueryMode.Deep ? Math.Max(request.TopK, rerankConfig.TopN) : rerankConfig.TopN);
+            var rerankCandidateLimit = request.Mode == QueryMode.Deep
+                ? Math.Clamp(Math.Max(topN * 3, 50), topN, 100)
+                : Math.Clamp(topN * Math.Max(2, rerankConfig.RecallFactor), topN, 50);
 
             if (topResults.Count > rerankCandidateLimit)
             {
@@ -212,6 +289,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                     .Take(rerankCandidateLimit)
                     .ToList();
             }
+
+            stateMachine.TransitionTo(SearchPipelinePhase.Reranking, topResults.Count, topN, $"Cross-Encoder 精排候选 (Limit={rerankCandidateLimit})");
 
             _logger.LogInformation("开始重排: 候选数={Count}, Query={Query}", topResults.Count, request.Query);
 
@@ -228,8 +307,13 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             foreach (var doc in rerankResult.Documents.Take(topN))
             {
                 var originalResult = topResults[doc.Index];
-                originalResult.RerankScore = doc.RelevanceScore;
-                originalResult.Score = (float)doc.RelevanceScore; // 更新主分数
+                var score = doc.RelevanceScore;
+                if (double.IsNaN(score) || double.IsInfinity(score))
+                {
+                    score = 0.5;
+                }
+                originalResult.RerankScore = score;
+                originalResult.Score = (float)score; // 更新主分数
                 rerankedResults.Add(originalResult);
             }
 
@@ -246,14 +330,24 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             rerankSw.Stop();
 
             // 记录重排统计
+            var avgScore = rerankedResults.Count > 0
+                ? rerankedResults.Average(r =>
+                {
+                    var s = r.RerankScore ?? 0.0;
+                    return (double.IsNaN(s) || double.IsInfinity(s)) ? 0.0 : s;
+                })
+                : 0.0;
+            if (double.IsNaN(avgScore) || double.IsInfinity(avgScore))
+            {
+                avgScore = 0.0;
+            }
+
             rerankStats = new RerankStats
             {
                 CandidatesCount = topResults.Count,
                 RerankDurationMs = rerankSw.ElapsedMilliseconds,
                 ModelName = _rerankService.ModelName,
-                AverageScore = rerankedResults.Count > 0
-                    ? rerankedResults.Average(r => r.RerankScore ?? 0)
-                    : 0
+                AverageScore = avgScore
             };
 
             topResults = rerankedResults;
@@ -272,6 +366,15 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             // 无重排：RecallFactor 扩大了候选池，最终 trim 回 TopK
             topResults = topResults.Take(request.TopK).ToList();
         }
+
+        // 过滤无意义噪音与纯分隔符分块（彻底避免返回空行/纯分隔符分块）
+        int beforeCleanCount = topResults.Count;
+        topResults = topResults
+            .Where(r => string.IsNullOrEmpty(r.Content) || !MarkdownChunker.IsNoiseOrSeparator(r.Content))
+            .ToList();
+
+        stateMachine.TransitionTo(SearchPipelinePhase.AssemblingResults, beforeCleanCount, topResults.Count, "无意义噪声分块过滤与装配");
+        var pipelineTelemetry = stateMachine.Complete(topResults.Count);
 
         // 构建响应
         var chunks = BuildChunkResults(topResults);
@@ -300,7 +403,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             {
                 TotalMatches = topResults.Count,
                 DurationMs = sw.ElapsedMilliseconds,
-                EstimatedTokens = TokenEstimator.EstimateTokens(context)
+                EstimatedTokens = TokenEstimator.EstimateTokens(context),
+                PipelineTelemetry = pipelineTelemetry
             },
             HasMore = false,
             Suggestion = null,
@@ -494,8 +598,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         if (request.EnableRerank.HasValue)
             return request.EnableRerank.Value;
 
-        // HybridRerank 模式强制启用重排
-        if (request.Mode == QueryMode.HybridRerank)
+        // HybridRerank 与 Deep 模式强制启用重排
+        if (request.Mode == QueryMode.HybridRerank || request.Mode == QueryMode.Deep)
             return true;
 
         return false;
@@ -512,11 +616,17 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     {
         var queryVector = precomputedQueryVector
             ?? await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
-        int candidateLimit = (request.Sources?.Count > 0 || request.Filters?.Folders?.Count > 0)
-            ? Math.Max(request.TopK * 5, 50)
-            : request.TopK * 2;
+        // 保证充足的初始召回池，彻底防止后置噪声/禁用源/目录过滤后候选饥饿归零
+        int candidateLimit = Math.Max(request.TopK * 10, 50);
+        if (request.Sources?.Count > 0 || request.Filters?.Folders?.Count > 0)
+        {
+            candidateLimit = Math.Max(candidateLimit, 100);
+        }
         var modelName = _embeddingService.ModelName;
         var results = await _vectorStore.SearchAsync(queryVector, modelName, candidateLimit, cancellationToken);
+
+        // 过滤无有效语义的噪声或纯分隔符分块（允许单元测试 Mock 的空 Content 通过）
+        results = results.Where(r => string.IsNullOrEmpty(r.Content) || !MarkdownChunker.IsNoiseOrSeparator(r.Content));
 
         // 首先过滤禁用源（source 为空表示旧数据未分配来源，允许通过）
         results = results.Where(r => string.IsNullOrEmpty(r.Source) || enabledSources.Contains(r.Source));
@@ -552,8 +662,13 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             var chunk = await _vectorStore.GetChunkAsync(refId);
             if (chunk == null) continue;
 
-            // 获取相邻分段
-            var adjacentChunks = await GetAdjacentChunksAsync(chunk, request.ExpandContext);
+            var file = await _vectorStore.GetFileAsync(chunk.FileId, cancellationToken);
+            string fileTitle = file?.Title ?? file?.FileName ?? Path.GetFileName(file?.Path ?? string.Empty);
+            string filePath = file?.Path ?? string.Empty;
+            string fileSource = file?.Source ?? string.Empty;
+
+            // 获取相邻分段并补齐所属文件信息
+            var adjacentChunks = await GetAdjacentChunksAsync(chunk, request.ExpandContext, fileTitle, filePath, fileSource);
             expandedChunks.AddRange(adjacentChunks);
         }
 
@@ -699,11 +814,16 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     /// <summary>
     /// 获取相邻分段
     /// </summary>
-    private async Task<List<ChunkResult>> GetAdjacentChunksAsync(ChunkRecord chunk, int expandContext)
+    private async Task<List<ChunkResult>> GetAdjacentChunksAsync(
+        ChunkRecord originChunk,
+        int expandContext,
+        string fileTitle = "",
+        string filePath = "",
+        string source = "")
     {
         var chunks = await _vectorStore.GetAdjacentChunksByFileAsync(
-            chunk.FileId,
-            chunk.Id,
+            originChunk.FileId,
+            originChunk.Id,
             expandContext);
 
         var chunkList = chunks.ToList();
@@ -713,16 +833,25 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         }
 
         return chunkList
-            .Select(c => new ChunkResult
+            .Select(c =>
             {
-                RefId = c.Id,
-                FileId = c.FileId,
-                FilePath = "",
-                Content = c.Content,
-                StartLine = c.StartLine,
-                EndLine = c.EndLine,
-                HeadingPath = c.HeadingPath,
-                ObsidianLink = $"[[#L{c.StartLine}-L{c.EndLine}]]"
+                bool isCenter = string.Equals(c.Id, originChunk.Id, StringComparison.OrdinalIgnoreCase);
+                string title = !string.IsNullOrEmpty(fileTitle) ? fileTitle : (!string.IsNullOrEmpty(filePath) ? Path.GetFileName(filePath) : "文档片段");
+
+                return new ChunkResult
+                {
+                    RefId = c.Id,
+                    FileId = c.FileId,
+                    FilePath = filePath,
+                    Source = source,
+                    Title = title,
+                    Content = c.Content,
+                    StartLine = c.StartLine,
+                    EndLine = c.EndLine,
+                    HeadingPath = c.HeadingPath,
+                    Score = isCenter ? 1.0f : 0.0f,
+                    ObsidianLink = $"[[#L{c.StartLine}-L{c.EndLine}]]"
+                };
             })
             .ToList();
     }

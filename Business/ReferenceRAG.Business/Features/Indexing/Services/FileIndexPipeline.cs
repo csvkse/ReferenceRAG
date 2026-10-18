@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+using ReferenceRAG.Business.Features.Indexing.Services;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services.Graph;
@@ -22,6 +22,7 @@ public class FileIndexPipeline : IFileIndexPipeline
     private readonly IGraphIndexingService? _graphIndexing;
     private readonly IEmbeddingTokenCounter? _tokenCounter;
     private readonly ILogger<FileIndexPipeline>? _logger;
+    private readonly IChunkGatekeeperService _gatekeeper;
 
     public FileIndexPipeline(
         IVectorStore vectorStore,
@@ -32,7 +33,8 @@ public class FileIndexPipeline : IFileIndexPipeline
         ConfigManager configManager,
         IGraphIndexingService? graphIndexing = null,
         IEmbeddingTokenCounter? tokenCounter = null,
-        ILogger<FileIndexPipeline>? logger = null)
+        ILogger<FileIndexPipeline>? logger = null,
+        IChunkGatekeeperService? gatekeeper = null)
     {
         _vectorStore = vectorStore;
         _bm25Store = bm25Store;
@@ -43,6 +45,7 @@ public class FileIndexPipeline : IFileIndexPipeline
         _graphIndexing = graphIndexing;
         _tokenCounter = tokenCounter;
         _logger = logger;
+        _gatekeeper = gatekeeper ?? new ChunkGatekeeperService(logger: null);
     }
 
     public async Task<FileProcessContext?> PrepareAsync(
@@ -93,9 +96,20 @@ public class FileIndexPipeline : IFileIndexPipeline
             MinTokens = chunking.MinTokens,
             OverlapTokens = chunking.OverlapTokens,
             PreserveHeadings = chunking.PreserveHeadings,
-            PreserveCodeBlocks = chunking.PreserveCodeBlocks
+            PreserveCodeBlocks = chunking.PreserveCodeBlocks,
+            Mode = chunking.Mode,
+            AdaptiveLevel = chunking.AdaptiveLevel,
+            AdaptiveStrategyType = chunking.AdaptiveStrategyType,
+            TargetWindowUtilizationPercent = chunking.TargetWindowUtilizationPercent,
+            AdaptiveOverlapPercent = chunking.AdaptiveOverlapPercent,
+            ModelProfile = new ReferenceRAG.Business.Features.Chunking.Adapters.DefaultModelProfileAdapter().GetProfile(config.Embedding)
         });
         if (chunks.Count == 0) return null;
+
+        // 准入网关：通过适配器责任链、处置策略与生命周期状态机彻底过滤/吸收底层无意义噪音（=== (43-48) ===, --- 等）
+        var (cleanChunks, _) = _gatekeeper.GatekeepChunks(chunks, filePath);
+        if (cleanChunks.Count == 0) return null;
+        chunks = cleanChunks;
 
         var sourceName = matchedSource?.Name ?? "unknown";
         var fileRecord = new FileRecord
@@ -140,7 +154,9 @@ public class FileIndexPipeline : IFileIndexPipeline
         var (changedCount, exact) = await LimitEmbeddingInputAsync(context.Chunks, config, ct);
         if (changedCount > 0)
         {
-            fileRecord.ChunkCount = chunks.Count;
+            var (reCleaned, _) = _gatekeeper.GatekeepChunks(context.Chunks, filePath);
+            context.Chunks = reCleaned;
+            fileRecord.ChunkCount = reCleaned.Count;
             await _vectorStore.UpsertFileAsync(fileRecord, ct);
         }
 
@@ -209,10 +225,16 @@ public class FileIndexPipeline : IFileIndexPipeline
         }
 
         // 新向量/BM25/图谱都已写入后再清理旧版本，避免推理失败造成搜索空窗。
-        foreach (var oldChunkId in ctx.OldChunkIds)
-            await _vectorStore.DeleteChunkAsync(oldChunkId, ct);
-        if (ctx.OldChunkIds.Count > 0 && updateBm25)
-            await _bm25Store.DeleteDocumentsByIdsAsync(ctx.OldChunkIds);
+        if (ctx.OldChunkIds.Count > 0)
+        {
+            await _vectorStore.DeleteChunksAsync(ctx.OldChunkIds, ct);
+            if (updateBm25)
+                await _bm25Store.DeleteDocumentsByIdsAsync(ctx.OldChunkIds);
+        }
+
+        // 文件级原子防线：清理该文件下任何不属于本次有效新分块的历史旧分块及其向量（彻底杜绝重新切片产生孤儿向量）
+        var currentChunkIds = ctx.Chunks.Select(c => c.Id).ToList();
+        await _vectorStore.DeleteStaleChunksForFileAsync(ctx.FileRecord.Id, currentChunkIds, ct);
 
         // 所有阶段完成，标记为 complete，防止中断后因 hash 匹配被跳过
         await _vectorStore.MarkFileStatusAsync(ctx.FileRecord.Id, "complete", ct);
@@ -336,7 +358,12 @@ public class FileIndexPipeline : IFileIndexPipeline
             chunking.MinTokens,
             chunking.OverlapTokens,
             chunking.PreserveHeadings,
-            chunking.PreserveCodeBlocks);
+            chunking.PreserveCodeBlocks,
+            chunking.Mode,
+            chunking.AdaptiveLevel,
+            chunking.AdaptiveStrategyType,
+            chunking.TargetWindowUtilizationPercent,
+            chunking.AdaptiveOverlapPercent);
         return Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(text)));
     }
 

@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -16,9 +17,11 @@ public class ModelsController : ControllerBase
     private readonly IModelManager _modelManager;
     private readonly IEmbeddingService _embeddingService;
     private readonly IRerankService? _rerankService;
+    private readonly IModelTelemetryService? _telemetryService;
     private readonly IVectorStore _vectorStore;
     private readonly ILogger<ModelsController> _logger;
     private static readonly Dictionary<string, DownloadProgress> _downloadProgress = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _downloadCts = new();
     private static readonly SemaphoreSlim _modelSwitchLock = new(1, 1);
 
     public ModelsController(
@@ -27,7 +30,8 @@ public class ModelsController : ControllerBase
         IEmbeddingService embeddingService,
         IVectorStore vectorStore,
         ILogger<ModelsController> logger,
-        IRerankService? rerankService = null)
+        IRerankService? rerankService = null,
+        IModelTelemetryService? telemetryService = null)
     {
         _configManager = configManager;
         _modelManager = modelManager;
@@ -35,6 +39,7 @@ public class ModelsController : ControllerBase
         _vectorStore = vectorStore;
         _logger = logger;
         _rerankService = rerankService;
+        _telemetryService = telemetryService;
     }
 
     /// <summary>
@@ -62,6 +67,168 @@ public class ModelsController : ControllerBase
         {
             _logger.LogError(ex, "扫描模型失败");
             return StatusCode(500, new { error = $"扫描模型失败: {ex.Message}" });
+        }
+    }
+
+    /// <summary>
+    /// 获取嵌入式模型与重排模型的实时协同运行状态（状态机状态、GPU硬件加速、租约与多版本变体）
+    /// </summary>
+    [HttpGet("runtime-status")]
+    public ActionResult<ModelsRuntimeStatusResponse> GetRuntimeStatus()
+    {
+        var cfg = _configManager.Load();
+        var currentEmbModel = _modelManager.GetCurrentModel();
+        var currentRerankModel = _modelManager.GetCurrentRerankModel();
+
+        SingleModelStatusResponse? embStatus = null;
+        SingleModelStatusResponse? rerankStatus = null;
+
+        if (_telemetryService != null)
+        {
+            var embTelemetry = _telemetryService.GetCurrentEmbeddingTelemetry();
+            embStatus = new SingleModelStatusResponse
+            {
+                ModelName = !string.IsNullOrEmpty(embTelemetry.Configuration.ModelName) ? embTelemetry.Configuration.ModelName : (currentEmbModel?.Name ?? string.Empty),
+                DisplayName = currentEmbModel?.DisplayName ?? embTelemetry.Configuration.DisplayName,
+                ActiveVariant = currentEmbModel?.ActiveVariantFileName ?? (currentEmbModel?.LocalPath != null ? Path.GetFileName(currentEmbModel.LocalPath) : null),
+                ActiveVariantPath = currentEmbModel?.LocalPath,
+                State = (int)embTelemetry.StateMachine.State,
+                StateName = embTelemetry.StateMachine.StateName,
+                StateDescription = embTelemetry.StateMachine.StateDescription,
+                ActiveLeases = embTelemetry.StateMachine.ActiveLeases,
+                IsReady = embTelemetry.StateMachine.IsReady,
+                IsGpuMode = embTelemetry.Hardware.IsGpuMode,
+                ExecutionDevice = embTelemetry.Hardware.ExecutionDevice,
+                TotalVramGb = embTelemetry.Hardware.TotalVramGb,
+                OffloadDescription = embTelemetry.Hardware.OffloadDescription,
+                Quantization = embTelemetry.Configuration.Quantization,
+                ModelFormat = currentEmbModel?.InstalledVariants.FirstOrDefault(v => v.IsActive)?.Format
+                    ?? (currentEmbModel?.LocalPath?.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) == true ? "gguf" : "onnx"),
+                Dimension = embTelemetry.Configuration.Dimension,
+                MaxSequenceLength = embTelemetry.Configuration.ContextSize,
+                RetentionStrategy = cfg.ModelRetentionStrategy.ToString(),
+                IdleTimeoutSeconds = cfg.ModelIdleTimeoutSeconds,
+                UnloadOnlyWhenMinimizedToTray = cfg.UnloadOnlyWhenMinimizedToTray,
+                LastError = embTelemetry.StateMachine.LastError,
+                InstalledVariants = currentEmbModel?.InstalledVariants ?? new()
+            };
+
+            var rerankTelemetry = _telemetryService.GetCurrentRerankTelemetry();
+            rerankStatus = new SingleModelStatusResponse
+            {
+                ModelName = !string.IsNullOrEmpty(rerankTelemetry.Configuration.ModelName) ? rerankTelemetry.Configuration.ModelName : (currentRerankModel?.Name ?? string.Empty),
+                DisplayName = currentRerankModel?.DisplayName ?? rerankTelemetry.Configuration.DisplayName,
+                ActiveVariant = currentRerankModel?.ActiveVariantFileName ?? (currentRerankModel?.LocalPath != null ? Path.GetFileName(currentRerankModel.LocalPath) : null),
+                ActiveVariantPath = currentRerankModel?.LocalPath,
+                State = (int)rerankTelemetry.StateMachine.State,
+                StateName = rerankTelemetry.StateMachine.StateName,
+                StateDescription = rerankTelemetry.StateMachine.StateDescription,
+                ActiveLeases = rerankTelemetry.StateMachine.ActiveLeases,
+                IsReady = rerankTelemetry.StateMachine.IsReady,
+                IsGpuMode = rerankTelemetry.Hardware.IsGpuMode,
+                ExecutionDevice = rerankTelemetry.Hardware.ExecutionDevice,
+                TotalVramGb = rerankTelemetry.Hardware.TotalVramGb,
+                OffloadDescription = rerankTelemetry.Hardware.OffloadDescription,
+                Quantization = rerankTelemetry.Configuration.Quantization,
+                ModelFormat = currentRerankModel?.InstalledVariants.FirstOrDefault(v => v.IsActive)?.Format
+                    ?? (currentRerankModel?.LocalPath?.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) == true ? "gguf" : "onnx"),
+                Dimension = rerankTelemetry.Configuration.Dimension,
+                MaxSequenceLength = rerankTelemetry.Configuration.ContextSize,
+                RetentionStrategy = cfg.ModelRetentionStrategy.ToString(),
+                IdleTimeoutSeconds = cfg.ModelIdleTimeoutSeconds,
+                UnloadOnlyWhenMinimizedToTray = cfg.UnloadOnlyWhenMinimizedToTray,
+                LastError = rerankTelemetry.StateMachine.LastError,
+                InstalledVariants = currentRerankModel?.InstalledVariants ?? new()
+            };
+        }
+
+        return Ok(new ModelsRuntimeStatusResponse
+        {
+            Embedding = embStatus,
+            Rerank = rerankStatus
+        });
+    }
+
+    /// <summary>
+    /// 切换同一模型的特定变体版本（如 Q4_K_M, Q8_0, ONNX 等）
+    /// </summary>
+    [HttpPost("switch-variant")]
+    public async Task<ActionResult> SwitchVariant([FromBody] SwitchVariantRequest request)
+    {
+        if (string.IsNullOrEmpty(request.ModelName) || string.IsNullOrEmpty(request.VariantFileName))
+        {
+            return BadRequest(new { error = "模型名称和变体文件名不能为空" });
+        }
+
+        if (!await _modelSwitchLock.WaitAsync(TimeSpan.FromSeconds(30)))
+        {
+            return StatusCode(429, new { error = "模型切换正在进行中，请稍后重试" });
+        }
+
+        try
+        {
+            var success = await _modelManager.SwitchModelVariantAsync(request.ModelName, request.VariantFileName, request.IsRerank);
+            if (!success)
+            {
+                return BadRequest(new { error = $"切换到变体 {request.VariantFileName} 失败" });
+            }
+
+            var cfg = _configManager.Load();
+            if (request.IsRerank)
+            {
+                if (_rerankService != null)
+                {
+                    var targetPath = cfg.Rerank.ModelPath ?? string.Empty;
+                    await _rerankService.ReloadModelAsync(targetPath, request.ModelName);
+                }
+            }
+            else
+            {
+                var targetPath = cfg.Embedding.ModelPath ?? string.Empty;
+                await _embeddingService.ReloadModelAsync(targetPath, request.ModelName);
+            }
+
+            return Ok(new { message = $"已成功切换到版本: {request.VariantFileName}" });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "切换变体失败: {ModelName} -> {Variant}", request.ModelName, request.VariantFileName);
+            return StatusCode(500, new { error = $"切换变体失败: {ex.Message}" });
+        }
+        finally
+        {
+            _modelSwitchLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 删除特定模型变体文件
+    /// </summary>
+    [HttpDelete("variant")]
+    public async Task<ActionResult> DeleteVariant(
+        [FromQuery] string modelName,
+        [FromQuery] string variantFileName,
+        [FromQuery] bool isRerank = false)
+    {
+        if (string.IsNullOrEmpty(modelName) || string.IsNullOrEmpty(variantFileName))
+        {
+            return BadRequest(new { error = "模型名称和变体文件名不能为空" });
+        }
+
+        try
+        {
+            var success = await _modelManager.DeleteModelVariantAsync(modelName, variantFileName, isRerank);
+            if (!success)
+            {
+                return BadRequest(new { error = $"删除变体 {variantFileName} 失败" });
+            }
+
+            return Ok(new { message = $"已成功删除变体文件: {variantFileName}" });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "删除模型变体失败: {ModelName}/{Variant}", modelName, variantFileName);
+            return StatusCode(500, new { error = $"删除模型变体失败: {ex.Message}" });
         }
     }
 
@@ -136,8 +303,8 @@ public class ModelsController : ControllerBase
                 oldModelName, request.ModelName, request.DeleteOldVectors);
 
             // 先验证并切换运行时模型，避免无效模型破坏旧配置/向量。
-            var onnxPath = Path.Combine(model.LocalPath ?? "", "model.onnx");
-            var reloadSuccess = await _embeddingService.ReloadModelAsync(onnxPath, request.ModelName, model.MaxSequenceLength);
+            var modelPath = ModelManager.ResolveModelFilePath(model.LocalPath);
+            var reloadSuccess = await _embeddingService.ReloadModelAsync(modelPath, request.ModelName, model.MaxSequenceLength);
 
             if (!reloadSuccess)
             {
@@ -151,9 +318,9 @@ public class ModelsController : ControllerBase
                 _logger.LogError("模型配置切换失败: {ModelName}", request.ModelName);
                 if (oldModel?.LocalPath is not null)
                 {
-                    var oldOnnxPath = Path.Combine(oldModel.LocalPath, "model.onnx");
+                    var oldModelPath = ModelManager.ResolveModelFilePath(oldModel.LocalPath);
                     var rolledBack = await _embeddingService.ReloadModelAsync(
-                        oldOnnxPath, oldModelName, oldModel.MaxSequenceLength);
+                        oldModelPath, oldModelName, oldModel.MaxSequenceLength);
                     _logger.Log(rolledBack ? LogLevel.Information : LogLevel.Critical,
                         "运行时模型回滚 {Result}: {ModelName}", rolledBack ? "成功" : "失败", oldModelName);
                 }
@@ -189,9 +356,9 @@ public class ModelsController : ControllerBase
     /// 获取模型的下载选项
     /// </summary>
     [HttpGet("download-options/{modelName}")]
-    public async Task<ActionResult<ModelDownloadOptions>> GetDownloadOptions(string modelName)
+    public async Task<ActionResult<ModelDownloadOptions>> GetDownloadOptions(string modelName, CancellationToken cancellationToken = default)
     {
-        var options = await _modelManager.GetDownloadOptionsAsync(modelName);
+        var options = await _modelManager.GetDownloadOptionsAsync(modelName, cancellationToken);
         return Ok(options);
     }
 
@@ -221,11 +388,16 @@ public class ModelsController : ControllerBase
             return Ok(new { message = "模型正在下载中", progress = existing });
         }
 
+        var cts = new CancellationTokenSource();
+        _downloadCts[modelName] = cts;
+
         // 初始化进度
         var progress = new DownloadProgress
         {
             ModelName = modelName,
             Status = "downloading",
+            Stage = DownloadStage.ResolvingManifest,
+            StageMessage = "正在初始化下载任务...",
             Progress = 0,
             StartTime = DateTime.UtcNow,
             TotalBytes = model.ModelSizeBytes
@@ -239,31 +411,24 @@ public class ModelsController : ControllerBase
             {
                 _logger.LogInformation("[ModelManager] 开始下载模型: {ModelName}", modelName);
                 
-                var (success, error) = await _modelManager.DownloadModelAsync(modelName, new Progress<float>(p =>
-                {
-                    if (_downloadProgress.TryGetValue(modelName, out var pg))
+                var (success, error) = await _modelManager.DownloadModelAsync(
+                    modelName,
+                    new Progress<DownloadProgress>(p =>
                     {
-                        pg.Progress = p;
-                        pg.BytesReceived = (long)(p * model.ModelSizeBytes / 100);
-
-                        var elapsed = (DateTime.UtcNow - pg.StartTime).TotalSeconds;
-                        if (elapsed > 0 && pg.BytesReceived > 0)
-                        {
-                            pg.SpeedBytesPerSecond = pg.BytesReceived / elapsed;
-                            if (pg.SpeedBytesPerSecond > 0)
-                            {
-                                var remaining = model.ModelSizeBytes - pg.BytesReceived;
-                                pg.EstimatedSecondsRemaining = (int)(remaining / pg.SpeedBytesPerSecond);
-                            }
-                        }
-                    }
-                }), null, request?.OnnxFilePath);
+                        _downloadProgress[modelName] = p;
+                    }),
+                    request?.Format,
+                    request?.OnnxFilePath,
+                    cts.Token,
+                    request?.Repository);
 
                 if (_downloadProgress.TryGetValue(modelName, out var pg2))
                 {
                     if (success)
                     {
                         pg2.Status = "completed";
+                        pg2.Stage = DownloadStage.Completed;
+                        pg2.StageMessage = "模型下载与配置就绪";
                         pg2.Progress = 100;
                         pg2.EndTime = DateTime.UtcNow;
                         _logger.LogInformation("[ModelManager] 模型下载完成: {ModelName}", modelName);
@@ -271,11 +436,24 @@ public class ModelsController : ControllerBase
                     else
                     {
                         pg2.Status = "failed";
+                        pg2.Stage = DownloadStage.Failed;
                         pg2.ErrorMessage = error ?? "未知错误";
+                        pg2.StageMessage = $"下载失败: {error}";
                         pg2.ErrorCode = ParseErrorCode(error ?? "");
                         pg2.EndTime = DateTime.UtcNow;
                         _logger.LogError("[ModelManager] 模型下载失败: {ModelName} - {Error}", modelName, error);
                     }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("[ModelManager] 用户取消了模型下载: {ModelName}", modelName);
+                if (_downloadProgress.TryGetValue(modelName, out var pgCancel))
+                {
+                    pgCancel.Status = "cancelled";
+                    pgCancel.Stage = DownloadStage.Cancelled;
+                    pgCancel.StageMessage = "下载已由用户取消";
+                    pgCancel.EndTime = DateTime.UtcNow;
                 }
             }
             catch (Exception ex)
@@ -284,10 +462,16 @@ public class ModelsController : ControllerBase
                 if (_downloadProgress.TryGetValue(modelName, out var pg3))
                 {
                     pg3.Status = "failed";
+                    pg3.Stage = DownloadStage.Failed;
                     pg3.ErrorMessage = ex.Message;
+                    pg3.StageMessage = $"下载异常: {ex.Message}";
                     pg3.ErrorCode = DownloadErrorCode.Unknown;
                     pg3.EndTime = DateTime.UtcNow;
                 }
+            }
+            finally
+            {
+                _downloadCts.TryRemove(modelName, out _);
             }
         });
 
@@ -331,17 +515,41 @@ public class ModelsController : ControllerBase
     [HttpDelete("download/{modelName}")]
     public ActionResult CancelDownload(string modelName)
     {
-        if (_downloadProgress.TryGetValue(modelName, out var progress))
+        var key = modelName;
+        if (!_downloadProgress.ContainsKey(key) && _downloadProgress.ContainsKey($"rerank_{modelName}"))
         {
-            if (progress.Status == "downloading")
+            key = $"rerank_{modelName}";
+        }
+
+        if (_downloadCts.TryRemove(key, out var cts))
+        {
+            try
             {
-                progress.Status = "cancelled";
-                progress.EndTime = DateTime.UtcNow;
-                return Ok(new { message = "已取消下载" });
+                cts.Cancel();
+                cts.Dispose();
             }
+            catch { }
+        }
+
+        if (_downloadProgress.TryGetValue(key, out var progress))
+        {
+            progress.Status = "cancelled";
+            progress.Stage = DownloadStage.Cancelled;
+            progress.StageMessage = "下载已由用户取消";
+            progress.EndTime = DateTime.UtcNow;
+            return Ok(new { message = "已取消下载" });
         }
         
         return NotFound(new { error = "没有正在进行的下载任务" });
+    }
+
+    /// <summary>
+    /// 取消重排模型下载
+    /// </summary>
+    [HttpDelete("rerank/download/{modelName}")]
+    public ActionResult CancelRerankDownload(string modelName)
+    {
+        return CancelDownload($"rerank_{modelName}");
     }
 
     /// <summary>
@@ -528,6 +736,17 @@ public class ModelsController : ControllerBase
             "bge-m3" => "BGE M3",
             "bge-base-en-v1.5" => "BGE Base English v1.5",
             "bge-small-en-v1.5" => "BGE Small English v1.5",
+            "gte-multilingual-base" => "GTE Multilingual Base",
+            "xVITA-Embed-300M-zhTW" => "xVITA Embed 300M zh-TW",
+            "Qwen3-Embedding-0.6B" => "Qwen3 Embedding 0.6B",
+            "Qwen3-Embedding-4B" => "Qwen3 Embedding 4B",
+            "jina-embeddings-v3" => "Jina Embeddings v3",
+            "Qwen3-Reranker-0.6B" => "Qwen3 Reranker 0.6B",
+            "Qwen3-Reranker-4B" => "Qwen3 Reranker 4B",
+            "jina-reranker-v2-base-multilingual" => "Jina Reranker v2 Base Multilingual",
+            "mxbai-rerank-base-v1" => "mxbai Rerank Base v1",
+            "mxbai-rerank-xsmall-v1" => "mxbai Rerank xSmall v1",
+            "gte-multilingual-reranker-base" => "GTE Multilingual Reranker Base",
             _ => modelName
         };
     }
@@ -541,6 +760,9 @@ public class ModelsController : ControllerBase
             return DownloadErrorCode.Unknown;
 
         var lowerMessage = errorMessage.ToLowerInvariant();
+
+        if (lowerMessage.Contains("401") || lowerMessage.Contains("403") || lowerMessage.Contains("授权") || lowerMessage.Contains("hf_token") || lowerMessage.Contains("unauthorized"))
+            return DownloadErrorCode.AuthorizationRequired;
 
         if (lowerMessage.Contains("model.onnx") && lowerMessage.Contains("不完整"))
             return DownloadErrorCode.FileIncomplete;
@@ -632,27 +854,20 @@ public async Task<ActionResult> SwitchRerankModel([FromBody] SwitchModelRequest 
         return StatusCode(500, new { error = "重排模型切换失败" });
     }
 
-    // 重新加载 Rerank 服务的模型（优先用 LocalPath，兼容子目录与扁平结构）
+    // 重新加载 Rerank 服务的模型（优先用 LocalPath，兼容 GGUF、子目录与扁平结构）
     if (_rerankService != null)
     {
         var localDir = model.LocalPath;
-        string onnxPath;
-        if (!string.IsNullOrEmpty(localDir))
-        {
-            onnxPath = Path.Combine(localDir, "model.onnx");
-            if (!System.IO.File.Exists(onnxPath))
-                onnxPath = Path.Combine(localDir, "onnx", "model.onnx");
-        }
-        else
+        var modelFilePath = ModelManager.ResolveModelFilePath(localDir);
+        if (string.IsNullOrEmpty(localDir) || (!System.IO.File.Exists(modelFilePath) && !System.IO.Directory.Exists(modelFilePath)))
         {
             var config = _configManager.Load();
             var modelsPath = config.ModelsRootPath;
-            onnxPath = Path.Combine(modelsPath, "Reranker", request.ModelName, "model.onnx");
-            if (!System.IO.File.Exists(onnxPath))
-                onnxPath = Path.Combine(modelsPath, "Reranker", request.ModelName, "onnx", "model.onnx");
+            var candidatePath = Path.Combine(modelsPath, "Reranker", request.ModelName);
+            modelFilePath = ModelManager.ResolveModelFilePath(candidatePath);
         }
 
-        var reloadSuccess = await _rerankService.ReloadModelAsync(onnxPath, request.ModelName);
+        var reloadSuccess = await _rerankService.ReloadModelAsync(modelFilePath, request.ModelName);
         if (!reloadSuccess)
             _logger.LogWarning("Rerank 服务重新加载模型失败: {ModelName}", request.ModelName);
     }
@@ -692,11 +907,16 @@ public async Task<ActionResult> DownloadRerankModel(string modelName, [FromBody]
         return Ok(new { message = "重排模型正在下载中", progress = existing });
     }
 
+    var cts = new CancellationTokenSource();
+    _downloadCts[progressKey] = cts;
+
     // 初始化进度
     var progress = new DownloadProgress
     {
         ModelName = modelName,
         Status = "downloading",
+        Stage = DownloadStage.ResolvingManifest,
+        StageMessage = "正在初始化重排模型下载任务...",
         Progress = 0,
         StartTime = DateTime.UtcNow,
         TotalBytes = model.ModelSizeBytes
@@ -710,20 +930,24 @@ public async Task<ActionResult> DownloadRerankModel(string modelName, [FromBody]
         {
             _logger.LogInformation("[RerankModel] 开始下载重排模型: {ModelName}", modelName);
             
-            var (success, error) = await _modelManager.DownloadModelAsync(modelName, new Progress<float>(p =>
-            {
-                if (_downloadProgress.TryGetValue(progressKey, out var pg))
+            var (success, error) = await _modelManager.DownloadModelAsync(
+                modelName,
+                new Progress<DownloadProgress>(p =>
                 {
-                    pg.Progress = p;
-                    pg.BytesReceived = (long)(p * model.ModelSizeBytes / 100);
-                }
-            }), null, request?.OnnxFilePath);
+                    _downloadProgress[progressKey] = p;
+                }),
+                request?.Format,
+                request?.OnnxFilePath,
+                cts.Token,
+                request?.Repository);
 
             if (_downloadProgress.TryGetValue(progressKey, out var pg2))
             {
                 if (success)
                 {
                     pg2.Status = "completed";
+                    pg2.Stage = DownloadStage.Completed;
+                    pg2.StageMessage = "重排模型下载与配置就绪";
                     pg2.Progress = 100;
                     pg2.EndTime = DateTime.UtcNow;
                     _logger.LogInformation("[RerankModel] 重排模型下载完成: {ModelName}", modelName);
@@ -731,10 +955,24 @@ public async Task<ActionResult> DownloadRerankModel(string modelName, [FromBody]
                 else
                 {
                     pg2.Status = "failed";
+                    pg2.Stage = DownloadStage.Failed;
                     pg2.ErrorMessage = error ?? "未知错误";
+                    pg2.StageMessage = $"下载失败: {error}";
+                    pg2.ErrorCode = ParseErrorCode(error ?? "");
                     pg2.EndTime = DateTime.UtcNow;
                     _logger.LogError("[RerankModel] 重排模型下载失败: {ModelName} - {Error}", modelName, error);
                 }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("[RerankModel] 用户取消了重排模型下载: {ModelName}", modelName);
+            if (_downloadProgress.TryGetValue(progressKey, out var pgCancel))
+            {
+                pgCancel.Status = "cancelled";
+                pgCancel.Stage = DownloadStage.Cancelled;
+                pgCancel.StageMessage = "下载已由用户取消";
+                pgCancel.EndTime = DateTime.UtcNow;
             }
         }
         catch (Exception ex)
@@ -743,9 +981,16 @@ public async Task<ActionResult> DownloadRerankModel(string modelName, [FromBody]
             if (_downloadProgress.TryGetValue(progressKey, out var pg3))
             {
                 pg3.Status = "failed";
+                pg3.Stage = DownloadStage.Failed;
                 pg3.ErrorMessage = ex.Message;
+                pg3.StageMessage = $"下载异常: {ex.Message}";
+                pg3.ErrorCode = DownloadErrorCode.Unknown;
                 pg3.EndTime = DateTime.UtcNow;
             }
+        }
+        finally
+        {
+            _downloadCts.TryRemove(progressKey, out _);
         }
     });
 
@@ -799,9 +1044,9 @@ public async Task<ActionResult> DeleteRerankModel(string modelName)
 /// 获取重排模型下载选项
 /// </summary>
 [HttpGet("rerank/download-options/{modelName}")]
-public async Task<ActionResult<ModelDownloadOptions>> GetRerankDownloadOptions(string modelName)
+public async Task<ActionResult<ModelDownloadOptions>> GetRerankDownloadOptions(string modelName, CancellationToken cancellationToken = default)
 {
-    var options = await _modelManager.GetDownloadOptionsAsync(modelName);
+    var options = await _modelManager.GetDownloadOptionsAsync(modelName, cancellationToken);
     return Ok(options);
 }
 }
@@ -825,10 +1070,20 @@ public class SwitchModelRequest
 public class DownloadModelRequest
 {
     /// <summary>
-    /// 指定要下载的 ONNX 文件路径（如: model.onnx, onnx/model_qint8_avx512.onnx）
+    /// 指定要下载的文件路径（如: model.onnx, onnx/model_qint8_avx512.onnx, bge-m3-Q4_K_M.gguf）
     /// 如果不指定，将自动选择最佳选项
     /// </summary>
     public string? OnnxFilePath { get; set; }
+
+    /// <summary>
+    /// 指定格式类型: "gguf" 或 "onnx"，可选
+    /// </summary>
+    public string? Format { get; set; }
+
+    /// <summary>
+    /// 指定来源模型仓库（主仓库或社区候选源），可选
+    /// </summary>
+    public string? Repository { get; set; }
 }
 
 /// <summary>
@@ -866,3 +1121,52 @@ public class ActiveDownloadItem
     public string Key { get; set; } = string.Empty;
     public DownloadProgress Progress { get; set; } = new();
 }
+
+/// <summary>
+/// 模型运行时双模型协同状态快照
+/// </summary>
+public class ModelsRuntimeStatusResponse
+{
+    public SingleModelStatusResponse? Embedding { get; set; }
+    public SingleModelStatusResponse? Rerank { get; set; }
+}
+
+/// <summary>
+/// 单个模型的详细实时状态快照
+/// </summary>
+public class SingleModelStatusResponse
+{
+    public string ModelName { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string? ActiveVariant { get; set; }
+    public string? ActiveVariantPath { get; set; }
+    public int State { get; set; }
+    public string StateName { get; set; } = "Unloaded";
+    public string StateDescription { get; set; } = "未加载";
+    public int ActiveLeases { get; set; }
+    public bool IsReady { get; set; }
+    public bool IsGpuMode { get; set; }
+    public string ExecutionDevice { get; set; } = "CPU";
+    public double? TotalVramGb { get; set; }
+    public string? OffloadDescription { get; set; }
+    public string? Quantization { get; set; }
+    public string? ModelFormat { get; set; }
+    public int Dimension { get; set; }
+    public int MaxSequenceLength { get; set; }
+    public string? RetentionStrategy { get; set; }
+    public int IdleTimeoutSeconds { get; set; }
+    public bool UnloadOnlyWhenMinimizedToTray { get; set; }
+    public string? LastError { get; set; }
+    public List<ModelVariantInfo> InstalledVariants { get; set; } = new();
+}
+
+/// <summary>
+/// 切换同模型特定变体请求
+/// </summary>
+public class SwitchVariantRequest
+{
+    public string ModelName { get; set; } = string.Empty;
+    public string VariantFileName { get; set; } = string.Empty;
+    public bool IsRerank { get; set; }
+}
+

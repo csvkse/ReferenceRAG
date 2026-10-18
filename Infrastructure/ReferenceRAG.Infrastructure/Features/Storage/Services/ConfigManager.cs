@@ -118,6 +118,14 @@ public class ConfigManager
                 File.WriteAllText(appSettingsPath, root.ToJsonString(_writeOptions));
 
                 _config = config;
+                if (!string.IsNullOrWhiteSpace(config.ModelHub?.HfToken))
+                {
+                    Environment.SetEnvironmentVariable("HF_TOKEN", config.ModelHub.HfToken);
+                }
+                if (!string.IsNullOrWhiteSpace(config.ModelHub?.HfEndpoint))
+                {
+                    Environment.SetEnvironmentVariable("HF_ENDPOINT", config.ModelHub.HfEndpoint);
+                }
                 _logger.LogInformation($"[ConfigManager] 配置已保存到: {appSettingsPath}");
             }
             catch (Exception ex)
@@ -304,6 +312,16 @@ public class ConfigManager
         var rerankEnabled = Environment.GetEnvironmentVariable("REFERENCERAG_RERANK_ENABLED");
         if (bool.TryParse(rerankEnabled, out var enabled))
             config.Rerank.Enabled = enabled;
+
+        config.ModelHub ??= new ModelHubConfig();
+        ApplyString("HF_TOKEN", value => config.ModelHub.HfToken = value);
+        ApplyString("HF_ENDPOINT", value => config.ModelHub.HfEndpoint = value);
+
+        var idleTimeout = Environment.GetEnvironmentVariable("REFERENCERAG_MODEL_IDLE_TIMEOUT_SECONDS");
+        if (!string.IsNullOrEmpty(idleTimeout) && int.TryParse(idleTimeout, out var timeoutSec))
+        {
+            config.ModelIdleTimeoutSeconds = timeoutSec;
+        }
 
         var port = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_PORT");
         if (!string.IsNullOrEmpty(port) && int.TryParse(port, out var portNum))

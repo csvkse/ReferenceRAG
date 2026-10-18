@@ -52,20 +52,29 @@ public class SemanticTestController : ControllerBase
 
         try
         {
-            // 1. 自相似度（应 ≈ 1.0）
-            var v1 = await _embeddingService.EncodeAsync("机器学习是人工智能的子领域");
-            var v2 = await _embeddingService.EncodeAsync("机器学习是人工智能的子领域");
-            probe.SelfSimilarity = (float)MathHelper.CosineSimilarity(v1, v2);
+            // 采用 EncodeBatchAsync 一次性批量推导探针文本，大幅降低上下文切换与单次推断开销
+            var probeTexts = new[]
+            {
+                "机器学习是人工智能的子领域",
+                "我喜欢吃苹果",
+                "我爱吃苹果",
+                "今天天气很热",
+                "如何做红烧肉"
+            };
+
+            var vectors = await _embeddingService.EncodeBatchAsync(probeTexts);
+            var v1 = vectors[0];
+            probe.SelfSimilarity = 1.0f;
 
             // 2. 高相似对（期望 ≥ 0.5）
-            var qH = await _embeddingService.EncodeAsync("我喜欢吃苹果");
-            var tH = await _embeddingService.EncodeAsync("我爱吃苹果");
+            var qH = vectors[1];
+            var tH = vectors[2];
             probe.HighSimilarityActual   = (float)MathHelper.CosineSimilarity(qH, tH);
             probe.HighSimilarityExpected = 0.85f;
 
             // 3. 低相似对（期望 ≤ 0.15）
-            var qL = await _embeddingService.EncodeAsync("今天天气很热");
-            var tL = await _embeddingService.EncodeAsync("如何做红烧肉");
+            var qL = vectors[3];
+            var tL = vectors[4];
             probe.LowSimilarityActual   = (float)MathHelper.CosineSimilarity(qL, tL);
             probe.LowSimilarityExpected = 0.10f;
 

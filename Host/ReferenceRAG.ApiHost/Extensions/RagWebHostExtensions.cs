@@ -34,6 +34,12 @@ public static class RagWebHostExtensions
         IConfiguration configuration,
         bool signalRDetailedErrors = false)
     {
+        try
+        {
+            ReferenceRAG.Core.Features.HardwareAcceleration.LlamaNativeInitializer.EnsureInitialized(preferCuda: true);
+        }
+        catch { }
+
         ReferenceRAG.Business.Composition.BusinessComposition.AddRagBusiness(services, configuration);
         Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<ReferenceRAG.Business.Features.App.Contracts.IPlatformActions,ReferenceRAG.Business.Features.App.Contracts.BrowserPlatformActions>(services);
         services.AddSingleton<IndexEventPublisher>();

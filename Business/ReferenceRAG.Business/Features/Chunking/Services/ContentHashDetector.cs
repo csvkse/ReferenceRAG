@@ -167,7 +167,7 @@ public class ContentHashDetector
 
         // 文件头采样
         var headBuffer = new byte[Math.Min(sampleSize, fileInfo.Length)];
-        await stream.ReadAsync(headBuffer, 0, headBuffer.Length);
+        await stream.ReadExactlyAsync(headBuffer, 0, headBuffer.Length);
         samples.AddRange(headBuffer);
 
         // 文件尾采样
@@ -175,7 +175,7 @@ public class ContentHashDetector
         {
             stream.Position = fileInfo.Length - sampleSize;
             var tailBuffer = new byte[sampleSize];
-            await stream.ReadAsync(tailBuffer, 0, tailBuffer.Length);
+            await stream.ReadExactlyAsync(tailBuffer, 0, tailBuffer.Length);
             samples.AddRange(tailBuffer);
         }
 

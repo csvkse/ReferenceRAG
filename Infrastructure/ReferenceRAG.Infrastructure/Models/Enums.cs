@@ -134,4 +134,34 @@ public class ChunkingOptions
     /// 是否保留标题结构
     /// </summary>
     public bool PreserveHeadings { get; set; } = true;
+
+    /// <summary>
+    /// 分段模式：Fixed（固定）| Adaptive（自适应）
+    /// </summary>
+    public string Mode { get; set; } = "Fixed";
+
+    /// <summary>
+    /// 自适应等级：Level1（模型感知）| Level2（结构句法）| Level3（深度语义）
+    /// </summary>
+    public string AdaptiveLevel { get; set; } = "Level2";
+
+    /// <summary>
+    /// 自适应风格类型：Balanced（通用平衡）| PrecisionDense（高精度）| DeepNarrative（长文叙事）| CodeFirst（代码优先）
+    /// </summary>
+    public string AdaptiveStrategyType { get; set; } = "Balanced";
+
+    /// <summary>
+    /// 目标模型窗口利用率百分比（50~90，默认 70）
+    /// </summary>
+    public int TargetWindowUtilizationPercent { get; set; } = 70;
+
+    /// <summary>
+    /// 动态重叠率百分比（0~25，默认 10）
+    /// </summary>
+    public int AdaptiveOverlapPercent { get; set; } = 10;
+
+    /// <summary>
+    /// 绑定的模型画像（可选，自适应计算时使用）
+    /// </summary>
+    public ModelEmbeddingProfile? ModelProfile { get; set; }
 }

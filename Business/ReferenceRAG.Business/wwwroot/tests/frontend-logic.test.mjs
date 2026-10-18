@@ -124,3 +124,30 @@ test('Template symbol binding checker detects unbound identifiers in templates',
     assert.ok(invalidMissing.includes('renderMsg'), 'Should detect missing renderMsg');
     assert.ok(invalidMissing.includes('throttledScroll'), 'Should detect missing throttledScroll');
 });
+
+test('checkReturnedScope detects undeclared identifiers in __returned__ preventing black screen runtime errors', async () => {
+    const { checkReturnedScope } = await import('../check.mjs');
+
+    // 1. Valid setup with declared identifiers
+    const validSource = `
+        import { ref } from 'vue';
+        const count = ref(0);
+        function increment() { count.value++; }
+        const __returned__ = { count, increment };
+        return __returned__;
+    `;
+    assert.deepEqual(checkReturnedScope(validSource), []);
+
+    // 2. Invalid setup with undeclared shorthand property (like confirmDownload bug)
+    const invalidSource = `
+        import { ref } from 'vue';
+        const count = ref(0);
+        const __returned__ = { count, confirmDownload, handleSwitch };
+        return __returned__;
+    `;
+    const undeclared = checkReturnedScope(invalidSource);
+    assert.ok(undeclared.includes('confirmDownload'), 'Should detect undeclared confirmDownload');
+    assert.ok(undeclared.includes('handleSwitch'), 'Should detect undeclared handleSwitch');
+    assert.ok(!undeclared.includes('count'), 'Declared count should not be flagged');
+});
+

@@ -1,117 +1,219 @@
 @echo off
-chcp 65001 >nul
-setlocal EnableDelayedExpansion
+setlocal
 
-REM 确保日志目录存在
-if not exist "%~dp0..\..\artifacts\logs" mkdir "%~dp0..\..\artifacts\logs"
-
-echo ============================================
-echo   ReferenceRAG Desktop - 发布构建
-echo ============================================
-echo.
-
-cd /d "%~dp0..\..\.."
-set LOG_FILE=%cd%\support\artifacts\logs\desktop-build.log
-if not exist "%cd%\support\artifacts\logs" mkdir "%cd%\support\artifacts\logs"
-
-REM 解析参数
-set CONFIG=Release
-set RUNTIME=win-x64
-set SELF_CONTAINED=true
-set VERBOSE=
-set CLEAN=false
+set "SCRIPT_DIR=%~dp0"
+for %%I in ("%SCRIPT_DIR%..\..\..") do set "ROOT_DIR=%%~fI"
+set "PROJECT=%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\ReferenceRAG.DesktopHost.csproj"
+set "OUTPUT=%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\bin\Release\net10.0-windows\publish"
+set "CONFIGURATION=Release"
+set "RID=win-x64"
+set "SELF_CONTAINED=true"
+set "STRIP_PDB=true"
+set "CLEAN=false"
+set "VERBOSE=false"
+set "RETRY_READY=1"
+set "NON_INTERACTIVE="
+set "RUN_SMOKE=false"
 
 :parse_args
-if "%~1"=="" goto end_parse
-if /i "%~1"=="-c" set CONFIG=%~2& shift & shift & goto parse_args
-if /i "%~1"=="--config" set CONFIG=%~2& shift & shift & goto parse_args
-if /i "%~1"=="-r" set RUNTIME=%~2& shift & shift & goto parse_args
-if /i "%~1"=="--runtime" set RUNTIME=%~2& shift & shift & goto parse_args
-if /i "%~1"=="--framework-dependent" set SELF_CONTAINED=false& shift & goto parse_args
-if /i "%~1"=="--clean" set CLEAN=true& shift & goto parse_args
-if /i "%~1"=="-clean" set CLEAN=true& shift & goto parse_args
-if /i "%~1"=="-v" set VERBOSE=true& shift & goto parse_args
-if /i "%~1"=="--verbose" set VERBOSE=true& shift & goto parse_args
+if "%~1"=="" goto after_args
+if /i "%~1"=="--debug" (
+    set "CONFIGURATION=Debug"
+    set "STRIP_PDB=false"
+    set "OUTPUT=%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\bin\Debug\net10.0-windows\publish"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="-c" (
+    set "CONFIGURATION=%~2"
+    shift
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--config" (
+    set "CONFIGURATION=%~2"
+    shift
+    shift
+    goto parse_args
+)
+if /i "%~1"=="-r" (
+    set "RID=%~2"
+    shift
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--runtime" (
+    set "RID=%~2"
+    shift
+    shift
+    goto parse_args
+)
+if /i "%~1"=="-o" (
+    set "OUTPUT=%~f2"
+    shift
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--output" (
+    set "OUTPUT=%~f2"
+    shift
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--clean" (
+    set "CLEAN=true"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="-clean" (
+    set "CLEAN=true"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--framework-dependent" (
+    set "SELF_CONTAINED=false"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--pdb" (
+    set "STRIP_PDB=false"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="-v" (
+    set "VERBOSE=true"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--verbose" (
+    set "VERBOSE=true"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--no-retry" (
+    set "RETRY_READY="
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--smoke" (
+    set "RUN_SMOKE=true"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--batch" (
+    set "NON_INTERACTIVE=true"
+    shift
+    goto parse_args
+)
 shift
 goto parse_args
-:end_parse
 
-REM 正式发布输出目录：使用 bin 目录（动态适配配置名称）
-set OUT_DIR=Host\ReferenceRAG.DesktopHost\bin\%CONFIG%\net10.0-windows\publish
+:after_args
 
-echo 配置: %CONFIG%
-echo 运行时: %RUNTIME%
-echo 独立部署: %SELF_CONTAINED%
-if "%CLEAN%"=="true" echo 干净构建: 是 (--clean)
-echo 输出目录: %cd%\%OUT_DIR%
+:publish
+set "EXIT_CODE=0"
+
+echo.
+echo ==========================================================
+echo   ReferenceRAG Desktop - Build and Publish
+echo ==========================================================
+echo.
+echo [build-desktop] Project   : "%PROJECT%"
+echo [build-desktop] Config    : %CONFIGURATION%
+echo [build-desktop] Runtime   : %RID%
+echo [build-desktop] Output    : "%OUTPUT%"
+echo [build-desktop] SelfCont  : %SELF_CONTAINED%
 echo.
 
-REM 检查桌面端是否正在运行（防止锁文件导致覆盖失败）
-tasklist /fi "imagename eq ReferenceRAG.DesktopHost.exe" 2>nul | findstr /i "ReferenceRAG.DesktopHost.exe" >nul
-if %ERRORLEVEL% neq 0 goto check_clean
-
-echo [警告] 检测到 ReferenceRAG.DesktopHost.exe 正在运行！
-echo 运行中的程序会锁死可执行文件，导致覆盖构建失败。
-set KILL_APP=Y
-set /p KILL_APP="是否自动结束正在运行的桌面端进程以覆盖构建? (Y/N, 默认 Y): "
-if /i "%KILL_APP%"=="N" (
-    echo 已取消构建，请手动退出桌面端后再运行构建。
-    goto build_end
+if not exist "%PROJECT%" (
+    echo [build-desktop] ERROR: Project file not found:
+    echo   "%PROJECT%"
+    set "EXIT_CODE=1"
+    goto finish
 )
-echo 正在停止 ReferenceRAG.DesktopHost.exe ...
-taskkill /f /im ReferenceRAG.DesktopHost.exe >nul 2>&1
-timeout /t 1 >nul
 
-:check_clean
-REM 若指定了 --clean，清理旧的发布目录以保证全新覆盖
-if "%CLEAN%"=="true" (
-    if exist "%OUT_DIR%" (
-        echo 正在清理旧的发布目录...
-        rmdir /s /q "%OUT_DIR%"
+where dotnet >nul 2>nul
+if errorlevel 1 (
+    echo [build-desktop] ERROR: dotnet SDK was not found in PATH.
+    set "EXIT_CODE=1"
+    goto finish
+)
+
+if /i "%RUN_SMOKE%"=="true" (
+    echo [build-desktop] Running E2E core smoke test before build...
+    call "%ROOT_DIR%\smoke-test.bat"
+    if errorlevel 1 (
+        echo [build-desktop] ERROR: Smoke test failed. Build aborted to prevent regression.
+        set "EXIT_CODE=1"
+        goto finish
+    )
+    echo [build-desktop] Smoke test passed. Continuing with publish.
+    echo.
+)
+
+echo [build-desktop] Checking running processes...
+taskkill /F /IM ReferenceRAG.DesktopHost.exe >nul 2>nul
+
+if /i "%CLEAN%"=="true" (
+    if exist "%OUTPUT%" (
+        echo [build-desktop] Cleaning target directory: "%OUTPUT%"...
+        rd /s /q "%OUTPUT%" >nul 2>nul
     )
 )
 
-REM 设置构建参数
-set PUBLISH_ARGS=-c %CONFIG% -r %RUNTIME% -o "%OUT_DIR%"
-
-if "%SELF_CONTAINED%"=="true" (
-    set PUBLISH_ARGS=%PUBLISH_ARGS% --self-contained true
-) else (
-    set PUBLISH_ARGS=%PUBLISH_ARGS% --self-contained false
+set "PDB_ARG="
+if /i "%STRIP_PDB%"=="true" (
+    set "PDB_ARG=-p:DebugType=none -p:DebugSymbols=false"
 )
 
-if not defined VERBOSE (
-    set PUBLISH_ARGS=%PUBLISH_ARGS% -v m
-) else (
-    set PUBLISH_ARGS=%PUBLISH_ARGS% -v n
+set "VERBOSITY_ARG=-v m"
+if /i "%VERBOSE%"=="true" (
+    set "VERBOSITY_ARG=-v n"
 )
 
-REM 执行构建
-echo 正在构建桌面端并输出到 bin 目录...
-dotnet publish "Host/ReferenceRAG.DesktopHost/ReferenceRAG.DesktopHost.csproj" %PUBLISH_ARGS%
+echo [build-desktop] Publishing ReferenceRAG.DesktopHost (%CONFIGURATION%, %RID%, StripPdb=%STRIP_PDB%)...
+echo [build-desktop] Target: "%OUTPUT%"
 
-if %ERRORLEVEL% equ 0 (
+dotnet publish "%PROJECT%" -c %CONFIGURATION% -r %RID% --self-contained %SELF_CONTAINED% --nologo -p:OS=Windows_NT %PDB_ARG% %VERBOSITY_ARG% -o "%OUTPUT%"
+set "EXIT_CODE=%ERRORLEVEL%"
+
+if "%EXIT_CODE%"=="0" (
+    if /i "%STRIP_PDB%"=="true" (
+        del /s /q "%OUTPUT%\*.pdb" >nul 2>nul
+    )
+    if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" (
+        copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" "%OUTPUT%\tray-icon.ico" >nul 2>nul
+        copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" "%OUTPUT%\icon.ico" >nul 2>nul
+    )
     echo.
-    echo ============================================
-    echo   桌面端构建成功！
-    echo   输出目录: %cd%\%OUT_DIR%
-    echo   可执行文件: ReferenceRAG.DesktopHost.exe
-    echo ============================================
-
-    REM 记录构建日志
-    echo [%date% %time%] 桌面端构建成功 - %CONFIG% %RUNTIME% [bin] >> "%LOG_FILE%"
+    echo ==========================================================
+    echo [build-desktop] Desktop publish succeeded!
+    echo   DesktopHost: "%OUTPUT%\ReferenceRAG.DesktopHost.exe"
+    echo   Output Dir : "%OUTPUT%"
+    echo ==========================================================
+    if exist "%ROOT_DIR%\support\artifacts\logs" (
+        echo [%date% %time%] desktop publish success - %CONFIGURATION% %RID% >> "%ROOT_DIR%\support\artifacts\logs\desktop-build.log"
+    )
 ) else (
     echo.
-    echo ============================================
-    echo   桌面端构建失败！错误代码: %ERRORLEVEL%
-    echo ============================================
-
-    REM 记录失败日志
-    echo [%date% %time%] 桌面端构建失败 - 错误代码: %ERRORLEVEL% >> "%LOG_FILE%"
+    echo ==========================================================
+    echo [build-desktop] ERROR: Publish failed with exit code %EXIT_CODE%.
+    echo ==========================================================
+    if exist "%ROOT_DIR%\support\artifacts\logs" (
+        echo [%date% %time%] desktop publish failed - code %EXIT_CODE% >> "%ROOT_DIR%\support\artifacts\logs\desktop-build.log"
+    )
 )
 
-:build_end
+:finish
 echo.
-echo 按任意键返回...
-pause >nul
-endlocal
+if defined NON_INTERACTIVE (
+    exit /b %EXIT_CODE%
+)
+if defined RETRY_READY (
+    choice /C RQ /N /M "[build-desktop] Press R to publish again, Q to close: "
+    if errorlevel 2 exit /b %EXIT_CODE%
+    if errorlevel 1 goto publish
+) else (
+    choice /C Q /N /M "[build-desktop] Press Q to close: "
+)
+exit /b %EXIT_CODE%

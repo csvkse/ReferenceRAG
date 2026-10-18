@@ -89,16 +89,21 @@ export const indexApi = {
     deleteAllData: () => api.delete('/index/data'),
     rebuild: (request) => api.post('/index/rebuild', request || {}),
     rebuildSource: (sourceName) => api.post(`/index/rebuild/${encodeURIComponent(sourceName)}`),
+    rechunk: (sources) => api.post('/index/rechunk', { sources }),
+    rechunkSource: (sourceName) => api.post(`/index/rechunk/${encodeURIComponent(sourceName)}`),
     cleanup: () => api.post('/index/cleanup')
 };
 export const settingsApi = {
     get: () => api.get('/Settings'),
     save: (config) => api.post('/Settings', config),
     updateModelsPath: (modelsPath, migrateExisting = false) => api.patch('/Settings/models-path', { modelsPath, migrateExisting }),
-    getCudaAvailability: () => api.get('/Settings/cuda-availability')
+    getCudaAvailability: () => api.get('/Settings/cuda-availability'),
+    verifyHfToken: (token, endpoint) => api.post('/Settings/verify-hf-token', { token, endpoint })
 };
 // Performance
 export const performanceApi = {
+    getModelStatus: () => api.get('/performance/model-status'),
+    getRerankStatus: () => api.get('/performance/rerank-status'),
     benchmark: (data) => api.post('/Performance/benchmark', data || {}),
     quickTest: (textLength = 10000) => api.get(`/Performance/quick-test?textLength=${textLength}`),
     batchSizes: (data) => api.post('/Performance/batch-sizes', data || {}),
@@ -121,25 +126,33 @@ export const modelsApi = {
     getAll: () => api.get('/Models'),
     getCurrent: () => api.get('/Models/current'),
     switch: (modelName, deleteOldVectors = false) => api.post(`/Models/switch`, { modelName, deleteOldVectors }),
-    download: (modelName, onnxFilePath) => api.post(`/Models/download/${modelName}`, onnxFilePath ? { onnxFilePath } : {}),
+    download: (modelName, onnxFilePath, format, repository) => api.post(`/Models/download/${modelName}`, { onnxFilePath, format, repository }),
     getDownloadProgress: (modelName) => api.get(`/Models/download/${modelName}/progress`),
     getActiveDownloads: () => api.get('/Models/downloads/active'),
     convert: (modelName, targetFormat) => api.post(`/Models/${modelName}/convert`, { targetFormat }),
     getConvertProgress: (modelName) => api.get(`/Models/${modelName}/convert/progress`),
     addCustom: (huggingFaceId, displayName) => api.post('/Models/custom', { huggingFaceId, displayName }),
     delete: (modelName) => api.delete(`/Models/${modelName}`),
-    getDownloadOptions: (modelName) => api.get(`/Models/download-options/${modelName}`),
+    getDownloadOptions: (modelName, config) => api.get(`/Models/download-options/${modelName}`, config),
     // Rerank Models
     getRerankModels: () => api.get('/Models/rerank'),
     getDownloadedRerankModels: () => api.get('/Models/rerank/downloaded'),
     getCurrentRerankModel: () => api.get('/Models/rerank/current'),
     switchRerankModel: (modelName) => api.post(`/Models/rerank/switch`, { modelName }),
-    downloadRerankModel: (modelName, onnxFilePath) => api.post(`/Models/rerank/download/${modelName}`, onnxFilePath ? { onnxFilePath } : {}),
+    downloadRerankModel: (modelName, onnxFilePath, format, repository) => api.post(`/Models/rerank/download/${modelName}`, { onnxFilePath, format, repository }),
     getRerankDownloadProgress: (modelName) => api.get(`/Models/rerank/download/${modelName}/progress`),
     deleteRerankModel: (modelName) => api.delete(`/Models/rerank/${modelName}`),
-    getRerankDownloadOptions: (modelName) => api.get(`/Models/rerank/download-options/${modelName}`),
+    getRerankDownloadOptions: (modelName, config) => api.get(`/Models/rerank/download-options/${modelName}`, config),
+    cancelDownload: (modelName) => api.delete(`/Models/download/${modelName}`),
+    cancelRerankDownload: (modelName) => api.delete(`/Models/rerank/download/${modelName}`),
     // 扫描模型目录
-    scanModels: () => api.post('/Models/scan')
+    scanModels: () => api.post('/Models/scan'),
+    // 模型运行时状态
+    getRuntimeStatus: () => api.get('/Models/runtime-status'),
+    // 切换模型变体（嵌入或重排）
+    switchVariant: (modelName, variantFileName, isRerank = false) => api.post('/Models/switch-variant', { modelName, variantFileName, isRerank }),
+    // 删除模型特定变体
+    deleteVariant: (modelName, variantFileName, isRerank = false) => api.delete(`/Models/variant?modelName=${encodeURIComponent(modelName)}&variantFileName=${encodeURIComponent(variantFileName)}&isRerank=${isRerank}`)
 };
 // vectorsApi / vectorIndexApi removed — use indexJobsApi + indexApi
 // System

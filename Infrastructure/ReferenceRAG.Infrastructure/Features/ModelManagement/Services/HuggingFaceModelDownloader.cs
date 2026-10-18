@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Diagnostics;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Features.ModelManagement.Protobuf;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -12,18 +13,53 @@ internal class HuggingFaceModelDownloader : IDisposable
 {
     private readonly HttpClient _httpClient;
     private readonly string _hfToken;
+    private readonly List<string> _endpoints = new();
+    private string _activeBaseUrl;
     private bool _disposed;
 
-    public HuggingFaceModelDownloader(string? hfToken = null)
+    public HuggingFaceModelDownloader(string? hfToken = null, string? customEndpoint = null)
     {
-        _httpClient = new HttpClient();
-        _hfToken = hfToken ?? Environment.GetEnvironmentVariable("HF_TOKEN") ?? "";
+        _httpClient = new HttpClient
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+        _hfToken = !string.IsNullOrWhiteSpace(hfToken) ? hfToken : (Environment.GetEnvironmentVariable("HF_TOKEN") ?? "");
+
+        // 设置 User-Agent，避免 Cloudflare 或 CDN 拦截
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 ReferenceRAG/1.0");
 
         if (!string.IsNullOrEmpty(_hfToken))
         {
             _httpClient.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Bearer", _hfToken);
         }
+
+        // 优先级：
+        // 1. 用户自定义配置/环境变量 HF_ENDPOINT (如国内镜像或内网反代)
+        // 2. 国内镜像 https://hf-mirror.com
+        // 3. HuggingFace 官方 https://huggingface.co
+        var ep = !string.IsNullOrWhiteSpace(customEndpoint) ? customEndpoint : Environment.GetEnvironmentVariable("HF_ENDPOINT");
+        if (!string.IsNullOrWhiteSpace(ep))
+        {
+            var cleanEp = ep.Trim().TrimEnd('/');
+            if (!_endpoints.Contains(cleanEp, StringComparer.OrdinalIgnoreCase))
+            {
+                _endpoints.Add(cleanEp);
+            }
+        }
+
+        if (!_endpoints.Contains("https://hf-mirror.com", StringComparer.OrdinalIgnoreCase))
+        {
+            _endpoints.Add("https://hf-mirror.com");
+        }
+
+        if (!_endpoints.Contains("https://huggingface.co", StringComparer.OrdinalIgnoreCase))
+        {
+            _endpoints.Add("https://huggingface.co");
+        }
+
+        _activeBaseUrl = _endpoints[0];
     }
 
     /// <summary>
@@ -48,6 +84,7 @@ internal class HuggingFaceModelDownloader : IDisposable
 
         // 检查是否有 ONNX 模型文件
         var onnxFiles = files.Where(f => f.Path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)).ToList();
+        var ggufFiles = files.Where(f => f.Path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase)).ToList();
 
         if (onnxFiles.Count > 0)
         {
@@ -55,11 +92,38 @@ internal class HuggingFaceModelDownloader : IDisposable
             Console.WriteLine($"[Downloader] 检测到 ONNX 文件，直接下载模式");
             await DownloadOnnxModelAsync(modelId, targetDir, files, progress, cancellationToken, onnxVariantPath);
         }
+        else if (ggufFiles.Count > 0)
+        {
+            // 方案2: 直接下载 GGUF 模型（LLamaSharp 原生加载，零转换）
+            Console.WriteLine($"[Downloader] 检测到 GGUF 文件，直接下载模式");
+            await DownloadGgufModelAsync(modelId, targetDir, files, progress, cancellationToken, onnxVariantPath);
+        }
         else
         {
-            // 方案2: 下载 PyTorch 模型并转换
-            Console.WriteLine($"[Downloader] 未检测到 ONNX 文件，将下载 PyTorch 模型并自动转换");
-            await DownloadAndConvertAsync(modelId, targetDir, files, progress, cancellationToken, onnxFormat);
+            // 方案3: 尝试探测社区 ONNX 镜像源 (Xenova / onnx-community / optimum)
+            var (mirrorFound, mirrorModelId, mirrorFiles) = await ProbeCommunityMirrorsAsync(modelId, cancellationToken);
+            if (mirrorFound && mirrorModelId != null && mirrorFiles != null)
+            {
+                Console.WriteLine($"[Downloader] 检测到社区 ONNX 镜像 [{mirrorModelId}]，直接下载免转换 ONNX 模型");
+                await DownloadOnnxModelAsync(mirrorModelId, targetDir, mirrorFiles, progress, cancellationToken, onnxVariantPath);
+            }
+            else
+            {
+                // 方案4: 检查 Python 环境
+                if (!IsPythonAvailable())
+                {
+                    throw new InvalidOperationException(
+                        $"模型 '{modelId}' 仅包含 PyTorch 原始权重，未检测到预转换的 ONNX 或 GGUF 格式。\n" +
+                        $"当前系统未检测到 Python/Optimum 环境，无法在本地执行 PyTorch 模型导出。\n\n" +
+                        $"建议解决方案：\n" +
+                        $"1. 选用已适配 ONNX 的模型或带 GGUF 权重的模型；\n" +
+                        $"2. 或者在终端执行命令手动导出：\n" +
+                        $"   optimum-cli export onnx --model {modelId} {targetDir}");
+                }
+
+                Console.WriteLine($"[Downloader] 未检测到 ONNX/GGUF 预置权重，将下载 PyTorch 模型并自动转换");
+                await DownloadAndConvertAsync(modelId, targetDir, files, progress, cancellationToken, onnxFormat);
+            }
         }
 
         progress?.Report(100);
@@ -83,23 +147,16 @@ internal class HuggingFaceModelDownloader : IDisposable
             var onnxFiles = files.Where(f =>
                 f.Path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)).ToList();
 
+            // 查找所有 GGUF 文件
+            var ggufFiles = files.Where(f =>
+                f.Path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase)).ToList();
+
             // 查找所有外部数据文件（.onnx.data 或 .onnx_data 两种命名约定）
             var dataFiles = files.Where(f =>
                 f.Path.EndsWith(".onnx.data", StringComparison.OrdinalIgnoreCase) ||
                 f.Path.EndsWith(".onnx_data", StringComparison.OrdinalIgnoreCase)).ToList();
 
-            if (onnxFiles.Count == 0)
-            {
-                // 没有 ONNX 文件，需要转换
-                result.HasOnnx = false;
-                result.NeedsConversion = true;
-
-                // 估算模型大小（PyTorch 文件）
-                result.EstimatedSize = files
-                    .Where(f => f.Path.EndsWith(".bin") || f.Path.EndsWith(".safetensors"))
-                    .Sum(f => f.Size);
-            }
-            else
+            if (onnxFiles.Count > 0)
             {
                 result.HasOnnx = true;
                 result.NeedsConversion = false;
@@ -127,6 +184,76 @@ internal class HuggingFaceModelDownloader : IDisposable
 
                 // 确定推荐选项
                 DetermineRecommendedOption(result);
+            }
+            else if (ggufFiles.Count > 0)
+            {
+                result.HasOnnx = false;
+                result.HasGguf = true;
+                result.NeedsConversion = false; // GGUF 直接加载，无需转换
+
+                var rootGgufFiles = ggufFiles.Where(f => !f.Path.Contains("/")).ToList();
+                var subfolderGgufFiles = ggufFiles.Where(f => f.Path.Contains("/")).ToList();
+
+                foreach (var file in rootGgufFiles)
+                {
+                    var option = CreateGgufOption(file, false);
+                    result.RootOptions.Add(option);
+                }
+
+                foreach (var file in subfolderGgufFiles)
+                {
+                    var option = CreateGgufOption(file, true);
+                    result.SubfolderOptions.Add(option);
+                }
+
+                result.AllOptions = result.RootOptions.Concat(result.SubfolderOptions).ToList();
+                DetermineRecommendedOption(result);
+            }
+            else
+            {
+                // 尝试探查社区镜像仓库是否存在预转换 ONNX
+                var (mirrorFound, mirrorModelId, mirrorFiles) = await ProbeCommunityMirrorsAsync(modelId, cancellationToken);
+                if (mirrorFound && mirrorModelId != null && mirrorFiles != null)
+                {
+                    var mirrorOnnxFiles = mirrorFiles.Where(f => f.Path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)).ToList();
+                    var mirrorDataFiles = mirrorFiles.Where(f =>
+                        f.Path.EndsWith(".onnx.data", StringComparison.OrdinalIgnoreCase) ||
+                        f.Path.EndsWith(".onnx_data", StringComparison.OrdinalIgnoreCase)).ToList();
+
+                    if (mirrorOnnxFiles.Count > 0)
+                    {
+                        result.HasOnnx = true;
+                        result.NeedsConversion = false;
+
+                        foreach (var file in mirrorOnnxFiles.Where(f => !f.Path.Contains("/")))
+                        {
+                            var option = CreateFileOption(file, mirrorDataFiles, false);
+                            option.Description += $" (来自社区镜像 {mirrorModelId})";
+                            result.RootOptions.Add(option);
+                        }
+
+                        foreach (var file in mirrorOnnxFiles.Where(f => f.Path.Contains("/")))
+                        {
+                            var option = CreateFileOption(file, mirrorDataFiles, true);
+                            option.Description += $" (来自社区镜像 {mirrorModelId})";
+                            result.SubfolderOptions.Add(option);
+                        }
+
+                        result.AllOptions = result.RootOptions.Concat(result.SubfolderOptions).ToList();
+                        DetermineRecommendedOption(result);
+                        return result;
+                    }
+                }
+
+                // 没有 ONNX，也没有 GGUF，镜像也没有
+                result.HasOnnx = false;
+                result.HasGguf = false;
+                result.NeedsConversion = true;
+
+                // 估算模型大小（PyTorch 文件）
+                result.EstimatedSize = files
+                    .Where(f => f.Path.EndsWith(".bin") || f.Path.EndsWith(".safetensors"))
+                    .Sum(f => f.Size);
             }
         }
         catch (Exception ex)
@@ -250,6 +377,43 @@ internal class HuggingFaceModelDownloader : IDisposable
     }
 
     /// <summary>
+    /// 创建 GGUF 文件选项
+    /// </summary>
+    private static OnnxFileOption CreateGgufOption(HuggingFaceFile file, bool isInSubfolder)
+    {
+        var fileName = Path.GetFileName(file.Path);
+        var lowerName = fileName.ToLowerInvariant();
+        var match = System.Text.RegularExpressions.Regex.Match(lowerName, @"(q[0-9]_[a-z0-9_]+|f16|f32|bf16)");
+        var quant = match.Success ? match.Groups[1].Value.ToUpperInvariant() : "GGUF";
+
+        var isRecommended = quant.Equals("Q4_K_M", StringComparison.OrdinalIgnoreCase) ||
+                            quant.Equals("Q4_0", StringComparison.OrdinalIgnoreCase);
+
+        var option = new OnnxFileOption
+        {
+            Path = file.Path,
+            DisplayName = $"GGUF {quant}",
+            Description = $"GGUF 量化模型 ({quant})，支持通过 LLamaSharp 原生加载推理",
+            Size = file.Size,
+            IsQuantized = true,
+            HasExternalData = false,
+            IsInSubfolder = isInSubfolder,
+            IsRecommended = isRecommended
+        };
+
+        if (isInSubfolder)
+        {
+            var dir = Path.GetDirectoryName(file.Path);
+            if (!string.IsNullOrEmpty(dir))
+            {
+                option.Description += $" (来自 {dir}/ 子目录)";
+            }
+        }
+
+        return option;
+    }
+
+    /// <summary>
     /// 确定推荐选项
     /// </summary>
     private static void DetermineRecommendedOption(ModelDownloadOptions result)
@@ -285,6 +449,19 @@ internal class HuggingFaceModelDownloader : IDisposable
             return;
         }
 
+        // GGUF 优先推荐：Q4_K_M 或 Q4_0
+        var ggufRecommended = result.AllOptions.FirstOrDefault(o =>
+            o.Path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) &&
+            (o.Path.Contains("q4_k_m", StringComparison.OrdinalIgnoreCase) ||
+             o.Path.Contains("q4_0", StringComparison.OrdinalIgnoreCase)));
+
+        if (ggufRecommended != null)
+        {
+            ggufRecommended.IsRecommended = true;
+            result.RecommendedOption = ggufRecommended;
+            return;
+        }
+
         // 再次：根目录的标准版本（即使是外部格式）
         var rootStandard = result.RootOptions.FirstOrDefault(o =>
             System.IO.Path.GetFileName(o.Path) == "model.onnx");
@@ -304,7 +481,120 @@ internal class HuggingFaceModelDownloader : IDisposable
         {
             subfolderStandard.IsRecommended = true;
             result.RecommendedOption = subfolderStandard;
+            return;
         }
+
+        // 兜底：第一个可用选项
+        result.AllOptions[0].IsRecommended = true;
+        result.RecommendedOption = result.AllOptions[0];
+    }
+
+    /// <summary>
+    /// 方案2: 直接下载 GGUF 模型（无需任何转换）
+    /// </summary>
+    private async Task DownloadGgufModelAsync(
+        string modelId,
+        string targetDir,
+        List<HuggingFaceFile> files,
+        IProgress<float>? progress,
+        CancellationToken cancellationToken,
+        string? variantPath = null)
+    {
+        var ggufFiles = files.Where(f => f.Path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (ggufFiles.Count == 0)
+        {
+            throw new InvalidOperationException($"在模型 {modelId} 中未找到 .gguf 文件");
+        }
+
+        HuggingFaceFile targetGgufFile;
+        if (!string.IsNullOrEmpty(variantPath))
+        {
+            var match = ggufFiles.FirstOrDefault(f =>
+                f.Path.Equals(variantPath, StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileName(f.Path).Equals(variantPath, StringComparison.OrdinalIgnoreCase));
+            targetGgufFile = match ?? throw new InvalidOperationException($"指定的 GGUF 变体不存在: {variantPath}");
+        }
+        else
+        {
+            targetGgufFile = SelectBestGgufFile(ggufFiles);
+        }
+
+        // 查找辅助配置文件（如果存在）
+        var auxiliaryFiles = files.Where(f =>
+            f.Path.EndsWith("tokenizer.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("tokenizer_config.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("vocab.txt", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("special_tokens_map.json", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.EndsWith("config.json", StringComparison.OrdinalIgnoreCase)
+        ).ToList();
+
+        var filesToDownload = new List<HuggingFaceFile> { targetGgufFile };
+        filesToDownload.AddRange(auxiliaryFiles);
+        filesToDownload = filesToDownload.Distinct().ToList();
+
+        var totalSize = filesToDownload.Sum(f => f.Size);
+        var downloadedSize = 0L;
+
+        foreach (var file in filesToDownload)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var fileName = Path.GetFileName(file.Path);
+            var localPath = Path.Combine(targetDir, fileName);
+
+            Console.WriteLine($"[Downloader] 下载 GGUF/配置: {file.Path} ({file.Size / 1024.0 / 1024.0:F2} MB)");
+            await DownloadFileAsync(modelId, file.Path, localPath, downloadedSize, totalSize, progress, cancellationToken);
+            downloadedSize += file.Size;
+        }
+
+        Console.WriteLine($"[Downloader] GGUF 模型下载完成: {targetGgufFile.Path}");
+    }
+
+    private static HuggingFaceFile SelectBestGgufFile(List<HuggingFaceFile> files)
+    {
+        var priorities = new[] { "q4_k_m", "q4_k_s", "q4_0", "q5_k_m", "q5_k_s", "q5_0", "q8_0", "q4_1", "f16" };
+        foreach (var priority in priorities)
+        {
+            var match = files.FirstOrDefault(f => f.Path.Contains(priority, StringComparison.OrdinalIgnoreCase));
+            if (match != null) return match;
+        }
+        return files.OrderBy(f => f.Size).First();
+    }
+
+    /// <summary>
+    /// 探查主流社区镜像源是否有预转的 ONNX 模型 (Xenova / onnx-community / optimum)
+    /// </summary>
+    private async Task<(bool Found, string? MirrorModelId, List<HuggingFaceFile>? Files)> ProbeCommunityMirrorsAsync(
+        string modelId,
+        CancellationToken cancellationToken)
+    {
+        var repoName = modelId.Contains('/') ? modelId.Split('/').Last() : modelId;
+        var candidates = new List<string>
+        {
+            $"Xenova/{repoName}",
+            $"onnx-community/{repoName}",
+            $"optimum/{repoName}"
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (candidate.Equals(modelId, StringComparison.OrdinalIgnoreCase)) continue;
+
+            try
+            {
+                var files = await GetModelFilesAsync(candidate, cancellationToken);
+                if (files != null && files.Any(f => f.Path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return (true, candidate, files);
+                }
+            }
+            catch
+            {
+                // 忽略镜像探查失败（404 或网络），尝试下一个候选
+            }
+        }
+
+        return (false, null, null);
     }
 
     /// <summary>
@@ -455,10 +745,9 @@ internal class HuggingFaceModelDownloader : IDisposable
                 Directory.CreateDirectory(fileDir);
             }
 
-            var url = $"https://huggingface.co/{modelId}/resolve/main/{file.Path}";
             Console.WriteLine($"[Downloader] 下载: {file.Path} ({file.Size / 1024.0 / 1024.0:F2} MB)");
 
-            await DownloadFileAsync(url, filePath, downloadedSize, totalSize, progress, cancellationToken);
+            await DownloadFileAsync(modelId, file.Path, filePath, downloadedSize, totalSize, progress, cancellationToken);
             downloadedSize += file.Size;
         }
 
@@ -575,10 +864,9 @@ internal class HuggingFaceModelDownloader : IDisposable
                 Directory.CreateDirectory(fileDir);
             }
 
-            var url = $"https://huggingface.co/{modelId}/resolve/main/{file.Path}";
             Console.WriteLine($"[Downloader] 下载: {file.Path} ({file.Size / 1024.0 / 1024.0:F2} MB)");
 
-            await DownloadFileAsync(url, filePath, downloadedSize, totalSize, progress, cancellationToken);
+            await DownloadFileAsync(modelId, file.Path, filePath, downloadedSize, totalSize, progress, cancellationToken);
             downloadedSize += file.Size;
         }
 
@@ -735,10 +1023,9 @@ internal class HuggingFaceModelDownloader : IDisposable
             var onnxFile = files.FirstOrDefault(f => f.Path == "model.onnx");
             if (onnxFile == null) return false;
 
-            var url = $"https://huggingface.co/{optimumModelId}/resolve/main/model.onnx";
             var targetPath = Path.Combine(targetDir, "model.onnx");
 
-            await DownloadFileAsync(url, targetPath, 0, onnxFile.Size, null, cancellationToken);
+            await DownloadFileAsync(optimumModelId, "model.onnx", targetPath, 0, onnxFile.Size, null, cancellationToken);
             
             Console.WriteLine("[Downloader] 预转换 ONNX 模型下载成功");
             return true;
@@ -751,7 +1038,7 @@ internal class HuggingFaceModelDownloader : IDisposable
     }
 
     /// <summary>
-    /// 使用 Python 转换模型为 ONNX
+    /// 转换模型为 ONNX (嵌入式或外部格式)
     /// </summary>
     public async Task<bool> ConvertToOnnxAsync(
         string modelDir, 
@@ -760,10 +1047,25 @@ internal class HuggingFaceModelDownloader : IDisposable
         IProgress<float>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        // 1. 如果 model.onnx 已经存在，则属于格式转换需求，直接使用纯 C# 原生 Protobuf 转换器（零 Python 依赖）
+        var onnxPath = Path.Combine(modelDir, "model.onnx");
+        if (File.Exists(onnxPath))
+        {
+            Console.WriteLine("[Downloader] 检测到已有 model.onnx，调用纯 C# 原生 OnnxFormatConverter 进行格式转换...");
+            var (success, error) = await OnnxFormatConverter.ConvertFormatAsync(modelDir, format, progress, cancellationToken);
+            if (success)
+            {
+                Console.WriteLine($"[Downloader] 纯 C# ONNX 格式转换成功: {format}");
+                return true;
+            }
+            Console.WriteLine($"[Downloader] 纯 C# ONNX 格式转换失败: {error}");
+            return false;
+        }
+
         // 检查 Python 是否可用
         if (!IsPythonAvailable())
         {
-            Console.WriteLine("[Downloader] Python 不可用，跳过自动转换");
+            Console.WriteLine("[Downloader] Python 不可用，无法执行 PyTorch 导出转换");
             return false;
         }
 
@@ -827,6 +1129,11 @@ internal class HuggingFaceModelDownloader : IDisposable
                 StandardErrorEncoding = System.Text.Encoding.UTF8
             };
             startInfo.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+            startInfo.EnvironmentVariables["HF_ENDPOINT"] = _activeBaseUrl;
+            if (!string.IsNullOrEmpty(_hfToken))
+            {
+                startInfo.EnvironmentVariables["HF_TOKEN"] = _hfToken;
+            }
             progress?.Report(20);
 
             using var process = new Process { StartInfo = startInfo };
@@ -1150,18 +1457,41 @@ if __name__ == "__main__":
         string modelId,
         CancellationToken cancellationToken = default)
     {
-        var files = new List<HuggingFaceFile>();
+        Exception? lastException = null;
 
-        try
+        foreach (var endpoint in _endpoints)
         {
-            var apiUrl = $"https://huggingface.co/api/models/{modelId}";
-            var response = await _httpClient.GetAsync(apiUrl, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var apiUrl = $"{endpoint}/api/models/{modelId}";
 
-            if (response.IsSuccessStatusCode)
+            try
             {
+                using var response = await _httpClient.GetAsync(apiUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
+                if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                    response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    throw new UnauthorizedAccessException(
+                        $"模型 '{modelId}' 属于 HuggingFace 授权/私有/协议限制模型 (HTTP {(int)response.StatusCode})。" +
+                        $"若已获得授权，请在系统环境变量配置 HF_TOKEN 后重试。");
+                }
+
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    lastException = new KeyNotFoundException($"模型 '{modelId}' 在端点 {endpoint} 不存在 (HTTP 404)");
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    lastException = new HttpRequestException($"端点 {endpoint} 返回 HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
+                    continue;
+                }
+
                 var json = await response.Content.ReadAsStringAsync(cancellationToken);
                 var modelInfo = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(json);
-                
+                var files = new List<HuggingFaceFile>();
+
                 if (modelInfo.TryGetProperty("siblings", out var siblings))
                 {
                     foreach (var sibling in siblings.EnumerateArray())
@@ -1182,45 +1512,111 @@ if __name__ == "__main__":
                         }
                     }
                 }
+
+                // 成功获取文件列表，记录当前活动端点
+                _activeBaseUrl = endpoint;
+                Console.WriteLine($"[Downloader] 成功连接模型源 [{endpoint}]，获取到 {files.Count} 个文件信息");
+                return files;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // 授权限制属于权限配置问题，无需重试备用端点，直接向外抛出明确错误
+                throw;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+                Console.WriteLine($"[Downloader] 端点 {endpoint} 访问失败: {ex.Message}，正在尝试备用镜像源...");
             }
         }
-        catch (Exception ex)
+
+        if (lastException != null)
         {
-            Console.WriteLine($"[Downloader] API request failed: {ex.Message}");
+            throw new InvalidOperationException(
+                $"无法获取模型 {modelId} 的文件列表。已尝试端点: [{string.Join(", ", _endpoints)}]。原因: {lastException.Message}",
+                lastException);
         }
 
-        return files;
+        throw new InvalidOperationException($"无法获取模型 {modelId} 的文件列表，请检查模型名称是否正确。");
     }
 
     private async Task DownloadFileAsync(
-        string url,
+        string modelId,
+        string relativeFilePath,
         string targetPath,
         long downloadedSize,
         long totalSize,
         IProgress<float>? progress,
         CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        Exception? lastEx = null;
 
-        using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var fileStream = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true);
-
-        var buffer = new byte[8192];
-        long totalRead = 0;
-        int bytesRead;
-
-        while ((bytesRead = await contentStream.ReadAsync(buffer, cancellationToken)) > 0)
+        // 优先使用当前活动的端点，其次尝试其余候选端点
+        var candidateEndpoints = new List<string> { _activeBaseUrl };
+        foreach (var ep in _endpoints)
         {
-            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
-            totalRead += bytesRead;
-
-            if (totalSize > 0)
+            if (!candidateEndpoints.Contains(ep, StringComparer.OrdinalIgnoreCase))
             {
-                var overallProgress = (float)(downloadedSize + totalRead) / totalSize * 100;
-                progress?.Report(Math.Min(overallProgress, 99)); // 保留1%给最终确认
+                candidateEndpoints.Add(ep);
             }
         }
+
+        foreach (var endpoint in candidateEndpoints)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var url = $"{endpoint}/{modelId}/resolve/main/{relativeFilePath}";
+
+            try
+            {
+                using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                response.EnsureSuccessStatusCode();
+
+                using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var fileStream = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, true);
+
+                var buffer = new byte[65536];
+                long totalRead = 0;
+                int bytesRead;
+
+                while ((bytesRead = await contentStream.ReadAsync(buffer, cancellationToken)) > 0)
+                {
+                    await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
+                    totalRead += bytesRead;
+
+                    if (totalSize > 0)
+                    {
+                        var overallProgress = (float)(downloadedSize + totalRead) / totalSize * 100;
+                        progress?.Report(Math.Min(overallProgress, 99)); // 保留1%给最终确认
+                    }
+                }
+
+                _activeBaseUrl = endpoint;
+                return;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lastEx = ex;
+                Console.WriteLine($"[Downloader] 从 {endpoint} 下载 {relativeFilePath} 失败: {ex.Message}，正在尝试备用镜像源...");
+                try
+                {
+                    if (File.Exists(targetPath))
+                    {
+                        File.Delete(targetPath);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        throw new InvalidOperationException($"无法下载文件 '{relativeFilePath}' (模型: {modelId})。已尝试所有镜像端点。错误: {lastEx?.Message}", lastEx);
     }
 
     public void Dispose()

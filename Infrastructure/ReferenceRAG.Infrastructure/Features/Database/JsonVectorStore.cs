@@ -240,6 +240,22 @@ public class JsonVectorStore : IVectorStore, IDisposable
         await SaveDataAsync(cancellationToken);
     }
 
+    public async Task<int> DeleteChunksAsync(IEnumerable<string> chunkIds, CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        int count = 0;
+        foreach (var id in chunkIds)
+        {
+            if (_chunks.Remove(id)) count++;
+            _vectors.Remove(id);
+        }
+        if (count > 0)
+        {
+            await SaveDataAsync(cancellationToken);
+        }
+        return count;
+    }
+
     // ==================== 向量操作 ====================
 
     public async Task UpsertVectorAsync(VectorRecord vector, CancellationToken cancellationToken = default)
@@ -559,6 +575,12 @@ public class JsonVectorStore : IVectorStore, IDisposable
     }
 
     public Task<int> CleanupOrphanChunkVectorsAsync(CancellationToken cancellationToken = default)
+        => Task.FromResult(0);
+
+    public Task<int> DeleteStaleChunksForFileAsync(string fileId, IEnumerable<string> activeChunkIds, CancellationToken cancellationToken = default)
+        => Task.FromResult(0);
+
+    public Task<int> CleanupNoiseChunksAsync(CancellationToken cancellationToken = default)
         => Task.FromResult(0);
 
     public Task<IEnumerable<string>> GetAllChunkIdsAsync(CancellationToken cancellationToken = default)

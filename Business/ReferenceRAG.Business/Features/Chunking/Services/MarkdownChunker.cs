@@ -1,5 +1,11 @@
 using Markdig;
 using Markdig.Syntax;
+using ReferenceRAG.Business.Features.Chunking.Adapters;
+using ReferenceRAG.Business.Features.Chunking.ContinuousElements.Adapters;
+using ReferenceRAG.Business.Features.Chunking.ContinuousElements.Models;
+using ReferenceRAG.Business.Features.Chunking.ContinuousElements.StateMachine;
+using ReferenceRAG.Business.Features.Chunking.ContinuousElements.Strategies;
+using ReferenceRAG.Business.Features.Chunking.Strategies;
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
@@ -7,21 +13,37 @@ using ReferenceRAG.Core.Models;
 namespace ReferenceRAG.Core.Services;
 
 /// <summary>
-/// Markdown 分段器 - 支持行号记录
+/// Markdown 分段器 - 支持行号记录、自适应切分与连续结构元素保护
 /// </summary>
 public class MarkdownChunker : IMarkdownChunker
 {
     private const int ShortContentThreshold = 200;
     private readonly ITokenizer? _tokenizer;
     private readonly ChunkingOptions _defaultOptions;
+    private readonly IModelProfileAdapter _profileAdapter;
+    private readonly AdaptiveStrategyFactory _strategyFactory;
+    private readonly ContinuousChunkingStrategyFactory _continuousStrategyFactory;
+    private readonly TableStructureAdapter _tableAdapter = new();
 
     private static readonly System.Text.RegularExpressions.Regex HeadingPattern =
         new(@"^(#{1,6})\s+(.+)$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    public MarkdownChunker(ChunkingOptions? options = null, ITokenizer? tokenizer = null)
+    private static readonly System.Text.RegularExpressions.Regex SeparatorPattern =
+        new(@"^(\s*[=\-_*#~·\u2500-\u257F]{2,}\s*(\(?\d+[\-~至到/,\s]\d+\)?|\d+)?\s*[=\-_*#~·\u2500-\u257F]{0,}\s*)$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    public MarkdownChunker(
+        ChunkingOptions? options = null,
+        ITokenizer? tokenizer = null,
+        IModelProfileAdapter? profileAdapter = null,
+        AdaptiveStrategyFactory? strategyFactory = null,
+        ContinuousChunkingStrategyFactory? continuousStrategyFactory = null)
     {
         _defaultOptions = options ?? new ChunkingOptions();
         _tokenizer = tokenizer;
+        _profileAdapter = profileAdapter ?? new DefaultModelProfileAdapter();
+        _strategyFactory = strategyFactory ?? new AdaptiveStrategyFactory();
+        _continuousStrategyFactory = continuousStrategyFactory ?? new ContinuousChunkingStrategyFactory();
     }
 
     public List<ChunkRecord> Chunk(string content, FileRecord file)
@@ -34,8 +56,35 @@ public class MarkdownChunker : IMarkdownChunker
 
     public List<ChunkRecord> Chunk(string content, ChunkingOptions? options = null)
     {
+        // P0: 前置清洗巨型 Base64 多媒体内联字符串
+        content = Base64CleanerPipeline.Clean(content);
+
         // P2: 不修改实例状态，使用局部有效配置
         var effectiveOptions = options ?? _defaultOptions;
+        var isAdaptive = string.Equals(effectiveOptions.Mode, "Adaptive", StringComparison.OrdinalIgnoreCase);
+
+        if (isAdaptive)
+        {
+            var profile = effectiveOptions.ModelProfile ?? _profileAdapter.GetProfile(null);
+            var strategy = _strategyFactory.GetStrategy(effectiveOptions.AdaptiveStrategyType);
+            var adaptiveParams = strategy.ResolveParameters(effectiveOptions, profile);
+
+            effectiveOptions = new ChunkingOptions
+            {
+                MaxTokens = adaptiveParams.MaxTokens,
+                MinTokens = adaptiveParams.MinTokens,
+                OverlapTokens = adaptiveParams.OverlapTokens,
+                PreserveHeadings = adaptiveParams.PreserveHeadings,
+                PreserveCodeBlocks = adaptiveParams.PreserveCodeBlocks,
+                PreserveTables = adaptiveParams.PreserveTables,
+                Mode = effectiveOptions.Mode,
+                AdaptiveLevel = effectiveOptions.AdaptiveLevel,
+                AdaptiveStrategyType = effectiveOptions.AdaptiveStrategyType,
+                TargetWindowUtilizationPercent = effectiveOptions.TargetWindowUtilizationPercent,
+                AdaptiveOverlapPercent = effectiveOptions.AdaptiveOverlapPercent,
+                ModelProfile = profile
+            };
+        }
 
         var result = new List<ChunkRecord>();
         var lines = content.Split('\n');
@@ -45,11 +94,19 @@ public class MarkdownChunker : IMarkdownChunker
         // P0: 合并短节（< MinTokens）到相邻节，避免产生无效 chunk
         sections = MergeShortSections(sections, effectiveOptions);
 
+        if (isAdaptive && !string.Equals(effectiveOptions.AdaptiveLevel, "Level1", StringComparison.OrdinalIgnoreCase))
+        {
+            // Level 2 / Level 3: 进一步对连续短小兄弟节进行智能聚合，避免产生大量碎片向量
+            sections = AggregateSiblingSections(sections, effectiveOptions);
+        }
+
         foreach (var section in sections)
         {
             var sectionTokens = _tokenizer?.CountTokens(section.Content) ?? TokenEstimator.EstimateTokens(section.Content);
+            var sectionLines = section.Content.Split('\n');
+            bool hasTable = effectiveOptions.PreserveTables && section.Content.Contains('|') && ContainsTable(sectionLines);
 
-            if (sectionTokens <= effectiveOptions.MaxTokens)
+            if (sectionTokens <= effectiveOptions.MaxTokens && !hasTable)
             {
                 result.Add(CreateChunk(
                     section.Content,
@@ -72,7 +129,114 @@ public class MarkdownChunker : IMarkdownChunker
             }
         }
 
+        result = PostProcessChunks(result, lines, effectiveOptions);
         return result;
+    }
+
+    private bool ContainsTable(string[] sectionLines)
+    {
+        for (int i = 0; i < sectionLines.Length; i++)
+        {
+            if (_tableAdapter.CanAdapt(sectionLines, i, out _))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 自适应模式下智能聚合连续短小兄弟小节，兼顾信息完整度与空间精简
+    /// </summary>
+    private List<Section> AggregateSiblingSections(List<Section> sections, ChunkingOptions options)
+    {
+        if (sections.Count <= 1) return sections;
+
+        var result = new List<Section>();
+        var current = sections[0];
+
+        for (int i = 1; i < sections.Count; i++)
+        {
+            var next = sections[i];
+            var currentTokens = _tokenizer?.CountTokens(current.Content) ?? TokenEstimator.EstimateTokens(current.Content);
+            var nextTokens = _tokenizer?.CountTokens(next.Content) ?? TokenEstimator.EstimateTokens(next.Content);
+
+            // 兄弟小节合并条件：合并后 token 不超过 85% 预算
+            bool canMerge = (currentTokens + nextTokens <= (int)(options.MaxTokens * 0.85f))
+                            && (current.Level == next.Level || (current.Level > 0 && next.Level > 0));
+
+            if (canMerge)
+            {
+                current = MergeTwoSections(current, next);
+            }
+            else
+            {
+                result.Add(current);
+                current = next;
+            }
+        }
+
+        result.Add(current);
+        return result;
+    }
+
+    /// <summary>
+    /// 判断文本是否为无独立语义的分隔符、装饰线或微小噪声碎片（如 === (43-48) ===, ---, ***, === 等）
+    /// </summary>
+    public static bool IsNoiseOrSeparator(string text) => NoiseChunkDetector.IsNoiseOrSeparator(text);
+
+    /// <summary>
+    /// 后置处理分块：消除孤立的单行分隔符或噪声分块，将其自动向前或向后合并到相邻内容分块
+    /// </summary>
+    private List<ChunkRecord> PostProcessChunks(List<ChunkRecord> chunks, string[] lines, ChunkingOptions options)
+    {
+        if (chunks.Count <= 1)
+        {
+            return chunks;
+        }
+
+        var processed = new List<ChunkRecord>();
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            var chunk = chunks[i];
+            if (IsNoiseOrSeparator(chunk.Content))
+            {
+                if (processed.Count > 0)
+                {
+                    // 向前合并到上一个分块
+                    var prev = processed[^1];
+                    prev.Content += "\n\n" + chunk.Content;
+                    prev.EndLine = Math.Max(prev.EndLine, chunk.EndLine);
+                    prev.EndColumn = chunk.EndColumn > 0 ? chunk.EndColumn : prev.EndColumn;
+                    prev.TokenCount = _tokenizer?.CountTokens(prev.Content) ?? TokenEstimator.EstimateTokens(prev.Content);
+                }
+                else if (i + 1 < chunks.Count)
+                {
+                    // 作为首个块且为纯分隔符，向后合并到下一个分块
+                    var next = chunks[i + 1];
+                    next.Content = chunk.Content + "\n\n" + next.Content;
+                    next.StartLine = Math.Min(chunk.StartLine, next.StartLine);
+                    next.TokenCount = _tokenizer?.CountTokens(next.Content) ?? TokenEstimator.EstimateTokens(next.Content);
+                }
+                else
+                {
+                    // 既无前也无后，保留
+                    processed.Add(chunk);
+                }
+            }
+            else
+            {
+                processed.Add(chunk);
+            }
+        }
+
+        // 重新编号 ChunkIndex
+        for (int i = 0; i < processed.Count; i++)
+        {
+            processed[i].ChunkIndex = i;
+        }
+
+        return processed;
     }
 
     // ── 短节合并 (P0) ─────────────────────────────────────────────────────────
@@ -243,7 +407,7 @@ public class MarkdownChunker : IMarkdownChunker
         ChunkingOptions options)
     {
         var result = new List<ChunkRecord>();
-        var paragraphs = ExtractParagraphs(section, allLines, options.PreserveCodeBlocks);
+        var paragraphs = ExtractParagraphs(section, allLines, options.PreserveCodeBlocks, options.PreserveTables);
         var buffer = new List<Paragraph>();
         var bufferTokens = 0;
         var chunkIndex = startChunkIndex;
@@ -251,6 +415,49 @@ public class MarkdownChunker : IMarkdownChunker
         foreach (var para in paragraphs)
         {
             var paraTokens = _tokenizer?.CountTokens(para.Content) ?? TokenEstimator.EstimateTokens(para.Content);
+
+            // 表格专属处理：支持表头传承与行级对齐
+            if (para.IsTable && options.PreserveTables && para.TableElement != null)
+            {
+                if (buffer.Count > 0)
+                {
+                    result.Add(CreateChunkFromParagraphs(buffer, allLines, chunkIndex++, section, fileId));
+                    buffer.Clear();
+                    bufferTokens = 0;
+                }
+
+                if (paraTokens > options.MaxTokens)
+                {
+                    var tableStrategy = _continuousStrategyFactory.GetStrategy(ChunkType.Table);
+                    var tableStateMachine = new OversizedBlockSegmentationStateMachine();
+                    var tableChunks = tableStateMachine.Execute(
+                        tableStrategy!,
+                        para.TableElement,
+                        allLines,
+                        options,
+                        _tokenizer,
+                        fileId,
+                        section.HeadingPath,
+                        section.Level,
+                        ref chunkIndex);
+
+                    result.AddRange(tableChunks);
+                }
+                else
+                {
+                    result.Add(CreateChunk(
+                        para.Content,
+                        allLines,
+                        para.StartLine,
+                        para.EndLine,
+                        chunkIndex++,
+                        section.HeadingPath,
+                        section.Level,
+                        fileId,
+                        ChunkType.Table));
+                }
+                continue;
+            }
 
             if (paraTokens > options.MaxTokens)
             {
@@ -321,7 +528,7 @@ public class MarkdownChunker : IMarkdownChunker
         return result;
     }
 
-    private List<Paragraph> ExtractParagraphs(Section section, string[] allLines, bool preserveCodeBlocks)
+    private List<Paragraph> ExtractParagraphs(Section section, string[] allLines, bool preserveCodeBlocks, bool preserveTables)
     {
         var paragraphs = new List<Paragraph>();
         var lines = section.Content.Split('\n');
@@ -337,7 +544,8 @@ public class MarkdownChunker : IMarkdownChunker
                 Content = string.Join("\n", currentPara),
                 StartLine = paraStart.Value,
                 EndLine = endLine,
-                IsCode = isCode
+                IsCode = isCode,
+                IsTable = false
             });
             currentPara.Clear();
             paraStart = null;
@@ -370,6 +578,37 @@ public class MarkdownChunker : IMarkdownChunker
             {
                 // 围栏内的空行不拆分段落，保持代码块完整
                 currentPara.Add(line);
+                continue;
+            }
+
+            // 表格检测（非围栏状态下且启用 PreserveTables）
+            if (preserveTables && _tableAdapter.CanAdapt(lines, i, out var consumedTableLines))
+            {
+                // 检查当前段落是否有且仅有前置导语说明行（如“*表 1-1：系统权限矩阵*”）
+                string? precedingContext = null;
+                if (currentPara.Count == 1 && currentPara[0].Trim().Length < 120)
+                {
+                    precedingContext = currentPara[0].Trim();
+                    currentPara.Clear();
+                    paraStart = null;
+                }
+                else
+                {
+                    FlushParagraph(isCode: false, actualLineNum - 1);
+                }
+
+                var tableElement = _tableAdapter.Adapt(lines, i, consumedTableLines, actualLineNum, precedingContext);
+                paragraphs.Add(new Paragraph
+                {
+                    Content = tableElement.RawContent,
+                    StartLine = actualLineNum,
+                    EndLine = actualLineNum + consumedTableLines - 1,
+                    IsCode = false,
+                    IsTable = true,
+                    TableElement = tableElement
+                });
+
+                i += consumedTableLines - 1;
                 continue;
             }
 
@@ -512,6 +751,14 @@ public class MarkdownChunker : IMarkdownChunker
             }
 
             if (length <= 0) length = 1;
+
+            // UTF-16 代理项守护：如果截断终点落在高代理项，确保不劈裂 Emoji 或四字节字符
+            if (start + length < text.Length && char.IsHighSurrogate(text[start + length - 1]))
+            {
+                if (length > 1) length--;
+                else length = 2;
+            }
+
             parts.Add(text.Substring(start, length));
             start += length;
         }
@@ -677,6 +924,9 @@ public class MarkdownChunker : IMarkdownChunker
 
         for (int i = buffer.Count - 1; i >= 0; i--)
         {
+            // 代码段落与表格段落不作为跨块重叠段落，确保语法树完整与零重复
+            if (buffer[i].IsCode || buffer[i].IsTable) continue;
+
             var t = _tokenizer?.CountTokens(buffer[i].Content) ?? TokenEstimator.EstimateTokens(buffer[i].Content);
             if (tokens + t > maxTokens && result.Count > 0) break;
             result.Insert(0, buffer[i]);
@@ -732,5 +982,7 @@ public class MarkdownChunker : IMarkdownChunker
         public int StartLine { get; set; }
         public int EndLine { get; set; }
         public bool IsCode { get; set; }
+        public bool IsTable { get; set; }
+        public TableElement? TableElement { get; set; }
     }
 }

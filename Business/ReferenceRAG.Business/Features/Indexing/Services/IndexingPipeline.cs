@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using ReferenceRAG.Business.Features.Indexing.Adapters;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 
@@ -14,6 +15,7 @@ public class IndexingPipeline : IDisposable
 {
     private readonly IEmbeddingService _embeddingService;
     private readonly IVectorStore _vectorStore;
+    private readonly IIndexStorageAdapter? _storageAdapter;
     private readonly int _batchSize;
     private readonly int _maxConcurrency;
     private readonly Channel<ChunkBatch> _tokenizeChannel;
@@ -28,12 +30,14 @@ public class IndexingPipeline : IDisposable
         IEmbeddingService embeddingService,
         IVectorStore vectorStore,
         int batchSize = 64,
-        int maxConcurrency = 3)
+        int maxConcurrency = 3,
+        IIndexStorageAdapter? storageAdapter = null)
     {
         _embeddingService = embeddingService;
         _vectorStore = vectorStore;
         _batchSize = batchSize;
         _maxConcurrency = maxConcurrency;
+        _storageAdapter = storageAdapter;
 
         // tokenizeChannel 容量 2× → Tokenize Stage 可超前更多批次，保证 GPU 不饿等
         // embedChannel 容量 +2 → 允许 Embed Stage write-ahead，与下一批 GPU 推理重叠
@@ -55,7 +59,9 @@ public class IndexingPipeline : IDisposable
         CancellationToken cancellationToken = default,
         IReadOnlyDictionary<string, string>? embeddingInputs = null)
     {
-        var chunkList = chunks.ToList();
+        var chunkList = chunks
+            .Where(c => !string.IsNullOrEmpty(c.Content) && !ReferenceRAG.Core.Helpers.NoiseChunkDetector.IsNoiseOrSeparator(c.Content))
+            .ToList();
         if (chunkList.Count == 0)
         {
             return new IndexingResult { TotalChunks = 0, TotalVectors = 0 };
@@ -307,9 +313,17 @@ public class IndexingPipeline : IDisposable
                 });
             }
 
-            // 批量写入（chunks 必须先于向量写入：中断时 chunks 缺失可被下次清理，反之则产生孤儿向量）
-            await _vectorStore.UpsertChunksAsync(embeddedBatch.Chunks, cancellationToken);
-            await _vectorStore.UpsertVectorsAsync(records, cancellationToken);
+            // 批量写入（若配置了适配器则通过适配器防冲校验写入，彻底避免外键冲突）
+            if (_storageAdapter != null)
+            {
+                await _storageAdapter.SafeUpsertChunksAsync(embeddedBatch.Chunks, cancellationToken);
+                await _storageAdapter.SafeUpsertVectorsAsync(records, cancellationToken);
+            }
+            else
+            {
+                await _vectorStore.UpsertChunksAsync(embeddedBatch.Chunks, cancellationToken);
+                await _vectorStore.UpsertVectorsAsync(records, cancellationToken);
+            }
 
             totalVectors += records.Count;
 

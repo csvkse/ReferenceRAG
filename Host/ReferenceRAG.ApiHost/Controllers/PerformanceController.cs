@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -20,6 +21,7 @@ public class PerformanceController : ControllerBase
     private readonly IMarkdownChunker _chunker;
     private readonly ITokenizer _tokenizer;
     private readonly ConfigManager _configManager;
+    private readonly IModelTelemetryService _telemetryService;
     private readonly ILogger<PerformanceController> _logger;
 
     public PerformanceController(
@@ -27,13 +29,51 @@ public class PerformanceController : ControllerBase
         IMarkdownChunker chunker,
         ITokenizer tokenizer,
         ConfigManager configManager,
+        IModelTelemetryService telemetryService,
         ILogger<PerformanceController> logger)
     {
         _embeddingService = embeddingService;
         _chunker = chunker;
         _tokenizer = tokenizer;
         _configManager = configManager;
+        _telemetryService = telemetryService;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// 获取当前模型的运行时状态机状态、GPU 硬件加速与性能配置
+    /// </summary>
+    [HttpGet("model-status")]
+    public ActionResult<ModelRuntimeTelemetry> GetModelStatus()
+    {
+        try
+        {
+            var telemetry = _telemetryService.GetCurrentEmbeddingTelemetry();
+            return Ok(telemetry);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to retrieve model runtime telemetry");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// 获取当前重排模型的运行时状态机状态、硬件加速与性能配置
+    /// </summary>
+    [HttpGet("rerank-status")]
+    public ActionResult<ModelRuntimeTelemetry> GetRerankStatus()
+    {
+        try
+        {
+            var telemetry = _telemetryService.GetCurrentRerankTelemetry();
+            return Ok(telemetry);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to retrieve rerank runtime telemetry");
+            return StatusCode(500, new { error = ex.Message });
+        }
     }
 
     /// <summary>
@@ -152,6 +192,16 @@ public class PerformanceController : ControllerBase
             result.EstimatedMemoryMB = allVectors.Count > 0 && allVectors[0].Length > 0
                 ? (allVectors.Count * allVectors[0].Length * sizeof(float)) / (1024.0 * 1024.0)
                 : 0;
+
+            // 9. 捕获测试时的模型与硬件运行时遥测快照
+            try
+            {
+                result.ModelTelemetry = _telemetryService.GetCurrentEmbeddingTelemetry();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to capture model telemetry for benchmark");
+            }
 
             return Ok(result);
         }
@@ -447,6 +497,7 @@ public class BenchmarkResult
     public double VectorsPerSecond { get; set; }
 
     public double EstimatedMemoryMB { get; set; }
+    public ModelRuntimeTelemetry? ModelTelemetry { get; set; }
 }
 
 /// <summary>

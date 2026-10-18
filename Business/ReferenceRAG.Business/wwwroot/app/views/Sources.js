@@ -1,14 +1,17 @@
 import { defineComponent as _defineComponent } from 'vue';
-import { ref, h, onMounted } from 'vue';
+import { ref, computed, h, onMounted, onUnmounted } from 'vue';
 import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput, NRadioGroup, NRadio, NText } from 'naive-ui';
 import { sourcesApi, indexApi, indexJobsApi, settingsApi } from '/app/api/index.js';
-import {isDesktop,selectFolder} from '/core/platform.js';
+import { isDesktop, selectFolder } from '/core/platform.js';
+import { JobCenter } from '/core/jobs/JobCenter.js';
+import { useAsyncJob } from '/core/jobs/useAsyncJob.js';
 const component = /*@__PURE__*/ _defineComponent({
     __name: 'Sources',
     setup(__props, { expose: __expose }) {
         __expose();
         const message = useMessage();
         const dialog = useDialog();
+        const { runJob, isResourceBusy, getResourceJob } = useAsyncJob();
         const formRef = ref(null);
         const loading = ref(false);
         const creating = ref(false);
@@ -25,6 +28,12 @@ const component = /*@__PURE__*/ _defineComponent({
         const vectorOnlyIndexing = ref(false);
         const sourceQuickIndexing = ref(new Set());
         const sourceVectorOnlyIndexing = ref(new Set());
+        const sourceRechunking = ref(new Set());
+        const rechunkingAll = ref(false);
+        const isGlobalQuickIndexing = computed(() => quickIndexing.value || isResourceBusy('global', 'Incremental'));
+        const isGlobalRechunking = computed(() => rechunkingAll.value || isResourceBusy('global', 'Rechunk'));
+        const isGlobalVectorOnlyIndexing = computed(() => vectorOnlyIndexing.value || isResourceBusy('global', 'VectorOnly'));
+        const isGlobalRebuilding = computed(() => rebuilding.value || isResourceBusy('global', 'FullRebuild'));
         const indexSummary = ref(null);
         const chunkingConfig = ref(null);
         const newSource = ref({
@@ -78,7 +87,7 @@ const component = /*@__PURE__*/ _defineComponent({
             {
                 title: '操作',
                 key: 'actions',
-                width: 380,
+                width: 480,
                 render: (row) => h(NSpace, { size: 'small' }, {
                     default: () => [
                         h(NButton, {
@@ -97,21 +106,30 @@ const component = /*@__PURE__*/ _defineComponent({
                         h(NButton, {
                             size: 'small',
                             type: 'success',
-                            loading: sourceQuickIndexing.value.has(row.name),
+                            loading: sourceQuickIndexing.value.has(row.name) || isResourceBusy(`source:${row.name}`, 'Incremental'),
                             onClick: () => handleQuickIndexSource(row)
                         }, {
                             default: () => '增量索引'
                         }),
                         h(NButton, {
                             size: 'small',
+                            type: 'warning',
+                            loading: sourceRechunking.value.has(row.name) || isResourceBusy(`source:${row.name}`, 'Rechunk'),
+                            onClick: () => handleRechunkSource(row)
+                        }, {
+                            default: () => '重建切片'
+                        }),
+                        h(NButton, {
+                            size: 'small',
                             type: 'info',
-                            loading: sourceVectorOnlyIndexing.value.has(row.name),
+                            loading: sourceVectorOnlyIndexing.value.has(row.name) || isResourceBusy(`source:${row.name}`, 'VectorOnly'),
                             onClick: () => handleVectorOnlyIndexSource(row)
                         }, {
                             default: () => '补全向量'
                         }),
                         h(NButton, {
                             size: 'small',
+                            loading: isResourceBusy(`source:${row.name}`, 'FullRebuild'),
                             onClick: () => handleReindex(row)
                         }, {
                             default: () => '重建索引'
@@ -171,30 +189,30 @@ const component = /*@__PURE__*/ _defineComponent({
                 })
             }
         ];
-        const loadSources = async () => {
-            loading.value = true;
+        const loadSources = async (silent = false) => {
+            if (!silent) loading.value = true;
             try {
                 const response = await sourcesApi.getAll();
                 sources.value = response.data;
             }
             catch (error) {
-                message.error('加载源列表失败');
+                if (!silent) message.error('加载源列表失败');
             }
             finally {
-                loading.value = false;
+                if (!silent) loading.value = false;
             }
         };
-        const loadVectorIndex = async () => {
-            loadingIndex.value = true;
+        const loadVectorIndex = async (silent = false) => {
+            if (!silent) loadingIndex.value = true;
             try {
                 const response = await indexApi.getSummary();
                 indexSummary.value = response.data;
             }
             catch (error) {
-                message.error('加载向量索引信息失败');
+                if (!silent) message.error('加载向量索引信息失败');
             }
             finally {
-                loadingIndex.value = false;
+                if (!silent) loadingIndex.value = false;
             }
         };
         const loadChunkingConfig = async () => {
@@ -295,12 +313,40 @@ const component = /*@__PURE__*/ _defineComponent({
                 negativeText: '取消',
                 onPositiveClick: async () => {
                     try {
-                        const response = await indexApi.rebuildSource(source.name);
-                        message.success(response.data.message || '重建任务已启动');
-                        await loadVectorIndex();
+                        const response = await runJob(
+                            () => indexApi.rebuildSource(source.name),
+                            { targetResource: `source:${source.name}`, jobType: 'FullRebuild', message: `准备重建 ${source.name} 索引...` }
+                        );
+                        message.success(response.data?.message || '重建任务已启动');
                     }
                     catch (error) {
                         message.error('启动重建失败');
+                    }
+                }
+            });
+        };
+        const handleRechunkSource = (source) => {
+            dialog.warning({
+                title: `重建 "${source.name}" 切片`,
+                content: `将使用当前自适应/分块配置对 "${source.name}" 的全部文件重新分块并重算向量。旧分块与向量将被原子替换，无需清空源库。确定继续吗？`,
+                positiveText: '开始重建切片',
+                negativeText: '取消',
+                onPositiveClick: async () => {
+                    sourceRechunking.value.add(source.name);
+                    sourceRechunking.value = new Set(sourceRechunking.value);
+                    try {
+                        const response = await runJob(
+                            () => indexApi.rechunkSource(source.name),
+                            { targetResource: `source:${source.name}`, jobType: 'Rechunk', message: `准备重建 ${source.name} 切片...` }
+                        );
+                        message.success(response.data?.message || `${source.name} 重建切片任务已启动`);
+                    }
+                    catch (error) {
+                        message.error(error.response?.data?.error || error.message || `${source.name} 重建切片启动失败`);
+                    }
+                    finally {
+                        sourceRechunking.value.delete(source.name);
+                        sourceRechunking.value = new Set(sourceRechunking.value);
                     }
                 }
             });
@@ -345,9 +391,11 @@ const component = /*@__PURE__*/ _defineComponent({
         const handleQuickIndexAll = async () => {
             quickIndexing.value = true;
             try {
-                const response = await indexJobsApi.startJob({ force: false });
-                message.success(response.data.message || '增量索引任务已启动（跳过未变更文件）');
-                await loadVectorIndex();
+                const response = await runJob(
+                    () => indexJobsApi.startJob({ force: false }),
+                    { targetResource: 'global', jobType: 'Incremental', message: '准备全局增量索引...' }
+                );
+                message.success(response.data?.message || '增量索引任务已启动（跳过未变更文件）');
             }
             catch (error) {
                 message.error(error.response?.data?.error || error.message || '启动增量索引失败');
@@ -356,13 +404,31 @@ const component = /*@__PURE__*/ _defineComponent({
                 quickIndexing.value = false;
             }
         };
+        const handleRechunkAll = async () => {
+            rechunkingAll.value = true;
+            try {
+                const response = await runJob(
+                    () => indexApi.rechunk(),
+                    { targetResource: 'global', jobType: 'Rechunk', message: '准备全库重建切片...' }
+                );
+                message.success(response.data?.message || '全库重建切片任务已启动（按最新配置重新分块并原子更替）');
+            }
+            catch (error) {
+                message.error(error.response?.data?.error || error.message || '启动重建切片失败');
+            }
+            finally {
+                rechunkingAll.value = false;
+            }
+        };
         const handleQuickIndexSource = async (source) => {
             sourceQuickIndexing.value.add(source.name);
             sourceQuickIndexing.value = new Set(sourceQuickIndexing.value);
             try {
-                await indexJobsApi.startJob({ sources: [source.name], force: false });
-                message.success(`${source.name} 增量索引已启动（跳过未变更文件）`);
-                await loadVectorIndex();
+                const response = await runJob(
+                    () => indexJobsApi.startJob({ sources: [source.name], force: false }),
+                    { targetResource: `source:${source.name}`, jobType: 'Incremental', message: `增量索引 ${source.name}...` }
+                );
+                message.success(response.data?.message || `${source.name} 增量索引已启动（跳过未变更文件）`);
             }
             catch (error) {
                 message.error(error.response?.data?.error || error.message || `${source.name} 增量索引启动失败`);
@@ -375,9 +441,11 @@ const component = /*@__PURE__*/ _defineComponent({
         const handleVectorOnlyIndexAll = async () => {
             vectorOnlyIndexing.value = true;
             try {
-                const response = await indexJobsApi.startJob({ vectorOnly: true });
-                message.success(response.data.message || '向量补全任务已启动（仅重推向量，不动分块/BM25/图谱）');
-                await loadVectorIndex();
+                const response = await runJob(
+                    () => indexJobsApi.startJob({ vectorOnly: true }),
+                    { targetResource: 'global', jobType: 'VectorOnly', message: '准备全局补全向量...' }
+                );
+                message.success(response.data?.message || '向量补全任务已启动（仅重推向量，不动分块/BM25/图谱）');
             }
             catch (error) {
                 message.error(error.response?.data?.error || error.message || '启动向量补全失败');
@@ -390,9 +458,11 @@ const component = /*@__PURE__*/ _defineComponent({
             sourceVectorOnlyIndexing.value.add(source.name);
             sourceVectorOnlyIndexing.value = new Set(sourceVectorOnlyIndexing.value);
             try {
-                await indexJobsApi.startJob({ sources: [source.name], vectorOnly: true });
-                message.success(`${source.name} 向量补全已启动`);
-                await loadVectorIndex();
+                const response = await runJob(
+                    () => indexJobsApi.startJob({ sources: [source.name], vectorOnly: true }),
+                    { targetResource: `source:${source.name}`, jobType: 'VectorOnly', message: `补全 ${source.name} 向量...` }
+                );
+                message.success(response.data?.message || `${source.name} 向量补全已启动`);
             }
             catch (error) {
                 message.error(error.response?.data?.error || error.message || `${source.name} 向量补全启动失败`);
@@ -405,9 +475,11 @@ const component = /*@__PURE__*/ _defineComponent({
         const handleRebuildAll = async () => {
             rebuilding.value = true;
             try {
-                const response = await indexApi.rebuild();
-                message.success(response.data.message || '向量索引重建任务已启动');
-                await loadVectorIndex();
+                const response = await runJob(
+                    () => indexApi.rebuild(),
+                    { targetResource: 'global', jobType: 'FullRebuild', message: '准备全量重建索引...' }
+                );
+                message.success(response.data?.message || '向量索引重建任务已启动');
             }
             catch (error) {
                 message.error(error.response?.data?.error || error.message || '启动重建失败');
@@ -454,15 +526,28 @@ const component = /*@__PURE__*/ _defineComponent({
                 message.error(error.response?.data?.error || error.message || '删除失败');
             }
         };
-        onMounted(() => {
+        let unbindSources = null;
+        let unbindIndex = null;
+        onMounted(async () => {
             loadSources();
             loadVectorIndex();
             loadChunkingConfig();
+            try {
+                await JobCenter.initialize();
+                unbindSources = JobCenter.registerRefresher('sources', () => loadSources(true));
+                unbindIndex = JobCenter.registerRefresher('vector_index', () => loadVectorIndex(true));
+            } catch (err) {
+                console.warn('JobCenter 初始化失败:', err);
+            }
         });
-        const __returned__ = { isDesktop, selectDirectory, message, dialog, formRef, loading, creating, sources, editingSource, editingName, loadingIndex, rebuilding, cleaning, deletingAll, quickIndexing, vectorOnlyIndexing, sourceQuickIndexing, sourceVectorOnlyIndexing, indexSummary, chunkingConfig, loadChunkingConfig, newSource, formRules, columns, indexColumns, loadSources, loadVectorIndex, handleCreateSource, resetForm, handleToggle, handleEdit, handleReindex, handleDelete, handleQuickIndexAll, handleQuickIndexSource, handleVectorOnlyIndexAll, handleVectorOnlyIndexSource, handleRebuildAll, handleCleanup, handleDeleteAllIndex, handleDeleteModelIndex, get NButton() { return NButton; }, get NSpace() { return NSpace; }, get NTag() { return NTag; }, get NPopconfirm() { return NPopconfirm; }, get NInput() { return NInput; } };
+        onUnmounted(() => {
+            unbindSources?.();
+            unbindIndex?.();
+        });
+        const __returned__ = { isDesktop, selectDirectory, message, dialog, formRef, loading, creating, sources, editingSource, editingName, loadingIndex, rebuilding, cleaning, deletingAll, quickIndexing, vectorOnlyIndexing, sourceQuickIndexing, sourceVectorOnlyIndexing, sourceRechunking, rechunkingAll, isGlobalQuickIndexing, isGlobalRechunking, isGlobalVectorOnlyIndexing, isGlobalRebuilding, indexSummary, chunkingConfig, loadChunkingConfig, newSource, formRules, columns, indexColumns, loadSources, loadVectorIndex, handleCreateSource, resetForm, handleToggle, handleEdit, handleReindex, handleRechunkSource, handleRechunkAll, handleDelete, handleQuickIndexAll, handleQuickIndexSource, handleVectorOnlyIndexAll, handleVectorOnlyIndexSource, handleRebuildAll, handleCleanup, handleDeleteAllIndex, handleDeleteModelIndex, get NButton() { return NButton; }, get NSpace() { return NSpace; }, get NTag() { return NTag; }, get NPopconfirm() { return NPopconfirm; }, get NInput() { return NInput; } };
         return __returned__;
     }
 });
 
-component.template = "\n  <n-space vertical :size=\"20\">\n    <!-- Add Source -->\n    <n-card title=\"添加源\">\n      <n-space vertical>\n        <n-form\n          ref=\"formRef\"\n          :model=\"newSource\"\n          :rules=\"formRules\"\n          label-placement=\"left\"\n          label-width=\"80\"\n        >\n          <n-form-item :label=\"isDesktop ? '本机目录' : '服务器目录'\" path=\"path\">\n            <n-input v-model:value=\"newSource.path\" placeholder=\"输入文件夹绝对路径（必填）\" /><n-button v-if=\"isDesktop\" @click=\"selectDirectory\">选择文件夹</n-button>\n          </n-form-item>\n          <n-form-item label=\"名称\">\n            <n-input v-model:value=\"newSource.name\" placeholder=\"输入源名称（可选，默认使用文件夹名）\" />\n          </n-form-item>\n          <n-space>\n            <n-button type=\"primary\" :loading=\"creating\" @click=\"handleCreateSource\">\n              添加\n            </n-button>\n            <n-button @click=\"resetForm\">重置</n-button>\n          </n-space>\n        </n-form>\n      </n-space>\n    </n-card>\n\n    <!-- Vector Index Management -->\n    <n-card title=\"向量索引管理\">\n      <template #header-extra>\n        <n-space>\n          <n-button size=\"small\" :loading=\"loadingIndex\" @click=\"() => { loadVectorIndex(); loadChunkingConfig(); }\">\n            刷新\n          </n-button>\n        </n-space>\n      </template>\n      <n-spin :show=\"loadingIndex\">\n        <n-space vertical :size=\"16\">\n          <!-- Current Model Info -->\n          <n-descriptions label-placement=\"left\" :column=\"3\" bordered size=\"small\">\n            <n-descriptions-item label=\"当前模型\">\n              <n-tag type=\"primary\">{{ indexSummary?.currentModel || '-' }}</n-tag>\n            </n-descriptions-item>\n            <n-descriptions-item label=\"向量维度\">\n              {{ indexSummary?.currentDimension || '-' }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"总文件数\">\n              {{ indexSummary?.totalFiles || 0 }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"总分块数\">\n              {{ indexSummary?.totalChunks || 0 }}\n            </n-descriptions-item>\n          </n-descriptions>\n\n          <!-- Chunking Config -->\n          <n-descriptions label-placement=\"left\" :column=\"5\" bordered size=\"small\">\n            <n-descriptions-item label=\"最大 Token 数\">\n              {{ chunkingConfig?.maxTokens ?? '-' }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"最小 Token 数\">\n              {{ chunkingConfig?.minTokens ?? '-' }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"重叠 Token 数\">\n              {{ chunkingConfig?.overlapTokens ?? '-' }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"保留标题结构\">\n              <n-tag :type=\"chunkingConfig?.preserveHeadings ? 'success' : 'default'\" size=\"small\">{{ chunkingConfig?.preserveHeadings ? '启用' : '停用' }}</n-tag>\n            </n-descriptions-item>\n            <n-descriptions-item label=\"保留代码块\">\n              <n-tag :type=\"chunkingConfig?.preserveCodeBlocks ? 'success' : 'default'\" size=\"small\">{{ chunkingConfig?.preserveCodeBlocks ? '启用' : '停用' }}</n-tag>\n            </n-descriptions-item>\n          </n-descriptions>\n\n          <!-- Model Stats Table -->\n          <n-data-table\n            :columns=\"indexColumns\"\n            :data=\"indexSummary?.modelStats || []\"\n            :bordered=\"false\"\n            size=\"small\"\n          />\n\n          <!-- Actions -->\n          <n-space>\n            <n-button type=\"success\" :loading=\"quickIndexing\" @click=\"handleQuickIndexAll\">\n              快速增量索引（全局）\n            </n-button>\n            <n-popconfirm @positive-click=\"handleVectorOnlyIndexAll\">\n              <template #trigger>\n                <n-button type=\"info\" :loading=\"vectorOnlyIndexing\">\n                  补全缺失向量（全局）\n                </n-button>\n              </template>\n              将对所有文件重新生成向量，不修改分块/BM25/图谱。适用于向量数少于分块数时补全缺口。\n            </n-popconfirm>\n            <n-popconfirm @positive-click=\"handleRebuildAll\">\n              <template #trigger>\n                <n-button type=\"primary\" :loading=\"rebuilding\">\n                  重建全部向量索引\n                </n-button>\n              </template>\n              确定要使用当前模型重建所有向量索引吗？这将删除现有向量并重新生成。\n            </n-popconfirm>\n            <n-popconfirm @positive-click=\"handleCleanup\">\n              <template #trigger>\n                <n-button type=\"warning\" :loading=\"cleaning\">\n                  清理孤立索引\n                </n-button>\n              </template>\n              确定要清理孤立向量索引（模型已不存在的向量数据）吗？\n            </n-popconfirm>\n            <n-popconfirm @positive-click=\"handleDeleteAllIndex\">\n              <template #trigger>\n                <n-button type=\"error\" :loading=\"deletingAll\">\n                  删除所有向量索引\n                </n-button>\n              </template>\n              确定要删除所有向量索引吗？此操作不可恢复！\n            </n-popconfirm>\n          </n-space>\n        </n-space>\n      </n-spin>\n    </n-card>\n\n    <!-- Sources Table -->\n    <n-card title=\"源列表\">\n      <template #header-extra>\n        <n-button size=\"small\" :loading=\"loading\" @click=\"loadSources\">\n          刷新\n        </n-button>\n      </template>\n      <n-data-table\n        :columns=\"columns\"\n        :data=\"sources\"\n        :loading=\"loading\"\n        :bordered=\"false\"\n        :row-key=\"(row) => row.name\"\n      />\n    </n-card>\n  </n-space>\n";
+component.template = "\n  <n-space vertical :size=\"20\">\n    <!-- Add Source -->\n    <n-card title=\"添加源\">\n      <n-space vertical>\n        <n-form\n          ref=\"formRef\"\n          :model=\"newSource\"\n          :rules=\"formRules\"\n          label-placement=\"left\"\n          label-width=\"80\"\n        >\n          <n-form-item :label=\"isDesktop ? '本机目录' : '服务器目录'\" path=\"path\">\n            <n-input v-model:value=\"newSource.path\" placeholder=\"输入文件夹绝对路径（必填）\" /><n-button v-if=\"isDesktop\" @click=\"selectDirectory\">选择文件夹</n-button>\n          </n-form-item>\n          <n-form-item label=\"名称\">\n            <n-input v-model:value=\"newSource.name\" placeholder=\"输入源名称（可选，默认使用文件夹名）\" />\n          </n-form-item>\n          <n-space>\n            <n-button type=\"primary\" :loading=\"creating\" @click=\"handleCreateSource\">\n              添加\n            </n-button>\n            <n-button @click=\"resetForm\">重置</n-button>\n          </n-space>\n        </n-form>\n      </n-space>\n    </n-card>\n\n    <!-- Vector Index Management -->\n    <n-card title=\"向量索引管理\">\n      <template #header-extra>\n        <n-space>\n          <n-button size=\"small\" :loading=\"loadingIndex\" @click=\"() => { loadVectorIndex(); loadChunkingConfig(); }\">\n            刷新\n          </n-button>\n        </n-space>\n      </template>\n      <n-spin :show=\"loadingIndex\">\n        <n-space vertical :size=\"16\">\n          <!-- Current Model Info -->\n          <n-descriptions label-placement=\"left\" :column=\"3\" bordered size=\"small\">\n            <n-descriptions-item label=\"当前模型\">\n              <n-tag type=\"primary\">{{ indexSummary?.currentModel || '-' }}</n-tag>\n            </n-descriptions-item>\n            <n-descriptions-item label=\"向量维度\">\n              {{ indexSummary?.currentDimension || '-' }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"总文件数\">\n              {{ indexSummary?.totalFiles || 0 }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"总分块数\">\n              {{ indexSummary?.totalChunks || 0 }}\n            </n-descriptions-item>\n          </n-descriptions>\n\n          <!-- Chunking Config -->\n          <n-descriptions label-placement=\"left\" :column=\"5\" bordered size=\"small\">\n            <n-descriptions-item label=\"最大 Token 数\">\n              {{ chunkingConfig?.maxTokens ?? '-' }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"最小 Token 数\">\n              {{ chunkingConfig?.minTokens ?? '-' }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"重叠 Token 数\">\n              {{ chunkingConfig?.overlapTokens ?? '-' }}\n            </n-descriptions-item>\n            <n-descriptions-item label=\"保留标题结构\">\n              <n-tag :type=\"chunkingConfig?.preserveHeadings ? 'success' : 'default'\" size=\"small\">{{ chunkingConfig?.preserveHeadings ? '启用' : '停用' }}</n-tag>\n            </n-descriptions-item>\n            <n-descriptions-item label=\"保留代码块\">\n              <n-tag :type=\"chunkingConfig?.preserveCodeBlocks ? 'success' : 'default'\" size=\"small\">{{ chunkingConfig?.preserveCodeBlocks ? '启用' : '停用' }}</n-tag>\n            </n-descriptions-item>\n          </n-descriptions>\n\n          <!-- Model Stats Table -->\n          <n-data-table\n            :columns=\"indexColumns\"\n            :data=\"indexSummary?.modelStats || []\"\n            :bordered=\"false\"\n            size=\"small\"\n          />\n\n          <!-- Actions -->\n          <n-space>\n            <n-button type=\"success\" :loading=\"isGlobalQuickIndexing\" @click=\"handleQuickIndexAll\">\n              快速增量索引（全局）\n            </n-button>\n            <n-popconfirm @positive-click=\"handleRechunkAll\">\n              <template #trigger>\n                <n-button type=\"warning\" :loading=\"isGlobalRechunking\">\n                  重建切片（全局）\n                </n-button>\n              </template>\n              将使用当前分块与自适应配置对所有启用源重新切分并原子更替向量，保留库中其他历史数据。确定继续吗？\n            </n-popconfirm>\n            <n-popconfirm @positive-click=\"handleVectorOnlyIndexAll\">\n              <template #trigger>\n                <n-button type=\"info\" :loading=\"isGlobalVectorOnlyIndexing\">\n                  补全缺失向量（全局）\n                </n-button>\n              </template>\n              将对所有文件重新生成向量，不修改分块/BM25/图谱。适用于向量数少于分块数时补全缺口。\n            </n-popconfirm>\n            <n-popconfirm @positive-click=\"handleRebuildAll\">\n              <template #trigger>\n                <n-button type=\"primary\" :loading=\"isGlobalRebuilding\">\n                  重建全部向量索引\n                </n-button>\n              </template>\n              确定要使用当前模型重建所有向量索引吗？这将删除现有向量并重新生成。\n            </n-popconfirm>\n            <n-popconfirm @positive-click=\"handleCleanup\">\n              <template #trigger>\n                <n-button type=\"warning\" :loading=\"cleaning\">\n                  清理孤立索引\n                </n-button>\n              </template>\n              确定要清理孤立向量索引（模型已不存在的向量数据）吗？\n            </n-popconfirm>\n            <n-popconfirm @positive-click=\"handleDeleteAllIndex\">\n              <template #trigger>\n                <n-button type=\"error\" :loading=\"deletingAll\">\n                  删除所有向量索引\n                </n-button>\n              </template>\n              确定要删除所有向量索引吗？此操作不可恢复！\n            </n-popconfirm>\n          </n-space>\n        </n-space>\n      </n-spin>\n    </n-card>\n\n    <!-- Sources Table -->\n    <n-card title=\"源列表\">\n      <template #header-extra>\n        <n-button size=\"small\" :loading=\"loading\" @click=\"loadSources\">\n          刷新\n        </n-button>\n      </template>\n      <n-data-table\n        :columns=\"columns\"\n        :data=\"sources\"\n        :loading=\"loading\"\n        :bordered=\"false\"\n        :row-key=\"(row) => row.name\"\n      />\n    </n-card>\n  </n-space>\n";
 export default component;

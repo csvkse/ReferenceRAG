@@ -191,6 +191,56 @@ public class MarkdownChunkerTests
         Assert.Contains(chunks, chunk => CountOccurrences(chunk.Content, "```") % 2 == 1);
     }
 
+    [Theory]
+    [InlineData("=== (43-48) ===", true)]
+    [InlineData("---", true)]
+    [InlineData("***", true)]
+    [InlineData("  === (1-6) ===  ", true)]
+    [InlineData("==================", true)]
+    [InlineData("...", true)]
+    [InlineData("   ", true)]
+    [InlineData("# 第一章 论持久战", false)]
+    [InlineData("这是一个包含正常内容的段落。", false)]
+    [InlineData("```csharp\nint x = 1;\n```", false)]
+    public void IsNoiseOrSeparator_IdentifiesSeparatorsAndTrivialNoiseCorrectly(string input, bool expectedNoise)
+    {
+        var isNoise = MarkdownChunker.IsNoiseOrSeparator(input);
+        Assert.Equal(expectedNoise, isNoise);
+    }
+
+    [Fact]
+    public void Chunk_WithIsolatedSeparatorLine_MergesSeparatorIntoAdjacentChunk()
+    {
+        // 模拟长文本小说或文档中出现单独的 === (43-48) === 行
+        var part1 = string.Join("\n", Enumerable.Range(1, 30).Select(i => $"这是第{i}行正文文本内容，包含丰富的上下文信息。"));
+        var separator = "=== (43-48) ===";
+        var part2 = string.Join("\n", Enumerable.Range(31, 30).Select(i => $"这是第{i}行继续的正文内容，用于测试分块合并。"));
+
+        var fullContent = $"{part1}\n\n{separator}\n\n{part2}";
+
+        var chunks = _chunker.Chunk(fullContent, new ChunkingOptions
+        {
+            MaxTokens = 120,
+            MinTokens = 10,
+            OverlapTokens = 0
+        });
+
+        Assert.NotEmpty(chunks);
+
+        // 绝不应该存在内容仅仅为 === (43-48) === 的独立单行分块
+        Assert.DoesNotContain(chunks, c => c.Content.Trim() == separator);
+
+        // 分隔符应当被吸收合并在某个分块内
+        Assert.Contains(chunks, c => c.Content.Contains(separator));
+
+        // 所有分块内容均非空且非纯噪音
+        Assert.All(chunks, c =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(c.Content));
+            Assert.False(MarkdownChunker.IsNoiseOrSeparator(c.Content));
+        });
+    }
+
     private static int CountOccurrences(string text, string value)
     {
         var count = 0;
