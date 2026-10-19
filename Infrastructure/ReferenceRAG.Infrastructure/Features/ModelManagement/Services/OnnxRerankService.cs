@@ -9,6 +9,7 @@ using ReferenceRAG.Core.Tracing;
 using System.Diagnostics;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Injection;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Scanning;
+using ReferenceRAG.Core.Features.HardwareAcceleration;
 
 namespace ReferenceRAG.Core.Services.Rerank;
 
@@ -127,7 +128,11 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
                     // 设置确定性推理模式，避免 CUDA 非确定性操作
                     sessionOptions.EnableMemoryPattern = false;
 
-                    sessionOptions.AppendExecutionProvider_CUDA(_options.CudaDeviceId);
+                    if (!OnnxExecutionProviderHelper.TryAppendCuda(sessionOptions, _options.CudaDeviceId) &&
+                        !OnnxExecutionProviderHelper.TryAppendDirectMl(sessionOptions, _options.CudaDeviceId))
+                    {
+                        throw new InvalidOperationException("当前环境或构建未提供有效的 GPU 执行提供者");
+                    }
                     sessionOptions.AppendExecutionProvider_CPU();
                     _logger.LogInformation("使用 CUDA GPU: {DeviceId} (确定性模式)", _options.CudaDeviceId);
                 }

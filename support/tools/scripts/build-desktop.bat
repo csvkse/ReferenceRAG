@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..\..\..") do set "ROOT_DIR=%%~fI"
@@ -15,9 +15,68 @@ set "RETRY_READY=1"
 set "NON_INTERACTIVE="
 set "RUN_SMOKE=false"
 set "PRESERVE_CONFIG=true"
+set "GPU_BACKEND="
+set "GPU_BACKEND_DESC="
 
 :parse_args
 if "%~1"=="" goto after_args
+if /i "%~1"=="--universal" (
+    set "GPU_BACKEND=universal"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--directml" (
+    set "GPU_BACKEND=universal"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--cuda" (
+    set "GPU_BACKEND=cuda"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--nvidia" (
+    set "GPU_BACKEND=cuda"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--amd" (
+    set "GPU_BACKEND=amd"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--radeon" (
+    set "GPU_BACKEND=amd"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--intel" (
+    set "GPU_BACKEND=intel"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--arc" (
+    set "GPU_BACKEND=intel"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--cpu" (
+    set "GPU_BACKEND=cpu"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="-b" (
+    set "GPU_BACKEND=%~2"
+    shift
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--backend" (
+    set "GPU_BACKEND=%~2"
+    shift
+    shift
+    goto parse_args
+)
 if /i "%~1"=="--reset-config" (
     set "PRESERVE_CONFIG=false"
     shift
@@ -121,6 +180,53 @@ goto parse_args
 
 :after_args
 
+if not defined GPU_BACKEND (
+    if defined NON_INTERACTIVE (
+        set "GPU_BACKEND=universal"
+        goto normalize_backend
+    )
+    goto prompt_gpu_backend
+)
+goto normalize_backend
+
+:prompt_gpu_backend
+echo.
+echo ==========================================================
+echo   请选择桌面版硬件加速构建方案 (GPU Backend Variant):
+echo ==========================================================
+echo   [1] 通用版 (Universal / DirectML) [默认 - 推荐]
+echo       全显卡通用兼备 (AMD / Intel / NVIDIA / 高通骁龙 / 核显)
+echo   [2] NVIDIA 专属满血版 (NVIDIA CUDA 12)
+echo       专为 GeForce RTX / GTX 独显优化 (CUDA 12 + TensorRT 满血算力)
+echo   [3] AMD 专属优化版 (AMD Radeon / APU)
+echo       专为 AMD Radeon 独显与 Ryzen/APU 核显优化 (DirectML + Vulkan)
+echo   [4] Intel 专属优化版 (Intel Arc / Ultra)
+echo       专为 Intel Arc 独显与酷睿 Ultra 核显优化 (DirectML + Vulkan)
+echo ----------------------------------------------------------
+set "USER_CHOICE="
+set /p "USER_CHOICE=[build-desktop] 请输入选项 [1-4] (直接回车默认 [1] 通用版): "
+if "%USER_CHOICE%"=="" set "USER_CHOICE=1"
+if "%USER_CHOICE%"=="1" set "GPU_BACKEND=universal"
+if "%USER_CHOICE%"=="2" set "GPU_BACKEND=cuda"
+if "%USER_CHOICE%"=="3" set "GPU_BACKEND=amd"
+if "%USER_CHOICE%"=="4" set "GPU_BACKEND=intel"
+if "%USER_CHOICE%"=="5" set "GPU_BACKEND=cpu"
+if not defined GPU_BACKEND set "GPU_BACKEND=universal"
+
+:normalize_backend
+set "GPU_BACKEND_DESC=通用版 (Universal / DirectML + Vulkan)"
+if /i "%GPU_BACKEND%"=="universal" set "GPU_BACKEND=universal"& set "GPU_BACKEND_DESC=通用版 (Universal / DirectML + Vulkan - 全显卡兼备)"
+if /i "%GPU_BACKEND%"=="directml" set "GPU_BACKEND=universal"& set "GPU_BACKEND_DESC=通用版 (Universal / DirectML + Vulkan - 全显卡兼备)"
+if /i "%GPU_BACKEND%"=="cuda" set "GPU_BACKEND=cuda"& set "GPU_BACKEND_DESC=NVIDIA 专属满血版 (CUDA 12 + TensorRT 极致算力)"
+if /i "%GPU_BACKEND%"=="nvidia" set "GPU_BACKEND=cuda"& set "GPU_BACKEND_DESC=NVIDIA 专属满血版 (CUDA 12 + TensorRT 极致算力)"
+if /i "%GPU_BACKEND%"=="amd" set "GPU_BACKEND=amd"& set "GPU_BACKEND_DESC=AMD 专属优化版 (AMD Radeon 独显与 APU 核显优化)"
+if /i "%GPU_BACKEND%"=="rocm" set "GPU_BACKEND=amd"& set "GPU_BACKEND_DESC=AMD 专属优化版 (AMD Radeon 独显与 APU 核显优化)"
+if /i "%GPU_BACKEND%"=="radeon" set "GPU_BACKEND=amd"& set "GPU_BACKEND_DESC=AMD 专属优化版 (AMD Radeon 独显与 APU 核显优化)"
+if /i "%GPU_BACKEND%"=="intel" set "GPU_BACKEND=intel"& set "GPU_BACKEND_DESC=Intel 专属优化版 (Intel Arc 独显与酷睿 Ultra 核显优化)"
+if /i "%GPU_BACKEND%"=="arc" set "GPU_BACKEND=intel"& set "GPU_BACKEND_DESC=Intel 专属优化版 (Intel Arc 独显与酷睿 Ultra 核显优化)"
+if /i "%GPU_BACKEND%"=="openvino" set "GPU_BACKEND=intel"& set "GPU_BACKEND_DESC=Intel 专属优化版 (Intel Arc 独显与酷睿 Ultra 核显优化)"
+if /i "%GPU_BACKEND%"=="cpu" set "GPU_BACKEND=cpu"& set "GPU_BACKEND_DESC=纯 CPU 兼容版 (零 GPU 依赖 / AVX2 多核)"
+
 :publish
 set "EXIT_CODE=0"
 
@@ -132,6 +238,7 @@ echo.
 echo [build-desktop] Project   : "%PROJECT%"
 echo [build-desktop] Config    : %CONFIGURATION%
 echo [build-desktop] Runtime   : %RID%
+echo [build-desktop] GPU Model : %GPU_BACKEND_DESC% (%GPU_BACKEND%)
 echo [build-desktop] Output    : "%OUTPUT%"
 echo [build-desktop] SelfCont  : %SELF_CONTAINED%
 echo.
@@ -195,51 +302,59 @@ if /i "%VERBOSE%"=="true" (
 echo [build-desktop] Publishing ReferenceRAG.DesktopHost (%CONFIGURATION%, %RID%, StripPdb=%STRIP_PDB%)...
 echo [build-desktop] Target: "%OUTPUT%"
 
-dotnet publish "%PROJECT%" -c %CONFIGURATION% -r %RID% --self-contained %SELF_CONTAINED% --nologo -p:OS=Windows_NT %PDB_ARG% %VERBOSITY_ARG% -o "%OUTPUT%"
+dotnet publish "%PROJECT%" -c %CONFIGURATION% -r %RID% --self-contained %SELF_CONTAINED% --nologo -p:OS=Windows_NT -p:GpuBackend=%GPU_BACKEND% %PDB_ARG% %VERBOSITY_ARG% -o "%OUTPUT%"
 set "EXIT_CODE=%ERRORLEVEL%"
 
-if "%EXIT_CODE%"=="0" (
-    if exist "%CONFIG_BACKUP%" (
-        echo [build-desktop] Merging user configuration into published appsettings.json...
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%\support\tools\scripts\merge-appsettings.ps1" -PublishedPath "%OUTPUT%\appsettings.json" -BackupPath "%CONFIG_BACKUP%"
-        del /f /q "%CONFIG_BACKUP%" >nul 2>nul
-    )
-    if /i "%STRIP_PDB%"=="true" (
-        del /s /q "%OUTPUT%\*.pdb" >nul 2>nul
-    )
-    if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\icon.ico" (
-        copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\icon.ico" "%OUTPUT%\icon.ico" >nul 2>nul
-    )
-    if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\window-icon.ico" (
-        copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\window-icon.ico" "%OUTPUT%\window-icon.ico" >nul 2>nul
-    )
-    if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" (
-        copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" "%OUTPUT%\tray-icon.ico" >nul 2>nul
-    )
-    echo.
-    echo ==========================================================
-    echo [build-desktop] Desktop publish succeeded!
-    echo   DesktopHost: "%OUTPUT%\ReferenceRAG.DesktopHost.exe"
-    echo   Output Dir : "%OUTPUT%"
-    echo ==========================================================
-    if exist "%ROOT_DIR%\support\artifacts\logs" (
-        echo [%date% %time%] desktop publish success - %CONFIGURATION% %RID% >> "%ROOT_DIR%\support\artifacts\logs\desktop-build.log"
-    )
-) else (
-    if exist "%CONFIG_BACKUP%" (
-        if not exist "%OUTPUT%\appsettings.json" (
-            copy /y "%CONFIG_BACKUP%" "%OUTPUT%\appsettings.json" >nul 2>nul
-        )
-        del /f /q "%CONFIG_BACKUP%" >nul 2>nul
-    )
-    echo.
-    echo ==========================================================
-    echo [build-desktop] ERROR: Publish failed with exit code %EXIT_CODE%.
-    echo ==========================================================
-    if exist "%ROOT_DIR%\support\artifacts\logs" (
-        echo [%date% %time%] desktop publish failed - code %EXIT_CODE% >> "%ROOT_DIR%\support\artifacts\logs\desktop-build.log"
-    )
+if "%EXIT_CODE%"=="0" goto publish_success
+goto publish_failed
+
+:publish_success
+if exist "%CONFIG_BACKUP%" (
+    echo [build-desktop] Merging user configuration into published appsettings.json...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%\support\tools\scripts\merge-appsettings.ps1" -PublishedPath "%OUTPUT%\appsettings.json" -BackupPath "%CONFIG_BACKUP%"
+    del /f /q "%CONFIG_BACKUP%" >nul 2>nul
 )
+if /i "%STRIP_PDB%"=="true" (
+    del /s /q "%OUTPUT%\*.pdb" >nul 2>nul
+)
+if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\icon.ico" (
+    copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\icon.ico" "%OUTPUT%\icon.ico" >nul 2>nul
+)
+if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\window-icon.ico" (
+    copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\window-icon.ico" "%OUTPUT%\window-icon.ico" >nul 2>nul
+)
+if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" (
+    copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" "%OUTPUT%\tray-icon.ico" >nul 2>nul
+)
+echo.
+echo ==========================================================
+echo [build-desktop] Desktop publish succeeded!
+echo   DesktopHost: "%OUTPUT%\ReferenceRAG.DesktopHost.exe"
+echo   GPU Variant: %GPU_BACKEND_DESC% (%GPU_BACKEND%)
+echo   Output Dir : "%OUTPUT%"
+echo ==========================================================
+if exist "%ROOT_DIR%\support\artifacts\logs" (
+    echo [%date% %time%] desktop publish success - %CONFIGURATION% %RID% - %GPU_BACKEND% >> "%ROOT_DIR%\support\artifacts\logs\desktop-build.log"
+)
+goto publish_done
+
+:publish_failed
+if exist "%CONFIG_BACKUP%" (
+    if not exist "%OUTPUT%\appsettings.json" (
+        copy /y "%CONFIG_BACKUP%" "%OUTPUT%\appsettings.json" >nul 2>nul
+    )
+    del /f /q "%CONFIG_BACKUP%" >nul 2>nul
+)
+echo.
+echo ==========================================================
+echo [build-desktop] ERROR: Publish failed with exit code %EXIT_CODE%.
+echo ==========================================================
+if exist "%ROOT_DIR%\support\artifacts\logs" (
+    echo [%date% %time%] desktop publish failed - code %EXIT_CODE% - %GPU_BACKEND% >> "%ROOT_DIR%\support\artifacts\logs\desktop-build.log"
+)
+goto publish_done
+
+:publish_done
 
 :finish
 echo.

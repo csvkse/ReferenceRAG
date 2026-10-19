@@ -25,6 +25,7 @@ public class MafChatController : ControllerBase
     private readonly MafChatService _chatService;
     private readonly IConfiguration _configuration;
     private readonly ILogger<MafChatController> _logger;
+    private readonly Microsoft.Extensions.Hosting.IHostEnvironment? _environment;
 
     private static readonly JsonSerializerOptions _sseOptions = new()
     {
@@ -37,11 +38,16 @@ public class MafChatController : ControllerBase
         PropertyNamingPolicy = null
     };
 
-    public MafChatController(MafChatService chatService, IConfiguration configuration, ILogger<MafChatController> logger)
+    public MafChatController(
+        MafChatService chatService,
+        IConfiguration configuration,
+        ILogger<MafChatController> logger,
+        Microsoft.Extensions.Hosting.IHostEnvironment? environment = null)
     {
         _chatService = chatService;
         _configuration = configuration;
         _logger = logger;
+        _environment = environment;
     }
 
     [HttpPost("sessions")]
@@ -95,7 +101,8 @@ public class MafChatController : ControllerBase
     public ActionResult<ChatConfig> GetConfig()
     {
         var section = _configuration.GetSection("Chat");
-        var appSettingsPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+        var baseDir = _environment?.ContentRootPath ?? Directory.GetCurrentDirectory();
+        var appSettingsPath = Path.Combine(baseDir, "appsettings.json");
         string endpoint = section["Endpoint"] ?? string.Empty;
         string model = section["Model"] ?? string.Empty;
         string systemPrompt = section["SystemPrompt"] ?? string.Empty;
@@ -141,7 +148,8 @@ public class MafChatController : ControllerBase
     {
         try
         {
-            var appSettingsPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+            var baseDir = _environment?.ContentRootPath ?? Directory.GetCurrentDirectory();
+            var appSettingsPath = Path.Combine(baseDir, "appsettings.json");
             JsonObject root;
             if (System.IO.File.Exists(appSettingsPath))
             {

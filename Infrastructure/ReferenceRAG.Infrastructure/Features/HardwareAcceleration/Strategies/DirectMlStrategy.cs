@@ -30,19 +30,23 @@ public class DirectMlStrategy : IExecutionStrategy
     {
         try
         {
-            // 检查当前程序集中是否包含 DirectML 执行提供者扩展方法
-            var dmlMethod = typeof(SessionOptions).GetMethod("AppendExecutionProvider_DML", new[] { typeof(int) });
-            if (dmlMethod == null)
+            if (!OnnxExecutionProviderHelper.HasDirectMl)
             {
                 return Task.FromResult(StrategyValidationResult.Failure(
                     Name,
-                    "当前构建未启用 DirectML 原生模块（已就绪，可在 Phase 3 独立插件包中挂载）",
+                    "当前构建未启用 DirectML 原生模块（可选用通用版构建开箱即用）",
                     context.PrimaryGpu?.Name));
             }
 
             using (var testOptions = new SessionOptions())
             {
-                dmlMethod.Invoke(testOptions, new object[] { deviceId });
+                if (!OnnxExecutionProviderHelper.TryAppendDirectMl(testOptions, deviceId))
+                {
+                    return Task.FromResult(StrategyValidationResult.Failure(
+                        Name,
+                        "DirectML 执行提供者挂载失败",
+                        context.PrimaryGpu?.Name));
+                }
             }
 
             var gpuName = context.PrimaryGpu?.Name ?? $"GPU {deviceId}";
@@ -67,11 +71,9 @@ public class DirectMlStrategy : IExecutionStrategy
 
     public void ConfigureOnnxSession(SessionOptions options, int deviceId = 0)
     {
-        var dmlMethod = typeof(SessionOptions).GetMethod("AppendExecutionProvider_DML", new[] { typeof(int) });
-        if (dmlMethod != null)
+        options.EnableMemoryPattern = false;
+        if (OnnxExecutionProviderHelper.TryAppendDirectMl(options, deviceId))
         {
-            options.EnableMemoryPattern = false;
-            dmlMethod.Invoke(options, new object[] { deviceId });
             options.AppendExecutionProvider_CPU();
         }
         else

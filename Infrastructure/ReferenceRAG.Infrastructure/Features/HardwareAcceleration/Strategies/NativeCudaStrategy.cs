@@ -43,10 +43,24 @@ public class NativeCudaStrategy : IExecutionStrategy
                     context.PrimaryGpu?.Name));
             }
 
-            // 2. 校验 ONNX Runtime 是否能成功挂载 CUDA Execution Provider
+            // 2. 校验当前构建是否包含 CUDA 原生模块并能成功挂载
+            if (!OnnxExecutionProviderHelper.HasCuda)
+            {
+                return Task.FromResult(StrategyValidationResult.Failure(
+                    Name,
+                    "当前构建未包含 CUDA 原生执行模块（可选用 NVIDIA 专属满血版构建）",
+                    context.PrimaryGpu?.Name));
+            }
+
             using (var testOptions = new SessionOptions())
             {
-                testOptions.AppendExecutionProvider_CUDA(deviceId);
+                if (!OnnxExecutionProviderHelper.TryAppendCuda(testOptions, deviceId))
+                {
+                    return Task.FromResult(StrategyValidationResult.Failure(
+                        Name,
+                        "CUDA 执行提供者挂载失败",
+                        context.PrimaryGpu?.Name));
+                }
             }
 
             var gpuName = context.PrimaryGpu?.Name ?? $"NVIDIA GPU {deviceId}";
@@ -73,7 +87,13 @@ public class NativeCudaStrategy : IExecutionStrategy
     {
         // 始终关闭内存模式以支持动态 batch size（消除逐条推理退化）
         options.EnableMemoryPattern = false;
-        options.AppendExecutionProvider_CUDA(deviceId);
-        options.AppendExecutionProvider_CPU();
+        if (OnnxExecutionProviderHelper.TryAppendCuda(options, deviceId))
+        {
+            options.AppendExecutionProvider_CPU();
+        }
+        else
+        {
+            options.AppendExecutionProvider_CPU();
+        }
     }
 }

@@ -46,9 +46,23 @@ public class PortableCudaStrategy : IExecutionStrategy
         {
             var injected = _injector.InjectDirectories(new[] { portableDir });
 
+            if (!OnnxExecutionProviderHelper.HasCuda)
+            {
+                return Task.FromResult(StrategyValidationResult.Failure(
+                    Name,
+                    "当前构建未包含 CUDA 原生执行模块（可选用 NVIDIA 专属满血版构建）",
+                    context.PrimaryGpu?.Name));
+            }
+
             using (var testOptions = new SessionOptions())
             {
-                testOptions.AppendExecutionProvider_CUDA(deviceId);
+                if (!OnnxExecutionProviderHelper.TryAppendCuda(testOptions, deviceId))
+                {
+                    return Task.FromResult(StrategyValidationResult.Failure(
+                        Name,
+                        "便携式 CUDA 执行提供者挂载失败",
+                        context.PrimaryGpu?.Name));
+                }
             }
 
             var gpuName = context.PrimaryGpu?.Name ?? $"NVIDIA GPU {deviceId}";
@@ -73,7 +87,13 @@ public class PortableCudaStrategy : IExecutionStrategy
     public void ConfigureOnnxSession(SessionOptions options, int deviceId = 0)
     {
         options.EnableMemoryPattern = false;
-        options.AppendExecutionProvider_CUDA(deviceId);
-        options.AppendExecutionProvider_CPU();
+        if (OnnxExecutionProviderHelper.TryAppendCuda(options, deviceId))
+        {
+            options.AppendExecutionProvider_CPU();
+        }
+        else
+        {
+            options.AppendExecutionProvider_CPU();
+        }
     }
 }

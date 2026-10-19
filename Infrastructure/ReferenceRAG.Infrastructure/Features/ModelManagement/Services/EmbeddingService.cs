@@ -11,6 +11,7 @@ using System.Diagnostics;
 using System.Numerics;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Injection;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Scanning;
+using ReferenceRAG.Core.Features.HardwareAcceleration;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -139,7 +140,11 @@ public class EmbeddingService : IEmbeddingService, IDisposable, IRougamo<SearchT
                     // 始终关闭内存模式以支持动态 batch size
                     // 对 embedded 和 external 两种格式均有效，消除逐条推理退化
                     sessionOptions.EnableMemoryPattern = false;
-                    sessionOptions.AppendExecutionProvider_CUDA(_options.CudaDeviceId);
+                    if (!OnnxExecutionProviderHelper.TryAppendCuda(sessionOptions, _options.CudaDeviceId) &&
+                        !OnnxExecutionProviderHelper.TryAppendDirectMl(sessionOptions, _options.CudaDeviceId))
+                    {
+                        throw new InvalidOperationException("当前环境或构建未提供有效的 GPU 执行提供者");
+                    }
                     sessionOptions.AppendExecutionProvider_CPU();
                     _logger.LogInformation("使用 CUDA GPU: {DeviceId} (动态batch已启用)", _options.CudaDeviceId);
                 }

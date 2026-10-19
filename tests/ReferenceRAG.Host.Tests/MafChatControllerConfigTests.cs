@@ -13,21 +13,17 @@ namespace ReferenceRAG.Host.Tests;
 public class MafChatControllerConfigTests : IDisposable
 {
     private readonly string _tempDir;
-    private readonly string _origCurrentDir;
     private readonly string _appSettingsPath;
 
     public MafChatControllerConfigTests()
     {
-        _origCurrentDir = Directory.GetCurrentDirectory();
         _tempDir = Path.Combine(Path.GetTempPath(), "MafChatControllerTests_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_tempDir);
-        Directory.SetCurrentDirectory(_tempDir);
         _appSettingsPath = Path.Combine(_tempDir, "appsettings.json");
     }
 
     public void Dispose()
     {
-        Directory.SetCurrentDirectory(_origCurrentDir);
         try
         {
             if (Directory.Exists(_tempDir))
@@ -76,7 +72,19 @@ public class MafChatControllerConfigTests : IDisposable
             services.GetRequiredService<IHttpClientFactory>(),
             NullLogger<MafChatService>.Instance);
 
-        return new MafChatController(chatService, config, NullLogger<MafChatController>.Instance);
+        return new MafChatController(
+            chatService,
+            config,
+            NullLogger<MafChatController>.Instance,
+            new TestHostEnvironment { ContentRootPath = _tempDir });
+    }
+
+    private class TestHostEnvironment : Microsoft.Extensions.Hosting.IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = "Development";
+        public string ApplicationName { get; set; } = "ReferenceRAG.Tests";
+        public string ContentRootPath { get; set; } = string.Empty;
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
     [Fact]

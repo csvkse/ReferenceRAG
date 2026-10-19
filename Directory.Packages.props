@@ -26,6 +26,10 @@
          本机及常见部署环境是 CUDA 12（cublasLt64_12.dll）。升到 1.27+ 会导致
          CUDA 加载失败并静默回退 CPU。 -->
     <PackageVersion Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.24.4" />
+    <PackageVersion Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+    <PackageVersion Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" />
+    <PackageVersion Include="Intel.ML.OnnxRuntime.OpenVino" Version="1.24.1" />
+    <PackageVersion Include="LLamaSharp.Backend.Vulkan.Windows" Version="0.30.0" />
     <PackageVersion Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
     <PackageVersion Include="BERTTokenizers" Version="1.2.0" />
     <PackageVersion Include="Tokenizers.HuggingFace" Version="3.23.1" />

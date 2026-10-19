@@ -79,7 +79,26 @@ public static class LlamaNativeInitializer
 
                 if (!scanResult.Found)
                 {
-                    _logger.LogInformation("[LlamaNative] 未检测到 CUDA 12 依赖库 (cublas64_12.dll / cublasLt64_12.dll)，自动使用 CPU 模式");
+                    var vulkanCandidateDirs = new[]
+                    {
+                        Path.Combine(AppContext.BaseDirectory, "runtimes", "win-x64", "native", "vulkan"),
+                        Path.Combine(Directory.GetCurrentDirectory(), "runtimes", "win-x64", "native", "vulkan"),
+                        Path.Combine(AppContext.BaseDirectory, "vulkan"),
+                        Path.Combine(Directory.GetCurrentDirectory(), "vulkan")
+                    };
+
+                    string? activeVulkanDir = vulkanCandidateDirs.FirstOrDefault(d => Directory.Exists(d) && File.Exists(Path.Combine(d, "llama.dll")));
+                    if (activeVulkanDir != null && isWindows)
+                    {
+                        _logger.LogInformation("[LlamaNative] 未检测到 CUDA 12，已激活 Vulkan GPU 加速运行目录: {Dir}", activeVulkanDir);
+                        try { AddDllDirectory(activeVulkanDir); } catch { }
+                        injector.InjectDirectories(new[] { activeVulkanDir });
+                    }
+                    else
+                    {
+                        _logger.LogInformation("[LlamaNative] 未检测到 CUDA 12 依赖库 (cublas64_12.dll / cublasLt64_12.dll)，自动使用 CPU / 自适应回退模式");
+                    }
+
                     NativeLibraryConfig.All.WithCuda(false).WithAutoFallback(true);
                     _initialized = true;
                     return false;
