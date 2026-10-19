@@ -314,6 +314,18 @@ public class ModelDownloadArchitectureTests
             return Task.CompletedTask;
         }
 
+        public Task<List<ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models.ModelVariantSearchResult>> SearchVariantsAsync(
+            string query, string? format = null, int limit = 15, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new List<ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models.ModelVariantSearchResult>());
+        }
+
+        public Task<ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models.ModelVariantDetail?> GetVariantDetailAsync(
+            string repositoryId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models.ModelVariantDetail?>(null);
+        }
+
         public void Dispose() { }
     }
 }

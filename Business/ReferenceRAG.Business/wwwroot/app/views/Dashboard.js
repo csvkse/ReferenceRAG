@@ -1,5 +1,5 @@
 import { defineComponent as _defineComponent } from 'vue';
-import { ref, onMounted, onUnmounted, h } from 'vue';
+import { ref, onMounted, onUnmounted, onActivated, h } from 'vue';
 import { useRouter } from 'vue-router';
 import { NTag, NButton, useMessage } from 'naive-ui';
 import { FolderOutline, DocumentTextOutline, GridOutline, SearchOutline, PlayOutline } from '@vicons/ionicons5';
@@ -7,6 +7,7 @@ import { indexApi, sourcesApi, indexJobsApi } from '/app/api/index.js';
 import { useIndexStore } from '/app/stores/index.js';
 import { JobCenter } from '/core/jobs/JobCenter.js';
 const component = /*@__PURE__*/ _defineComponent({
+    ...{ name: 'Dashboard' },
     __name: 'Dashboard',
     setup(__props, { expose: __expose }) {
         __expose();
@@ -82,6 +83,9 @@ const component = /*@__PURE__*/ _defineComponent({
         });
         onUnmounted(() => {
             unbindDashboardStats?.();
+        });
+        onActivated(async () => {
+            await Promise.all([loadStats(), loadSources(true)]);
         });
         const __returned__ = { router, indexStore, stats, sources, loadingSources, isIndexing, sourceColumns, loadStats, loadSources, handleStartIndex, get NButton() { return NButton; }, get FolderOutline() { return FolderOutline; }, get DocumentTextOutline() { return DocumentTextOutline; }, get GridOutline() { return GridOutline; }, get SearchOutline() { return SearchOutline; }, get PlayOutline() { return PlayOutline; } };
         return __returned__;

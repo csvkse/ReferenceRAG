@@ -39,4 +39,20 @@ public interface IModelSourceAdapter : IDisposable
         string targetFilePath,
         Action<long, long>? onChunkReceived = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 搜索上游模型托管平台中的变种或社区量化仓库
+    /// </summary>
+    Task<List<ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models.ModelVariantSearchResult>> SearchVariantsAsync(
+        string query,
+        string? format = null,
+        int limit = 15,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 获取特定变种仓库的详细信息与文件清单
+    /// </summary>
+    Task<ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models.ModelVariantDetail?> GetVariantDetailAsync(
+        string repositoryId,
+        CancellationToken cancellationToken = default);
 }

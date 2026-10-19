@@ -6,6 +6,7 @@ import { ChatbubblesOutline, AddOutline, SendOutline, RefreshOutline, CreateOutl
 import { marked } from 'marked';
 import { API_URL } from '/app/config/env.js';
 import { useAuthStore } from '/app/stores/auth.js';
+import { ragFetch as fetch } from '/core/transport/index.js';
 const component = /*@__PURE__*/ _defineComponent({
     ...{ name: 'Chat' },
     __name: 'Chat',
@@ -79,6 +80,17 @@ const component = /*@__PURE__*/ _defineComponent({
             await nextTick();
             scrollbarRef.value?.scrollTo({ top: 999999, behavior: 'smooth' });
         };
+        const parseJsonSafe = async (res) => {
+            const text = await res.text();
+            if (!text || !text.trim()) {
+                throw new Error(`服务响应为空 (HTTP ${res.status})`);
+            }
+            try {
+                return JSON.parse(text);
+            } catch (err) {
+                throw new Error(`响应解析失败: ${err.message}`);
+            }
+        };
         const createSession = async () => {
             const res = await fetch(`${API_URL}/chat/sessions`, {
                 method: 'POST',
@@ -86,7 +98,7 @@ const component = /*@__PURE__*/ _defineComponent({
             });
             if (!res.ok)
                 throw new Error(`创建会话失败 (${res.status})`);
-            const data = await res.json();
+            const data = await parseJsonSafe(res);
             return (data.SessionId ?? data.sessionId);
         };
         const deleteSession = async (id) => {
@@ -196,12 +208,14 @@ const component = /*@__PURE__*/ _defineComponent({
             try {
                 sessionId.value = await createSession();
                 const res = await fetch(`${API_URL}/chat/tools`, { headers: getHeaders() });
-                if (res.ok)
-                    toolDescriptions.value = await res.json();
+                if (res.ok) {
+                    const data = await parseJsonSafe(res);
+                    toolDescriptions.value = Array.isArray(data) ? data : [];
+                }
             }
-            catch {
+            catch (e) {
                 initialized.value = false;
-                message.error('初始化会话失败，请检查服务连接及 Chat 配置');
+                message.error(e.message || '初始化会话失败，请检查服务连接及 Chat 配置');
             }
         };
         onMounted(initSession);

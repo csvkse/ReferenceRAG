@@ -1,9 +1,10 @@
 import { defineComponent as _defineComponent } from 'vue';
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, onActivated, watch } from 'vue';
 import { useMessage } from 'naive-ui';
 import { SearchOutline, ArrowDownOutline, OpenOutline, CloseOutline, RefreshOutline, CubeOutline, GitMergeOutline, LayersOutline, OptionsOutline } from '@vicons/ionicons5';
 import { aiQueryApi, sourcesApi, pathsApi } from '/app/api/index.js';
 const component = /*@__PURE__*/ _defineComponent({
+    ...{ name: 'Search' },
     __name: 'Search',
     setup(__props, { expose: __expose }) {
         __expose();
@@ -50,7 +51,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 searchOptions.value.sources.length === 0 &&
                 searchOptions.value.folders.length === 0);
         });
-        const sourceOptions = computed(() => sources.value.map(s => ({ label: s.name, value: s.name })));
+        const sourceOptions = computed(() => sources.value.filter(s => s.enabled !== false).map(s => ({ label: s.name, value: s.name })));
         // 将路径数据转换为树形结构供 n-tree 使用
         const pathTreeData = computed(() => {
             return paths.value.map(source => ({
@@ -255,6 +256,11 @@ const component = /*@__PURE__*/ _defineComponent({
             }
         };
         onMounted(() => {
+            loadSources();
+            loadPaths();
+            loadSearchStatus();
+        });
+        onActivated(() => {
             loadSources();
             loadPaths();
             loadSearchStatus();

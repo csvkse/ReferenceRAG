@@ -35,3 +35,28 @@ test('disposed and unavailable bridges reject outstanding requests', async () =>
   const unavailable=createIpcTransport(null);
   await assert.rejects(unavailable.fetch('/api/test'),/unavailable/i);
 });
+test('IPC correctly proxies /api/chat/sessions and handles response payload', async () => {
+  let sent;
+  const bridge = {
+    addEventListener: (_, fn) => bridge.listener = fn,
+    removeEventListener() {},
+    postMessage: v => sent = JSON.parse(JSON.parse(v).data)
+  };
+  const transport = createIpcTransport(bridge);
+  const pending = transport.fetch('/api/chat/sessions', { method: 'POST', body: null });
+  assert.equal(sent.method, 'POST');
+  assert.equal(sent.path, '/api/chat/sessions');
+  bridge.listener({
+    data: JSON.stringify({
+      id: sent.id,
+      type: 'response',
+      status: 200,
+      body: JSON.stringify({ sessionId: 'session-xyz' })
+    })
+  });
+  const res = await pending;
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(json.sessionId, 'session-xyz');
+  transport.dispose();
+});

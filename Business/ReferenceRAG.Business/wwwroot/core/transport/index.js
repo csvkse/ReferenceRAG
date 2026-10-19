@@ -5,10 +5,16 @@ const nativeFetch=globalThis.fetch.bind(globalThis);
 export const ipc=isDesktop?createIpcTransport(globalThis.chrome?.webview):null;
 
 export function ragFetch(input,options={}) {
-  const url=new URL(input,location.href);
+  const targetUrl = typeof input === 'string' || input instanceof URL ? input : input?.url || String(input);
+  const url=new URL(targetUrl,location.href);
   const local=url.protocol===location.protocol && url.host===location.host;
   if(isDesktop && local) return ipc.fetch(url.pathname+url.search,options);
   return nativeFetch(input,options);
+}
+
+// Hook global fetch in desktop mode so any native fetch call targeting local API routes automatically routes through IPC
+if (isDesktop && typeof globalThis.fetch === 'function') {
+  globalThis.fetch = ragFetch;
 }
 
 // Install before loading pages: every axios instance uses the selected transport.

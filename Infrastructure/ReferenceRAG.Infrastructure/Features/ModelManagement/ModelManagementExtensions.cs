@@ -51,9 +51,6 @@ public static class ModelManagementExtensions
             var memoryManager = sp.GetService<IGpuMemoryManager>();
             var windowState = sp.GetService<IWindowStateService>();
 
-            if (cfg.Embedding.Mode == "openai")
-                return new OpenAIEmbeddingService(cfg.Embedding);
-
             var options = new EmbeddingOptions
             {
                 ModelPath = cfg.Embedding.ModelPath,
@@ -70,10 +67,7 @@ public static class ModelManagementExtensions
 
         services.AddSingleton<IEmbeddingTokenCounter>(sp =>
         {
-            var embedding = sp.GetRequiredService<ConfigManager>().Load().Embedding;
-            return embedding.Mode == "openai"
-                ? new LlamaCppTokenCounter(embedding)
-                : new UnsupportedEmbeddingTokenCounter();
+            return new DynamicEmbeddingTokenCounter(sp.GetRequiredService<ConfigManager>());
         });
 
         services.AddSingleton<IRerankService>(sp =>
@@ -99,9 +93,6 @@ public static class ModelManagementExtensions
                 if (!File.Exists(modelPath))
                     modelPath = Path.Combine(cfgModelsPath, targetName, "model.onnx");
             }
-
-            if (rerankConfig.Mode == "openai")
-                return new OpenAIRerankService(rerankConfig);
 
             var options = new RerankOptions
             {

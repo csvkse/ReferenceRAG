@@ -98,6 +98,44 @@ public sealed class GgufBackendStrategy : IBackendResolutionStrategy
         var arch = GgufArchitectureDetector.DetectArchitecture(resolvedPath, modelName);
         _logger.LogInformation("[GgufStrategy] 重排模型 GGUF 检测到架构阵营: {Arch} (Model: {Name})", arch, modelName);
 
+        // 若为非 Causal 架构（如 BERT/RoBERTa/BCE 等传统 Cross-Encoder），检测同级/子级目录是否存在官方 model.onnx
+        if (arch != "causal")
+        {
+            var dir = File.Exists(resolvedPath) ? Path.GetDirectoryName(resolvedPath) : resolvedPath;
+            if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+            {
+                var onnxCandidate = Path.Combine(dir, "model.onnx");
+                if (!File.Exists(onnxCandidate))
+                {
+                    var subOnnx = Directory.GetFiles(dir, "model.onnx", SearchOption.AllDirectories);
+                    if (subOnnx.Length > 0) onnxCandidate = subOnnx[0];
+                }
+
+                if (File.Exists(onnxCandidate))
+                {
+                    _logger.LogInformation("[GgufStrategy] 检测到非 Causal Cross-Encoder 模型且同目录存在官方 ONNX ({Path})，自动升配至 OnnxRerankAdapter 执行真实高精重排，避免 llama.cpp 算子缺失", onnxCandidate);
+                    var onnxOptions = new ReferenceRAG.Core.Services.Rerank.RerankOptions
+                    {
+                        ModelPath = onnxCandidate,
+                        ModelName = modelName,
+                        UseCuda = config.UseCuda,
+                        CudaDeviceId = config.CudaDeviceId
+                    };
+                    var onnxAdapter = new OnnxRerankAdapter(onnxOptions, memoryManager);
+                    try
+                    {
+                        await onnxAdapter.InitializeAsync(cancellationToken);
+                        return onnxAdapter;
+                    }
+                    catch (Exception onnxEx)
+                    {
+                        _logger.LogWarning(onnxEx, "[GgufStrategy] 尝试升配加载 ONNX 异常，降级回退处理");
+                        onnxAdapter.Dispose();
+                    }
+                }
+            }
+        }
+
         IRerankBackendAdapter adapter = arch == "causal"
             ? new LlamaCausalLogitRerankAdapter(resolvedPath, modelName, offloadPlan.GpuLayers, 4096)
             : new LlamaRerankAdapter(resolvedPath, modelName, offloadPlan.GpuLayers, 4096);

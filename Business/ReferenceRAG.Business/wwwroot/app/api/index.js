@@ -118,6 +118,9 @@ export const semanticTestApi = {
     clearRecords: () => api.delete('/SemanticTest/records'),
     getPresets: () => api.get('/SemanticTest/presets'),
     runPreset: (suiteName) => api.post(`/SemanticTest/preset/${suiteName}`),
+    getRetrievalPresets: () => api.get('/SemanticTest/retrieval-presets'),
+    getRetrievalPreset: (suiteName) => api.get(`/SemanticTest/retrieval-preset/${suiteName}`),
+    runRetrievalPreset: (suiteName) => api.post(`/SemanticTest/retrieval-preset/${suiteName}`),
     getStatistics: () => api.get('/SemanticTest/statistics'),
     modelProbe: () => api.get('/SemanticTest/model-probe')
 };
@@ -143,8 +146,11 @@ export const modelsApi = {
     getRerankDownloadProgress: (modelName) => api.get(`/Models/rerank/download/${modelName}/progress`),
     deleteRerankModel: (modelName) => api.delete(`/Models/rerank/${modelName}`),
     getRerankDownloadOptions: (modelName, config) => api.get(`/Models/rerank/download-options/${modelName}`, config),
-    cancelDownload: (modelName) => api.delete(`/Models/download/${modelName}`),
-    cancelRerankDownload: (modelName) => api.delete(`/Models/rerank/download/${modelName}`),
+    cancelDownload: (modelName) => api.delete(`/Models/download/${encodeURIComponent(modelName)}`),
+    cancelRerankDownload: (modelName) => api.delete(`/Models/rerank/download/${encodeURIComponent(modelName)}`),
+    // 搜索开源社区模型变种与查看详情
+    searchVariants: (query, format = null, limit = 15) => api.get('/Models/variants/search', { params: { query, format, limit } }),
+    getVariantDetail: (repository) => api.get('/Models/variants/detail', { params: { repository } }),
     // 扫描模型目录
     scanModels: () => api.post('/Models/scan'),
     // 模型运行时状态
@@ -201,5 +207,13 @@ export const graphApi = {
     subgraph: (rootIds, depth = 1) => api.post('/graph/subgraph', { rootIds, depth }),
     rebuild: () => api.post('/graph/rebuild'),
     rebuildStatus: () => api.get('/graph/rebuild/status')
+};
+// Chat
+export const chatApi = {
+    createSession: () => api.post('/chat/sessions'),
+    deleteSession: (id) => api.delete(`/chat/sessions/${id}`),
+    getTools: () => api.get('/chat/tools'),
+    getConfig: () => api.get('/chat/config'),
+    saveConfig: (data) => api.post('/chat/config', data)
 };
 export default api;

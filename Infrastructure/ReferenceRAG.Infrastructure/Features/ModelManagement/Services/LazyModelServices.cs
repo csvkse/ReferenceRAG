@@ -16,7 +16,7 @@ namespace ReferenceRAG.Core.Services;
 /// <summary>
 /// 状态机驱动的高性能多后端延迟加载向量嵌入服务（适配器 + 策略 + 状态机）
 /// </summary>
-internal sealed class LazyEmbeddingService : IEmbeddingService, IModelRuntimeTelemetryProvider, IModelRetentionPolicyTarget, IDisposable
+internal sealed class LazyEmbeddingService : IEmbeddingService, IModelRuntimeTelemetryProvider, IModelRetentionPolicyTarget, IModelConfigurableTarget, IDisposable
 {
     private static readonly ILogger _logger = StaticLogger.GetLogger("LazyEmbeddingService");
 
@@ -135,11 +135,15 @@ internal sealed class LazyEmbeddingService : IEmbeddingService, IModelRuntimeTel
 
             var success = await _stateMachine.TwoPhaseReloadAsync(async () =>
             {
+                var cfg = _configManager?.Load()?.Embedding;
+                var mode = cfg?.Mode;
+
                 // 如果传入了旧版 Legacy Factory 且未命中 GGUF 或 OpenAI，保留回退兼容
                 if (_legacyFactory != null &&
+                    !string.Equals(mode, "openai", StringComparison.OrdinalIgnoreCase) &&
                     !_modelPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) &&
-                    !Directory.Exists(_modelPath) ||
-                    (_legacyFactory != null && File.Exists(_modelPath) && _modelPath.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase)))
+                    (!Directory.Exists(_modelPath) ||
+                    (File.Exists(_modelPath) && _modelPath.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase))))
                 {
                     var legacyService = _legacyFactory();
                     var adapter = new OnnxEmbeddingAdapter(_options, _memoryManager);
@@ -147,7 +151,7 @@ internal sealed class LazyEmbeddingService : IEmbeddingService, IModelRuntimeTel
                     return adapter;
                 }
 
-                var embeddingConfig = new EmbeddingConfig
+                var embeddingConfig = cfg ?? new EmbeddingConfig
                 {
                     ModelPath = _modelPath,
                     ModelName = _modelName,
@@ -158,7 +162,7 @@ internal sealed class LazyEmbeddingService : IEmbeddingService, IModelRuntimeTel
                     CudaLibraryPath = _options.CudaLibraryPath
                 };
 
-                var strategy = ModelBackendStrategyFactory.ResolveStrategy(_modelPath);
+                var strategy = ModelBackendStrategyFactory.ResolveStrategy(_modelPath, mode);
                 return await strategy.CreateEmbeddingAdapterAsync(_modelPath, _modelName, embeddingConfig, _memoryManager, cancellationToken);
             }, cancellationToken);
 
@@ -229,6 +233,43 @@ internal sealed class LazyEmbeddingService : IEmbeddingService, IModelRuntimeTel
         }
 
         return false;
+    }
+
+    public async Task<bool> ApplyConfigurationAsync(EmbeddingConfig config, CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("[LazyEmbedding] 应用新配置: Mode={Mode}, Model={Name}, Path={Path}, Cuda={UseCuda}, ApiUrl={ApiUrl}",
+            config.Mode, config.ModelName, config.ModelPath, config.UseCuda, config.ApiBaseUrl);
+
+        _modelPath = config.ModelPath ?? "";
+        _modelName = config.ModelName ?? "";
+        _options.ModelPath = _modelPath;
+        _options.ModelName = _modelName;
+        _options.UseCuda = config.UseCuda;
+        _options.CudaDeviceId = config.CudaDeviceId;
+        _options.CudaLibraryPath = config.CudaLibraryPath;
+        if (config.MaxSequenceLength > 0) _options.MaxSequenceLength = config.MaxSequenceLength;
+        if (config.BatchSize > 0) _options.BatchSize = config.BatchSize;
+
+        // 如果模型当前已加载（IsReady），通过状态机两阶段热重载平滑热替换
+        if (_stateMachine.IsReady)
+        {
+            var success = await _stateMachine.TwoPhaseReloadAsync(async () =>
+            {
+                var strategy = ModelBackendStrategyFactory.ResolveStrategy(_modelPath, config.Mode);
+                return await strategy.CreateEmbeddingAdapterAsync(_modelPath, _modelName, config, _memoryManager, cancellationToken);
+            }, cancellationToken);
+
+            if (success)
+            {
+                Dimension = _stateMachine.CurrentAdapter?.Dimension ?? Dimension;
+                return true;
+            }
+            return false;
+        }
+
+        // 若当前未加载（Unloaded），下次调用 EnsureReadyAsync 时会自动按最新配置与策略进行延迟加载
+        Dimension = ReadConfiguredDimension(_modelPath);
+        return true;
     }
 
     public void UnloadModel()
@@ -381,14 +422,14 @@ internal sealed class LazyEmbeddingService : IEmbeddingService, IModelRuntimeTel
 /// <summary>
 /// 状态机驱动的高性能多后端延迟加载重排服务（适配器 + 策略 + 状态机）
 /// </summary>
-internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyTarget, IRerankRuntimeTelemetryProvider, IDisposable
+internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyTarget, IRerankConfigurableTarget, IRerankRuntimeTelemetryProvider, IDisposable
 {
     private static readonly ILogger _logger = StaticLogger.GetLogger("LazyRerankService");
 
     private readonly Func<OnnxRerankService>? _legacyFactory;
     private readonly IGpuMemoryManager? _memoryManager;
-    private readonly bool _useCuda;
-    private readonly int _deviceId;
+    private bool _useCuda;
+    private int _deviceId;
     private readonly IWindowStateService? _windowStateService;
     private readonly ConfigManager? _configManager;
     private readonly ModelLifecycleStateMachine<IRerankBackendAdapter> _stateMachine;
@@ -494,11 +535,15 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
 
             var success = await _stateMachine.TwoPhaseReloadAsync(async () =>
             {
+                var cfg = _configManager?.Load();
+                var currentRerank = cfg?.Rerank;
+                var mode = currentRerank?.Mode;
+
                 if (_legacyFactory != null &&
+                    !string.Equals(mode, "openai", StringComparison.OrdinalIgnoreCase) &&
                     !_modelPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
                 {
                     var legacyService = _legacyFactory();
-                    var cfg = _configManager?.Load();
                     var options = new RerankOptions
                     {
                         ModelPath = _modelPath,
@@ -512,7 +557,7 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
                     return adapter;
                 }
 
-                var config = new RerankConfig
+                var config = currentRerank ?? new RerankConfig
                 {
                     ModelName = _modelName,
                     ModelPath = _modelPath,
@@ -520,7 +565,7 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
                     CudaDeviceId = _deviceId
                 };
 
-                var strategy = ModelBackendStrategyFactory.ResolveStrategy(_modelPath);
+                var strategy = ModelBackendStrategyFactory.ResolveStrategy(_modelPath, mode);
                 return await strategy.CreateRerankAdapterAsync(_modelPath, _modelName, config, _memoryManager, cancellationToken);
             }, cancellationToken);
         }
@@ -578,6 +623,36 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
         }
 
         return false;
+    }
+
+    public async Task<bool> ApplyConfigurationAsync(RerankConfig config, CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("[LazyRerank] 应用新配置: Mode={Mode}, Model={Name}, Path={Path}, Cuda={UseCuda}, Enabled={Enabled}, ApiUrl={ApiUrl}",
+            config.Mode, config.ModelName, config.ModelPath, config.UseCuda, config.Enabled, config.ApiBaseUrl);
+
+        _modelName = config.ModelName ?? "";
+        _modelPath = config.ModelPath ?? "";
+        _useCuda = config.UseCuda;
+        _deviceId = config.CudaDeviceId;
+
+        if (!config.Enabled)
+        {
+            await _stateMachine.UnloadAsync();
+            return true;
+        }
+
+        if (_stateMachine.IsReady)
+        {
+            var success = await _stateMachine.TwoPhaseReloadAsync(async () =>
+            {
+                var strategy = ModelBackendStrategyFactory.ResolveStrategy(_modelPath, config.Mode);
+                return await strategy.CreateRerankAdapterAsync(_modelPath, _modelName, config, _memoryManager, cancellationToken);
+            }, cancellationToken);
+
+            return success;
+        }
+
+        return true;
     }
 
     public void UnloadModel()

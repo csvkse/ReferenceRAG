@@ -69,3 +69,27 @@ public sealed class UnsupportedEmbeddingTokenCounter : IEmbeddingTokenCounter
     public Task<int> CountTokensAsync(string text, CancellationToken cancellationToken = default)
         => throw new NotSupportedException("当前嵌入服务不支持 llama.cpp /tokenize。");
 }
+
+/// <summary>
+/// 动态感知当前配置与模型后端的 Token 计数器适配器
+/// </summary>
+public sealed class DynamicEmbeddingTokenCounter : IEmbeddingTokenCounter
+{
+    private readonly ConfigManager _configManager;
+
+    public DynamicEmbeddingTokenCounter(ConfigManager configManager)
+    {
+        _configManager = configManager ?? throw new ArgumentNullException(nameof(configManager));
+    }
+
+    public Task<int> CountTokensAsync(string text, CancellationToken cancellationToken = default)
+    {
+        var cfg = _configManager.Load().Embedding;
+        if (string.Equals(cfg.Mode, "openai", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(cfg.ApiBaseUrl))
+        {
+            return new LlamaCppTokenCounter(cfg).CountTokensAsync(text, cancellationToken);
+        }
+        return new UnsupportedEmbeddingTokenCounter().CountTokensAsync(text, cancellationToken);
+    }
+}
+

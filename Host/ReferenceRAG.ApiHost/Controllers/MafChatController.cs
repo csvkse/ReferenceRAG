@@ -131,8 +131,12 @@ public class MafChatController : ControllerBase
             };
 
             System.IO.File.WriteAllText(appSettingsPath, root.ToJsonString(_writeOptions));
-            _logger.LogInformation("Chat 配置已保存，重启服务后生效");
-            return Ok(new { message = "配置已保存，重启服务后生效" });
+
+            // 即时热更新 MafChatService 客户端
+            _chatService.UpdateConfiguration(config.Endpoint, config.ApiKey, config.Model, config.SystemPrompt);
+
+            _logger.LogInformation("Chat 配置已保存并即时生效");
+            return Ok(new { message = "配置已保存并即时生效" });
         }
         catch (Exception ex)
         {

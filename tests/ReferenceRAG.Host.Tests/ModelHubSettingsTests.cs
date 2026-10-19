@@ -125,7 +125,7 @@ public class ModelHubSettingsTests : IDisposable
     }
 
     [Fact]
-    public void SettingsController_Save_PreservesModelHubSettings()
+    public async Task SettingsController_Save_PreservesModelHubSettings()
     {
         var configManager = new ConfigManager();
         var initial = new ObsidianRagConfig
@@ -156,8 +156,8 @@ public class ModelHubSettingsTests : IDisposable
             }
         };
 
-        var saveResult = controller.Save(updateConfig);
-        Assert.IsType<OkObjectResult>(saveResult);
+        var saveResult = await controller.Save(updateConfig);
+        Assert.IsType<OkObjectResult>(saveResult.Result);
 
         var saved = configManager.Load();
         Assert.Equal("hf_updated_token", saved.ModelHub.HfToken);

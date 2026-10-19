@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models;
 
 namespace ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Adapters;
 
@@ -320,6 +321,204 @@ public class HuggingFaceSourceAdapter : IModelSourceAdapter
             if (File.Exists(path)) File.Delete(path);
         }
         catch { }
+    }
+
+    public async Task<List<ModelVariantSearchResult>> SearchVariantsAsync(
+        string query,
+        string? format = null,
+        int limit = 15,
+        CancellationToken cancellationToken = default)
+    {
+        var results = new List<ModelVariantSearchResult>();
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return results;
+        }
+
+        var normalizedFormat = format?.Trim().ToLowerInvariant();
+        var cleanQuery = query.Trim();
+
+        foreach (var endpoint in _endpoints)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var encodedQuery = Uri.EscapeDataString(cleanQuery);
+            
+            // 构建带排序与过滤的搜索 URL
+            var searchUrl = $"{endpoint}/api/models?search={encodedQuery}&sort=downloads&direction=-1&limit={Math.Max(limit * 2, 20)}&full=false";
+            if (normalizedFormat == "gguf")
+            {
+                searchUrl += "&filter=gguf";
+            }
+
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                cts.CancelAfter(TimeSpan.FromSeconds(12)); // 12秒快速超时保护
+
+                using var response = await _httpClient.GetAsync(searchUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                if (!response.IsSuccessStatusCode) continue;
+
+                var json = await response.Content.ReadAsStringAsync(cts.Token);
+                using var doc = JsonDocument.Parse(json);
+
+                if (doc.RootElement.ValueKind != JsonValueKind.Array) continue;
+
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    if (!item.TryGetProperty("id", out var idElem)) continue;
+                    var id = idElem.GetString() ?? "";
+                    if (string.IsNullOrWhiteSpace(id)) continue;
+
+                    var parts = id.Split('/');
+                    var author = parts.Length > 1 ? parts[0] : "";
+                    var modelName = parts.Length > 1 ? parts[1] : id;
+
+                    long downloads = 0;
+                    if (item.TryGetProperty("downloads", out var dlElem) && dlElem.ValueKind == JsonValueKind.Number)
+                    {
+                        downloads = dlElem.GetInt64();
+                    }
+
+                    int likes = 0;
+                    if (item.TryGetProperty("likes", out var likesElem) && likesElem.ValueKind == JsonValueKind.Number)
+                    {
+                        likes = likesElem.GetInt32();
+                    }
+
+                    string pipelineTag = "";
+                    if (item.TryGetProperty("pipeline_tag", out var ptElem))
+                    {
+                        pipelineTag = ptElem.GetString() ?? "";
+                    }
+
+                    bool isPrivate = false;
+                    if (item.TryGetProperty("private", out var privElem))
+                    {
+                        isPrivate = privElem.GetBoolean();
+                    }
+
+                    DateTime? lastModified = null;
+                    if (item.TryGetProperty("lastModified", out var lmElem) && lmElem.TryGetDateTime(out var dt))
+                    {
+                        lastModified = dt;
+                    }
+
+                    var tags = new List<string>();
+                    if (item.TryGetProperty("tags", out var tagsElem) && tagsElem.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var t in tagsElem.EnumerateArray())
+                        {
+                            var s = t.GetString();
+                            if (!string.IsNullOrWhiteSpace(s)) tags.Add(s);
+                        }
+                    }
+
+                    var lowerId = id.ToLowerInvariant();
+                    bool hasGguf = tags.Any(t => t.Equals("gguf", StringComparison.OrdinalIgnoreCase))
+                                || lowerId.Contains("-gguf") || lowerId.Contains(".gguf") || lowerId.Contains("/gguf");
+                    bool hasOnnx = tags.Any(t => t.Equals("onnx", StringComparison.OrdinalIgnoreCase))
+                                || lowerId.Contains("onnx");
+
+                    // 依据请求格式做智能过滤
+                    if (normalizedFormat == "gguf" && !hasGguf) continue;
+                    if (normalizedFormat == "onnx" && !hasOnnx) continue;
+
+                    results.Add(new ModelVariantSearchResult
+                    {
+                        Id = id,
+                        Author = author,
+                        ModelName = modelName,
+                        Downloads = downloads,
+                        Likes = likes,
+                        PipelineTag = pipelineTag,
+                        Tags = tags,
+                        HasGguf = hasGguf,
+                        HasOnnx = hasOnnx,
+                        IsPrivate = isPrivate,
+                        LastModified = lastModified,
+                        Description = string.IsNullOrWhiteSpace(pipelineTag) ? "开源社区变种" : pipelineTag
+                    });
+                }
+
+                if (results.Count > 0)
+                {
+                    _activeEndpoint = endpoint;
+                    break;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                Console.WriteLine($"[HuggingFaceAdapter] 端点 {endpoint} 搜索变种失败: {ex.Message}，尝试备选端点...");
+            }
+        }
+
+        return results
+            .DistinctBy(r => r.Id, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(r => r.Downloads)
+            .Take(limit)
+            .ToList();
+    }
+
+    public async Task<ModelVariantDetail?> GetVariantDetailAsync(
+        string repositoryId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(repositoryId)) return null;
+
+        var manifest = await GetManifestAsync(repositoryId, cancellationToken);
+        if (manifest == null || manifest.Files.Count == 0) return null;
+
+        var parts = repositoryId.Split('/');
+        var author = parts.Length > 1 ? parts[0] : "";
+
+        var detail = new ModelVariantDetail
+        {
+            Id = repositoryId,
+            Author = author,
+            SourceEndpoint = manifest.SourceEndpoint,
+            HasGguf = manifest.HasGguf,
+            HasOnnx = manifest.HasOnnx,
+            TotalFilesCount = manifest.Files.Count,
+            WebUrl = $"{manifest.SourceEndpoint}/{repositoryId}"
+        };
+
+        // 提取并结构化 GGUF 文件
+        var ggufFiles = manifest.GetGgufFiles();
+        foreach (var file in ggufFiles)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(file.FileName.ToLowerInvariant(), @"(q[0-9]_[a-z0-9_]+|f16|f32|bf16)");
+            var quant = match.Success ? match.Groups[1].Value.ToUpperInvariant() : "GGUF";
+            bool isRecommended = quant.Contains("Q4_K") || quant.Contains("Q4_0");
+
+            detail.GgufFiles.Add(new ModelVariantFileOption
+            {
+                Path = file.Path,
+                FileName = file.FileName,
+                FileSize = file.Size,
+                Format = "gguf",
+                Quantization = quant,
+                IsRecommended = isRecommended,
+                Description = $"GGUF 量化版本 ({quant})"
+            });
+        }
+
+        // 提取并结构化 ONNX 文件
+        var onnxFiles = manifest.GetOnnxFiles();
+        foreach (var file in onnxFiles)
+        {
+            detail.OnnxFiles.Add(new ModelVariantFileOption
+            {
+                Path = file.Path,
+                FileName = file.FileName,
+                FileSize = file.Size,
+                Format = "onnx",
+                Description = file.FileName.Equals("model.onnx", StringComparison.OrdinalIgnoreCase)
+                    ? "标准 ONNX 格式"
+                    : $"ONNX 变体 ({file.FileName})"
+            });
+        }
+
+        return detail;
     }
 
     public void Dispose()

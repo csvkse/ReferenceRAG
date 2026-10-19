@@ -26,12 +26,14 @@ public sealed class LlamaRerankAdapter : IRerankBackendAdapter
     private LLamaWeights? _weights;
     private LLamaEmbedder? _embedder;
     private bool _disposed;
+    private volatile bool _isPermanentlyDegraded;
 
     public string BackendType => "llama";
     public string ModelPath => _modelPath;
     public string ModelName => _modelName;
     public bool IsLoaded => _weights != null && _embedder != null;
     public int GpuLayers => _gpuLayers;
+    public bool IsPermanentlyDegraded => _isPermanentlyDegraded;
 
     public LlamaRerankAdapter(
         string modelPath,
@@ -107,17 +109,31 @@ public sealed class LlamaRerankAdapter : IRerankBackendAdapter
 
     public async Task<double> RerankAsync(string query, string document, CancellationToken cancellationToken = default)
     {
+        if (_isPermanentlyDegraded)
+        {
+            return 0.5;
+        }
+
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_embedder == null) throw new InvalidOperationException("重排适配器未就绪");
 
         // 拼接查询与文档为交叉编码格式
         var prompt = FormatCrossEncoderPrompt(query, document);
 
-        IReadOnlyList<float[]> results;
+        IReadOnlyList<float[]>? results = null;
         await _inferenceSemaphore.WaitAsync(cancellationToken);
         try
         {
-            results = await _embedder.GetEmbeddings(prompt, cancellationToken);
+            try
+            {
+                results = await _embedder.GetEmbeddings(prompt, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[LlamaRerank] 单文档推理异常，触发熔断降级");
+                _isPermanentlyDegraded = true;
+                return 0.5;
+            }
         }
         finally
         {
@@ -154,6 +170,15 @@ public sealed class LlamaRerankAdapter : IRerankBackendAdapter
             return result;
         }
 
+        // 若当前适配器已触发熔断降级（例如模型缺少 Rank 头），直接使用保底排序，严禁再次调用原生 API
+        if (_isPermanentlyDegraded)
+        {
+            result.Documents = ReferenceRAG.Core.Features.ModelManagement.StateMachine.RerankExecutionContextStateMachine.GenerateFallbackDocuments(docList);
+            sw.Stop();
+            result.DurationMs = sw.ElapsedMilliseconds;
+            return result;
+        }
+
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_embedder == null) throw new InvalidOperationException("重排适配器未就绪");
 
@@ -166,10 +191,11 @@ public sealed class LlamaRerankAdapter : IRerankBackendAdapter
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 若连续 2 条输出 NaN，判定当前 GGUF 模型缺乏 rank 分类头，快速早停止损，避免无谓消耗数秒算力
+                // 若连续 2 条输出 NaN，判定当前 GGUF 模型缺乏 rank 分类头，永久熔断降级并早停，彻底避免后续查询再次调用 Native 引发崩溃
                 if (nanCount >= 2)
                 {
                     nanDetected = true;
+                    _isPermanentlyDegraded = true;
                     for (int rem = i; rem < docList.Count; rem++)
                     {
                         result.Documents.Add(new RerankDocument
@@ -183,7 +209,27 @@ public sealed class LlamaRerankAdapter : IRerankBackendAdapter
                 }
 
                 var prompt = FormatCrossEncoderPrompt(query, docList[i]);
-                var results = await _embedder.GetEmbeddings(prompt, cancellationToken);
+                IReadOnlyList<float[]>? results = null;
+                try
+                {
+                    results = await _embedder.GetEmbeddings(prompt, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[LlamaRerank] 批量推导原生异常，触发熔断降级");
+                    _isPermanentlyDegraded = true;
+                    for (int rem = i; rem < docList.Count; rem++)
+                    {
+                        result.Documents.Add(new RerankDocument
+                        {
+                            Index = rem,
+                            RelevanceScore = NormalizeScore(float.NaN, rem, docList.Count),
+                            Document = docList[rem]
+                        });
+                    }
+                    break;
+                }
+
                 var rawScore = (results != null && results.Count > 0 && results[0] != null && results[0].Length > 0) ? results[0][0] : 0f;
 
                 var isPseudoZeroVector = results != null && results.Count > 0 && results[0] != null && results[0].Length > 1 && results[0][0] == 0f && results[0][1] == 0f && results[0][^1] == 0f;
@@ -210,7 +256,7 @@ public sealed class LlamaRerankAdapter : IRerankBackendAdapter
 
             if (nanDetected)
             {
-                _logger.LogWarning("[LlamaRerank] 检测到 GGUF 重排模型输出 NaN，已平滑降级为保底加权分并早停。强烈建议在模型管理中选用 ONNX 格式标准 Cross-Encoder 模型（如 bge-reranker-base）以获得真正的毫秒级批处理与排序精度");
+                _logger.LogWarning("[LlamaRerank] 检测到 GGUF 重排模型输出 NaN，已启用熔断保护并平滑降级。强烈建议在模型管理中选用 ONNX 格式标准 Cross-Encoder 模型（如 bge-reranker-base / bce-reranker-base）以获得毫秒级批处理与满血排序精度");
             }
         }
         finally

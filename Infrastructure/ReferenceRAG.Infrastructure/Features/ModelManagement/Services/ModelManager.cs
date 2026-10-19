@@ -3,6 +3,7 @@ using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Adapters;
 using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Coordinator;
+using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models;
 using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.StateMachine;
 
 namespace ReferenceRAG.Core.Services;
@@ -178,6 +179,18 @@ public interface IModelManager
     /// 获取模型的下载选项
     /// </summary>
     Task<ModelDownloadOptions> GetDownloadOptionsAsync(string modelName, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 搜索开源社区模型变种 (如 GGUF 量化版本、ONNX 变种等)
+    /// </summary>
+    Task<List<ModelVariantSearchResult>> SearchVariantsAsync(
+        string query, string? format = null, int limit = 15, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 获取特定变种仓库的详细信息与文件清单
+    /// </summary>
+    Task<ModelVariantDetail?> GetVariantDetailAsync(
+        string repositoryId, CancellationToken cancellationToken = default);
 
     // ========== 重排模型管理 ==========
 
@@ -1036,7 +1049,22 @@ public class ModelManager : IModelManager, IDisposable
 
         if (!matched && variants.Count > 0)
         {
-            variants[0].IsActive = true;
+            if (string.Equals(modelType, "reranker", StringComparison.OrdinalIgnoreCase))
+            {
+                var preferredOnnx = variants.FirstOrDefault(v => v.Format == "onnx");
+                if (preferredOnnx != null)
+                {
+                    preferredOnnx.IsActive = true;
+                }
+                else
+                {
+                    variants[0].IsActive = true;
+                }
+            }
+            else
+            {
+                variants[0].IsActive = true;
+            }
         }
 
         return variants;
@@ -1265,11 +1293,18 @@ public class ModelManager : IModelManager, IDisposable
                 if (subMatches.Length > 0) return subMatches[0];
             }
 
-            var ggufFiles = Directory.GetFiles(localPath, "*.gguf", SearchOption.AllDirectories);
-            if (ggufFiles.Length > 0) return ggufFiles[0];
-
+            var isReranker = localPath.Contains("Reranker", StringComparison.OrdinalIgnoreCase);
             var onnxPath = Path.Combine(localPath, "model.onnx");
+
+            // 对于 Reranker 目录，若存在官方标准 model.onnx 则优先采用 ONNX（Cross-Encoder 最优运行时）
+            if (isReranker && File.Exists(onnxPath)) return onnxPath;
+
+            var ggufFiles = Directory.GetFiles(localPath, "*.gguf", SearchOption.AllDirectories);
+            if (ggufFiles.Length > 0 && !isReranker) return ggufFiles[0];
+
             if (File.Exists(onnxPath)) return onnxPath;
+
+            if (ggufFiles.Length > 0) return ggufFiles[0];
 
             var subOnnxFiles = Directory.GetFiles(localPath, "model.onnx", SearchOption.AllDirectories);
             if (subOnnxFiles.Length > 0) return subOnnxFiles[0];
@@ -1610,22 +1645,54 @@ public class ModelManager : IModelManager, IDisposable
             ScanLocalModels();
             return (true, null);
         }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine($"[ModelManager] 用户取消了模型下载: {model.DisplayName}");
+            CleanupIncompleteDownload(modelDir, onnxVariantPath);
+            throw;
+        }
         catch (Exception ex)
         {
             Console.WriteLine($"[ModelManager] 模型下载失败: {ex.Message}");
-            
-            // 清理不完整的下载
-            try
-            {
-                if (Directory.Exists(modelDir))
-                {
-                    Directory.Delete(modelDir, true);
-                }
-            }
-            catch { }
-            
+            CleanupIncompleteDownload(modelDir, onnxVariantPath);
             return (false, ex.Message);
         }
+    }
+
+    private void CleanupIncompleteDownload(string modelDir, string? onnxVariantPath)
+    {
+        try
+        {
+            if (!Directory.Exists(modelDir)) return;
+
+            // 1. 清理临时下载文件碎片 (*.tmp_*)
+            foreach (var tmpFile in Directory.GetFiles(modelDir, "*.tmp_*", SearchOption.AllDirectories))
+            {
+                try { File.Delete(tmpFile); } catch { }
+            }
+
+            // 2. 如果指定了具体变体，清理该变体对应的未完成目标文件
+            if (!string.IsNullOrEmpty(onnxVariantPath))
+            {
+                var targetFile = Path.Combine(modelDir, Path.GetFileName(onnxVariantPath));
+                if (File.Exists(targetFile))
+                {
+                    try { File.Delete(targetFile); } catch { }
+                }
+            }
+
+            // 3. 检查是否保留有其他已成功安装的有效模型文件（.gguf / .onnx）
+            var hasOtherVariants = Directory.EnumerateFiles(modelDir, "*.*", SearchOption.AllDirectories)
+                .Any(f => f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) ||
+                          f.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase));
+
+            // 4. 若没有任何有效模型文件，说明是首次下载失败，安全清理整个目录
+            if (!hasOtherVariants)
+            {
+                Directory.Delete(modelDir, true);
+            }
+        }
+        catch { }
     }
 
     public Task<bool> DeleteModelAsync(string modelName)
@@ -1985,6 +2052,36 @@ public class ModelManager : IModelManager, IDisposable
         {
             Console.WriteLine($"[ModelManager] 获取下载选项失败: {ex.Message}");
             return new ModelDownloadOptions { ModelName = modelName };
+        }
+    }
+
+    public async Task<List<ModelVariantSearchResult>> SearchVariantsAsync(
+        string query, string? format = null, int limit = 15, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var adapter = CreateModelSourceAdapter();
+            return await adapter.SearchVariantsAsync(query, format, limit, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 搜索社区变种异常: {ex.Message}");
+            return new List<ModelVariantSearchResult>();
+        }
+    }
+
+    public async Task<ModelVariantDetail?> GetVariantDetailAsync(
+        string repositoryId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var adapter = CreateModelSourceAdapter();
+            return await adapter.GetVariantDetailAsync(repositoryId, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 获取变种详情异常: {ex.Message}");
+            return null;
         }
     }
 

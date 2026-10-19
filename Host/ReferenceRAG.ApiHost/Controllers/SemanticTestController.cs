@@ -252,6 +252,7 @@ public class SemanticTestController : ControllerBase
                 passageResults.Add(new PassageResult
                 {
                     Id = passage.Id,
+                    Tag = passage.Tag,
                     Text = passage.Text.Length > 200 ? passage.Text[..200] + "..." : passage.Text,
                     FullTextLength = passage.Text.Length,
                     Similarity = similarity,
@@ -369,6 +370,82 @@ public class SemanticTestController : ControllerBase
             new() { Name = "document-retrieval", Description = "文档检索测试", Type = "long-text" },
             new() { Name = "qa-matching", Description = "问答匹配测试", Type = "short-text" }
         });
+    }
+
+    /// <summary>
+    /// 获取长文本检索预设套件列表
+    /// </summary>
+    [HttpGet("retrieval-presets")]
+    public ActionResult<List<RetrievalPresetSuiteInfo>> GetRetrievalPresetSuites()
+    {
+        return Ok(new List<RetrievalPresetSuiteInfo>
+        {
+            new()
+            {
+                Name = "tech-docs-retrieval",
+                Description = "ASP.NET Core 定时任务与优雅停机",
+                PassageCount = 10,
+                RelevantCount = 4
+            },
+            new()
+            {
+                Name = "enterprise-faq-retrieval",
+                Description = "企业行政与私车公用报销规程",
+                PassageCount = 10,
+                RelevantCount = 3
+            },
+            new()
+            {
+                Name = "cross-lingual-retrieval",
+                Description = "大模型RAG架构与幻觉抑制中英双向检索",
+                PassageCount = 10,
+                RelevantCount = 4
+            },
+            new()
+            {
+                Name = "version-temporal-retrieval",
+                Description = "Vue 3 组合式API与版本演进检索",
+                PassageCount = 10,
+                RelevantCount = 4
+            },
+            new()
+            {
+                Name = "numerical-constraint-retrieval",
+                Description = "工业级传感器宽温宽压与高精度参数检索",
+                PassageCount = 10,
+                RelevantCount = 3
+            }
+        });
+    }
+
+    /// <summary>
+    /// 获取长文本检索预设套件原始数据（用于前端加载并自定义编辑）
+    /// </summary>
+    [HttpGet("retrieval-preset/{suiteName}")]
+    public ActionResult<LongTextTestRequest> GetRetrievalPresetData(string suiteName)
+    {
+        var request = GetRetrievalPreset(suiteName);
+        if (request == null)
+        {
+            return NotFound(new { error = $"检索预设套件 '{suiteName}' 不存在" });
+        }
+        return Ok(request);
+    }
+
+    /// <summary>
+    /// 直接运行长文本检索预设套件
+    /// </summary>
+    [HttpPost("retrieval-preset/{suiteName}")]
+    public async Task<ActionResult<LongTextTestResult>> RunRetrievalPreset(string suiteName)
+    {
+        var request = GetRetrievalPreset(suiteName);
+        if (request == null)
+        {
+            return NotFound(new { error = $"检索预设套件 '{suiteName}' 不存在" });
+        }
+
+        var result = await TestLongText(request);
+        return result.Result!;
     }
 
     /// <summary>
@@ -606,6 +683,114 @@ public class SemanticTestController : ControllerBase
                     }
                 }
             },
+            "code-search" => new PresetSuite
+            {
+                Type = "long-text",
+                LongTextRequest = GetRetrievalPreset("tech-docs-retrieval")
+            },
+            "document-retrieval" => new PresetSuite
+            {
+                Type = "long-text",
+                LongTextRequest = GetRetrievalPreset("enterprise-faq-retrieval")
+            },
+            _ => null
+        };
+    }
+
+    private LongTextTestRequest? GetRetrievalPreset(string name)
+    {
+        return name switch
+        {
+            "tech-docs-retrieval" => new LongTextTestRequest
+            {
+                Query = "ASP.NET Core 中如何使用依赖注入注册后台定时任务并优雅停机",
+                TopK = 5,
+                Passages = new List<Passage>
+                {
+                    new() { Id = "doc1", Text = "在 ASP.NET Core 中，推荐通过继承 BackgroundService 或实现 IHostedService 接口实现后台定时任务。使用 services.AddHostedService<WorkerService>() 注册到 DI 容器。在服务停止时，CancellationToken 会触发，StopAsync 支持设置优雅停机等待超时（默认30秒），确保任务完整清理未竟事务。", IsRelevant = true },
+                    new() { Id = "doc2", Text = "BackgroundService 提供了 ExecuteAsync(CancellationToken stoppingToken) 虚方法。配合 PeriodicTimer.WaitForNextTickAsync(stoppingToken) 可构建精准无漂移的现代定时调度循环，当主机触发 IHostApplicationLifetime.ApplicationStopping 时安全退出。", IsRelevant = true },
+                    new() { Id = "doc3", Text = "在后台长周期任务中使用 Scoped 依赖注入服务时，不能在构造函数直接注入 Scoped 服务，而必须注入 IServiceProvider 或 IServiceScopeFactory，在每个定时批次周期内使用 using (var scope = _serviceProvider.CreateScope()) 手动创建作用域，防止内存泄露与单例生命周期混淆。", IsRelevant = true },
+                    new() { Id = "doc4", Text = "ASP.NET Core 优雅停机（Graceful Shutdown）机制依赖 HostOptions.ShutdownTimeout 参数配置。容器编排平台（如 Kubernetes）发送 SIGTERM 信号后，主机依次执行每个 IHostedService.StopAsync，如果在规定时间内未退出则强制 SIGKILL 终止进程。", IsRelevant = true },
+                    new() { Id = "doc5", Text = "ASP.NET Core 的依赖注入容器原生支持三种服务生命周期：Transient（瞬时，每次请求新建）、Scoped（作用域，单次 HTTP 请求共享）、Singleton（单例，进程全局唯一）。可通过 services.AddSingleton 等扩展方法声明。", IsRelevant = false },
+                    new() { Id = "doc6", Text = "Quartz.NET 和 Hangfire 是 .NET 生态中常用的分布式任务调度中间件，支持 CRON 表达式、持久化作业存储、分布式集群锁以及 Web 控制台可视化管理。", IsRelevant = false },
+                    new() { Id = "doc7", Text = "ASP.NET Core 中间件管道配置顺序极为关键：UseExceptionHandler 应当位于管道最外层，随后依次配置 UseRouting、UseCors、UseAuthentication、UseAuthorization 以及 UseEndpoints。", IsRelevant = false },
+                    new() { Id = "doc8", Tag = "对抗硬负例", Text = "在 Windows 任务计划程序中配置批处理脚本定时启动控制台应用，通过 schtasks /create /sc daily /tn 'BackupTask' /tr 'backup.bat' /st 02:00 命令配置。", IsRelevant = false },
+                    new() { Id = "doc9", Text = "SQL Server 的代理作业（SQL Server Agent）支持基于 T-SQL 语句或 SSIS 包的定时调度，可配置作业执行失败时通过数据库邮件向管理员告警。", IsRelevant = false },
+                    new() { Id = "doc10", Text = "使用 Docker 构建 ASP.NET Core 微服务镜像时，推荐采用多阶段构建（Multi-Stage Builds）以减小最终生产镜像体积并提升构建缓存命中率。", IsRelevant = false }
+                }
+            },
+            "enterprise-faq-retrieval" => new LongTextTestRequest
+            {
+                Query = "员工使用个人车辆因公出差的油费与过路费报销标准与审批规定",
+                TopK = 5,
+                Passages = new List<Passage>
+                {
+                    new() { Id = "doc1", Text = "《企业行政与财务制度》私车公用实施细则：经部门总监预先邮件报备并审批同意私车公用的，员工出差期间产生的真实过路过桥费凭增值税通行费发票实报实销；油耗补贴按照实际公用往返里程每公里 1.2 元定额计算补贴，出差前后须在行政协同系统上传仪表盘里程数照片。", IsRelevant = true },
+                    new() { Id = "doc2", Text = "私车因公出差核销流程要求：员工需在 OA 提报‘私车公用差旅报销申请’，报销单必须挂接：1. 部门负责人审批通过的《出差事前审批单》；2. ETC通行费电子发票及行程明细；3. 出差起点与终点的电子地图导航路线测距截图；4. 车辆行驶证复印件（车主须为本人或直系亲属）。", IsRelevant = true },
+                    new() { Id = "doc3", Text = "私车公用突发交通违章与意外责任划分：因公出差期间因个人驾驶违规产生的交通罚款、滞纳金及扣分由驾驶员本人自行承担，财务一律不予报销；如在出差途中发生交通事故，按员工个人商业车险条款理赔，企业报销免赔额以内部公车同等标准上限补贴。", IsRelevant = true },
+                    new() { Id = "doc4", Text = "公司公车班车与商务接待车队管理规定：商务接待用车需提前24小时通过行政调度系统申请派车单，随车配备专职司机，司机加油统一使用企业中石化中石油充值油卡，不得私自使用现金加油。", IsRelevant = false },
+                    new() { Id = "doc5", Text = "员工国内差旅住宿费与市内交通补助：出差期间未安排公务用车的，市内出租车及网约车发票据实报销，或可按每天 80 元定额标准申领市内交通包干综合补助。", IsRelevant = false },
+                    new() { Id = "doc6", Text = "企业固定资产报废与处置规范：使用年限超过 5 年且维修成本高于购置原值 40% 的办公设备与公务机动车辆，由资产管理部门提出报废鉴定申请，经财务审计核销后公开竞价拍卖处理。", IsRelevant = false },
+                    new() { Id = "doc7", Tag = "硬负例-非因公", Text = "员工每日上下班通勤产生的自驾油费、停车费、洗车费及月度交通补贴标准，属于日常薪酬福利范畴，按各职级标准直接计入每月工资卡发放，不得走差旅费用报销渠道。", IsRelevant = false },
+                    new() { Id = "doc8", Text = "办公差旅餐饮发票合规指引：因公出差期间员工伙食补贴按每人每天 120 元包干发放，不得另行开具非业务接待性质的单张高额餐饮发票报销。", IsRelevant = false },
+                    new() { Id = "doc9", Text = "年度优秀员工带薪休假旅游津贴：凡入职满三年的优秀员工每年可申请 3000 元家庭自驾旅游专项基金，可在年度休假结束凭过路费及门票冲抵报销。", IsRelevant = false },
+                    new() { Id = "doc10", Text = "企业安全生产消防疏散演练方案：研发大楼地库停车场严禁占用消防通道，电动自行车充电桩区域配备感温感烟探测器与水喷淋自动灭火系统。", IsRelevant = false }
+                }
+            },
+            "cross-lingual-retrieval" => new LongTextTestRequest
+            {
+                Query = "What is Retrieval-Augmented Generation and how does it prevent LLM hallucination",
+                TopK = 5,
+                Passages = new List<Passage>
+                {
+                    new() { Id = "doc1", Text = "Retrieval-Augmented Generation (RAG) is an architectural framework that enhances Large Language Models by fetching authoritative facts from external vector knowledge bases before prompt synthesis. Grounding responses in retrieved context drastically reduces hallucination and ensures factual fidelity.", IsRelevant = true },
+                    new() { Id = "doc2", Text = "检索增强生成（RAG）通过将大语言模型与外部动态知识库相结合，在生成答案前先行检索与提问最相关的文档切片（Chunks），将其作为上下文提示（Context Prompt）注入模型，有效杜绝了大模型在专业垂直领域由于知识盲区产生的编造虚假信息（幻觉）问题。", IsRelevant = true },
+                    new() { Id = "doc3", Text = "In advanced RAG pipelines, dense vector search is combined with reranking and query decomposition. Providing the generator LLM with verifiable source citations and domain-specific knowledge grounds the completion, thereby mitigating parametric hallucinations.", IsRelevant = true },
+                    new() { Id = "doc4", Text = "大模型幻觉消除策略中，RAG 相比全量微调（Fine-Tuning）具有知识实时更新、零重复训练开销、回答溯源可查以及权限受控等多项决定性优势，是企业私有化知识库落地的工业界标准范式。", IsRelevant = true },
+                    new() { Id = "doc5", Text = "Fine-Tuning adapts model weights directly using domain-specific dataset instruction tuning, optimizing the style and domain task behaviors but requiring substantial GPU compute resources.", IsRelevant = false },
+                    new() { Id = "doc6", Text = "Transformer architecture relies on multi-head self-attention mechanisms allowing models to dynamically weight token interactions across the entire input sequence length.", IsRelevant = false },
+                    new() { Id = "doc7", Tag = "硬负例-RLHF", Text = "Reinforcement Learning from Human Feedback (RLHF) aligns LLM generations with human moral values and preferences through PPO optimization without querying external databases.", IsRelevant = false },
+                    new() { Id = "doc8", Text = "Prompt engineering techniques such as Chain-of-Thought (CoT) and Few-Shot prompting guide LLMs to perform step-by-step reasoning on complex logic and mathematical puzzles.", IsRelevant = false },
+                    new() { Id = "doc9", Text = "PostgreSQL provides pgvector extension enabling cosine distance and L2 distance operators for dense vector similarity indexing.", IsRelevant = false },
+                    new() { Id = "doc10", Text = "Quantum computing utilizes qubits governed by superposition and entanglement to execute specific computational tasks exponentially faster than classical computers.", IsRelevant = false }
+                }
+            },
+            "version-temporal-retrieval" => new LongTextTestRequest
+            {
+                Query = "在 Vue 3 与现代前端工程中，官方推荐的全局状态管理与组件通信方案及 Composition API 最佳实践",
+                TopK = 5,
+                Passages = new List<Passage>
+                {
+                    new() { Id = "doc1", Tag = "官方推荐-Pinia", Text = "Vue 3 官方推荐全局状态管理库 Pinia：全面支持 TypeScript 类型推断、摒弃了冗余的 mutations、采用模块化扁平 store 设计，并无缝支持 SSR 服务端渲染与 Devtools 时间旅行调试。", IsRelevant = true },
+                    new() { Id = "doc2", Tag = "官方规范-组合式API", Text = "Vue 3 组合式 API（Composition API）与 <script setup> 响应式开发规范：推荐使用 ref、reactive 与 computed 声明状态，通过自定义 Composable 函数封装可复用业务逻辑，取代脆弱的 mixins。", IsRelevant = true },
+                    new() { Id = "doc3", Tag = "跨组件通信-Provide/Inject", Text = "Vue 3 深度嵌套组件通信规范：通过 provide 和 inject 配合 readonly 响应式对象实现祖孙跨层级单向数据流传递，避免 prop 逐级钻取透传（Prop Drilling）。", IsRelevant = true },
+                    new() { Id = "doc4", Tag = "事件总线替代", Text = "在 Vue 3 中，$on、$off 和 $once 实例事件总线已被官方彻底移除；对于简单的跨组件解耦通信，推荐使用 mitt 或 tiny-emitter 轻量发布订阅第三方库代替。", IsRelevant = true },
+                    new() { Id = "doc5", Tag = "现代化构建-Vite", Text = "Vue 3 前端工程现代化构建方案推荐采用 Vite，基于原生 ESM 模块实现毫秒级冷启动与极速热模块替换（HMR），相比传统 Webpack 大幅提升开发体验。", IsRelevant = false },
+                    new() { Id = "doc6", Tag = "版本演进冲突-Vuex旧版", Text = "Vuex 3.x/4.x 集中式状态管理规范：所有状态变更必须严格通过同步 mutations 提交 commit，异步操作必须封装在 actions 中分发 dispatch，通过嵌套 modules 树状拆分状态。", IsRelevant = false },
+                    new() { Id = "doc7", Tag = "版本废弃-Vue2选项式", Text = "Vue 2 选项式 API（Options API）架构设计：使用 data、methods、computed、watch 组织组件选项，多组件代码逻辑复用主要通过 mixins 混入实现。", IsRelevant = false },
+                    new() { Id = "doc8", Tag = "版本废弃-EventBus旧方案", Text = "Vue 2 时代常用的全局 EventBus 方案：通过 new Vue() 实例作为全局事件中心，在组件 mounted 中绑定 this.$bus.$on，在 destroyed 中通过 $off 解绑事件。", IsRelevant = false },
+                    new() { Id = "doc9", Tag = "不相关-React并发", Text = "React 19 核心并发特性与 Server Actions：通过 useTransition、useActionState 统一处理客户端服务端异步操作，搭配 Zustand 进行客户端原子状态管理。", IsRelevant = false },
+                    new() { Id = "doc10", Tag = "不相关-容器部署", Text = "Nginx 官方 Docker 镜像作为静态 Web 前端部署底座：配置 gzip 压缩、缓存强协商控制及 try_files $uri $uri/ /index.html 单页面路由重写规则。", IsRelevant = false }
+                }
+            },
+            "numerical-constraint-retrieval" => new LongTextTestRequest
+            {
+                Query = "选购要求：适用于工业物联网户外严苛环境的高精度温湿度传感器，工作温度必须覆盖 -40℃至85℃，供电电压兼容 12V 至 24V DC，且测量精度需达到 ±0.2℃ 以内",
+                TopK = 5,
+                Passages = new List<Passage>
+                {
+                    new() { Id = "doc1", Tag = "完美满足-严苛工业级", Text = "工业级数字式温湿度变送器 Modbus-RTU 型号 SHT-45X：工作温度范围为 -40℃~+85℃，宽电压供电范围 DC 10V~30V（完美适配 12V/24V 电源系统），温度测量精度高达 ±0.15℃，具备 IP67 防水防尘等级与过压反接保护，专为户外恶劣环境设计。", IsRelevant = true },
+                    new() { Id = "doc2", Tag = "满足参数-高精度变送器", Text = "高可靠性工业温湿度探头 HMP-80：额定工作温度 -40℃ 到 100℃，供电输入支持 12V/24V 直流自适应，测温精度在全量程内优于 ±0.2℃，采用特氟龙防护滤芯抗化学气体腐蚀。", IsRelevant = true },
+                    new() { Id = "doc3", Tag = "参数基本满足-宽温型", Text = "户外气象观测站专业温湿变送器：工作温度 -40℃~85℃，支持标准 24V DC 工业供电（低至 12V 正常启动），温度精度 ±0.2℃，标配铝合金防辐射百叶箱与 RS485 接口。", IsRelevant = true },
+                    new() { Id = "doc4", Tag = "参数边际-精度稍欠", Text = "管路插入式工业温度变送器：工作环境温度 -40℃ 至 85℃，支持 12V~24V DC 供电，测温元件采用 A 级 PT100，整机系统精度为 ±0.35℃，配备隔爆铸铝接线盒。", IsRelevant = false },
+                    new() { Id = "doc5", Tag = "参数边际-温宽收窄", Text = "仓储冷链专用数字温湿度记录仪：工作温度范围 -20℃ 至 70℃，供电支持 12V~24V 直流外接电源，测量精度达到 ±0.2℃，内置 10 万组数据存储与报警蜂鸣器。", IsRelevant = false },
+                    new() { Id = "doc6", Tag = "硬约束越界-温宽不符", Text = "数据中心室内精密机房温湿度传感器：仅适用于商业室内环境，工作温度范围 0℃ 至 50℃（无法在 -40℃ 极寒启动），工作电压 12V/24V DC，测量精度 ±0.2℃。", IsRelevant = false },
+                    new() { Id = "doc7", Tag = "硬约束越界-电压超限", Text = "高精度微功耗温湿度芯片模块：温度测量精度高达 ±0.1℃，工作温度 -40℃~85℃，但仅支持 3.3V 或 5V 弱电供电，严禁直接接入 12V 或 24V 工业供电以免瞬间击穿烧毁。", IsRelevant = false },
+                    new() { Id = "doc8", Tag = "硬约束越界-精度不达标", Text = "户外大棚简易温湿度采集器：工作温度 -40℃~85℃，12V~24V 供电，但采用低成本热敏电阻，测量精度仅为 ±1.5℃，无法满足高精度工业严苛监控要求。", IsRelevant = false },
+                    new() { Id = "doc9", Tag = "领域不符-红外热像仪", Text = "工业在线式长波红外热像仪：测温范围 -20℃~500℃，精度 ±2% 或 ±2℃，支持以太网 PoE 与 24V DC 供电，主要用于高压电气设备热缺陷巡检。", IsRelevant = false },
+                    new() { Id = "doc10", Tag = "无关技术-高斯混合模型", Text = "高斯混合模型（GMM）在时间序列传感器异常检测中的数学建模：利用 EM 期望最大化算法对多维变量的概率分布进行拟合，识别偏离正态分布的离群点。", IsRelevant = false }
+                }
+            },
             _ => null
         };
     }
@@ -655,6 +840,7 @@ public class LongTextTestRequest
 public class Passage
 {
     public string Id { get; set; } = "";
+    public string? Tag { get; set; }
     public string Text { get; set; } = "";
     public bool IsRelevant { get; set; }
 }
@@ -710,6 +896,7 @@ public class LongTextTestResult
 public class PassageResult
 {
     public string Id { get; set; } = "";
+    public string? Tag { get; set; }
     public string Text { get; set; } = "";
     public int FullTextLength { get; set; }
     public double Similarity { get; set; }
@@ -729,6 +916,14 @@ public class PresetSuiteInfo
     public string Name { get; set; } = "";
     public string Description { get; set; } = "";
     public string Type { get; set; } = "";
+}
+
+public class RetrievalPresetSuiteInfo
+{
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+    public int PassageCount { get; set; }
+    public int RelevantCount { get; set; }
 }
 
 // ==================== 测试记录存储 ====================
@@ -817,6 +1012,7 @@ public class TestRecordStore
 
     private async Task SaveRecordsAsync()
     {
+        Directory.CreateDirectory(_dataPath);
         var file = Path.Combine(_dataPath, "records.json");
         var json = System.Text.Json.JsonSerializer.Serialize(_records, _jsonOptions);
         await File.WriteAllTextAsync(file, json);

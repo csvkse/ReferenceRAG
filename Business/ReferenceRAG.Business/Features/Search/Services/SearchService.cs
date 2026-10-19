@@ -59,7 +59,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
     /// <summary>
     /// 获取启用的源名称列表
-    /// 如果配置中没有源，则从数据库获取所有存在的源
+    /// 仅当配置列表中完全没有配置源时（历史平滑迁移兼容），才从数据库获取所有存在的源作为回退
+    /// 若配置中已有源但全部被停用，严禁回退至数据库，坚决返回空集合
     /// </summary>
     private async Task<HashSet<string>> GetEnabledSourceNamesAsync()
     {
@@ -67,12 +68,12 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var enabledSources = config.Sources
             .Where(s => s.Enabled)
             .Select(s => s.Name)
-            .ToHashSet();
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        // 如果配置中没有源，从数据库获取所有存在的源作为回退
-        if (enabledSources.Count == 0)
+        // 仅在配置中没有任何源时，才从数据库获取所有存在的源作为历史平滑回退
+        if (config.Sources.Count == 0)
         {
-            var sources = new HashSet<string>();
+            var sources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var allFiles = await _vectorStore.StreamAllFilesAsync();
 
             await foreach (var file in allFiles)
@@ -90,6 +91,47 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         }
 
         return enabledSources;
+    }
+
+    /// <summary>
+    /// 判断数据源是否被允许通过（零信任白名单机制）
+    /// </summary>
+    private static bool IsSourceAllowed(string? source, HashSet<string> allowedSources, bool hasConfiguredSources)
+    {
+        if (hasConfiguredSources)
+        {
+            return !string.IsNullOrEmpty(source) && allowedSources.Contains(source);
+        }
+
+        // 历史无配置源模式：允许空源或回退白名单
+        return string.IsNullOrEmpty(source) || (source != null && allowedSources.Contains(source));
+    }
+
+    /// <summary>
+    /// 构建空搜索结果响应（用于快速前置短路，耗时小于 1ms）
+    /// </summary>
+    private static AIQueryResponse CreateEmptyResponse(AIQueryRequest request, long elapsedMs, SearchPipelineTelemetry? pipelineTelemetry = null)
+    {
+        return new AIQueryResponse
+        {
+            Query = request.Query,
+            Mode = request.Mode,
+            Context = string.Empty,
+            Prompt = string.Empty,
+            Chunks = new List<ChunkResult>(),
+            Files = new List<FileSummary>(),
+            Stats = new SearchStats
+            {
+                TotalMatches = 0,
+                DurationMs = elapsedMs,
+                EstimatedTokens = 0,
+                PipelineTelemetry = pipelineTelemetry
+            },
+            HasMore = false,
+            Suggestion = null,
+            RerankApplied = false,
+            RerankStats = null
+        };
     }
 
     /// <summary>
@@ -160,10 +202,30 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
         // 获取启用的源列表
         var enabledSources = await GetEnabledSourceNamesAsync();
+        bool hasConfiguredSources = config.Sources.Count > 0;
 
-        // 请求源限定
+        // 门禁检查 1：如果系统没有任何已启用的源，立即短路返回空结果，避免昂贵的 Embedding 计算与检索
+        if (enabledSources.Count == 0)
+        {
+            sw.Stop();
+            var emptyTelemetry = stateMachine.Complete(0);
+            return CreateEmptyResponse(request, sw.ElapsedMilliseconds, emptyTelemetry);
+        }
+
+        // 请求源限定与门禁检查 2
         if (request.Sources != null && request.Sources.Count != 0)
-            enabledSources = enabledSources.Where(m => request.Sources.Contains(m)).ToHashSet();
+        {
+            enabledSources = enabledSources
+                .Where(m => request.Sources.Contains(m, StringComparer.OrdinalIgnoreCase))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (enabledSources.Count == 0)
+            {
+                sw.Stop();
+                var emptyTelemetry = stateMachine.Complete(0);
+                return CreateEmptyResponse(request, sw.ElapsedMilliseconds, emptyTelemetry);
+            }
+        }
 
         // 并行启动：embedding 推理（CPU/GPU）与标题搜索（SQLite）互不依赖，同时进行
         var embeddingTask = _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
@@ -204,13 +266,13 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
             stateMachine.TransitionTo(SearchPipelinePhase.HybridFusing, hybridResults.Count, hybridResults.Count, "双路归一化加权融合与源过滤");
 
-            // 过滤禁用源（source 为空表示旧数据未分配来源，允许通过）
-            var filteredHybridResults = hybridResults.Where(r => string.IsNullOrEmpty(r.Source) || enabledSources.Contains(r.Source));
+            // 过滤禁用源（严禁空 source 或已停用源穿透）
+            var filteredHybridResults = hybridResults.Where(r => IsSourceAllowed(r.Source, enabledSources, hasConfiguredSources));
 
             // 应用用户指定的请求源过滤
             if (request.Sources?.Count > 0)
             {
-                filteredHybridResults = filteredHybridResults.Where(r => r.Source != null && request.Sources.Contains(r.Source));
+                filteredHybridResults = filteredHybridResults.Where(r => r.Source != null && enabledSources.Contains(r.Source));
             }
 
             topResults = filteredHybridResults.Select(h => new SearchResult
@@ -295,66 +357,82 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             _logger.LogInformation("开始重排: 候选数={Count}, Query={Query}", topResults.Count, request.Query);
 
             // 批量重排
-            var documents = topResults.Select(r => r.Content).ToList();
-            var rerankResult = await _rerankService.RerankBatchAsync(
-                request.Query,
-                documents,
-                cancellationToken);
-
-            // 获取 TopN
-            // 构建重排后的结果
-            var rerankedResults = new List<SearchResult>();
-            foreach (var doc in rerankResult.Documents.Take(topN))
+            try
             {
-                var originalResult = topResults[doc.Index];
-                var score = doc.RelevanceScore;
-                if (double.IsNaN(score) || double.IsInfinity(score))
+                var documents = topResults.Select(r => r.Content).ToList();
+                var rerankResult = await _rerankService.RerankBatchAsync(
+                    request.Query,
+                    documents,
+                    cancellationToken);
+
+                // 获取 TopN
+                // 构建重排后的结果
+                var rerankedResults = new List<SearchResult>();
+                foreach (var doc in rerankResult.Documents.Take(topN))
                 {
-                    score = 0.5;
+                    var originalResult = topResults[doc.Index];
+                    var score = doc.RelevanceScore;
+                    if (double.IsNaN(score) || double.IsInfinity(score))
+                    {
+                        score = 0.5;
+                    }
+                    originalResult.RerankScore = score;
+                    originalResult.Score = (float)score; // 更新主分数
+                    rerankedResults.Add(originalResult);
                 }
-                originalResult.RerankScore = score;
-                originalResult.Score = (float)score; // 更新主分数
-                rerankedResults.Add(originalResult);
-            }
 
-            // 应用分数阈值过滤
-            if (rerankConfig.ScoreThreshold > 0)
-            {
-                var beforeCount = rerankedResults.Count;
-                rerankedResults = rerankedResults
-                    .Where(r => r.RerankScore >= rerankConfig.ScoreThreshold)
-                    .ToList();
-                _logger.LogDebug("分数阈值过滤: {Before} -> {After}", beforeCount, rerankedResults.Count);
-            }
-
-            rerankSw.Stop();
-
-            // 记录重排统计
-            var avgScore = rerankedResults.Count > 0
-                ? rerankedResults.Average(r =>
+                // 应用分数阈值过滤
+                if (rerankConfig.ScoreThreshold > 0)
                 {
-                    var s = r.RerankScore ?? 0.0;
-                    return (double.IsNaN(s) || double.IsInfinity(s)) ? 0.0 : s;
-                })
-                : 0.0;
-            if (double.IsNaN(avgScore) || double.IsInfinity(avgScore))
-            {
-                avgScore = 0.0;
+                    var beforeCount = rerankedResults.Count;
+                    rerankedResults = rerankedResults
+                        .Where(r => r.RerankScore >= rerankConfig.ScoreThreshold)
+                        .ToList();
+                    _logger.LogDebug("分数阈值过滤: {Before} -> {After}", beforeCount, rerankedResults.Count);
+                }
+
+                rerankSw.Stop();
+
+                // 记录重排统计
+                var avgScore = rerankedResults.Count > 0
+                    ? rerankedResults.Average(r =>
+                    {
+                        var s = r.RerankScore ?? 0.0;
+                        return (double.IsNaN(s) || double.IsInfinity(s)) ? 0.0 : s;
+                    })
+                    : 0.0;
+                if (double.IsNaN(avgScore) || double.IsInfinity(avgScore))
+                {
+                    avgScore = 0.0;
+                }
+
+                rerankStats = new RerankStats
+                {
+                    CandidatesCount = topResults.Count,
+                    RerankDurationMs = rerankSw.ElapsedMilliseconds,
+                    ModelName = _rerankService.ModelName,
+                    AverageScore = avgScore
+                };
+
+                topResults = rerankedResults;
+
+                _logger.LogInformation(
+                    "两阶段搜索完成: 召回 {Candidates} 个候选, 重排耗时 {Ms}ms, 返回 {Count} 个结果, 平均分数={AvgScore:F4}",
+                    rerankStats.CandidatesCount, rerankStats.RerankDurationMs, topResults.Count, rerankStats.AverageScore);
             }
-
-            rerankStats = new RerankStats
+            catch (Exception ex)
             {
-                CandidatesCount = topResults.Count,
-                RerankDurationMs = rerankSw.ElapsedMilliseconds,
-                ModelName = _rerankService.ModelName,
-                AverageScore = avgScore
-            };
-
-            topResults = rerankedResults;
-
-            _logger.LogInformation(
-                "两阶段搜索完成: 召回 {Candidates} 个候选, 重排耗时 {Ms}ms, 返回 {Count} 个结果, 平均分数={AvgScore:F4}",
-                rerankStats.CandidatesCount, rerankStats.RerankDurationMs, topResults.Count, rerankStats.AverageScore);
+                rerankSw.Stop();
+                _logger.LogWarning(ex, "[SearchService] 重排执行发生异常或模型不兼容，安全降级使用第一阶段召回排序结果，避免检索失败");
+                topResults = topResults.Take(topN).ToList();
+                rerankStats = new RerankStats
+                {
+                    CandidatesCount = topResults.Count,
+                    RerankDurationMs = rerankSw.ElapsedMilliseconds,
+                    ModelName = $"{_rerankService.ModelName} (降级保底)",
+                    AverageScore = topResults.Count > 0 ? topResults.Average(r => r.Score) : 0.0
+                };
+            }
         }
         else if (shouldRerank && _rerankService == null)
         {
@@ -456,8 +534,14 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             .Distinct()
             .ToList();
 
+        bool hasConfiguredSources = _configManager.Load().Sources.Count > 0;
         var candidateFiles = (await _vectorStore.GetFilesByPathsAsync(paths!, cancellationToken))
-            .Where(f => string.IsNullOrEmpty(f.Source) || enabledSources.Contains(f.Source));
+            .Where(f => IsSourceAllowed(f.Source, enabledSources, hasConfiguredSources));
+
+        if (request.Sources?.Count > 0)
+        {
+            candidateFiles = candidateFiles.Where(f => f.Source != null && enabledSources.Contains(f.Source));
+        }
 
         if (request.Filters?.Folders?.Count > 0)
         {
@@ -628,13 +712,14 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         // 过滤无有效语义的噪声或纯分隔符分块（允许单元测试 Mock 的空 Content 通过）
         results = results.Where(r => string.IsNullOrEmpty(r.Content) || !MarkdownChunker.IsNoiseOrSeparator(r.Content));
 
-        // 首先过滤禁用源（source 为空表示旧数据未分配来源，允许通过）
-        results = results.Where(r => string.IsNullOrEmpty(r.Source) || enabledSources.Contains(r.Source));
+        bool hasConfiguredSources = _configManager.Load().Sources.Count > 0;
+        // 首先过滤禁用源（严禁空 source 或已停用源穿透）
+        results = results.Where(r => IsSourceAllowed(r.Source, enabledSources, hasConfiguredSources));
 
         // 应用源过滤（用户指定的源）
         if (request.Sources?.Count > 0)
         {
-            results = results.Where(r => r.Source != null && request.Sources.Contains(r.Source));
+            results = results.Where(r => r.Source != null && enabledSources.Contains(r.Source));
         }
 
         // 应用其他过滤条件
@@ -655,6 +740,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     public async Task<DrillDownResponse> DrillDownAsync(DrillDownRequest request, CancellationToken cancellationToken = default)
     {
         var expandedChunks = new List<ChunkResult>();
+        var enabledSources = await GetEnabledSourceNamesAsync();
+        bool hasConfiguredSources = _configManager.Load().Sources.Count > 0;
 
         foreach (var refId in request.RefIds)
         {
@@ -663,9 +750,17 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             if (chunk == null) continue;
 
             var file = await _vectorStore.GetFileAsync(chunk.FileId, cancellationToken);
-            string fileTitle = file?.Title ?? file?.FileName ?? Path.GetFileName(file?.Path ?? string.Empty);
-            string filePath = file?.Path ?? string.Empty;
-            string fileSource = file?.Source ?? string.Empty;
+            if (file == null) continue;
+
+            // 停用源门禁检查：若所属源已停用，严禁泄露与展开上下文
+            if (!IsSourceAllowed(file.Source, enabledSources, hasConfiguredSources))
+            {
+                continue;
+            }
+
+            string fileTitle = file.Title ?? file.FileName ?? Path.GetFileName(file.Path ?? string.Empty);
+            string filePath = file.Path ?? string.Empty;
+            string fileSource = file.Source ?? string.Empty;
 
             // 获取相邻分段并补齐所属文件信息
             var adjacentChunks = await GetAdjacentChunksAsync(chunk, request.ExpandContext, fileTitle, filePath, fileSource);
@@ -940,7 +1035,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
                     var file = await _vectorStore.GetFileAsync(bestChunk.FileId, ct);
                     if (file == null) continue;
-                    if (!string.IsNullOrEmpty(file.Source) && !enabledSources.Contains(file.Source)) continue;
+                    if (!IsSourceAllowed(file.Source, enabledSources, _configManager.Load().Sources.Count > 0)) continue;
                     if (filters?.Folders?.Count > 0)
                     {
                         bool inFolder = filters.Folders.Any(f =>

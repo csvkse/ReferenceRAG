@@ -3,6 +3,7 @@ using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -20,7 +21,7 @@ public class ModelsController : ControllerBase
     private readonly IModelTelemetryService? _telemetryService;
     private readonly IVectorStore _vectorStore;
     private readonly ILogger<ModelsController> _logger;
-    private static readonly Dictionary<string, DownloadProgress> _downloadProgress = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DownloadProgress> _downloadProgress = new();
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _downloadCts = new();
     private static readonly SemaphoreSlim _modelSwitchLock = new(1, 1);
 
@@ -363,6 +364,47 @@ public class ModelsController : ControllerBase
     }
 
     /// <summary>
+    /// 搜索开源社区模型变种（如 GGUF 量化版本、ONNX 变种）
+    /// </summary>
+    [HttpGet("variants/search")]
+    public async Task<ActionResult<List<ModelVariantSearchResult>>> SearchVariants(
+        [FromQuery] string query,
+        [FromQuery] string? format = null,
+        [FromQuery] int limit = 15,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return BadRequest(new { error = "搜索关键词不能为空" });
+        }
+
+        var results = await _modelManager.SearchVariantsAsync(query, format, limit, cancellationToken);
+        return Ok(results);
+    }
+
+    /// <summary>
+    /// 获取特定变种仓库的详情与量化文件清单
+    /// </summary>
+    [HttpGet("variants/detail")]
+    public async Task<ActionResult<ModelVariantDetail>> GetVariantDetail(
+        [FromQuery] string repository,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(repository))
+        {
+            return BadRequest(new { error = "仓库标识 (repository) 不能为空" });
+        }
+
+        var detail = await _modelManager.GetVariantDetailAsync(repository, cancellationToken);
+        if (detail == null)
+        {
+            return NotFound(new { error = $"未能获取仓库 '{repository}' 的详情或该仓库不存在" });
+        }
+
+        return Ok(detail);
+    }
+
+    /// <summary>
     /// 开始下载模型
     /// </summary>
     [HttpPost("download/{modelName}")]
@@ -378,7 +420,25 @@ public class ModelsController : ControllerBase
 
         if (model.IsDownloaded)
         {
-            return Ok(new { message = "模型已下载", model });
+            // 如果用户指定了具体变体，检查该具体变体是否已存在
+            // 如果未指定具体变体，或者具体变体已存在，才跳过下载；否则允许增量下载新变体！
+            bool variantAlreadyExists = false;
+            if (!string.IsNullOrEmpty(request?.OnnxFilePath))
+            {
+                var fileName = Path.GetFileName(request.OnnxFilePath);
+                variantAlreadyExists = model.InstalledVariants.Any(v =>
+                    string.Equals(v.FileName, fileName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(v.RelativePath, request.OnnxFilePath, StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                variantAlreadyExists = true;
+            }
+
+            if (variantAlreadyExists)
+            {
+                return Ok(new { message = "模型或所选变体已下载", isAlreadyDownloaded = true, model });
+            }
         }
 
         // 检查是否已在下载中
@@ -521,12 +581,14 @@ public class ModelsController : ControllerBase
             key = $"rerank_{modelName}";
         }
 
+        bool wasRunning = false;
         if (_downloadCts.TryRemove(key, out var cts))
         {
             try
             {
                 cts.Cancel();
                 cts.Dispose();
+                wasRunning = true;
             }
             catch { }
         }
@@ -537,10 +599,11 @@ public class ModelsController : ControllerBase
             progress.Stage = DownloadStage.Cancelled;
             progress.StageMessage = "下载已由用户取消";
             progress.EndTime = DateTime.UtcNow;
-            return Ok(new { message = "已取消下载" });
+            return Ok(new { message = "已取消下载", wasRunning, cancelled = true });
         }
         
-        return NotFound(new { error = "没有正在进行的下载任务" });
+        // 幂等确认：若后台当前已无该任务（或从未启动），确认状态为已停止并返回成功，绝不以 404 阻碍前端重置
+        return Ok(new { message = "当前没有正在进行的下载任务，已确认重置", wasRunning = false, cancelled = true });
     }
 
     /// <summary>
@@ -568,7 +631,7 @@ public class ModelsController : ControllerBase
         
         if (success)
         {
-            _downloadProgress.Remove(modelName);
+            _downloadProgress.TryRemove(modelName, out _);
             return Ok(new { message = "模型已删除" });
         }
         
@@ -896,7 +959,25 @@ public async Task<ActionResult> DownloadRerankModel(string modelName, [FromBody]
 
     if (model.IsDownloaded)
     {
-        return Ok(new { message = "重排模型已下载", model });
+        // 如果用户指定了具体变体，检查该具体变体是否已存在
+        // 如果未指定具体变体，或者具体变体已存在，才跳过下载；否则允许增量下载新变体！
+        bool variantAlreadyExists = false;
+        if (!string.IsNullOrEmpty(request?.OnnxFilePath))
+        {
+            var fileName = Path.GetFileName(request.OnnxFilePath);
+            variantAlreadyExists = model.InstalledVariants.Any(v =>
+                string.Equals(v.FileName, fileName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(v.RelativePath, request.OnnxFilePath, StringComparison.OrdinalIgnoreCase));
+        }
+        else
+        {
+            variantAlreadyExists = true;
+        }
+
+        if (variantAlreadyExists)
+        {
+            return Ok(new { message = "重排模型或所选变体已下载", isAlreadyDownloaded = true, model });
+        }
     }
 
     // 检查是否已在下载中
@@ -1033,7 +1114,7 @@ public async Task<ActionResult> DeleteRerankModel(string modelName)
     if (success)
     {
         var progressKey = $"rerank_{modelName}";
-        _downloadProgress.Remove(progressKey);
+        _downloadProgress.TryRemove(progressKey, out _);
         return Ok(new { message = "重排模型已删除" });
     }
     

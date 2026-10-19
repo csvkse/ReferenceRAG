@@ -1,11 +1,12 @@
 import { defineComponent as _defineComponent } from 'vue';
-import { ref, computed, h, onMounted, onUnmounted } from 'vue';
+import { ref, computed, h, onMounted, onUnmounted, onActivated } from 'vue';
 import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput, NRadioGroup, NRadio, NText } from 'naive-ui';
 import { sourcesApi, indexApi, indexJobsApi, settingsApi } from '/app/api/index.js';
 import { isDesktop, selectFolder } from '/core/platform.js';
 import { JobCenter } from '/core/jobs/JobCenter.js';
 import { useAsyncJob } from '/core/jobs/useAsyncJob.js';
 const component = /*@__PURE__*/ _defineComponent({
+    ...{ name: 'Sources' },
     __name: 'Sources',
     setup(__props, { expose: __expose }) {
         __expose();
@@ -543,6 +544,11 @@ const component = /*@__PURE__*/ _defineComponent({
         onUnmounted(() => {
             unbindSources?.();
             unbindIndex?.();
+        });
+        onActivated(() => {
+            loadSources(true);
+            loadVectorIndex(true);
+            loadChunkingConfig();
         });
         const __returned__ = { isDesktop, selectDirectory, message, dialog, formRef, loading, creating, sources, editingSource, editingName, loadingIndex, rebuilding, cleaning, deletingAll, quickIndexing, vectorOnlyIndexing, sourceQuickIndexing, sourceVectorOnlyIndexing, sourceRechunking, rechunkingAll, isGlobalQuickIndexing, isGlobalRechunking, isGlobalVectorOnlyIndexing, isGlobalRebuilding, indexSummary, chunkingConfig, loadChunkingConfig, newSource, formRules, columns, indexColumns, loadSources, loadVectorIndex, handleCreateSource, resetForm, handleToggle, handleEdit, handleReindex, handleRechunkSource, handleRechunkAll, handleDelete, handleQuickIndexAll, handleQuickIndexSource, handleVectorOnlyIndexAll, handleVectorOnlyIndexSource, handleRebuildAll, handleCleanup, handleDeleteAllIndex, handleDeleteModelIndex, get NButton() { return NButton; }, get NSpace() { return NSpace; }, get NTag() { return NTag; }, get NPopconfirm() { return NPopconfirm; }, get NInput() { return NInput; } };
         return __returned__;

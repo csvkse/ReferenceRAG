@@ -127,7 +127,7 @@ public class SettingsController : ControllerBase
     /// 保存配置
     /// </summary>
     [HttpPost]
-    public ActionResult Save([FromBody] ObsidianRagConfig config)
+    public async Task<ActionResult<SettingsSaveResult>> Save([FromBody] ObsidianRagConfig config)
     {
         var current = _configManager.Load();
         var embeddingIdentityChanged = !string.Equals(current.Embedding.Mode, config.Embedding.Mode, StringComparison.OrdinalIgnoreCase)
@@ -136,13 +136,21 @@ public class SettingsController : ControllerBase
         var embeddingRuntimeChanged = embeddingIdentityChanged
             || !string.Equals(current.Embedding.ApiBaseUrl, config.Embedding.ApiBaseUrl, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(current.Embedding.ApiKey, config.Embedding.ApiKey, StringComparison.Ordinal)
-            || !string.Equals(current.Embedding.ModelPath, config.Embedding.ModelPath, StringComparison.OrdinalIgnoreCase);
-        var modelRuntimeChanged = embeddingRuntimeChanged
-            || !string.Equals(current.Rerank.Mode, config.Rerank.Mode, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(current.Embedding.ModelPath, config.Embedding.ModelPath, StringComparison.OrdinalIgnoreCase)
+            || current.Embedding.UseCuda != config.Embedding.UseCuda
+            || current.Embedding.BatchSize != config.Embedding.BatchSize
+            || current.Embedding.MaxSequenceLength != config.Embedding.MaxSequenceLength;
+        var rerankRuntimeChanged = !string.Equals(current.Rerank.Mode, config.Rerank.Mode, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(current.Rerank.ModelName, config.Rerank.ModelName, StringComparison.Ordinal)
             || !string.Equals(current.Rerank.ApiBaseUrl, config.Rerank.ApiBaseUrl, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(current.Rerank.ApiKey, config.Rerank.ApiKey, StringComparison.Ordinal)
-            || !string.Equals(current.Rerank.ModelPath, config.Rerank.ModelPath, StringComparison.OrdinalIgnoreCase);
+            || !string.Equals(current.Rerank.ModelPath, config.Rerank.ModelPath, StringComparison.OrdinalIgnoreCase)
+            || current.Rerank.UseCuda != config.Rerank.UseCuda
+            || current.Rerank.Enabled != config.Rerank.Enabled;
+
+        var networkBindingChanged = current.Service.Port != config.Service.Port
+            || current.Service.AllowNetworkAccess != config.Service.AllowNetworkAccess
+            || current.Service.EnableHttpService != config.Service.EnableHttpService;
 
         // 关键保护：数据源由 Sources 模块独立管理，设置保存不能覆盖可能已并发修改的 Sources 列表
         config.Sources = current.Sources;
@@ -159,11 +167,29 @@ public class SettingsController : ControllerBase
             rerankRetention.UpdateRetentionPolicy(config);
         }
 
-        return Ok(new
+        // 热重载嵌入模型配置（状态机两阶段热重载）
+        if (embeddingRuntimeChanged && _embeddingService is IModelConfigurableTarget embeddingConfigurable)
         {
-            message = modelRuntimeChanged ? "配置已保存，重启后应用模型服务" : "配置已保存",
-            requiresRestart = modelRuntimeChanged,
-            indexRequiresRebuild = embeddingIdentityChanged
+            await embeddingConfigurable.ApplyConfigurationAsync(config.Embedding);
+        }
+
+        // 热重载重排模型配置（状态机两阶段热重载）
+        if (rerankRuntimeChanged && _rerankService is IRerankConfigurableTarget rerankConfigurable)
+        {
+            await rerankConfigurable.ApplyConfigurationAsync(config.Rerank);
+        }
+
+        var message = networkBindingChanged
+            ? "配置已保存，网络端口/外网设置需重启服务后生效"
+            : (embeddingIdentityChanged
+                ? "配置已即时热生效。嵌入模型已切换，检索前建议重建向量索引"
+                : "配置已保存并即时生效");
+
+        return Ok(new SettingsSaveResult
+        {
+            Message = message,
+            RequiresRestart = networkBindingChanged,
+            IndexRequiresRebuild = embeddingIdentityChanged
         });
     }
 
@@ -360,3 +386,25 @@ public class CudaAvailability
     /// </summary>
     public bool HasPortableCuda { get; set; }
 }
+
+/// <summary>
+/// 设置保存响应模型
+/// </summary>
+public class SettingsSaveResult
+{
+    /// <summary>
+    /// 提示消息
+    /// </summary>
+    public string Message { get; set; } = "";
+
+    /// <summary>
+    /// 是否需要重启服务（仅服务端口或外网绑定变更时为 true）
+    /// </summary>
+    public bool RequiresRestart { get; set; }
+
+    /// <summary>
+    /// 嵌入模型或维度变更时为 true，建议重建向量索引
+    /// </summary>
+    public bool IndexRequiresRebuild { get; set; }
+}
+

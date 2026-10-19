@@ -69,17 +69,21 @@ public class SourcesController : ControllerBase
     /// 返回所有已配置的源及其包含的文件夹路径列表
     /// </remarks>
     [HttpGet("~/api/paths")]
-    public async Task<ActionResult<PathsResponse>> GetPaths()
+    public async Task<ActionResult<PathsResponse>> GetPaths([FromQuery] bool enabledOnly = true)
     {
         var config = _configManager.Load();
         var files = await _vectorStore.GetAllFilesAsync();
         var fileList = files.ToList();
 
+        var sourcesToInclude = enabledOnly
+            ? config.Sources.Where(s => s.Enabled).ToList()
+            : config.Sources;
+
         var response = new PathsResponse
         {
-            Sources = config.Sources.Select(s =>
+            Sources = sourcesToInclude.Select(s =>
             {
-                var sourceFiles = fileList.Where(f => f.Source == s.Name).ToList();
+                var sourceFiles = fileList.Where(f => string.Equals(f.Source, s.Name, StringComparison.OrdinalIgnoreCase)).ToList();
 
                 // 从文件路径中提取唯一的文件夹路径
                 var folders = sourceFiles

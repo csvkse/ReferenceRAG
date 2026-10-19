@@ -9,6 +9,7 @@ using Microsoft.Extensions.AI;
 using OpenAI;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Service.Services;
 
@@ -16,10 +17,10 @@ public record SseEvent(string Type, string? Delta = null, string? Message = null
 
 public class MafChatService
 {
-    private readonly IChatClient? _client;
+    private volatile IChatClient? _client;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly string _systemPrompt;
+    private volatile string _systemPrompt;
     private readonly AITool[] _tools;
     private readonly ConcurrentDictionary<string, ChatSession> _sessions = new();
     private readonly ILogger<MafChatService> _logger;
@@ -66,16 +67,67 @@ public class MafChatService
         }
         else
         {
-            var rawClient = new OpenAIClient(
-                new ApiKeyCredential(apiKey),
-                new OpenAIClientOptions { Endpoint = new Uri(endpoint) })
-                .GetChatClient(model)
-                .AsIChatClient();
+            _client = BuildChatClient(endpoint, apiKey, model);
+        }
+    }
 
-            _client = rawClient
-                .AsBuilder()
-                .UseFunctionInvocation()
-                .Build();
+    private IChatClient? BuildChatClient(string endpoint, string? apiKey, string model)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey)) return null;
+
+        var sanitizingHandler = new OpenAiToolCallSanitizingHandler();
+        var httpClient = new HttpClient(sanitizingHandler)
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+
+        var clientOptions = new OpenAIClientOptions
+        {
+            Endpoint = new Uri(endpoint),
+            Transport = new System.ClientModel.Primitives.HttpClientPipelineTransport(httpClient)
+        };
+
+        var rawClient = new OpenAIClient(new ApiKeyCredential(apiKey), clientOptions)
+            .GetChatClient(model)
+            .AsIChatClient();
+
+        return rawClient
+            .AsBuilder()
+            .UseFunctionInvocation()
+            .Build();
+    }
+
+    /// <summary>
+    /// 热更新 AI 聊天配置（无需重启即时生效）
+    /// </summary>
+    public void UpdateConfiguration(string? endpoint, string? apiKey, string? model, string? systemPrompt)
+    {
+        var ep = string.IsNullOrWhiteSpace(endpoint) ? "https://api.openai.com/v1" : endpoint.Trim();
+        var mdl = string.IsNullOrWhiteSpace(model) ? "gpt-4o-mini" : model.Trim();
+        var key = apiKey?.Trim();
+
+        _logger.LogInformation("正在热更新 AI 聊天配置: Endpoint={Endpoint}, Model={Model}, HasKey={HasKey}",
+            ep, mdl, !string.IsNullOrWhiteSpace(key));
+
+        _systemPrompt = string.IsNullOrWhiteSpace(systemPrompt) ? "你是 ReferenceRAG 智能助手。" : systemPrompt.Trim();
+
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            _client = null;
+            _logger.LogWarning("AI 聊天 API Key 已清空，聊天接口将提示配置");
+            return;
+        }
+
+        try
+        {
+            var newClient = BuildChatClient(ep, key, mdl);
+            _client = newClient;
+            _logger.LogInformation("AI 聊天客户端热更新成功，立即生效");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "热更新 AI 聊天客户端失败");
+            throw;
         }
     }
 
@@ -163,16 +215,50 @@ public class MafChatService
             if (string.IsNullOrWhiteSpace(keyword)) return "搜索关键词不能为空。";
             using var scope = _scopeFactory.CreateScope();
             var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
-            var results = await bm25Store.SearchAsync(keyword, topK);
+            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+            var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
 
-            if (results.Count == 0)
+            var config = configManager.Load();
+            var enabledSources = config.Sources
+                .Where(s => s.Enabled)
+                .Select(s => s.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (config.Sources.Count > 0 && enabledSources.Count == 0)
+                return $"未找到关键词「{keyword}」的匹配内容（所有数据源均已停用）。";
+
+            var results = await bm25Store.SearchAsync(keyword, topK * 2);
+
+            var filteredResults = new List<BM25SearchResult>();
+            if (config.Sources.Count > 0)
+            {
+                foreach (var item in results)
+                {
+                    var chunk = await vectorStore.GetChunkAsync(item.ChunkId);
+                    if (chunk != null)
+                    {
+                        var file = await vectorStore.GetFileAsync(chunk.FileId);
+                        if (file != null && !string.IsNullOrEmpty(file.Source) && enabledSources.Contains(file.Source))
+                        {
+                            filteredResults.Add(item);
+                            if (filteredResults.Count >= topK) break;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                filteredResults = results.Take(topK).ToList();
+            }
+
+            if (filteredResults.Count == 0)
                 return $"未找到关键词「{keyword}」的匹配内容。";
 
             var sb = new StringBuilder();
             sb.AppendLine($"## BM25 精确检索（词：{keyword}）");
             sb.AppendLine();
             int idx = 1;
-            foreach (var item in results)
+            foreach (var item in filteredResults)
             {
                 sb.AppendLine($"[{idx++}] score: {item.Score:F2}");
                 sb.AppendLine(item.Content);
@@ -197,16 +283,57 @@ public class MafChatService
             if (string.IsNullOrWhiteSpace(titleQuery)) return "笔记标题关键词不能为空。";
             using var scope = _scopeFactory.CreateScope();
             var graphStore = scope.ServiceProvider.GetRequiredService<IGraphStore>();
-            limit = Math.Clamp(limit, 1, 50);
-            var nodes = await graphStore.SearchNodesAsync(titleQuery, limit);
+            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+            var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
 
-            if (nodes.Count == 0)
+            var config = configManager.Load();
+            var enabledSources = config.Sources
+                .Where(s => s.Enabled)
+                .Select(s => s.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (config.Sources.Count > 0 && enabledSources.Count == 0)
+                return $"未找到标题含「{titleQuery}」的笔记节点（所有数据源均已停用）。";
+
+            limit = Math.Clamp(limit, 1, 50);
+            var nodes = await graphStore.SearchNodesAsync(titleQuery, limit * 2);
+
+            var filteredNodes = new List<GraphNode>();
+            if (config.Sources.Count > 0)
+            {
+                var paths = nodes.Select(n =>
+                {
+                    var hashIdx = n.Id.IndexOf('#');
+                    return hashIdx >= 0 ? n.Id[..hashIdx] : n.Id;
+                }).Distinct().ToList();
+
+                var files = (await vectorStore.GetFilesByPathsAsync(paths))
+                    .Where(f => !string.IsNullOrEmpty(f.Source) && enabledSources.Contains(f.Source))
+                    .ToDictionary(f => f.Path, StringComparer.OrdinalIgnoreCase);
+
+                foreach (var node in nodes)
+                {
+                    var hashIdx = node.Id.IndexOf('#');
+                    var p = hashIdx >= 0 ? node.Id[..hashIdx] : node.Id;
+                    if (files.ContainsKey(p))
+                    {
+                        filteredNodes.Add(node);
+                        if (filteredNodes.Count >= limit) break;
+                    }
+                }
+            }
+            else
+            {
+                filteredNodes = nodes.Take(limit).ToList();
+            }
+
+            if (filteredNodes.Count == 0)
                 return $"未找到标题含「{titleQuery}」的笔记节点。";
 
             var sb = new StringBuilder();
             sb.AppendLine($"## 图谱节点搜索（标题：{titleQuery}）");
             sb.AppendLine();
-            foreach (var node in nodes)
+            foreach (var node in filteredNodes)
             {
                 sb.AppendLine($"- 《{node.Title}》  类型: {node.Type}");
                 sb.AppendLine($"  ID: {node.Id}");
@@ -232,6 +359,13 @@ public class MafChatService
 
             using var scope = _scopeFactory.CreateScope();
             var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+            var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
+
+            var config = configManager.Load();
+            var enabledSources = config.Sources
+                .Where(s => s.Enabled)
+                .Select(s => s.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var sb = new StringBuilder();
             sb.AppendLine("## 文件章节结构");
@@ -252,6 +386,12 @@ public class MafChatService
                 if (file == null)
                 {
                     sb.AppendLine($"- {rawPath}: 文件未被索引");
+                    continue;
+                }
+
+                if (config.Sources.Count > 0 && (!enabledSources.Contains(file.Source ?? "")))
+                {
+                    sb.AppendLine($"- {rawPath}: 文件所属数据源已停用");
                     continue;
                 }
 
@@ -296,6 +436,13 @@ public class MafChatService
 
             using var scope = _scopeFactory.CreateScope();
             var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+            var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
+
+            var config = configManager.Load();
+            var enabledSources = config.Sources
+                .Where(s => s.Enabled)
+                .Select(s => s.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var normalizedPath = Path.GetFullPath(filePath);
             var file = await vectorStore.GetFileByPathAsync(normalizedPath)
@@ -303,6 +450,9 @@ public class MafChatService
 
             if (file == null)
                 return "文件未被索引。";
+
+            if (config.Sources.Count > 0 && (!enabledSources.Contains(file.Source ?? "")))
+                return "该文件所属数据源已停用，无法读取内容。";
 
             var allChunks = await vectorStore.GetChunksByFileAsync(file.Id);
             var filtered = allChunks.OrderBy(c => c.ChunkOrder);
@@ -381,9 +531,10 @@ public class MafChatService
         string userMessage,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        if (_client is null)
+        var client = _client;
+        if (client is null)
         {
-            yield return new SseEvent("error", Message: "聊天 API Key 未配置，请设置环境变量 Chat__ApiKey 后重启服务");
+            yield return new SseEvent("error", Message: "聊天 API Key 未配置，请在项目设置中配置 Chat ApiKey 后使用");
             yield return new SseEvent("done");
             yield break;
         }
@@ -407,7 +558,7 @@ public class MafChatService
         var options = new ChatOptions { Tools = [.. _tools] };
         var responseText = new StringBuilder();
 
-        await foreach (var update in _client.GetStreamingResponseAsync(history, options, ct))
+        await foreach (var update in client.GetStreamingResponseAsync(history, options, ct))
         {
             if (!string.IsNullOrEmpty(update.Text))
             {
