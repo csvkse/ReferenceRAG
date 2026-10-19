@@ -58,23 +58,40 @@ public class Win32EnvironmentInjector : IEnvironmentInjector
             }
         }
 
-        // 同步更新当前进程环境变量 PATH
+        // 同步更新当前进程环境变量 PATH 与 Linux LD_LIBRARY_PATH
         if (injectedThisBatch.Count > 0)
         {
             lock (_pathLock)
             {
+                var pathSeparator = isWindows ? ';' : ':';
                 var currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
                 var existingParts = new HashSet<string>(
-                    currentPath.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
-                    StringComparer.OrdinalIgnoreCase
+                    currentPath.Split(pathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                    isWindows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal
                 );
 
                 var toAdd = injectedThisBatch.Where(p => !existingParts.Contains(p)).ToList();
                 if (toAdd.Count > 0)
                 {
-                    var newPath = string.Join(";", toAdd) + ";" + currentPath;
+                    var newPath = string.Join(pathSeparator.ToString(), toAdd) + pathSeparator + currentPath;
                     Environment.SetEnvironmentVariable("PATH", newPath, EnvironmentVariableTarget.Process);
-                    _logger?.LogInformation("[Win32EnvironmentInjector] 已动态注入运行库路径到进程 PATH: {Paths}", string.Join("; ", toAdd));
+                    _logger?.LogInformation("[EnvironmentInjector] 已动态注入运行库路径到进程 PATH: {Paths}", string.Join(pathSeparator.ToString(), toAdd));
+                }
+
+                if (!isWindows)
+                {
+                    var currentLd = Environment.GetEnvironmentVariable("LD_LIBRARY_PATH") ?? "";
+                    var existingLdParts = new HashSet<string>(
+                        currentLd.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                        StringComparer.Ordinal
+                    );
+                    var toAddLd = injectedThisBatch.Where(p => !existingLdParts.Contains(p)).ToList();
+                    if (toAddLd.Count > 0)
+                    {
+                        var newLd = string.Join(":", toAddLd) + (string.IsNullOrEmpty(currentLd) ? "" : ":" + currentLd);
+                        Environment.SetEnvironmentVariable("LD_LIBRARY_PATH", newLd);
+                        _logger?.LogInformation("[EnvironmentInjector] 已动态注入运行库路径到进程 LD_LIBRARY_PATH: {Paths}", string.Join(":", toAddLd));
+                    }
                 }
             }
         }

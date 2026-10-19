@@ -19,35 +19,47 @@
     <PackageReference Include="System.Management" />
   </ItemGroup>
 
-  <!-- 通用版 (默认): 支持 AMD / Intel / NVIDIA / 高通骁龙 全系列显卡 (DirectML + Vulkan) -->
+  <PropertyGroup>
+    <IsTargetLinux Condition="'$(OS)' != 'Windows_NT' or $([MSBuild]::IsOSPlatform('Linux')) or $([MSBuild]::ValueOrDefault('$(RuntimeIdentifier)', '').StartsWith('linux'))">true</IsTargetLinux>
+    <IsTargetWindows Condition="'$(IsTargetLinux)' != 'true'">true</IsTargetWindows>
+  </PropertyGroup>
+
+  <!-- 1. 通用版 (默认): 支持 AMD / Intel / NVIDIA / 高通骁龙 / 核显 (Windows: DirectML+Vulkan; Linux: CPU+Vulkan) -->
   <ItemGroup Condition="'$(GpuBackend)' == '' or '$(GpuBackend)' == 'universal' or '$(GpuBackend)' == 'directml'">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" />
-    <PackageReference Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="Microsoft.ML.OnnxRuntime.DirectML" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Linux" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />
   </ItemGroup>
 
-  <!-- NVIDIA 专属满血版: 针对 GeForce RTX / GTX 独显优化 (CUDA 12 + TensorRT) -->
+  <!-- 2. NVIDIA 专属满血版: 针对 GeForce RTX / GTX 独显优化 (CUDA 12 + TensorRT 原生) -->
   <ItemGroup Condition="'$(GpuBackend)' == 'nvidia' or '$(GpuBackend)' == 'cuda'">
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" />
-    <PackageReference Include="LLamaSharp.Backend.Cuda12.Windows" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="LLamaSharp.Backend.Cuda12.Windows" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="LLamaSharp.Backend.Cuda12.Linux" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />
   </ItemGroup>
 
-  <!-- AMD 专属优化版: 针对 AMD Radeon 独显与 Ryzen/APU 核显优化 (DirectML + Vulkan) -->
+  <!-- 3. AMD 专属优化版: Windows 采用 DirectML+Vulkan，Linux 采用 Vulkan 原生 -->
   <ItemGroup Condition="'$(GpuBackend)' == 'amd' or '$(GpuBackend)' == 'rocm' or '$(GpuBackend)' == 'radeon'">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" />
-    <PackageReference Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="Microsoft.ML.OnnxRuntime.DirectML" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Linux" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />
   </ItemGroup>
 
-  <!-- Intel 专属优化版: 针对 Intel Arc 独显与酷睿 Ultra 核显优化 (DirectML + Vulkan) -->
+  <!-- 4. Intel 专属优化版: Windows 采用 DirectML+Vulkan，Linux 采用 OpenVINO+Vulkan 原生 -->
   <ItemGroup Condition="'$(GpuBackend)' == 'intel' or '$(GpuBackend)' == 'openvino' or '$(GpuBackend)' == 'arc'">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" />
-    <PackageReference Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="Microsoft.ML.OnnxRuntime.DirectML" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="Intel.ML.OnnxRuntime.OpenVino" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Linux" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />
   </ItemGroup>
 
-  <!-- 纯 CPU 兼容版: 针对无独显轻量级环境 (纯 CPU AVX2) -->
+  <!-- 5. 纯 CPU 兼容版: 针对无独显轻量级环境 (纯 CPU AVX2/AVX-512) -->
   <ItemGroup Condition="'$(GpuBackend)' == 'cpu'">
     <PackageReference Include="Microsoft.ML.OnnxRuntime" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />

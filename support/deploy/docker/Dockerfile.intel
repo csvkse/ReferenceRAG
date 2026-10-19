@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libicu74 \
     libssl3t64 \
+    libvulkan1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Add Intel Graphics official repository & install Level Zero GPU runtime

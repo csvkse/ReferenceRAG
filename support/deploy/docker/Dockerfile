@@ -34,10 +34,11 @@ RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-# Install wget for health check and libgomp1 for native CPU inference
+# Install wget for health check, libgomp1 for native CPU inference, and libvulkan1 for Vulkan acceleration
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     libgomp1 \
+    libvulkan1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create data directory and non-root user

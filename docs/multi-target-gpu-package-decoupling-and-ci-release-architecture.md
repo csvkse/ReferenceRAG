@@ -96,33 +96,43 @@ flowchart TD
     <RootNamespace>ReferenceRAG.Core</RootNamespace>
     <!-- 默认兜底为通用版 (全显卡兼备) -->
     <GpuBackend Condition="'$(GpuBackend)' == ''">universal</GpuBackend>
+    <!-- 跨平台操作系统目标判定 -->
+    <IsTargetLinux Condition="'$(OS)' != 'Windows_NT' or $([MSBuild]::IsOSPlatform('Linux')) or $([MSBuild]::ValueOrDefault('$(RuntimeIdentifier)', '').StartsWith('linux'))">true</IsTargetLinux>
+    <IsTargetWindows Condition="'$(IsTargetLinux)' != 'true'">true</IsTargetWindows>
   </PropertyGroup>
 
-  <!-- 1. 通用版 (DirectML + Vulkan): 支持 AMD / Intel / NVIDIA / 高通骁龙 / 各类核显 -->
+  <!-- 1. 通用版 (Windows: DirectML+Vulkan; Linux: CPU+Vulkan): 支持 AMD / Intel / NVIDIA / 核显 -->
   <ItemGroup Condition="'$(GpuBackend)' == 'universal' or '$(GpuBackend)' == 'directml'">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" />
-    <PackageReference Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="Microsoft.ML.OnnxRuntime.DirectML" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Linux" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />
   </ItemGroup>
 
-  <!-- 2. NVIDIA 专属满血版 (CUDA 12 + TensorRT): 针对 GeForce RTX / GTX 独显优化 -->
+  <!-- 2. NVIDIA 专属满血版 (CUDA 12 原生): 针对 GeForce RTX / GTX / 云端 NVIDIA 实例优化 -->
   <ItemGroup Condition="'$(GpuBackend)' == 'cuda' or '$(GpuBackend)' == 'nvidia'">
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" />
-    <PackageReference Include="LLamaSharp.Backend.Cuda12.Windows" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="LLamaSharp.Backend.Cuda12.Windows" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="LLamaSharp.Backend.Cuda12.Linux" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />
   </ItemGroup>
 
-  <!-- 3. AMD 专属优化版 -->
+  <!-- 3. AMD 专属优化版 (Windows: DirectML+Vulkan; Linux: ROCm/Vulkan 原生) -->
   <ItemGroup Condition="'$(GpuBackend)' == 'amd' or '$(GpuBackend)' == 'rocm' or '$(GpuBackend)' == 'radeon'">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" />
-    <PackageReference Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="Microsoft.ML.OnnxRuntime.DirectML" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Linux" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />
   </ItemGroup>
 
-  <!-- 4. Intel 专属优化版 -->
+  <!-- 4. Intel 专属优化版 (Windows: DirectML+Vulkan; Linux: OpenVINO+Vulkan 原生) -->
   <ItemGroup Condition="'$(GpuBackend)' == 'intel' or '$(GpuBackend)' == 'openvino' or '$(GpuBackend)' == 'arc'">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" />
-    <PackageReference Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="Microsoft.ML.OnnxRuntime.DirectML" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="Intel.ML.OnnxRuntime.OpenVino" />
+    <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Windows" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Linux" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />
   </ItemGroup>
 
@@ -135,8 +145,9 @@ flowchart TD
 ```
 
 **实现效果**：
-- 当传入 `-p:GpuBackend=cuda` 时，包还原与编译仅下载 CUDA 相关组件；
-- 当传入 `-p:GpuBackend=universal` 时，仅下载 DirectML 与 Vulkan，两者物理隔离，从根源避免原生文件冲突。
+- 当传入 `-p:GpuBackend=cuda` 时，在 Windows 下还原 `Cuda12.Windows`，在 Linux 下还原 `Cuda12.Linux` 与 Linux CUDA ONNX 原生包；
+- 当传入 `-p:GpuBackend=universal` 时，在 Windows 下拉取 DirectML + `Vulkan.Windows`，在 Linux 下拉取 `Vulkan.Linux` + CPU ONNX（无缝支持 Mesa 驱动直连）；
+- 跨操作系统构建相互隔离，从根源避免原生文件冲突与操作系统平台不兼容问题。
 
 ---
 
@@ -217,11 +228,15 @@ public static class OnnxExecutionProviderHelper
 
 ## 五、 第三层：大模型 GGUF 后端动态引导 (LlamaNativeInitializer)
 
-在 `LlamaNativeInitializer.cs` 中，负责在 llama.cpp 底层原生 C++ 动态库锁定前完成环境准备：
+在 `LlamaNativeInitializer.cs` 中，负责在 llama.cpp 底层原生 C++ 动态库锁定前完成环境准备，实现了 **Windows / Linux 双平台自适应引导**：
 1. **优先探测 CUDA 12 运行时**：
-   通过 `CudaEnvironmentScanner` 扫描 `./runtimes/cuda`、系统路径或常见 AI 环境（PyTorch/ComfyUI/Ollama）。若检测到 `cublas64_12.dll` 与 `cublasLt64_12.dll`，自动通过 Win32 API `AddDllDirectory` 将其加入 Windows 动态库查找链；
-2. **动态回退至 Vulkan 原生路径**：
-   若当前构建不包含 CUDA 或未扫描到相关 DLL，引导器探查包内的 `runtimes/win-x64/native/vulkan/llama.dll`，自动切换至 Vulkan GPU 渲染计算模式，实现对 AMD、Intel 显卡的原生驱动直连。
+   - **Windows**：通过 `CudaEnvironmentScanner` 扫描 `./runtimes/cuda`、系统路径或常见 AI 环境（PyTorch/ComfyUI/Ollama）。若检测到 `cublas64_12.dll` 与 `cublasLt64_12.dll`，自动通过 Win32 API `AddDllDirectory` 将其加入 Windows 动态库查找链；
+   - **Linux**：扫描 `/usr/local/cuda/lib64`、`/usr/local/cuda/targets/x86_64-linux/lib`、`LD_LIBRARY_PATH` 等路径。若检测到 `libcublas.so` 与 `libcublasLt.so`，自动将有效目录动态注入至进程环境 `LD_LIBRARY_PATH`，并配置 `NativeLibraryConfig.All.WithLibrary("runtimes/linux-x64/native/cuda12/libllama.so")`；
+2. **动态加载 Vulkan 原生路径**：
+   - **Windows**：引导器探查包内的 `runtimes/win-x64/native/vulkan/llama.dll`，自动切换至 Vulkan GPU 渲染计算模式，实现对 AMD、Intel 显卡的原生驱动直连；
+   - **Linux**：引导器探查 `runtimes/linux-x64/native/vulkan/libllama.so`，利用 Linux 系统内置的 Mesa 开源驱动（RADV/ANV）直连显卡，无需安装臃肿挑内核的 ROCm 完整软件栈；
+3. **安全回退保底**：
+   - 若系统未检测到 GPU 驱动或原生库加载异常，自动回退到跨平台 CPU 库（`LLamaSharp.Backend.Cpu`），保障服务 100% 可用不崩溃。
 
 ---
 

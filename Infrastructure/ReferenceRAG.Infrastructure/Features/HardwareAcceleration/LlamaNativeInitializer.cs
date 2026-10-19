@@ -79,24 +79,34 @@ public static class LlamaNativeInitializer
 
                 if (!scanResult.Found)
                 {
-                    var vulkanCandidateDirs = new[]
+                    var vulkanCandidateDirs = isWindows ? new[]
                     {
                         Path.Combine(AppContext.BaseDirectory, "runtimes", "win-x64", "native", "vulkan"),
                         Path.Combine(Directory.GetCurrentDirectory(), "runtimes", "win-x64", "native", "vulkan"),
                         Path.Combine(AppContext.BaseDirectory, "vulkan"),
                         Path.Combine(Directory.GetCurrentDirectory(), "vulkan")
+                    } : new[]
+                    {
+                        Path.Combine(AppContext.BaseDirectory, "runtimes", "linux-x64", "native", "vulkan"),
+                        Path.Combine(Directory.GetCurrentDirectory(), "runtimes", "linux-x64", "native", "vulkan"),
+                        Path.Combine(AppContext.BaseDirectory, "vulkan"),
+                        Path.Combine(Directory.GetCurrentDirectory(), "vulkan")
                     };
 
-                    string? activeVulkanDir = vulkanCandidateDirs.FirstOrDefault(d => Directory.Exists(d) && File.Exists(Path.Combine(d, "llama.dll")));
-                    if (activeVulkanDir != null && isWindows)
+                    string libName = isWindows ? "llama.dll" : "libllama.so";
+                    string? activeVulkanDir = vulkanCandidateDirs.FirstOrDefault(d => Directory.Exists(d) && File.Exists(Path.Combine(d, libName)));
+                    if (activeVulkanDir != null)
                     {
                         _logger.LogInformation("[LlamaNative] 未检测到 CUDA 12，已激活 Vulkan GPU 加速运行目录: {Dir}", activeVulkanDir);
-                        try { AddDllDirectory(activeVulkanDir); } catch { }
+                        if (isWindows)
+                        {
+                            try { AddDllDirectory(activeVulkanDir); } catch { }
+                        }
                         injector.InjectDirectories(new[] { activeVulkanDir });
                     }
                     else
                     {
-                        _logger.LogInformation("[LlamaNative] 未检测到 CUDA 12 依赖库 (cublas64_12.dll / cublasLt64_12.dll)，自动使用 CPU / 自适应回退模式");
+                        _logger.LogInformation("[LlamaNative] 未检测到 CUDA 12 依赖库，自动使用 CPU / 自适应回退模式");
                     }
 
                     NativeLibraryConfig.All.WithCuda(false).WithAutoFallback(true);
@@ -153,6 +163,24 @@ public static class LlamaNativeInitializer
 
                         var ggml = Path.Combine(activeCuda12Dir, "ggml.dll");
                         if (File.Exists(ggml)) LoadLibraryW(ggml);
+                    }
+                }
+                else
+                {
+                    // 探查并激活 LLamaSharp.Backend.Cuda12.Linux 中的 libllama.so
+                    var candidateLinuxDirs = new[]
+                    {
+                        Path.Combine(AppContext.BaseDirectory, "runtimes", "linux-x64", "native", "cuda12"),
+                        Path.Combine(Directory.GetCurrentDirectory(), "runtimes", "linux-x64", "native", "cuda12"),
+                        Path.Combine(AppContext.BaseDirectory, "cuda12"),
+                        Path.Combine(Directory.GetCurrentDirectory(), "cuda12")
+                    };
+
+                    string? activeCuda12LinuxDir = candidateLinuxDirs.FirstOrDefault(d => Directory.Exists(d) && File.Exists(Path.Combine(d, "libllama.so")));
+                    if (activeCuda12LinuxDir != null)
+                    {
+                        _logger.LogInformation("[LlamaNative] 激活 Linux LLamaSharp CUDA 12 运行目录: {Dir}", activeCuda12LinuxDir);
+                        injector.InjectDirectories(new[] { activeCuda12LinuxDir });
                     }
                 }
 

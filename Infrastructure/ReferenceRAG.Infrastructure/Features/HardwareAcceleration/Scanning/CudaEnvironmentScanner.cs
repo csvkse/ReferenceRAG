@@ -129,11 +129,26 @@ public class CudaEnvironmentScanner : ICudaEnvironmentScanner
         else
         {
             // Linux / 容器标准路径
-            var linuxPaths = new[] { "/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64", "/usr/lib/x86_64-linux-gnu" };
+            var linuxPaths = new[]
+            {
+                "/usr/local/cuda/lib64",
+                "/usr/local/cuda-12/lib64",
+                "/usr/local/cuda/targets/x86_64-linux/lib",
+                "/usr/lib/x86_64-linux-gnu",
+                "/usr/lib64"
+            };
             foreach (var lp in linuxPaths)
             {
                 scanned.Add($"Linux: {lp}");
                 if (Directory.Exists(lp)) candidates.Add(lp);
+            }
+
+            // 探测 Linux 环境变量 LD_LIBRARY_PATH
+            var ldPath = Environment.GetEnvironmentVariable("LD_LIBRARY_PATH") ?? "";
+            foreach (var p in ldPath.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                scanned.Add($"EnvVar(LD_LIBRARY_PATH): {p}");
+                if (Directory.Exists(p)) candidates.Add(p);
             }
         }
 
@@ -337,11 +352,20 @@ public class CudaEnvironmentScanner : ICudaEnvironmentScanner
         }
         else
         {
-            var hasCublasLt = File.Exists(Path.Combine(dir, "libcublasLt.so.12")) ||
-                              Directory.GetFiles(dir, "libcublasLt.so.12*").Length > 0;
-            var hasCublas = File.Exists(Path.Combine(dir, "libcublas.so.12")) ||
-                            Directory.GetFiles(dir, "libcublas.so.12*").Length > 0;
-            if (!hasCublasLt && !hasCublas) return false;
+            try
+            {
+                var hasCublasLt = File.Exists(Path.Combine(dir, "libcublasLt.so.12")) ||
+                                  File.Exists(Path.Combine(dir, "libcublasLt.so")) ||
+                                  Directory.GetFiles(dir, "libcublasLt.so*").Length > 0;
+                var hasCublas = File.Exists(Path.Combine(dir, "libcublas.so.12")) ||
+                                File.Exists(Path.Combine(dir, "libcublas.so")) ||
+                                Directory.GetFiles(dir, "libcublas.so*").Length > 0;
+                if (!hasCublasLt || !hasCublas) return false;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         return true;
