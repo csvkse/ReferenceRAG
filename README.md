@@ -108,7 +108,7 @@ ReferenceRAG/
 
 ## 快速开始
 
-目录和配置约定见 [support 说明](support/README.md)。本机配置位于 `support/config/local/`，发布输出位于 `support/artifacts/publish/`。
+目录和配置约定见 [support 说明](support/README.md)。本机配置位于 `support/config/local/`，桌面端脚本（`build-desktop.bat`）默认发布输出位于 `Host/ReferenceRAG.DesktopHost/bin/Release/net10.0-windows/publish/`（Web 服务脚本发布输出位于 `support/artifacts/publish/web/`）。
 
 ### 1. 桌面端（推荐）
 
@@ -139,7 +139,7 @@ dotnet run --project Host/ReferenceRAG.DesktopHost
 也可以直接使用仓库根目录快捷脚本：
 
 ```bat
-:: 一键编译发布 Windows x64 桌面端（输出至 support/artifacts/publish/desktop）
+:: 一键编译发布 Windows x64 桌面端（默认输出至 Host/ReferenceRAG.DesktopHost/bin/Release/net10.0-windows/publish）
 build-desktop.bat
 
 :: 运行端到端核心冒烟测试

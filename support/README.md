@@ -22,14 +22,15 @@
 
 ## 发布
 
-在仓库根目录执行：
+在仓库根目录执行快捷构建脚本：
 
-```powershell
-dotnet publish Host/ReferenceRAG.WebHost -p:PublishProfile=win-x64
-dotnet publish Host/ReferenceRAG.DesktopHost -p:PublishProfile=win-x64
+```bat
+:: 桌面端发布（默认输出至 Host/ReferenceRAG.DesktopHost/bin/Release/net10.0-windows/publish）
+build-desktop.bat
+
+:: Web 服务端发布（默认输出至 support/artifacts/publish/web）
+support\tools\scripts\build.bat
 ```
-
-输出分别位于 `support/artifacts/publish/web` 和 `desktop`。
 
 Docker 使用 `docker compose -f support/deploy/docker/compose.yml up --build`。启动前将 Docker 模板复制到 `support/config/local/docker/appsettings.Production.json` 并配置模型；该文件映射为容器的 `/app/appsettings.json`，不会遮蔽程序目录。此处记录运行方式，不代表已经执行部署。
 
