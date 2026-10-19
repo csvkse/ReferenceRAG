@@ -17,9 +17,20 @@ set "RUN_SMOKE=false"
 set "PRESERVE_CONFIG=true"
 set "GPU_BACKEND="
 set "GPU_BACKEND_DESC="
+set "BUNDLE_CUDA="
 
 :parse_args
 if "%~1"=="" goto after_args
+if /i "%~1"=="--bundle-cuda" (
+    set "BUNDLE_CUDA=true"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--no-bundle-cuda" (
+    set "BUNDLE_CUDA=false"
+    shift
+    goto parse_args
+)
 if /i "%~1"=="--universal" (
     set "GPU_BACKEND=universal"
     shift
@@ -326,6 +337,11 @@ if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\window-icon.ico" (
 if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" (
     copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" "%OUTPUT%\tray-icon.ico" >nul 2>nul
 )
+
+if /i "%GPU_BACKEND%"=="cuda" (
+    call :bundle_cuda_runtime
+)
+
 echo.
 echo ==========================================================
 echo [build-desktop] Desktop publish succeeded!
@@ -369,3 +385,65 @@ if defined RETRY_READY (
     choice /C Q /N /M "[build-desktop] Press Q to close: "
 )
 exit /b %EXIT_CODE%
+
+:bundle_cuda_runtime
+echo.
+echo [build-desktop] NVIDIA 专属版: 正在检查 CUDA 12 核心运行库打包...
+set "OUT_CUDA_DIR=%OUTPUT%\runtimes\cuda"
+set "LOCAL_CUDA_DIR=%ROOT_DIR%\runtimes\cuda"
+
+if not exist "%OUT_CUDA_DIR%\cublas64_12.dll" goto check_local_cuda
+if not exist "%OUT_CUDA_DIR%\cublasLt64_12.dll" goto check_local_cuda
+echo [build-desktop] 发布目录已包含完整的 CUDA 12 核心库，跳过复制 - 幂等跳过。
+goto :eof
+
+:check_local_cuda
+if not exist "%LOCAL_CUDA_DIR%\cublas64_12.dll" goto check_bundle_needed
+if not exist "%LOCAL_CUDA_DIR%\cublasLt64_12.dll" goto check_bundle_needed
+
+echo [build-desktop] 检测到本地已存在 CUDA 12 核心库，正在自动打包至发布目录...
+if not exist "%OUT_CUDA_DIR%" mkdir "%OUT_CUDA_DIR%"
+xcopy /y /d "%LOCAL_CUDA_DIR%\*.dll" "%OUT_CUDA_DIR%\" >nul 2>nul
+echo [build-desktop] CUDA 12 核心库打包成功: "%OUT_CUDA_DIR%"
+goto :eof
+
+:check_bundle_needed
+if /i "%BUNDLE_CUDA%"=="false" (
+    echo [build-desktop] 已指定 --no-bundle-cuda，跳过便携库打包。
+    goto :eof
+)
+
+if /i "%BUNDLE_CUDA%"=="true" goto do_bundle_download
+
+if defined NON_INTERACTIVE (
+    echo [build-desktop] 提示: 本地未就绪便携 CUDA 库。如需随包分发，请指定 --bundle-cuda 参数。
+    goto :eof
+)
+
+echo ----------------------------------------------------------
+echo [build-desktop] 提示: 本地尚未下载便携式微型 CUDA 12 核心库。
+echo [build-desktop] 打包微型库可使目标电脑无需安装完整 CUDA Toolkit 即可开启满血 GPU 加速。
+echo ----------------------------------------------------------
+set "USER_BUNDLE_CHOICE="
+set /p "USER_BUNDLE_CHOICE=[build-desktop] 是否现在自动拉取微型 CUDA 12 核心库并打包？[Y/N] (直接回车默认 Y): "
+if "%USER_BUNDLE_CHOICE%"=="" set "USER_BUNDLE_CHOICE=Y"
+if /i "%USER_BUNDLE_CHOICE%"=="Y" goto do_bundle_download
+echo [build-desktop] 已跳过便携库打包。目标程序将优先使用本机 CUDA Toolkit，或可运行 download-cuda-minimal.bat。
+goto :eof
+
+:do_bundle_download
+echo [build-desktop] 正在触发微型 CUDA 12 核心库幂等下载...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%\support\tools\scripts\download-cuda-minimal.ps1" -TargetDir "%LOCAL_CUDA_DIR%"
+if errorlevel 1 (
+    echo [build-desktop] 警告: 微型 CUDA 12 运行库拉取未完成，跳过打包。
+    echo [build-desktop] 桌面版已发布完成，后续可随时运行 download-cuda-minimal.bat 补充。
+    goto :eof
+)
+
+if exist "%LOCAL_CUDA_DIR%\cublas64_12.dll" (
+    if not exist "%OUT_CUDA_DIR%" mkdir "%OUT_CUDA_DIR%"
+    xcopy /y /d "%LOCAL_CUDA_DIR%\*.dll" "%OUT_CUDA_DIR%\" >nul 2>nul
+    echo [build-desktop] CUDA 12 核心库打包成功: "%OUT_CUDA_DIR%"
+)
+goto :eof
+

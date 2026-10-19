@@ -16,6 +16,10 @@ public class PortableCudaManager : IPortableCudaManager
     // 默认备选官方与镜像加速源
     private static readonly string[] DefaultMirrorUrls =
     {
+        "https://pypi.tuna.tsinghua.edu.cn/packages/84/f7/985e9bdbe3e0ac9298fcc8cfa51a392862a46a0ffaccbbd56939b62a9c83/nvidia_cublas_cu12-12.6.4.1-py3-none-win_amd64.whl",
+        "https://mirrors.aliyun.com/pypi/packages/84/f7/985e9bdbe3e0ac9298fcc8cfa51a392862a46a0ffaccbbd56939b62a9c83/nvidia_cublas_cu12-12.6.4.1-py3-none-win_amd64.whl",
+        "https://files.pythonhosted.org/packages/84/f7/985e9bdbe3e0ac9298fcc8cfa51a392862a46a0ffaccbbd56939b62a9c83/nvidia_cublas_cu12-12.6.4.1-py3-none-win_amd64.whl",
+        "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.8.4.1-archive.zip",
         "https://hf-mirror.com/datasets/reference-rag/runtimes/resolve/main/cuda12-win-x64-minimal.zip",
         "https://github.com/reference-rag/runtimes/releases/download/v1.0.0/cuda12-win-x64-minimal.zip"
     };
@@ -33,7 +37,18 @@ public class PortableCudaManager : IPortableCudaManager
 
         var cublasLt = Path.Combine(targetDir, "cublasLt64_12.dll");
         var cublas = Path.Combine(targetDir, "cublas64_12.dll");
-        return File.Exists(cublasLt) && File.Exists(cublas);
+        if (!File.Exists(cublasLt) || !File.Exists(cublas)) return false;
+
+        try
+        {
+            var ltInfo = new FileInfo(cublasLt);
+            var cbInfo = new FileInfo(cublas);
+            return ltInfo.Length > 10 * 1024 * 1024 && cbInfo.Length > 10 * 1024 * 1024;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public string GetInstallDirectory()
@@ -56,7 +71,15 @@ public class PortableCudaManager : IPortableCudaManager
         {
             await Task.Run(() =>
             {
-                ZipFile.ExtractToDirectory(archivePath, targetDir, overwriteFiles: true);
+                using var archive = ZipFile.OpenRead(archivePath);
+                foreach (var entry in archive.Entries)
+                {
+                    if (entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var destPath = Path.Combine(targetDir, entry.Name);
+                        entry.ExtractToFile(destPath, overwrite: true);
+                    }
+                }
             }, cancellationToken);
 
             var installed = IsInstalled();
@@ -72,6 +95,12 @@ public class PortableCudaManager : IPortableCudaManager
 
     public async Task<bool> DownloadAndInstallAsync(string? customUrl = null, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
     {
+        if (IsInstalled())
+        {
+            _logger?.LogInformation("[PortableCudaManager] 便携式 CUDA 核心运行库已存在且有效，跳过下载 (幂等)");
+            return true;
+        }
+
         var urls = !string.IsNullOrWhiteSpace(customUrl)
             ? new[] { customUrl }
             : DefaultMirrorUrls;
