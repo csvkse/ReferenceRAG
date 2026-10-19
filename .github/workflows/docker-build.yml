@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       variant:
-        description: "构建变体 (cpu / cuda / rocm / intel / all)"
+        description: "构建变体 (cpu / cuda / nvidia / rocm / amd / intel / all)"
         required: true
         default: "all"
         type: choice
@@ -28,7 +28,9 @@ on:
           - all
           - cpu
           - cuda
+          - nvidia
           - rocm
+          - amd
           - intel
       push_image:
         description: "是否推送镜像至 GHCR"
@@ -60,6 +62,10 @@ jobs:
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "${{ inputs.variant }}" = "all" ]; then
               echo 'variants=["cpu","cuda","rocm","intel"]' >> "$GITHUB_OUTPUT"
+            elif [ "${{ inputs.variant }}" = "nvidia" ]; then
+              echo 'variants=["cuda"]' >> "$GITHUB_OUTPUT"
+            elif [ "${{ inputs.variant }}" = "amd" ]; then
+              echo 'variants=["rocm"]' >> "$GITHUB_OUTPUT"
             else
               echo 'variants=["${{ inputs.variant }}"]' >> "$GITHUB_OUTPUT"
             fi

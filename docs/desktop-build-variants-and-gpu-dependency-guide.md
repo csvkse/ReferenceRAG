@@ -26,6 +26,7 @@
 | **[2] NVIDIA 专属满血版**<br>*(CUDA 12 + TensorRT)* | **需要 CUDA 12 运行时** | **需要电脑中有 CUDA 12 核心依赖**（`cublasLt64_12.dll` 等）：<br>• 若电脑已装过 Ollama、ComfyUI、SD-WebUI 或 PyTorch，程序会自动借用，免装；<br>• 若为全新纯净系统，需放置便携包（自动拉取 ~80MB 核心 DLL）或装 CUDA 驱动。 | **极限压榨 RTX 独显算力**，吞吐最高，但对纯小白用户存在环境门槛。 |
 | **[3] AMD 专属优化版**<br>*(DirectML + Vulkan)* | **完全不需要！**<br>❌ 免装 AMD ROCm / HIP SDK | **只需装了 AMD 官方 Adrenalin 显卡驱动**。<br>DirectX 12 驱动层会直接调用 RDNA 架构硬件算力。 | **AMD 独显与 Ryzen/APU 核显直接加速**。<br>底层依赖与通用版同构。 |
 | **[4] Intel 专属优化版**<br>*(DirectML + Vulkan)* | **完全不需要！**<br>❌ 免装 Intel oneAPI Toolkit | **只需装了 Intel 官方 Arc / 酷睿显卡驱动**。<br>DirectX 12 会自动调用 Xe 核心与核显算力。 | **Intel Arc 独显与酷睿 Ultra 核显直接加速**。<br>底层依赖与通用版同构。 |
+| **[5] 纯 CPU 兼容版**<br>*(Pure CPU AVX2)* | **完全不需要！**<br>❌ 免装任何显卡驱动与 SDK | **任何支持 x64 的 Windows 电脑**。<br>不需要电脑拥有任何独立或集成 GPU。 | **🛡️ 极致兼容**。<br>专为云虚拟机、老旧电脑、无 GPU 环境量身打造，纯 CPU 多核多线程运行。 |
 
 ---
 

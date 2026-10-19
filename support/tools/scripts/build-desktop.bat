@@ -213,9 +213,11 @@ echo   [3] AMD 专属优化版 (AMD Radeon / APU)
 echo       专为 AMD Radeon 独显与 Ryzen/APU 核显优化 (DirectML + Vulkan)
 echo   [4] Intel 专属优化版 (Intel Arc / Ultra)
 echo       专为 Intel Arc 独显与酷睿 Ultra 核显优化 (DirectML + Vulkan)
+echo   [5] 纯 CPU 兼容版 (Pure CPU AVX2)
+echo       无独立显卡 / 老旧设备 / 云虚拟机轻量兼容运行
 echo ----------------------------------------------------------
 set "USER_CHOICE="
-set /p "USER_CHOICE=[build-desktop] 请输入选项 [1-4] (直接回车默认 [1] 通用版): "
+set /p "USER_CHOICE=[build-desktop] 请输入选项 [1-5] (直接回车默认 [1] 通用版): "
 if "%USER_CHOICE%"=="" set "USER_CHOICE=1"
 if "%USER_CHOICE%"=="1" set "GPU_BACKEND=universal"
 if "%USER_CHOICE%"=="2" set "GPU_BACKEND=cuda"

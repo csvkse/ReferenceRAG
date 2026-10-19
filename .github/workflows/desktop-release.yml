@@ -11,7 +11,7 @@ on:
         required: false
         type: string
       variant:
-        description: '构建硬件加速分包变体 (all / universal / cuda / amd / intel)'
+        description: '构建硬件加速分包变体 (all / universal / cuda / amd / intel / cpu)'
         required: true
         default: 'all'
         type: choice
@@ -21,6 +21,7 @@ on:
           - cuda
           - amd
           - intel
+          - cpu
       bundle_cuda:
         description: '是否为 NVIDIA 专属版自动内嵌微型绿色 CUDA 12 核心库 (开箱即用免装 CUDA Toolkit)'
         required: false
@@ -44,13 +45,13 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "${{ inputs.variant }}" = "all" ]; then
-              echo 'variants=["universal","cuda","amd","intel"]' >> "$GITHUB_OUTPUT"
+              echo 'variants=["universal","cuda","amd","intel","cpu"]' >> "$GITHUB_OUTPUT"
             else
               echo 'variants=["${{ inputs.variant }}"]' >> "$GITHUB_OUTPUT"
             fi
             echo "bundle_cuda=${{ inputs.bundle_cuda }}" >> "$GITHUB_OUTPUT"
           else
-            echo 'variants=["universal","cuda","amd","intel"]' >> "$GITHUB_OUTPUT"
+            echo 'variants=["universal","cuda","amd","intel","cpu"]' >> "$GITHUB_OUTPUT"
             echo "bundle_cuda=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -185,6 +186,7 @@ jobs:
             | **`ReferenceRAG-win-x64-cuda.zip`** | **NVIDIA GeForce 独显**<br>(RTX 20/30/40/50 系列、GTX 16 系列等) | CUDA 12 + TensorRT | **免装 3GB+ Toolkit！**<br>已内嵌微型绿色核心库 | **🚀 极致算力**<br>极限压榨 RTX 独显吞吐量 |
             | **`ReferenceRAG-win-x64-amd.zip`** | **AMD Radeon 显卡**<br>(RX 6000/7000/8000 独显及 Ryzen/APU 核显) | DirectML + Vulkan | **完全免装 ROCm！**<br>官方 Adrenalin 驱动原生承接 | **🔴 AMD 优化**<br>专为 A 卡优化的预置加速路径 |
             | **`ReferenceRAG-win-x64-intel.zip`** | **Intel 显卡与酷睿处理器**<br>(Arc 独显、酷睿 Ultra 核显及 Iris Xe) | DirectML + Vulkan | **完全免装 oneAPI！**<br>官方 Intel 显卡驱动原生承接 | **🔵 Intel 优化**<br>专为 Intel GPU 优化的预置加速路径 |
+            | **`ReferenceRAG-win-x64-cpu.zip`** | **纯 CPU / 老旧电脑 / 虚拟机**<br>(任何支持 x64 的 Windows 设备) | 纯 CPU (AVX2 / AVX-512) | **零额外依赖！**<br>纯软件多核计算 | **🛡️ 纯净兼容**<br>无独显、云桌面虚拟机或老旧硬件低功耗运行 |
 
             ---
 
