@@ -221,35 +221,35 @@ echo ===========================================================================
 echo   ReferenceRAG Desktop - 本地构建与硬件加速打包工具
 echo ===============================================================================
 echo.
-echo 用法 (Usage):
-echo   build-desktop.bat [选项 (Options)]
+echo 用法 [Usage]:
+echo   build-desktop.bat [选项]
 echo.
-echo 硬件加速方案选型 (GPU Backend Variants):
+echo 硬件加速方案选型 [GPU Backend Variants]:
 echo   --universal, --directml    通用加速版 (DirectML + Vulkan，支持全品牌显卡) [默认推荐]
 echo   --cuda, --nvidia           NVIDIA 满血版 (CUDA 12 + TensorRT，内嵌微型便携库)
 echo   --cuda-slim, --slim        NVIDIA 精简版 (CUDA 12，无内嵌依赖 ~70MB，借用本机已有环境)
 echo   --amd, --radeon            AMD 优化版 (DirectML + Vulkan，适配 Radeon 与 APU)
 echo   --intel, --arc             Intel 优化版 (DirectML + Vulkan，适配 Arc 与 Ultra)
 echo   --cpu                      纯 CPU 兼容版 (AVX2 / AVX-512，零 GPU 依赖)
-echo   -b, --backend [name]       指定构建后端名称 (universal / cuda / amd / intel / cpu)
+echo   -b, --backend [name]       指定构建后端名称 [universal / cuda / amd / intel / cpu]
 echo.
-echo 构建控制选项 (Build Flags):
-echo   -c, --config [name]        构建配置 (Release 或 Debug，默认: Release)
+echo 构建控制选项 [Build Flags]:
+echo   -c, --config [name]        构建配置 [Release 或 Debug，默认: Release]
 echo   --debug                    等同于 -c Debug --pdb
-echo   -r, --runtime [rid]        目标运行时标识符 (默认: win-x64)
-echo   -o, --output [dir]         输出目录 (默认: Host/ReferenceRAG.DesktopHost/bin/...)
+echo   -r, --runtime [rid]        目标运行时标识符 [默认: win-x64]
+echo   -o, --output [dir]         输出目录 [默认: Host/ReferenceRAG.DesktopHost/bin/...]
 echo   --clean                    构建前清空目标输出目录
 echo   --bundle-cuda              强制下载并内嵌微型 CUDA 12 核心库
 echo   --no-bundle-cuda           跳过下载与内嵌微型 CUDA 12 核心库
-echo   --framework-dependent      构建框架依赖版本 (非独立分发，默认: --self-contained)
-echo   --pdb                      保留 PDB 调试符号文件 (默认: 去除 PDB 以压缩体积)
-echo   --smoke                    构建前执行端到端自动化冒烟测试门禁 (smoke-test.bat)
-echo   --batch                    非交互模式运行 (CI/CD 自动化流水线使用)
+echo   --framework-dependent      构建框架依赖版本 [非独立分发，默认: --self-contained]
+echo   --pdb                      保留 PDB 调试符号文件 [默认: 去除 PDB 以压缩体积]
+echo   --smoke                    构建前执行端到端自动化冒烟测试门禁 [smoke-test.bat]
+echo   --batch                    非交互模式运行 [CI/CD 自动化流水线使用]
 echo   --reset-config             构建后不保留历史 appsettings.json 配置
 echo   -v, --verbose              输出详细的 dotnet MSBuild 构建日志
 echo   -h, --help, /?             显示此帮助信息
 echo.
-echo 示例 (Examples):
+echo 示例 [Examples]:
 echo   build-desktop.bat                         交互式菜单选择显卡构建
 echo   build-desktop.bat --universal             快速构建通用免依赖版
 echo   build-desktop.bat --cuda-slim -c Release  快速构建 NVIDIA 极轻量精简版 (~70MB)
@@ -274,7 +274,7 @@ goto normalize_backend
 :prompt_gpu_backend
 echo.
 echo ===============================================================================
-echo   ReferenceRAG Desktop - 请选择硬件加速构建方案 (GPU Backend Variant)
+echo   ReferenceRAG Desktop - 请选择硬件加速构建方案 [GPU Backend Variant]
 echo ===============================================================================
 echo.
 echo   [1] 通用加速版  (Universal / DirectML + Vulkan)  [默认 - 强烈推荐]
@@ -314,38 +314,27 @@ if "%USER_CHOICE%"=="6" set "GPU_BACKEND=cpu"
 if not defined GPU_BACKEND set "GPU_BACKEND=universal"
 
 :normalize_backend
-set "GPU_BACKEND_DESC=通用版 (Universal / DirectML + Vulkan)"
-if /i "%GPU_BACKEND%"=="universal" set "GPU_BACKEND=universal"& set "GPU_BACKEND_DESC=通用版 (Universal / DirectML + Vulkan - 全显卡兼备)"
-if /i "%GPU_BACKEND%"=="directml" set "GPU_BACKEND=universal"& set "GPU_BACKEND_DESC=通用版 (Universal / DirectML + Vulkan - 全显卡兼备)"
-if /i "%GPU_BACKEND%"=="cuda" (
-    if /i "%BUNDLE_CUDA%"=="false" (
-        set "GPU_BACKEND_DESC=NVIDIA 专属精简版 (CUDA 12 - 无依赖极简版)"
-    ) else (
-        set "GPU_BACKEND_DESC=NVIDIA 专属满血版 (CUDA 12 - 内嵌微型便携库)"
-    )
-)
-if /i "%GPU_BACKEND%"=="nvidia" (
-    set "GPU_BACKEND=cuda"
-    if /i "%BUNDLE_CUDA%"=="false" (
-        set "GPU_BACKEND_DESC=NVIDIA 专属精简版 (CUDA 12 - 无依赖极简版)"
-    ) else (
-        set "GPU_BACKEND_DESC=NVIDIA 专属满血版 (CUDA 12 - 内嵌微型便携库)"
-    )
-)
-if /i "%GPU_BACKEND%"=="amd" set "GPU_BACKEND=amd"& set "GPU_BACKEND_DESC=AMD 专属优化版 (AMD Radeon 独显与 APU 核显优化)"
-if /i "%GPU_BACKEND%"=="rocm" set "GPU_BACKEND=amd"& set "GPU_BACKEND_DESC=AMD 专属优化版 (AMD Radeon 独显与 APU 核显优化)"
-if /i "%GPU_BACKEND%"=="radeon" set "GPU_BACKEND=amd"& set "GPU_BACKEND_DESC=AMD 专属优化版 (AMD Radeon 独显与 APU 核显优化)"
-if /i "%GPU_BACKEND%"=="intel" set "GPU_BACKEND=intel"& set "GPU_BACKEND_DESC=Intel 专属优化版 (Intel Arc 独显与酷睿 Ultra 核显优化)"
-if /i "%GPU_BACKEND%"=="arc" set "GPU_BACKEND=intel"& set "GPU_BACKEND_DESC=Intel 专属优化版 (Intel Arc 独显与酷睿 Ultra 核显优化)"
-if /i "%GPU_BACKEND%"=="openvino" set "GPU_BACKEND=intel"& set "GPU_BACKEND_DESC=Intel 专属优化版 (Intel Arc 独显与酷睿 Ultra 核显优化)"
-if /i "%GPU_BACKEND%"=="cpu" set "GPU_BACKEND=cpu"& set "GPU_BACKEND_DESC=纯 CPU 兼容版 (零 GPU 依赖 / AVX2 多核)"
+set "GPU_BACKEND_DESC=通用版 [Universal / DirectML + Vulkan]"
+if /i "%GPU_BACKEND%"=="universal" set "GPU_BACKEND=universal"& set "GPU_BACKEND_DESC=通用版 [Universal / DirectML + Vulkan - 全显卡兼备]"
+if /i "%GPU_BACKEND%"=="directml" set "GPU_BACKEND=universal"& set "GPU_BACKEND_DESC=通用版 [Universal / DirectML + Vulkan - 全显卡兼备]"
+if /i "%GPU_BACKEND%"=="cuda" set "GPU_BACKEND=cuda"& set "GPU_BACKEND_DESC=NVIDIA 专属满血版 [CUDA 12 - 内嵌微型便携库]"
+if /i "%GPU_BACKEND%"=="cuda" if /i "%BUNDLE_CUDA%"=="false" set "GPU_BACKEND_DESC=NVIDIA 专属精简版 [CUDA 12 - 无依赖极简版]"
+if /i "%GPU_BACKEND%"=="nvidia" set "GPU_BACKEND=cuda"& set "GPU_BACKEND_DESC=NVIDIA 专属满血版 [CUDA 12 - 内嵌微型便携库]"
+if /i "%GPU_BACKEND%"=="nvidia" if /i "%BUNDLE_CUDA%"=="false" set "GPU_BACKEND_DESC=NVIDIA 专属精简版 [CUDA 12 - 无依赖极简版]"
+if /i "%GPU_BACKEND%"=="amd" set "GPU_BACKEND=amd"& set "GPU_BACKEND_DESC=AMD 专属优化版 [AMD Radeon 独显与 APU 核显优化]"
+if /i "%GPU_BACKEND%"=="rocm" set "GPU_BACKEND=amd"& set "GPU_BACKEND_DESC=AMD 专属优化版 [AMD Radeon 独显与 APU 核显优化]"
+if /i "%GPU_BACKEND%"=="radeon" set "GPU_BACKEND=amd"& set "GPU_BACKEND_DESC=AMD 专属优化版 [AMD Radeon 独显与 APU 核显优化]"
+if /i "%GPU_BACKEND%"=="intel" set "GPU_BACKEND=intel"& set "GPU_BACKEND_DESC=Intel 专属优化版 [Intel Arc 独显与酷睿 Ultra 核显优化]"
+if /i "%GPU_BACKEND%"=="arc" set "GPU_BACKEND=intel"& set "GPU_BACKEND_DESC=Intel 专属优化版 [Intel Arc 独显与酷睿 Ultra 核显优化]"
+if /i "%GPU_BACKEND%"=="openvino" set "GPU_BACKEND=intel"& set "GPU_BACKEND_DESC=Intel 专属优化版 [Intel Arc 独显与酷睿 Ultra 核显优化]"
+if /i "%GPU_BACKEND%"=="cpu" set "GPU_BACKEND=cpu"& set "GPU_BACKEND_DESC=纯 CPU 兼容版 [零 GPU 依赖 / AVX2 多核]"
 
 :publish
 set "EXIT_CODE=0"
 
 echo.
 echo ===============================================================================
-echo   ReferenceRAG Desktop - 开始构建与发布 (Build and Publish)
+echo   ReferenceRAG Desktop - 开始构建与发布 [Build and Publish]
 echo ===============================================================================
 echo   [项目文件]   : "%PROJECT%"
 echo   [构建配置]   : %CONFIGURATION%
@@ -483,19 +472,21 @@ if defined NON_INTERACTIVE (
     exit /b %EXIT_CODE%
 )
 if defined RETRY_READY (
-    choice /C RQ /N /M "[build-desktop] 按 R 重新构建发布，按 Q 退出 (Press R to retry, Q to quit): "
+    choice /C RQ /N /M "[build-desktop] 按 R 重新构建发布，按 Q 退出 [Press R to retry, Q to quit]: "
     if errorlevel 2 (
         if defined _RESTORE_CP chcp %_RESTORE_CP% >nul
         exit /b %EXIT_CODE%
     )
     if errorlevel 1 goto publish
 ) else (
-    choice /C Q /N /M "[build-desktop] 按 Q 退出 (Press Q to quit): "
+    choice /C Q /N /M "[build-desktop] 按 Q 退出 [Press Q to quit]: "
 )
 if defined _RESTORE_CP chcp %_RESTORE_CP% >nul
 exit /b %EXIT_CODE%
 
 :bundle_cuda_runtime
+if /i "%BUNDLE_CUDA%"=="false" goto skip_bundle_cuda
+
 echo.
 echo [build-desktop] NVIDIA 专属版: 正在检查 CUDA 12 核心运行库打包...
 set "OUT_CUDA_DIR=%OUTPUT%\runtimes\cuda"
@@ -503,7 +494,7 @@ set "LOCAL_CUDA_DIR=%ROOT_DIR%\runtimes\cuda"
 
 if not exist "%OUT_CUDA_DIR%\cublas64_12.dll" goto check_local_cuda
 if not exist "%OUT_CUDA_DIR%\cublasLt64_12.dll" goto check_local_cuda
-echo [build-desktop] 发布目录已包含完整的 CUDA 12 核心库，跳过复制 (幂等跳过)。
+echo [build-desktop] 发布目录已包含完整的 CUDA 12 核心库，跳过复制 [幂等跳过]。
 goto :eof
 
 :check_local_cuda
@@ -517,11 +508,6 @@ echo [build-desktop] CUDA 12 核心库打包成功: "%OUT_CUDA_DIR%"
 goto :eof
 
 :check_bundle_needed
-if /i "%BUNDLE_CUDA%"=="false" (
-    echo [build-desktop] 已指定 --no-bundle-cuda / --cuda-slim，跳过便携库打包 (生成无依赖轻量版)。
-    goto :eof
-)
-
 if /i "%BUNDLE_CUDA%"=="true" goto do_bundle_download
 
 if defined NON_INTERACTIVE (
@@ -554,4 +540,8 @@ if exist "%LOCAL_CUDA_DIR%\cublas64_12.dll" (
     xcopy /y /d "%LOCAL_CUDA_DIR%\*.dll" "%OUT_CUDA_DIR%\" >nul 2>nul
     echo [build-desktop] CUDA 12 核心库打包成功: "%OUT_CUDA_DIR%"
 )
+goto :eof
+
+:skip_bundle_cuda
+echo [build-desktop] 已指定 --no-bundle-cuda / --cuda-slim，跳过便携库打包 [生成无依赖轻量版]。
 goto :eof
