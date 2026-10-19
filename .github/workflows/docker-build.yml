@@ -177,26 +177,34 @@ jobs:
         run: |
           case "${{ matrix.variant }}" in
             cuda)
-              echo "dockerfile=support/deploy/docker/Dockerfile.cuda" >> "$GITHUB_OUTPUT"
-              echo "tags=${{ steps.meta_cuda.outputs.tags }}" >> "$GITHUB_OUTPUT"
-              echo "labels=${{ steps.meta_cuda.outputs.labels }}" >> "$GITHUB_OUTPUT"
+              DOCKERFILE="support/deploy/docker/Dockerfile.cuda"
+              TAGS="${{ steps.meta_cuda.outputs.tags }}"
+              LABELS="${{ steps.meta_cuda.outputs.labels }}"
               ;;
             rocm)
-              echo "dockerfile=support/deploy/docker/Dockerfile.rocm" >> "$GITHUB_OUTPUT"
-              echo "tags=${{ steps.meta_rocm.outputs.tags }}" >> "$GITHUB_OUTPUT"
-              echo "labels=${{ steps.meta_rocm.outputs.labels }}" >> "$GITHUB_OUTPUT"
+              DOCKERFILE="support/deploy/docker/Dockerfile.rocm"
+              TAGS="${{ steps.meta_rocm.outputs.tags }}"
+              LABELS="${{ steps.meta_rocm.outputs.labels }}"
               ;;
             intel)
-              echo "dockerfile=support/deploy/docker/Dockerfile.intel" >> "$GITHUB_OUTPUT"
-              echo "tags=${{ steps.meta_intel.outputs.tags }}" >> "$GITHUB_OUTPUT"
-              echo "labels=${{ steps.meta_intel.outputs.labels }}" >> "$GITHUB_OUTPUT"
+              DOCKERFILE="support/deploy/docker/Dockerfile.intel"
+              TAGS="${{ steps.meta_intel.outputs.tags }}"
+              LABELS="${{ steps.meta_intel.outputs.labels }}"
               ;;
             *)
-              echo "dockerfile=support/deploy/docker/Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "tags=${{ steps.meta_cpu.outputs.tags }}" >> "$GITHUB_OUTPUT"
-              echo "labels=${{ steps.meta_cpu.outputs.labels }}" >> "$GITHUB_OUTPUT"
+              DOCKERFILE="support/deploy/docker/Dockerfile"
+              TAGS="${{ steps.meta_cpu.outputs.tags }}"
+              LABELS="${{ steps.meta_cpu.outputs.labels }}"
               ;;
           esac
+
+          echo "dockerfile=$DOCKERFILE" >> "$GITHUB_OUTPUT"
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$TAGS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "labels<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$LABELS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
