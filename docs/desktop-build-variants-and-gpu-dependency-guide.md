@@ -23,10 +23,11 @@
 | 构建方案 | 需要装 CUDA / ROCm / oneAPI 吗？ | 用户电脑需要满足什么条件？ | 运行体验与推荐场景 |
 | :--- | :--- | :--- | :--- |
 | **[1] 通用版**<br>*(DirectML + Vulkan)*<br>**【默认 - 强烈推荐】** | **完全不需要！**<br>❌ 免装 CUDA<br>❌ 免装 AMD ROCm<br>❌ 免装 Intel oneAPI | **只需正常安装了显卡驱动即可**。<br>Windows 10/11 系统的 DirectX 12 与显卡驱动自带的 Vulkan 会自动承接硬件算力。 | **真正的开箱即用**。<br>发给任何有独显或核显的用户，双击直接 GPU 加速。日常分发、团队协作与商业交付首选。 |
-| **[2] NVIDIA 专属满血版**<br>*(CUDA 12 + TensorRT)* | **需要 CUDA 12 运行时** | **需要电脑中有 CUDA 12 核心依赖**（`cublasLt64_12.dll` 等）：<br>• 若电脑已装过 Ollama、ComfyUI、SD-WebUI 或 PyTorch，程序会自动借用，免装；<br>• 若为全新纯净系统，需放置便携包（自动拉取 ~80MB 核心 DLL）或装 CUDA 驱动。 | **极限压榨 RTX 独显算力**，吞吐最高，但对纯小白用户存在环境门槛。 |
-| **[3] AMD 专属优化版**<br>*(DirectML + Vulkan)* | **完全不需要！**<br>❌ 免装 AMD ROCm / HIP SDK | **只需装了 AMD 官方 Adrenalin 显卡驱动**。<br>DirectX 12 驱动层会直接调用 RDNA 架构硬件算力。 | **AMD 独显与 Ryzen/APU 核显直接加速**。<br>底层依赖与通用版同构。 |
-| **[4] Intel 专属优化版**<br>*(DirectML + Vulkan)* | **完全不需要！**<br>❌ 免装 Intel oneAPI Toolkit | **只需装了 Intel 官方 Arc / 酷睿显卡驱动**。<br>DirectX 12 会自动调用 Xe 核心与核显算力。 | **Intel Arc 独显与酷睿 Ultra 核显直接加速**。<br>底层依赖与通用版同构。 |
-| **[5] 纯 CPU 兼容版**<br>*(Pure CPU AVX2)* | **完全不需要！**<br>❌ 免装任何显卡驱动与 SDK | **任何支持 x64 的 Windows 电脑**。<br>不需要电脑拥有任何独立或集成 GPU。 | **🛡️ 极致兼容**。<br>专为云虚拟机、老旧电脑、无 GPU 环境量身打造，纯 CPU 多核多线程运行。 |
+| **[2] NVIDIA 专属满血版**<br>*(CUDA 12 + 内嵌微型库)* | **免装 Toolkit！**<br>已内置核心库 | **开箱即用满血加速**：<br>已内置 ~85MB 核心 DLL（`cublasLt64_12.dll` 等），解压即可满血激活 Tensor Core 算力。 | **开箱即用极致算力**，对纯小白和全新系统极其友好，无需配置任何环境变量。 |
+| **[3] NVIDIA 专属轻量版**<br>*(CUDA 12 - 无依赖精简版)* | **自动借用本机环境** | **需要电脑已装有 CUDA 12 或 AI 软件**：<br>体积极小（~70MB），自动借用本机已有 Ollama、ComfyUI、SD-WebUI 或 PyTorch 的 CUDA 12 核心库。 | **极客首选**，下载体积仅 1/10，已有 AI 环境开发者的最轻量选择。 |
+| **[4] AMD 专属优化版**<br>*(DirectML + Vulkan)* | **完全不需要！**<br>❌ 免装 AMD ROCm / HIP SDK | **只需装了 AMD 官方 Adrenalin 显卡驱动**。<br>DirectX 12 驱动层会直接调用 RDNA 架构硬件算力。 | **AMD 独显与 Ryzen/APU 核显直接加速**。<br>底层依赖与通用版同构。 |
+| **[5] Intel 专属优化版**<br>*(DirectML + Vulkan)* | **完全不需要！**<br>❌ 免装 Intel oneAPI Toolkit | **只需装了 Intel 官方 Arc / 酷睿显卡驱动**。<br>DirectX 12 会自动调用 Xe 核心与核显算力。 | **Intel Arc 独显与酷睿 Ultra 核显直接加速**。<br>底层依赖与通用版同构。 |
+| **[6] 纯 CPU 兼容版**<br>*(Pure CPU AVX2)* | **完全不需要！**<br>❌ 免装任何显卡驱动与 SDK | **任何支持 x64 的 Windows 电脑**。<br>不需要电脑拥有任何独立或集成 GPU。 | **🛡️ 极致兼容**。<br>专为云虚拟机、老旧电脑、无 GPU 环境量身打造，纯 CPU 多核多线程运行。 |
 
 ---
 

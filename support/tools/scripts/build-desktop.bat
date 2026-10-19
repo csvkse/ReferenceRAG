@@ -31,6 +31,17 @@ if /i "%~1"=="--no-bundle-cuda" (
     shift
     goto parse_args
 )
+if /i "%~1"=="--cuda-slim" (
+    set "GPU_BACKEND=cuda"
+    set "BUNDLE_CUDA=false"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--slim" (
+    set "BUNDLE_CUDA=false"
+    shift
+    goto parse_args
+)
 if /i "%~1"=="--universal" (
     set "GPU_BACKEND=universal"
     shift
@@ -207,23 +218,26 @@ echo   请选择桌面版硬件加速构建方案 (GPU Backend Variant):
 echo ==========================================================
 echo   [1] 通用版 (Universal / DirectML) [默认 - 推荐]
 echo       全显卡通用兼备 (AMD / Intel / NVIDIA / 高通骁龙 / 核显)
-echo   [2] NVIDIA 专属满血版 (NVIDIA CUDA 12)
-echo       专为 GeForce RTX / GTX 独显优化 (CUDA 12 + TensorRT 满血算力)
-echo   [3] AMD 专属优化版 (AMD Radeon / APU)
+echo   [2] NVIDIA 专属满血版 (NVIDIA CUDA 12 - 内嵌微型便携库)
+echo       专为 GeForce RTX / GTX 独显优化 (已打包微型 CUDA 12 绿色库，解压即用)
+echo   [3] NVIDIA 专属轻量版 (NVIDIA CUDA 12 - 无依赖精简版)
+echo       体积极小 (~70MB)，自动借用系统已有 CUDA 12 或 PyTorch/Ollama 环境
+echo   [4] AMD 专属优化版 (AMD Radeon / APU)
 echo       专为 AMD Radeon 独显与 Ryzen/APU 核显优化 (DirectML + Vulkan)
-echo   [4] Intel 专属优化版 (Intel Arc / Ultra)
+echo   [5] Intel 专属优化版 (Intel Arc / Ultra)
 echo       专为 Intel Arc 独显与酷睿 Ultra 核显优化 (DirectML + Vulkan)
-echo   [5] 纯 CPU 兼容版 (Pure CPU AVX2)
+echo   [6] 纯 CPU 兼容版 (Pure CPU AVX2)
 echo       无独立显卡 / 老旧设备 / 云虚拟机轻量兼容运行
 echo ----------------------------------------------------------
 set "USER_CHOICE="
-set /p "USER_CHOICE=[build-desktop] 请输入选项 [1-5] (直接回车默认 [1] 通用版): "
+set /p "USER_CHOICE=[build-desktop] 请输入选项 [1-6] (直接回车默认 [1] 通用版): "
 if "%USER_CHOICE%"=="" set "USER_CHOICE=1"
 if "%USER_CHOICE%"=="1" set "GPU_BACKEND=universal"
-if "%USER_CHOICE%"=="2" set "GPU_BACKEND=cuda"
-if "%USER_CHOICE%"=="3" set "GPU_BACKEND=amd"
-if "%USER_CHOICE%"=="4" set "GPU_BACKEND=intel"
-if "%USER_CHOICE%"=="5" set "GPU_BACKEND=cpu"
+if "%USER_CHOICE%"=="2" set "GPU_BACKEND=cuda"& set "BUNDLE_CUDA=true"
+if "%USER_CHOICE%"=="3" set "GPU_BACKEND=cuda"& set "BUNDLE_CUDA=false"
+if "%USER_CHOICE%"=="4" set "GPU_BACKEND=amd"
+if "%USER_CHOICE%"=="5" set "GPU_BACKEND=intel"
+if "%USER_CHOICE%"=="6" set "GPU_BACKEND=cpu"
 if not defined GPU_BACKEND set "GPU_BACKEND=universal"
 
 :normalize_backend

@@ -93,19 +93,36 @@ jobs:
         shell: powershell
         run: |
           $variant = "${{ matrix.variant }}"
-          $bundleArg = ""
-          if ($variant -eq "cuda") {
-            if ("${{ needs.prepare.outputs.bundle_cuda }}" -eq "true") {
-              $bundleArg = "--bundle-cuda"
-            } else {
-              $bundleArg = "--no-bundle-cuda"
-            }
-          }
           $outDir = "support\artifacts\publish\$variant"
-          Write-Host "[CI] Running build-desktop.bat for variant: $variant with args: $bundleArg -o $outDir"
-          cmd.exe /c "support\tools\scripts\build-desktop.bat -b $variant -c Release -r win-x64 --batch $bundleArg -o $outDir"
-          if ($LASTEXITCODE -ne 0) {
-            throw "build-desktop.bat exited with error code: $LASTEXITCODE"
+          $packageDir = "support\artifacts\packages"
+          if (-not (Test-Path $packageDir)) { New-Item -ItemType Directory -Path $packageDir -Force | Out-Null }
+
+          if ($variant -eq "cuda") {
+            # 1. 先构建无依赖精简版 (Slim: 不含 600MB+ 的 CUDA 核心 DLL，体积极小 ~70MB)
+            Write-Host "[CI] Step 1: Building unbundled slim variant for cuda..."
+            cmd.exe /c "support\tools\scripts\build-desktop.bat -b cuda -c Release -r win-x64 --batch --no-bundle-cuda -o $outDir"
+            if ($LASTEXITCODE -ne 0) {
+              throw "build-desktop.bat (slim) exited with error code: $LASTEXITCODE"
+            }
+
+            # 独立压缩并生成 ReferenceRAG-win-x64-cuda-slim.zip
+            $slimZip = Join-Path $packageDir "ReferenceRAG-win-x64-cuda-slim.zip"
+            Write-Host "[CI] Creating slim archive: $slimZip"
+            Compress-Archive -Path "$outDir\*" -DestinationPath $slimZip -Force
+
+            # 2. 注入绿色微型 CUDA 12 核心库，准备打包全内嵌满血版 (ReferenceRAG-win-x64-cuda.zip)
+            if ("${{ needs.prepare.outputs.bundle_cuda }}" -eq "true") {
+              Write-Host "[CI] Step 2: Bundling minimal CUDA 12 runtime into $outDir\runtimes\cuda..."
+              $targetCudaDir = Join-Path $outDir "runtimes\cuda"
+              if (-not (Test-Path $targetCudaDir)) { New-Item -ItemType Directory -Path $targetCudaDir -Force | Out-Null }
+              Copy-Item -Path "runtimes\cuda\*.dll" -Destination $targetCudaDir -Force
+            }
+          } else {
+            Write-Host "[CI] Running build-desktop.bat for variant: $variant -o $outDir"
+            cmd.exe /c "support\tools\scripts\build-desktop.bat -b $variant -c Release -r win-x64 --batch -o $outDir"
+            if ($LASTEXITCODE -ne 0) {
+              throw "build-desktop.bat exited with error code: $LASTEXITCODE"
+            }
           }
 
       - name: Package artifacts and generate checksums
@@ -183,7 +200,8 @@ jobs:
             | 安装包名称 | 适用硬件与显卡型号 | 硬件加速引擎 | 依赖安装需求 | 推荐场景 |
             | :--- | :--- | :--- | :--- | :--- |
             | **`ReferenceRAG-win-x64.zip`**<br>*(或 `...-universal.zip`)* | **全显卡通用**<br>(AMD / Intel / NVIDIA / 高通骁龙 / 核显) | DirectML + Vulkan | **完全免装额外依赖！**<br>有显卡驱动即可直接点火 | **🌟 强烈推荐**<br>开箱即用，零售后门槛，团队协作与日常分发首选 |
-            | **`ReferenceRAG-win-x64-cuda.zip`** | **NVIDIA GeForce 独显**<br>(RTX 20/30/40/50 系列、GTX 16 系列等) | CUDA 12 + TensorRT | **免装 3GB+ Toolkit！**<br>已内嵌微型绿色核心库 | **🚀 极致算力**<br>极限压榨 RTX 独显吞吐量 |
+            | **`ReferenceRAG-win-x64-cuda.zip`** | **NVIDIA GeForce 独显**<br>(RTX 20/30/40/50 系列、GTX 16 系列等) | CUDA 12 + TensorRT | **免装 3GB+ Toolkit！**<br>已内嵌微型绿色核心库 (~700MB) | **🚀 极致算力（开箱即用）**<br>纯净 Windows 系统直接满血加速 |
+            | **`ReferenceRAG-win-x64-cuda-slim.zip`** | **NVIDIA GeForce 独显**<br>(电脑已装 CUDA 12 / PyTorch / Ollama) | CUDA 12 + TensorRT | **无内嵌依赖包 (~70MB 极小体积)**<br>自动借用本机已有 CUDA 12 环境 | **⚡ 极客轻量下载**<br>已有深度学习环境用户秒速下载 |
             | **`ReferenceRAG-win-x64-amd.zip`** | **AMD Radeon 显卡**<br>(RX 6000/7000/8000 独显及 Ryzen/APU 核显) | DirectML + Vulkan | **完全免装 ROCm！**<br>官方 Adrenalin 驱动原生承接 | **🔴 AMD 优化**<br>专为 A 卡优化的预置加速路径 |
             | **`ReferenceRAG-win-x64-intel.zip`** | **Intel 显卡与酷睿处理器**<br>(Arc 独显、酷睿 Ultra 核显及 Iris Xe) | DirectML + Vulkan | **完全免装 oneAPI！**<br>官方 Intel 显卡驱动原生承接 | **🔵 Intel 优化**<br>专为 Intel GPU 优化的预置加速路径 |
             | **`ReferenceRAG-win-x64-cpu.zip`** | **纯 CPU / 老旧电脑 / 虚拟机**<br>(任何支持 x64 的 Windows 设备) | 纯 CPU (AVX2 / AVX-512) | **零额外依赖！**<br>纯软件多核计算 | **🛡️ 纯净兼容**<br>无独显、云桌面虚拟机或老旧硬件低功耗运行 |
