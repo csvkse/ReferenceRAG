@@ -3,16 +3,23 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <OutputType>WinExe</OutputType><UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PublishAot>false</PublishAot><PublishTrimmed>false</PublishTrimmed>
     <PlatformTarget>x64</PlatformTarget>
-    <ApplicationIcon>Assets/tray-icon.ico</ApplicationIcon>
+    <ApplicationIcon>Assets/icon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <Using Include="System" />
     <ProjectReference Include="../ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj" />
     <PackageReference Include="InfiniLore.InfiniFrame" />
     <PackageReference Include="InfiniLore.InfiniFrame.Shared" />
+    <EmbeddedResource Include="Assets/icon.ico" LogicalName="app.ico" />
+    <EmbeddedResource Include="Assets/window-icon.ico" LogicalName="window.ico" />
     <Content Include="../../support/config/local/appsettings*.json" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets/icon.ico" Link="icon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets/window-icon.ico" Link="window-icon.ico" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets/tray-icon.ico" Link="tray-icon.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

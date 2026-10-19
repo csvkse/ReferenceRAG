@@ -181,9 +181,14 @@ if "%EXIT_CODE%"=="0" (
     if /i "%STRIP_PDB%"=="true" (
         del /s /q "%OUTPUT%\*.pdb" >nul 2>nul
     )
+    if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\icon.ico" (
+        copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\icon.ico" "%OUTPUT%\icon.ico" >nul 2>nul
+    )
+    if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\window-icon.ico" (
+        copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\window-icon.ico" "%OUTPUT%\window-icon.ico" >nul 2>nul
+    )
     if exist "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" (
         copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" "%OUTPUT%\tray-icon.ico" >nul 2>nul
-        copy /y "%ROOT_DIR%\Host\ReferenceRAG.DesktopHost\Assets\tray-icon.ico" "%OUTPUT%\icon.ico" >nul 2>nul
     )
     echo.
     echo ==========================================================

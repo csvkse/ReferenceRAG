@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json.Serialization;
@@ -15,6 +16,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Hosting;
 using ReferenceRAG.ApiHost.Transport;
+using ReferenceRAG.DesktopHost.Platform;
 using ReferenceRAG.Service.Extensions;
 using ReferenceRAG.Service.Middleware;
 using ReferenceRAG.Service.Controllers;
@@ -25,11 +27,35 @@ using McpHelper.Extensions;
 
 namespace ReferenceRAG.DesktopHost;
 
-internal static class Program
+internal static partial class Program
 {
+    private const string AppUserModelId = "ReferenceRAG.AppWorkspace.v4";
+
     [STAThread]
     private static void Main(string[] args)
     {
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                _ = SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
+            }
+            catch
+            {
+                // Ignore shell AUMID errors on non-standard environments
+            }
+
+            try
+            {
+                // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+                _ = SetProcessDpiAwarenessContext((nint)(-4));
+            }
+            catch
+            {
+                // Manifest already configures PerMonitorV2; fallback is best-effort
+            }
+        }
+
         try { Run(args); }
         catch(Exception ex) { File.WriteAllText(Path.Combine(AppContext.BaseDirectory,"desktop-error.log"),ex.ToString()); MessageBox.Show(ex.Message,"ReferenceRAG 启动失败"); }
     }
@@ -37,6 +63,15 @@ internal static class Program
     {
         using var mutex=new Mutex(true,"Local\\ReferenceRAG_Desktop_SingleInstance",out var owner);
         if(!owner){MessageBox.Show("ReferenceRAG 已在运行，请从托盘打开。");return;}
+
+        var appIconPath = ExtractAppIconPath();
+        var windowIconPath = ExtractWindowIconPath() ?? appIconPath;
+        Task? shortcutGuardTask = null;
+        if (OperatingSystem.IsWindows())
+        {
+            shortcutGuardTask = Task.Run(() => ShortcutGuard.EnsureValid("ReferenceRAG", appIconPath));
+        }
+
         Directory.SetCurrentDirectory(Environment.GetEnvironmentVariable("REFERENCERAG_CONTENT_ROOT") ?? AppContext.BaseDirectory);
         var builder=WebApplication.CreateBuilder(new WebApplicationOptions {Args=args,ContentRootPath=Directory.GetCurrentDirectory()});
         // 与 WebHost 共用日志配置：桌面端是 WinExe 无控制台，没有文件日志就无法排障。
@@ -107,35 +142,38 @@ internal static class Program
             windowState?.SetMinimizedToTray(true);
             return WindowClosingResult.Cancel;
         });
+        if (shortcutGuardTask != null)
+        {
+            _ = shortcutGuardTask.Wait(TimeSpan.FromMilliseconds(100));
+        }
         LogStartup("Creating InfiniFrame window");
         var window=windowBuilder.Build();handle=window.WindowHandle;
         platform.Window=window;
         SetWindowText(handle,"ReferenceRAG");
+        WindowsWindowIcon.Apply(handle, windowIconPath);
         InitialWindowBounds.Apply(handle);
         LogStartup("InfiniFrame window created");
         ipc=new IpcDispatcher(app.Services.GetRequiredService<InProcessServer>(),window.SendWebMessage,app.Services.GetRequiredService<ILogger<IpcDispatcher>>());
         var publisher=app.Services.GetRequiredService<IndexEventPublisher>();publisher.Published+=ipc.Publish;
-        NotifyIcon? tray=null;ApplicationContext? trayContext=null;
-        var trayThread=new Thread(()=>{
-            trayContext=new ApplicationContext();
-            var menu=new ContextMenuStrip();
-            _ = menu.Handle; // Ensure shutdown can marshal to this tray thread before the menu is opened.
-            void Show(){
-                ShowWindow(handle,9);
-                SetForegroundWindow(handle);
-                windowState?.SetMinimizedToTray(false);
-            }
-            menu.Items.Add("打开 ReferenceRAG",null,(_,_)=>Show());
-            var autoStart=new ToolStripMenuItem("开机启动"){Checked=ReferenceRAG.Desktop.StartupManager.GetAutoStart(),CheckOnClick=true};
-            autoStart.Click+=(_,_)=>ReferenceRAG.Desktop.StartupManager.SetAutoStart(autoStart.Checked);menu.Items.Add(autoStart);
-            var minimized=new ToolStripMenuItem("最小化启动"){Checked=ReferenceRAG.Desktop.StartupManager.GetStartMinimized(),CheckOnClick=true};
-            minimized.Click+=(_,_)=>ReferenceRAG.Desktop.StartupManager.SetStartMinimized(minimized.Checked);menu.Items.Add(minimized);
-            menu.Items.Add("退出",null,(_,_)=>{exiting=true;window.Close();});
-            tray=new NotifyIcon {Text="ReferenceRAG",Icon=new System.Drawing.Icon(Path.Combine(AppContext.BaseDirectory,"tray-icon.ico")),ContextMenuStrip=menu,Visible=true};
-            tray.DoubleClick+=(_,_)=>Show();
-            Application.Run(trayContext);tray.Dispose();menu.Dispose();
-        }){IsBackground=true};
-        trayThread.SetApartmentState(ApartmentState.STA);trayThread.Start();
+
+        void ShowMainWindow()
+        {
+            ShowWindow(handle, 9);
+            SetForegroundWindow(handle);
+            windowState?.SetMinimizedToTray(false);
+        }
+
+        Action onTrayShow = ShowMainWindow;
+        Action onTrayExit = () =>
+        {
+            exiting = true;
+            window.Close();
+        };
+
+        TrayIconManager.ShowRequested += onTrayShow;
+        TrayIconManager.ExitRequested += onTrayExit;
+        TrayIconManager.Start(windowIconPath, "ReferenceRAG");
+
         var startMinimized = args.Contains("--minimized") || args.Contains("--silent") || ReferenceRAG.Desktop.StartupManager.GetStartMinimized();
         if(startMinimized) {
             ShowWindow(handle,0);
@@ -158,11 +196,57 @@ internal static class Program
         finally {
             publisher.Published-=ipc.Publish;
             ipc.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            if(tray?.ContextMenuStrip is {IsHandleCreated:true} control) control.BeginInvoke(()=>trayContext?.ExitThread());
+            TrayIconManager.ShowRequested -= onTrayShow;
+            TrayIconManager.ExitRequested -= onTrayExit;
+            TrayIconManager.Stop();
             app.StopAsync(TimeSpan.FromSeconds(15)).GetAwaiter().GetResult();app.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            trayThread.Join(TimeSpan.FromSeconds(2));
         }
     }
+
+    private static string? ExtractAppIconPath() => ExtractEmbeddedIcon("app.ico", "app-v4.ico", "icon.ico");
+
+    // 窗口标题栏、任务栏与系统托盘统一使用带主题色圆角边框的 R 图标
+    private static string? ExtractWindowIconPath() => ExtractEmbeddedIcon("window.ico", "window-v4.ico", "window-icon.ico");
+
+    private static string? ExtractEmbeddedIcon(string resourceName, string cacheFileName, string fallbackBaseFileName)
+    {
+        try
+        {
+            var iconDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ReferenceRAG",
+                "Cache");
+            Directory.CreateDirectory(iconDir);
+            var iconPath = Path.Combine(iconDir, cacheFileName);
+
+            using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName);
+            if (stream is null)
+            {
+                var fallbackPath = Path.Combine(AppContext.BaseDirectory, fallbackBaseFileName);
+                return File.Exists(fallbackPath) ? fallbackPath : null;
+            }
+
+            if (!File.Exists(iconPath) || new FileInfo(iconPath).Length != stream.Length)
+            {
+                using var fs = File.Create(iconPath);
+                stream.CopyTo(fs);
+            }
+
+            return iconPath;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int SetCurrentProcessExplicitAppUserModelID(string appID);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetProcessDpiAwarenessContext(nint value);
+
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr handle,int command);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr handle);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern bool SetWindowText(IntPtr handle,string text);
