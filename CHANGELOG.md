@@ -2,6 +2,30 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.14] - 2026-10-20
+
+### 桌面端与高分屏体验
+- 升级多分辨率（`16/24/32/48/64/128/256` 共 7 帧 32bpp）带页面主题色（`#63E2B7`）圆角边框的 `R` 应用与托盘图标。
+- 接入 `app.manifest` 的 `PerMonitorV2` DPI 感知声明、窗口动态 DPI 图标注入（`WindowsWindowIcon`）与原生 Win32 托盘菜单（`TrayIconManager`），彻底解决高分屏下应用图标与托盘右键菜单模糊问题。
+- 托盘图标改为左键单击立即显示主窗口，并升级开始菜单快捷方式的版本化图标自愈机制（`ShortcutGuard`），自动刷新 Windows 11 任务栏图标缓存。
+
+## [1.0.13] - 2026-10-19
+
+### 检索评测、数据门禁与前端体验
+- 扩展嵌入模型与重排模型预设评测集至 12 个维度（新增否定与排除语义、数值与时间精度、多跳拼图、长尾罕见标识、跨语言语义对齐、指令遵循等），并将说明标签独立至 `Note` / `TargetChallenge` 元数据字段，彻底消除评测标签对模型输入正文的污染。
+- 实现停用知识源在向量检索、BM25、混合检索与知识图谱扩展中的全链路门禁过滤。
+- 前端路由引入 `keep-alive` 页面状态保活，切换 Search / Chat / Performance 等页面不再丢失输入与结果状态。
+- 增强预设套件横向对比看板与重排详情卡片的双向一键联动定位，并支持中间得分、等级与 P95 延迟的最简紧凑折叠显示。
+
+## [1.0.8 – 1.0.12] - 2026-10
+
+### 双引擎推理、自适应分块与显存生命周期
+- 引入 LLamaSharp GGUF 嵌入与重排后端（含 `Qwen3-Reranker` Causal Logit 架构），形成 ONNX Runtime + LLamaSharp 双推理引擎，支持多量化变体（`Q4_K_M / Q8_0 / FP16`）管理。
+- 新增硬件加速自适应策略（Native CUDA / Portable CUDA / DirectML / CPU）、GGUF GPU 卸载层数自动计算、模型空闲滑动过期自动卸载、最小化到托盘极速回收显存及实时 GPU 遥测。
+- 重构多源模型下载协调器与状态机，支持 HuggingFace 官方源与国内镜像源自动切换及取消下载。
+- 实现自适应 Markdown 分块、入库低信息密度噪声过滤（`NoiseChunkDetector`）以及单文件原子级重分块（根治重分块双倍残留向量）。
+- 新增全局后台异步任务中心（`JobCenter`）与检索全链路耗时拆解追踪。
+
 ## [1.0.7] - 2026-09-04
 
 ### 架构
@@ -41,4 +65,6 @@
 - 支持本地 ONNX Embedding/Reranker、CUDA 加速及 OpenAI 兼容 API 模式。
 - 历史版本详情见 [Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+[1.0.14]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.14
+[1.0.13]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.13
 [1.0.7]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.7
