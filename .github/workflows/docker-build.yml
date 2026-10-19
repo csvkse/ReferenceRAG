@@ -136,7 +136,6 @@ jobs:
             type=raw,value=cuda,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
             type=raw,value=cuda-12.8,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
             type=raw,value=nvidia,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=gpu,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
 
       # 3. AMD ROCm 元数据提取
       - name: Extract Docker metadata (AMD ROCm)
