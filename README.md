@@ -266,7 +266,7 @@ Error loading "onnxruntime_providers_cuda.dll" which depends on
 "cublasLt64_13.dll" which is missing.
 ```
 
-程序会**静默回退 CPU**（不报错、不中断），表现为推理变慢，容易误判为配置问题。升级前请先确认目标环境的 CUDA 版本，或同步安装 CUDA 13 运行时。
+程序会**静默回退 CPU**（不报错、不中断），表现为推理变慢，容易误判为配置问题。由于本项目同时使用 `LLamaSharp.Backend.Cuda12.Windows`（CUDA 12），保持在 CUDA 12.x 可使 ONNX 与 GGUF 双引擎共用同一套 CUDA 运行时；详细评估与升级门禁见 [CUDA 13.0 升级可行性评估与双引擎约束分析](docs/cuda-13-upgrade-feasibility-and-dual-engine-constraint-analysis.md)。
 
 ### 如何确认 GPU 已生效
 
