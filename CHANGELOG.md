@@ -2,6 +2,18 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.15] - 2026-10-20
+
+### 双平台硬件加速架构与 CI/CD 全矩阵发布对齐
+- **双平台双引擎加速架构**：落地 Windows & Linux 跨平台、跨引擎（ONNX & GGUF）的 5 目标硬件加速方案：
+  - Windows 端：主推通用兼容版（DirectML + Vulkan，显卡图形驱动直连零依赖）与 NVIDIA 专属满血版（CUDA 12 原生 + 85MB 微型绿色便携库 + 缺失自动平滑降级 CPU 零闪退）。
+  - Linux 端：ONNX 采用全原生（CUDA/ROCm/OpenVINO）与 CPU 降级；GGUF 采用全原生与 Vulkan（Mesa 开源驱动免配置直连，无需复杂 ROCm 环境）。
+  - 运行时自适应探针：`CudaEnvironmentScanner` 扩展 Linux 库扫描；`Win32EnvironmentInjector` 扩展 Linux `LD_LIBRARY_PATH` 进程注入；`LlamaNativeInitializer` 支持动态加载 Linux 原生 `libllama.so`。
+- **桌面端与 Docker 发布流水线全对齐**：
+  - 桌面端流水线（`desktop-release.yml`）：矩阵对齐 5 大变体（`universal`、`cuda`、`amd`、`intel`、`cpu`），通用版自动同步便捷别名 `ReferenceRAG-win-x64.zip`，全量生成 SHA256 校验和。
+  - Docker 容器流水线（`docker-build.yml`）：支持变体别名映射（`nvidia` / `amd`），容器基础镜像注入 `libvulkan1` 运行时，实现 Vulkan GPU 直通加速。
+  - 归档核心发布技术规范：`docs/desktop-and-docker-ci-cd-pipeline-optimization-and-release-alignment.md`。
+
 ## [1.0.14] - 2026-10-20
 
 ### 桌面端与高分屏体验
@@ -65,6 +77,7 @@
 - 支持本地 ONNX Embedding/Reranker、CUDA 加速及 OpenAI 兼容 API 模式。
 - 历史版本详情见 [Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+[1.0.15]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.15
 [1.0.14]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.14
 [1.0.13]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.13
 [1.0.7]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.7

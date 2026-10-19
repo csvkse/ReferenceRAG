@@ -333,9 +333,14 @@ CUDA/cuDNN 的 DLL 不在系统 PATH 时，用 `ReferenceRAG:embedding:cudaLibra
 
 ## 版本与改动历史
 
-当前稳定版本为 [v1.0.14](https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.14)。版本级改动和升级提示见 [CHANGELOG.md](CHANGELOG.md)。
+当前稳定版本为 [v1.0.15](https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.15)。版本级改动和升级提示见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 近期重点演进摘要
+
+#### 双平台硬件加速架构与 CI/CD 全矩阵发布对齐（v1.0.15）
+- **feat:** 落地 Windows & Linux 双平台双引擎（ONNX & GGUF）混合部署架构，提供 Windows 通用版（DirectML+Vulkan）、NVIDIA 专属满血版（CUDA 12 原生+绿色微型库+平滑降级）、Linux 原生容器与 Mesa Vulkan 免配直连加速
+- **feat:** 优化桌面端与 Docker 构建流水线，实现 5 大硬件目标分包发布（`universal`、`cuda`、`amd`、`intel`、`cpu`）与 SHA256 校验和自动生成
+- **feat:** 运行时增强跨平台动态探针与环境注入（Linux `libcublas.so` 探测与 `LD_LIBRARY_PATH` 注入）
 
 #### 桌面端高分屏与托盘体验（v1.0.14）
 - **feat:** 升级多分辨率（`16`～`256` 共 7 帧 32bpp）主题色 `R` 应用与托盘图标
