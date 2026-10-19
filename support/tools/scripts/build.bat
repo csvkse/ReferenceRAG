@@ -47,11 +47,26 @@ if not defined VERBOSE (
     set PUBLISH_ARGS=%PUBLISH_ARGS% -v q
 )
 
+set "WEB_OUTPUT=%~dp0..\..\artifacts\publish\web"
+set "CONFIG_BACKUP=%TEMP%\referencerag_web_appsettings_backup.json"
+if exist "%CONFIG_BACKUP%" del /f /q "%CONFIG_BACKUP%" >nul 2>nul
+if exist "%WEB_OUTPUT%\appsettings.json" (
+    echo [build] Backing up existing appsettings.json to preserve user configuration...
+    copy /y "%WEB_OUTPUT%\appsettings.json" "%CONFIG_BACKUP%" >nul 2>nul
+)
+
 REM 执行构建
 echo 正在构建...
 dotnet publish "Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj" %PUBLISH_ARGS%
+set "BUILD_STATUS=%ERRORLEVEL%"
 
-if %ERRORLEVEL% equ 0 (
+if %BUILD_STATUS% equ 0 (
+    if exist "%CONFIG_BACKUP%" (
+        echo [build] Merging user configuration into published appsettings.json...
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0merge-appsettings.ps1" -PublishedPath "%WEB_OUTPUT%\appsettings.json" -BackupPath "%CONFIG_BACKUP%"
+        del /f /q "%CONFIG_BACKUP%" >nul 2>nul
+    )
+
     echo.
     echo ============================================
     echo   构建成功！
@@ -61,6 +76,14 @@ if %ERRORLEVEL% equ 0 (
     REM 记录构建日志
     echo [%date% %time%] 构建成功 - %CONFIG% %RUNTIME% >> "%~dp0..\..\artifacts\logs\build.log"
 ) else (
+    if exist "%CONFIG_BACKUP%" (
+        if not exist "%WEB_OUTPUT%\appsettings.json" (
+            copy /y "%CONFIG_BACKUP%" "%WEB_OUTPUT%\appsettings.json" >nul 2>nul
+        )
+        del /f /q "%CONFIG_BACKUP%" >nul 2>nul
+    )
+
+    echo.
     echo.
     echo ============================================
     echo   构建失败！错误代码: %ERRORLEVEL%

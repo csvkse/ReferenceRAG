@@ -14,9 +14,20 @@ set "VERBOSE=false"
 set "RETRY_READY=1"
 set "NON_INTERACTIVE="
 set "RUN_SMOKE=false"
+set "PRESERVE_CONFIG=true"
 
 :parse_args
 if "%~1"=="" goto after_args
+if /i "%~1"=="--reset-config" (
+    set "PRESERVE_CONFIG=false"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--no-preserve-config" (
+    set "PRESERVE_CONFIG=false"
+    shift
+    goto parse_args
+)
 if /i "%~1"=="--debug" (
     set "CONFIGURATION=Debug"
     set "STRIP_PDB=false"
@@ -154,6 +165,16 @@ if /i "%RUN_SMOKE%"=="true" (
 echo [build-desktop] Checking running processes...
 taskkill /F /IM ReferenceRAG.DesktopHost.exe >nul 2>nul
 
+set "CONFIG_BACKUP=%TEMP%\referencerag_desktop_appsettings_backup.json"
+if exist "%CONFIG_BACKUP%" del /f /q "%CONFIG_BACKUP%" >nul 2>nul
+
+if /i "%PRESERVE_CONFIG%"=="true" (
+    if exist "%OUTPUT%\appsettings.json" (
+        echo [build-desktop] Backing up existing appsettings.json to preserve user configuration...
+        copy /y "%OUTPUT%\appsettings.json" "%CONFIG_BACKUP%" >nul 2>nul
+    )
+)
+
 if /i "%CLEAN%"=="true" (
     if exist "%OUTPUT%" (
         echo [build-desktop] Cleaning target directory: "%OUTPUT%"...
@@ -178,6 +199,11 @@ dotnet publish "%PROJECT%" -c %CONFIGURATION% -r %RID% --self-contained %SELF_CO
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if "%EXIT_CODE%"=="0" (
+    if exist "%CONFIG_BACKUP%" (
+        echo [build-desktop] Merging user configuration into published appsettings.json...
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%\support\tools\scripts\merge-appsettings.ps1" -PublishedPath "%OUTPUT%\appsettings.json" -BackupPath "%CONFIG_BACKUP%"
+        del /f /q "%CONFIG_BACKUP%" >nul 2>nul
+    )
     if /i "%STRIP_PDB%"=="true" (
         del /s /q "%OUTPUT%\*.pdb" >nul 2>nul
     )
@@ -200,6 +226,12 @@ if "%EXIT_CODE%"=="0" (
         echo [%date% %time%] desktop publish success - %CONFIGURATION% %RID% >> "%ROOT_DIR%\support\artifacts\logs\desktop-build.log"
     )
 ) else (
+    if exist "%CONFIG_BACKUP%" (
+        if not exist "%OUTPUT%\appsettings.json" (
+            copy /y "%CONFIG_BACKUP%" "%OUTPUT%\appsettings.json" >nul 2>nul
+        )
+        del /f /q "%CONFIG_BACKUP%" >nul 2>nul
+    )
     echo.
     echo ==========================================================
     echo [build-desktop] ERROR: Publish failed with exit code %EXIT_CODE%.

@@ -95,13 +95,44 @@ public class MafChatController : ControllerBase
     public ActionResult<ChatConfig> GetConfig()
     {
         var section = _configuration.GetSection("Chat");
+        var appSettingsPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+        string endpoint = section["Endpoint"] ?? string.Empty;
+        string model = section["Model"] ?? string.Empty;
+        string systemPrompt = section["SystemPrompt"] ?? string.Empty;
+        bool hasApiKey = !string.IsNullOrWhiteSpace(section["ApiKey"]);
+
+        // 若 appsettings.json 存在，补充核对文件中的最新状态（避免 IConfiguration reload 延迟）
+        if (System.IO.File.Exists(appSettingsPath))
+        {
+            try
+            {
+                var json = System.IO.File.ReadAllText(appSettingsPath);
+                var root = JsonNode.Parse(json)?.AsObject();
+                if (root?["Chat"] is JsonObject chatObj)
+                {
+                    if (chatObj["Endpoint"] != null) endpoint = chatObj["Endpoint"]?.GetValue<string>() ?? endpoint;
+                    if (chatObj["Model"] != null) model = chatObj["Model"]?.GetValue<string>() ?? model;
+                    if (chatObj["SystemPrompt"] != null) systemPrompt = chatObj["SystemPrompt"]?.GetValue<string>() ?? systemPrompt;
+                    if (chatObj["ApiKey"] != null)
+                    {
+                        var keyInFile = chatObj["ApiKey"]?.GetValue<string>();
+                        hasApiKey = !string.IsNullOrWhiteSpace(keyInFile);
+                    }
+                }
+            }
+            catch
+            {
+                // fallback to IConfiguration
+            }
+        }
+
         return Ok(new ChatConfig
         {
-            Endpoint = section["Endpoint"] ?? string.Empty,
+            Endpoint = endpoint,
             ApiKey = string.Empty,
-            ApiKeyConfigured = !string.IsNullOrWhiteSpace(section["ApiKey"]),
-            Model = section["Model"] ?? string.Empty,
-            SystemPrompt = section["SystemPrompt"] ?? string.Empty
+            ApiKeyConfigured = hasApiKey,
+            Model = model,
+            SystemPrompt = systemPrompt
         });
     }
 
@@ -122,18 +153,36 @@ public class MafChatController : ControllerBase
                 root = new JsonObject();
             }
 
-            root["Chat"] = new JsonObject
+            var existingApiKey = root["Chat"]?["ApiKey"]?.GetValue<string>()
+                ?? _configuration.GetSection("Chat")["ApiKey"]
+                ?? string.Empty;
+
+            string effectiveApiKey;
+            if (string.Equals(config.ApiKey, "__CLEAR__", StringComparison.OrdinalIgnoreCase))
             {
-                ["Endpoint"] = config.Endpoint,
-                ["ApiKey"] = config.ApiKey,
-                ["Model"] = config.Model,
-                ["SystemPrompt"] = config.SystemPrompt
-            };
+                effectiveApiKey = string.Empty;
+            }
+            else if (string.IsNullOrWhiteSpace(config.ApiKey) && !string.IsNullOrWhiteSpace(existingApiKey))
+            {
+                // 前端脱敏留空：自动继承已有有效 Key，防止意外抹除
+                effectiveApiKey = existingApiKey;
+            }
+            else
+            {
+                effectiveApiKey = config.ApiKey?.Trim() ?? string.Empty;
+            }
+
+            var chatObj = root["Chat"]?.AsObject() ?? new JsonObject();
+            chatObj["Endpoint"] = config.Endpoint;
+            chatObj["ApiKey"] = effectiveApiKey;
+            chatObj["Model"] = config.Model;
+            chatObj["SystemPrompt"] = config.SystemPrompt;
+            root["Chat"] = chatObj;
 
             System.IO.File.WriteAllText(appSettingsPath, root.ToJsonString(_writeOptions));
 
             // 即时热更新 MafChatService 客户端
-            _chatService.UpdateConfiguration(config.Endpoint, config.ApiKey, config.Model, config.SystemPrompt);
+            _chatService.UpdateConfiguration(config.Endpoint, effectiveApiKey, config.Model, config.SystemPrompt);
 
             _logger.LogInformation("Chat 配置已保存并即时生效");
             return Ok(new { message = "配置已保存并即时生效" });
