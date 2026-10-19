@@ -3,18 +3,65 @@ name: Desktop Release
 on:
   push:
     tags:
-      - "v*" # 推送 v1.0.0 格式的 tag 时自动触发
+      - "v*" # 推送 v1.0.0 格式的 tag 时自动触发全量分包构建与发布
   workflow_dispatch: # 允许在 GitHub Actions 面板手动触发
     inputs:
       version:
-        description: 'Release version (e.g., v1.0.0) - Leave empty to build only without creating release'
+        description: '发布版本号 (例如 v1.0.0) - 若留空则仅构建产物不创建 GitHub Release'
         required: false
         type: string
+      variant:
+        description: '构建硬件加速分包变体 (all / universal / cuda / amd / intel)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - universal
+          - cuda
+          - amd
+          - intel
+      bundle_cuda:
+        description: '是否为 NVIDIA 专属版自动内嵌微型绿色 CUDA 12 核心库 (开箱即用免装 CUDA Toolkit)'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: desktop-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  prepare:
+    name: Prepare Desktop Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.set-variants.outputs.variants }}
+      bundle_cuda: ${{ steps.set-variants.outputs.bundle_cuda }}
+    steps:
+      - name: Determine variants to build
+        id: set-variants
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.variant }}" = "all" ]; then
+              echo 'variants=["universal","cuda","amd","intel"]' >> "$GITHUB_OUTPUT"
+            else
+              echo 'variants=["${{ inputs.variant }}"]' >> "$GITHUB_OUTPUT"
+            fi
+            echo "bundle_cuda=${{ inputs.bundle_cuda }}" >> "$GITHUB_OUTPUT"
+          else
+            echo 'variants=["universal","cuda","amd","intel"]' >> "$GITHUB_OUTPUT"
+            echo "bundle_cuda=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
-    name: Build Windows x64 Desktop
+    name: Build Desktop (${{ matrix.variant }})
+    needs: prepare
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(needs.prepare.outputs.variants) }}
 
     steps:
       - name: Checkout repository
@@ -36,61 +83,120 @@ jobs:
           node check.mjs
           node --test
 
-      - name: Restore dependencies
-        run: dotnet restore ReferenceRAG.slnx
+      - name: Download minimal CUDA 12 runtime (for NVIDIA variant)
+        if: matrix.variant == 'cuda' && needs.prepare.outputs.bundle_cuda == 'true'
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File support/tools/scripts/download-cuda-minimal.ps1 -TargetDir runtimes/cuda
 
-      - name: Publish Desktop App
-        run: >
-          dotnet publish Host/ReferenceRAG.DesktopHost/ReferenceRAG.DesktopHost.csproj
-          -c Release
-          -r win-x64
-          --self-contained true
-          -p:Platform=x64
-          -o support/artifacts/publish/desktop
+      - name: Publish Desktop Host (${{ matrix.variant }})
+        shell: powershell
+        run: |
+          $variant = "${{ matrix.variant }}"
+          $bundleArg = ""
+          if ($variant -eq "cuda") {
+            if ("${{ needs.prepare.outputs.bundle_cuda }}" -eq "true") {
+              $bundleArg = "--bundle-cuda"
+            } else {
+              $bundleArg = "--no-bundle-cuda"
+            }
+          }
+          $outDir = "support\artifacts\publish\$variant"
+          Write-Host "[CI] Running build-desktop.bat for variant: $variant with args: $bundleArg -o $outDir"
+          cmd.exe /c "support\tools\scripts\build-desktop.bat -b $variant -c Release -r win-x64 --batch $bundleArg -o $outDir"
+          if ($LASTEXITCODE -ne 0) {
+            throw "build-desktop.bat exited with error code: $LASTEXITCODE"
+          }
 
-      - name: Archive production artifacts
-        run: Compress-Archive -Path support/artifacts/publish/desktop\* -DestinationPath support/artifacts/publish/ReferenceRAG-win-x64.zip
+      - name: Package artifacts and generate checksums
+        shell: powershell
+        run: |
+          $variant = "${{ matrix.variant }}"
+          $sourceDir = "support\artifacts\publish\$variant"
+          $packageDir = "support\artifacts\packages"
+          if (-not (Test-Path $packageDir)) { New-Item -ItemType Directory -Path $packageDir -Force | Out-Null }
 
-      - name: Upload Artifacts
+          $zipName = "ReferenceRAG-win-x64-$variant.zip"
+          $targetZip = Join-Path $packageDir $zipName
+          Write-Host "[CI] Creating zip archive: $targetZip"
+          Compress-Archive -Path "$sourceDir\*" -DestinationPath $targetZip -Force
+
+          # 通用版同时提供默认无后缀别名包 (ReferenceRAG-win-x64.zip) 方便普通用户直接下载
+          if ($variant -eq "universal") {
+            $defaultZip = Join-Path $packageDir "ReferenceRAG-win-x64.zip"
+            Copy-Item -Path $targetZip -Destination $defaultZip -Force
+            Write-Host "[CI] Created default convenient alias: $defaultZip"
+          }
+
+          # 生成 SHA256 校验和文件
+          Get-ChildItem -Path $packageDir -Filter "*.zip" | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash
+            $shaFile = "$($_.FullName).sha256"
+            "$hash  $($_.Name)" | Set-Content -Path $shaFile -Encoding ASCII
+            Write-Host "[CI] Generated Checksum: $($_.Name) -> $hash"
+          }
+
+      - name: Upload Artifact (${{ matrix.variant }})
         uses: actions/upload-artifact@v4
         with:
-          name: ReferenceRAG-win-x64
-          path: support/artifacts/publish/ReferenceRAG-win-x64.zip
+          name: desktop-package-${{ matrix.variant }}
+          path: support/artifacts/packages/*
+          if-no-files-found: error
 
   release:
-    needs: build
+    name: Publish GitHub Release
+    needs: [prepare, build]
     runs-on: ubuntu-latest
-    # Tag 推送或手动触发且填写版本号时创建 release
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
     permissions:
       contents: write
+
     steps:
-      - name: Download all artifacts
+      - name: Download all package artifacts
         uses: actions/download-artifact@v4
         with:
           path: support/artifacts/downloads
+          pattern: desktop-package-*
+          merge-multiple: true
 
-      - name: Create Release
+      - name: List downloaded release assets
+        run: |
+          echo "Release Assets ready for upload:"
+          ls -lh support/artifacts/downloads/
+
+      - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
-          files: support/artifacts/downloads/*/*
+          files: support/artifacts/downloads/*
           generate_release_notes: true
           body: |
-            🎉 **ReferenceRAG Windows 桌面版更新发布**
+            🎉 **ReferenceRAG 桌面端多硬件加速版更新发布**
 
-            本次发布包含适用于 Windows x64 的独立运行桌面程序。
-            **无需安装 .NET 运行时**，下载解压即可直接运行！
-
-            ### 📦 下载与运行指南
-
-            * **🪟 Windows x64**:
-                * 下载 `ReferenceRAG-win-x64.zip`。
-                * 解压后双击运行 `ReferenceRAG.DesktopHost.exe`。
-                * 首次运行需安装 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2)（Edge 浏览器已含此组件）。
+            本版本提供适用于 Windows x64 的独立运行桌面安装包，采用**多目标硬件加速分发架构**。
+            **无需安装 .NET 运行时**，解压即可直接运行！
 
             ---
 
-            *💡 详细代码更新日志请参考下方自动生成的 Release Notes 👇*
+            ### 📦 硬件加速分包选型指南 (请按您的显卡选型下载)
+
+            | 安装包名称 | 适用硬件与显卡型号 | 硬件加速引擎 | 依赖安装需求 | 推荐场景 |
+            | :--- | :--- | :--- | :--- | :--- |
+            | **`ReferenceRAG-win-x64.zip`**<br>*(或 `...-universal.zip`)* | **全显卡通用**<br>(AMD / Intel / NVIDIA / 高通骁龙 / 核显) | DirectML + Vulkan | **完全免装额外依赖！**<br>有显卡驱动即可直接点火 | **🌟 强烈推荐**<br>开箱即用，零售后门槛，团队协作与日常分发首选 |
+            | **`ReferenceRAG-win-x64-cuda.zip`** | **NVIDIA GeForce 独显**<br>(RTX 20/30/40/50 系列、GTX 16 系列等) | CUDA 12 + TensorRT | **免装 3GB+ Toolkit！**<br>已内嵌微型绿色核心库 | **🚀 极致算力**<br>极限压榨 RTX 独显吞吐量 |
+            | **`ReferenceRAG-win-x64-amd.zip`** | **AMD Radeon 显卡**<br>(RX 6000/7000/8000 独显及 Ryzen/APU 核显) | DirectML + Vulkan | **完全免装 ROCm！**<br>官方 Adrenalin 驱动原生承接 | **🔴 AMD 优化**<br>专为 A 卡优化的预置加速路径 |
+            | **`ReferenceRAG-win-x64-intel.zip`** | **Intel 显卡与酷睿处理器**<br>(Arc 独显、酷睿 Ultra 核显及 Iris Xe) | DirectML + Vulkan | **完全免装 oneAPI！**<br>官方 Intel 显卡驱动原生承接 | **🔵 Intel 优化**<br>专为 Intel GPU 优化的预置加速路径 |
+
+            ---
+
+            ### 🚀 快速启动说明
+
+            1. 下载对应硬件版本的 `.zip` 压缩包（不知道选什么请直接下载 **`ReferenceRAG-win-x64.zip`**）；
+            2. 解压到任意无中文空格的本地目录；
+            3. 双击运行 **`ReferenceRAG.DesktopHost.exe`** 即可启动；
+            4. *(首次运行需系统具备 WebView2 Runtime，Windows 10/11 自带 Edge 浏览器默认已内置)*。
+
+            ---
+
+            *💡 详细代码提交历史请参考下方自动生成的 Release Notes 👇*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
