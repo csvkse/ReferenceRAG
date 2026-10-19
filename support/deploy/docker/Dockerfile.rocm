@@ -68,9 +68,11 @@ RUN mkdir -p /etc/apt/keyrings \
 COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
 RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
 
-# Create directories and non-root user (add to video & render groups for GPU device access)
+# Create directories and non-root user (ensure video & render groups exist for GPU device access)
 RUN mkdir -p /app/data /app/models /app/logs \
     && groupadd -r appgroup \
+    && (getent group video || groupadd -r video) \
+    && (getent group render || groupadd -r render) \
     && useradd -r -g appgroup -G video,render appuser \
     && chown -R appuser:appgroup /app
 

@@ -58,10 +58,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Add Intel Graphics official repository & install Level Zero GPU runtime
 RUN mkdir -p /usr/share/keyrings \
     && wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble/lts/unified" > /etc/apt/sources.list.d/intel-gpu.list \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble unified" > /etc/apt/sources.list.d/intel-gpu.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         intel-opencl-icd \
-        intel-level-zero-gpu \
+        libze-intel-gpu1 \
         libze1 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -69,9 +69,11 @@ RUN mkdir -p /usr/share/keyrings \
 COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
 RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
 
-# Create directories and non-root user (add to render & video groups for DRI access)
+# Create directories and non-root user (ensure video & render groups exist for DRI access)
 RUN mkdir -p /app/data /app/models /app/logs \
     && groupadd -r appgroup \
+    && (getent group video || groupadd -r video) \
+    && (getent group render || groupadd -r render) \
     && useradd -r -g appgroup -G video,render appuser \
     && chown -R appuser:appgroup /app
 
