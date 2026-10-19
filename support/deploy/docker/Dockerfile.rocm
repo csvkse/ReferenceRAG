@@ -1,0 +1,93 @@
+# syntax=docker/dockerfile:1
+# ============================================================
+# ReferenceRAG - AMD ROCm GPU Dockerfile
+# 说明：本镜像专为 AMD Radeon 独立显卡与 APU 核显打造
+# 运行示例：docker run --device=/dev/kfd --device=/dev/dri --group-add video -p 5123:5000 ghcr.io/csvkse/referencerag:rocm
+# ============================================================
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Stage 1: Restore dependencies
+COPY Directory.Build.props Directory.Packages.props ./
+COPY Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.csproj ./Infrastructure/ReferenceRAG.Infrastructure/
+COPY Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj ./Business/ReferenceRAG.Business/
+COPY Host/ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj ./Host/ReferenceRAG.ApiHost/
+COPY Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj ./Host/ReferenceRAG.WebHost/
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
+    dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj
+
+# Stage 2: Build & Publish
+COPY Infrastructure/ ./Infrastructure/
+COPY Business/ ./Business/
+COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
+COPY Host/ReferenceRAG.WebHost/ ./Host/ReferenceRAG.WebHost/
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
+    dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
+    -c Release \
+    -o /app/publish \
+    --no-restore \
+    /p:UseAppHost=false \
+    /p:DebugType=none \
+    /p:DebugSymbols=false \
+    && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx*
+
+# Official ASP.NET Core 10.0 runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS dotnet-runtime
+
+# ============================================================
+# Stage 3: Runtime (AMD ROCm / HIP Compute)
+# ============================================================
+FROM ubuntu:24.04 AS runtime
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install prerequisites, curl, gpg, and .NET dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    wget \
+    libgomp1 \
+    libicu74 \
+    libssl3t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add AMD ROCm repository & install minimal HIP runtime & rocBLAS
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/6.2 noble main" > /etc/apt/sources.list.d/rocm.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        hip-runtime-amd \
+        rocblas \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy .NET 10 ASP.NET Core runtime directly from official image
+COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
+RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
+
+# Create directories and non-root user (add to video & render groups for GPU device access)
+RUN mkdir -p /app/data /app/models /app/logs \
+    && groupadd -r appgroup \
+    && useradd -r -g appgroup -G video,render appuser \
+    && chown -R appuser:appgroup /app
+
+COPY --from=build /app/publish .
+COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
+
+ENV ASPNETCORE_URLS=http://+:5000
+ENV ASPNETCORE_ENVIRONMENT=Production
+ENV DataPath=/app/data
+ENV LogsPath=/app/logs
+ENV DOTNET_RUNNING_IN_CONTAINER=true
+ENV ROCM_PATH=/opt/rocm
+ENV HIP_VISIBLE_DEVICES=0
+ENV PATH="/opt/rocm/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH}"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
+
+USER appuser
+EXPOSE 5000
+ENTRYPOINT ["dotnet", "ReferenceRAG.WebHost.dll"]

@@ -20,14 +20,16 @@ on:
   workflow_dispatch:
     inputs:
       variant:
-        description: "构建变体 (cpu / gpu / all)"
+        description: "构建变体 (cpu / cuda / rocm / intel / all)"
         required: true
         default: "all"
         type: choice
         options:
           - all
           - cpu
-          - gpu
+          - cuda
+          - rocm
+          - intel
       push_image:
         description: "是否推送镜像至 GHCR"
         required: false
@@ -57,13 +59,13 @@ jobs:
             echo 'should_push=false' >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "${{ inputs.variant }}" = "all" ]; then
-              echo 'variants=["cpu","gpu"]' >> "$GITHUB_OUTPUT"
+              echo 'variants=["cpu","cuda","rocm","intel"]' >> "$GITHUB_OUTPUT"
             else
               echo 'variants=["${{ inputs.variant }}"]' >> "$GITHUB_OUTPUT"
             fi
             echo 'should_push=${{ inputs.push_image }}' >> "$GITHUB_OUTPUT"
           else
-            echo 'variants=["cpu","gpu"]' >> "$GITHUB_OUTPUT"
+            echo 'variants=["cpu","cuda","rocm","intel"]' >> "$GITHUB_OUTPUT"
             echo 'should_push=true' >> "$GITHUB_OUTPUT"
           fi
 
@@ -82,8 +84,8 @@ jobs:
       id-token: write
 
     steps:
-      - name: Free Disk Space (for GPU CUDA image)
-        if: matrix.variant == 'gpu'
+      - name: Free Disk Space (for GPU / compute images)
+        if: matrix.variant != 'cpu'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
@@ -106,6 +108,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 1. CPU 元数据提取
       - name: Extract Docker metadata (CPU)
         id: meta_cpu
         if: matrix.variant == 'cpu'
@@ -117,27 +120,87 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=cpu,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
 
-      - name: Extract Docker metadata (GPU)
-        id: meta_gpu
-        if: matrix.variant == 'gpu'
+      # 2. NVIDIA CUDA 元数据提取（明确 NVIDIA 标识，并保留兼容别名）
+      - name: Extract Docker metadata (NVIDIA CUDA)
+        id: meta_cuda
+        if: matrix.variant == 'cuda'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}},suffix=-gpu
-            type=semver,pattern={{major}}.{{minor}},suffix=-gpu
-            type=sha,format=short,suffix=-gpu
+            type=semver,pattern={{version}},suffix=-cuda
+            type=semver,pattern={{major}}.{{minor}},suffix=-cuda
+            type=sha,format=short,suffix=-cuda
+            type=raw,value=cuda,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=cuda-12.8,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=nvidia,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
             type=raw,value=gpu,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+
+      # 3. AMD ROCm 元数据提取
+      - name: Extract Docker metadata (AMD ROCm)
+        id: meta_rocm
+        if: matrix.variant == 'rocm'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},suffix=-rocm
+            type=semver,pattern={{major}}.{{minor}},suffix=-rocm
+            type=sha,format=short,suffix=-rocm
+            type=raw,value=rocm,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=amd,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+
+      # 4. Intel GPU 元数据提取
+      - name: Extract Docker metadata (Intel GPU)
+        id: meta_intel
+        if: matrix.variant == 'intel'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},suffix=-intel
+            type=semver,pattern={{major}}.{{minor}},suffix=-intel
+            type=sha,format=short,suffix=-intel
+            type=raw,value=intel,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=openvino,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+
+      # 5. 动态选择 Dockerfile 与 Meta
+      - name: Determine Dockerfile and Tags
+        id: select_target
+        run: |
+          case "${{ matrix.variant }}" in
+            cuda)
+              echo "dockerfile=support/deploy/docker/Dockerfile.cuda" >> "$GITHUB_OUTPUT"
+              echo "tags=${{ steps.meta_cuda.outputs.tags }}" >> "$GITHUB_OUTPUT"
+              echo "labels=${{ steps.meta_cuda.outputs.labels }}" >> "$GITHUB_OUTPUT"
+              ;;
+            rocm)
+              echo "dockerfile=support/deploy/docker/Dockerfile.rocm" >> "$GITHUB_OUTPUT"
+              echo "tags=${{ steps.meta_rocm.outputs.tags }}" >> "$GITHUB_OUTPUT"
+              echo "labels=${{ steps.meta_rocm.outputs.labels }}" >> "$GITHUB_OUTPUT"
+              ;;
+            intel)
+              echo "dockerfile=support/deploy/docker/Dockerfile.intel" >> "$GITHUB_OUTPUT"
+              echo "tags=${{ steps.meta_intel.outputs.tags }}" >> "$GITHUB_OUTPUT"
+              echo "labels=${{ steps.meta_intel.outputs.labels }}" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "dockerfile=support/deploy/docker/Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "tags=${{ steps.meta_cpu.outputs.tags }}" >> "$GITHUB_OUTPUT"
+              echo "labels=${{ steps.meta_cpu.outputs.labels }}" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.variant == 'gpu' && 'support/deploy/docker/Dockerfile.gpu' || 'support/deploy/docker/Dockerfile' }}
+          file: ${{ steps.select_target.outputs.dockerfile }}
           platforms: linux/amd64
           push: ${{ needs.prepare.outputs.should_push == 'true' }}
-          tags: ${{ matrix.variant == 'gpu' && steps.meta_gpu.outputs.tags || steps.meta_cpu.outputs.tags }}
-          labels: ${{ matrix.variant == 'gpu' && steps.meta_gpu.outputs.labels || steps.meta_cpu.outputs.labels }}
+          tags: ${{ steps.select_target.outputs.tags }}
+          labels: ${{ steps.select_target.outputs.labels }}
           cache-from: type=gha,scope=docker-${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=docker-${{ matrix.variant }}

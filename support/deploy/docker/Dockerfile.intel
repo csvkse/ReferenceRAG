@@ -1,0 +1,92 @@
+# syntax=docker/dockerfile:1
+# ============================================================
+# ReferenceRAG - Intel GPU / iGPU (Arc & Iris Xe) Dockerfile
+# 说明：本镜像专为 Intel Arc 独立显卡与 Intel 酷睿 Iris Xe/UHD 核显打造
+# 运行示例：docker run --device=/dev/dri -p 5123:5000 ghcr.io/csvkse/referencerag:intel
+# ============================================================
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Stage 1: Restore dependencies
+COPY Directory.Build.props Directory.Packages.props ./
+COPY Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.csproj ./Infrastructure/ReferenceRAG.Infrastructure/
+COPY Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj ./Business/ReferenceRAG.Business/
+COPY Host/ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj ./Host/ReferenceRAG.ApiHost/
+COPY Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj ./Host/ReferenceRAG.WebHost/
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
+    dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj
+
+# Stage 2: Build & Publish
+COPY Infrastructure/ ./Infrastructure/
+COPY Business/ ./Business/
+COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
+COPY Host/ReferenceRAG.WebHost/ ./Host/ReferenceRAG.WebHost/
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
+    dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
+    -c Release \
+    -o /app/publish \
+    --no-restore \
+    /p:UseAppHost=false \
+    /p:DebugType=none \
+    /p:DebugSymbols=false \
+    && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx*
+
+# Official ASP.NET Core 10.0 runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS dotnet-runtime
+
+# ============================================================
+# Stage 3: Runtime (Intel Compute Runtime / Level Zero & OpenCL)
+# ============================================================
+FROM ubuntu:24.04 AS runtime
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install prerequisites, curl, gpg, and .NET dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    wget \
+    libgomp1 \
+    libicu74 \
+    libssl3t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Intel Graphics official repository & install Level Zero GPU runtime
+RUN mkdir -p /usr/share/keyrings \
+    && wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble/lts/unified" > /etc/apt/sources.list.d/intel-gpu.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        intel-opencl-icd \
+        intel-level-zero-gpu \
+        libze1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy .NET 10 ASP.NET Core runtime directly from official image
+COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
+RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
+
+# Create directories and non-root user (add to render & video groups for DRI access)
+RUN mkdir -p /app/data /app/models /app/logs \
+    && groupadd -r appgroup \
+    && useradd -r -g appgroup -G video,render appuser \
+    && chown -R appuser:appgroup /app
+
+COPY --from=build /app/publish .
+COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
+
+ENV ASPNETCORE_URLS=http://+:5000
+ENV ASPNETCORE_ENVIRONMENT=Production
+ENV DataPath=/app/data
+ENV LogsPath=/app/logs
+ENV DOTNET_RUNNING_IN_CONTAINER=true
+ENV ONEAPI_DEVICE_SELECTOR=level_zero:gpu
+ENV LIBVA_DRIVER_NAME=iHD
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
+
+USER appuser
+EXPOSE 5000
+ENTRYPOINT ["dotnet", "ReferenceRAG.WebHost.dll"]

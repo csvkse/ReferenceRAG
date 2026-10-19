@@ -1,19 +1,20 @@
 services:
-  reference-rag:
-    build:
-      context: ../../..
-      dockerfile: support/deploy/docker/Dockerfile
-    container_name: reference-rag
-    image: reference-rag:latest
+  # ------------------------------------------------------------
+  # 1. 通用 CPU 镜像（默认：全平台支持，包括 AMD/Intel/云服务器/无显卡环境）
+  # 启动命令: docker compose up -d
+  # ------------------------------------------------------------
+  reference-rag-cpu:
+    container_name: reference-rag-cpu
+    image: ghcr.io/csvkse/referencerag:latest
     ports:
       - "5123:5000"
     volumes:
-      # 持久化配置（防止容器重建/重启丢失用户设置）
+      # 持久化配置（防止容器重建丢失用户设置）
       - ../../config/local/docker/appsettings.Production.json:/app/appsettings.json
       # 持久化数据
       - ../../data:/app/data
       - ../../artifacts/logs/docker:/app/logs
-      # 持久化模型（可选，减少重复下载）
+      # 持久化模型
       - ../../models:/app/models
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
@@ -29,3 +30,95 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+
+  # ------------------------------------------------------------
+  # 2. NVIDIA CUDA 独立显卡加速镜像（仅限 NVIDIA GeForce / RTX / Tesla）
+  # 启动命令: docker compose --profile cuda up -d
+  # ------------------------------------------------------------
+  reference-rag-cuda:
+    profiles: ["cuda"]
+    container_name: reference-rag-cuda
+    image: ghcr.io/csvkse/referencerag:cuda
+    ports:
+      - "5123:5000"
+    volumes:
+      - ../../config/local/docker/appsettings.Production.json:/app/appsettings.json
+      - ../../data:/app/data
+      - ../../artifacts/logs/docker:/app/logs
+      - ../../models:/app/models
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - DataPath=/app/data
+      - LogsPath=/app/logs
+      - ReferenceRAG__Service__port=5000
+      - ReferenceRAG__Service__host=0.0.0.0
+      - SwaggerEnabled=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ------------------------------------------------------------
+  # 3. AMD ROCm 显卡加速镜像（AMD Radeon RX 5000~8000 独显 / Ryzen APU 核显）
+  # 启动命令: docker compose --profile rocm up -d
+  # ------------------------------------------------------------
+  reference-rag-rocm:
+    profiles: ["rocm"]
+    container_name: reference-rag-rocm
+    image: ghcr.io/csvkse/referencerag:rocm
+    ports:
+      - "5123:5000"
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      - ../../config/local/docker/appsettings.Production.json:/app/appsettings.json
+      - ../../data:/app/data
+      - ../../artifacts/logs/docker:/app/logs
+      - ../../models:/app/models
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - DataPath=/app/data
+      - LogsPath=/app/logs
+      - ReferenceRAG__Service__port=5000
+      - ReferenceRAG__Service__host=0.0.0.0
+      - SwaggerEnabled=true
+    restart: unless-stopped
+
+  # ------------------------------------------------------------
+  # 4. Intel GPU 显卡加速镜像（Intel Arc 独显 / Core 酷睿 Iris Xe & UHD 核显）
+  # 启动命令: docker compose --profile intel up -d
+  # ------------------------------------------------------------
+  reference-rag-intel:
+    profiles: ["intel"]
+    container_name: reference-rag-intel
+    image: ghcr.io/csvkse/referencerag:intel
+    ports:
+      - "5123:5000"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      - ../../config/local/docker/appsettings.Production.json:/app/appsettings.json
+      - ../../data:/app/data
+      - ../../artifacts/logs/docker:/app/logs
+      - ../../models:/app/models
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - DataPath=/app/data
+      - LogsPath=/app/logs
+      - ReferenceRAG__Service__port=5000
+      - ReferenceRAG__Service__host=0.0.0.0
+      - SwaggerEnabled=true
+    restart: unless-stopped

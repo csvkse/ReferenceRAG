@@ -32,7 +32,13 @@ build-desktop.bat
 support\tools\scripts\build.bat
 ```
 
-Docker 使用 `docker compose -f support/deploy/docker/compose.yml up --build`。启动前将 Docker 模板复制到 `support/config/local/docker/appsettings.Production.json` 并配置模型；该文件映射为容器的 `/app/appsettings.json`，不会遮蔽程序目录。此处记录运行方式，不代表已经执行部署。
+Docker 支持多硬件加速镜像，基于 `support/deploy/docker/compose.yml` 启动：
+- **通用 CPU（全平台）**：`docker compose -f support/deploy/docker/compose.yml up -d`
+- **NVIDIA 显卡（CUDA 12.8）**：`docker compose -f support/deploy/docker/compose.yml --profile cuda up -d`
+- **AMD 显卡（ROCm / Radeon & APU）**：`docker compose -f support/deploy/docker/compose.yml --profile rocm up -d`
+- **Intel 显卡（Arc & Iris Xe 核显）**：`docker compose -f support/deploy/docker/compose.yml --profile intel up -d`
+
+启动前将 Docker 模板复制到 `support/config/local/docker/appsettings.Production.json` 并配置模型；该文件映射为容器的 `/app/appsettings.json`，不会遮蔽程序目录。此处记录运行方式，不代表已经执行部署。
 
 ## 清理边界
 

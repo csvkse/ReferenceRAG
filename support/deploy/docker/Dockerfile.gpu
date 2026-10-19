@@ -1,9 +1,12 @@
 # syntax=docker/dockerfile:1
-# ReferenceRAG: shared static ES modules, no frontend build stage.
+# ============================================================
+# [DEPRECATED] ReferenceRAG - Legacy Dockerfile.gpu
+# 提示：为避免名称误导非 NVIDIA 用户，本镜像已重命名为 Dockerfile.cuda
+# 请优先使用 support/deploy/docker/Dockerfile.cuda
+# ============================================================
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-# Stage 1: Restore dependencies (cached independently of source code changes)
 COPY Directory.Build.props Directory.Packages.props ./
 COPY Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.csproj ./Infrastructure/ReferenceRAG.Infrastructure/
 COPY Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj ./Business/ReferenceRAG.Business/
@@ -12,7 +15,6 @@ COPY Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj ./Host/ReferenceRAG.W
 RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
     dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj
 
-# Stage 2: Build & Publish (prune Windows/macOS native runtimes to shrink Linux image)
 COPY Infrastructure/ ./Infrastructure/
 COPY Business/ ./Business/
 COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
@@ -27,17 +29,11 @@ RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
     /p:DebugSymbols=false \
     && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx*
 
-# Official ASP.NET Core 10.0 runtime stage for zero-download binary copy
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS dotnet-runtime
 
-# ============================================================
-# Stage 3: Runtime (GPU / CUDA 12.8 + cuDNN 9)
-# ============================================================
-# Aligns with Microsoft.ML.OnnxRuntime.Gpu 1.24.4 requirement (CUDA 12.8 + cuDNN 9.x)
 FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04 AS runtime
 WORKDIR /app
 
-# Install native dependencies required by .NET 10 and ONNX/GGUF runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     libgomp1 \
@@ -46,21 +42,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy .NET 10 ASP.NET Core runtime directly from official image (avoids slow dotnet-install.sh download)
 COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
 RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
 
-# Create directories and non-root user
 RUN mkdir -p /app/data /app/models /app/logs \
     && groupadd -r appgroup \
     && useradd -r -g appgroup appuser \
     && chown -R appuser:appgroup /app
 
-# Copy published application
 COPY --from=build /app/publish .
 COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
 
-# Environment variables
 ENV ASPNETCORE_URLS=http://+:5000
 ENV ASPNETCORE_ENVIRONMENT=Production
 ENV DataPath=/app/data
@@ -68,7 +60,6 @@ ENV LogsPath=/app/logs
 ENV DOTNET_RUNNING_IN_CONTAINER=true
 ENV CUDA_VISIBLE_DEVICES=0
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
 
