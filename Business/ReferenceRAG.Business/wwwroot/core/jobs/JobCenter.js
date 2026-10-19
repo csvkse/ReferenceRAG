@@ -1,4 +1,4 @@
-import { reactive, ref } from 'vue';
+import { reactive, ref } from '../../vendor/vue.js';
 import { getInvalidationTags } from './InvalidationRegistry.js';
 
 class JobCenterEngine {

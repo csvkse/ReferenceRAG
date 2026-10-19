@@ -180,8 +180,7 @@ test('Chat.js parseJsonSafe correctly handles empty bodies with descriptive erro
 
 test('Chat.js module imports ragFetch and passes quality gate without unbound symbols', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
-    const file = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Chat.js');
+    const file = new URL('../app/views/Chat.js', import.meta.url);
     const source = fs.readFileSync(file, 'utf8');
 
     // Verify import of ragFetch
@@ -195,8 +194,7 @@ test('Chat.js module imports ragFetch and passes quality gate without unbound sy
 
 test('MainLayout.js keeps all router views alive and keys components by route.name', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
-    const file = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/layouts/MainLayout.js');
+    const file = new URL('../app/layouts/MainLayout.js', import.meta.url);
     const source = fs.readFileSync(file, 'utf8');
 
     // Must not restrict keep-alive to Chat only
@@ -208,11 +206,10 @@ test('MainLayout.js keeps all router views alive and keys components by route.na
 
 test('Search.js, Performance.js, Models.js, Sources.js, Dashboard.js declare component names and onActivated hooks', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
     const views = ['Search.js', 'Performance.js', 'Models.js', 'Sources.js', 'Dashboard.js'];
 
     for (const view of views) {
-        const file = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views', view);
+        const file = new URL(`../app/views/${view}`, import.meta.url);
         const source = fs.readFileSync(file, 'utf8');
         const viewName = view.replace('.js', '');
 
@@ -226,8 +223,7 @@ test('Search.js, Performance.js, Models.js, Sources.js, Dashboard.js declare com
 
 test('Performance.js rerank preset linkage: exports active preset state, stepper and rowProps', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
-    const file = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Performance.js');
+    const file = new URL('../app/views/Performance.js', import.meta.url);
     const source = fs.readFileSync(file, 'utf8');
 
     // 1. Verify linkage identifiers exist in source
@@ -316,8 +312,7 @@ test('Rerank linkage logic: stepper and upsert mechanics operate correctly', () 
 
 test('Performance.js supports compact minimalist summary bar and collapsible full metrics for rerank detail', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
-    const file = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Performance.js');
+    const file = new URL('../app/views/Performance.js', import.meta.url);
     const source = fs.readFileSync(file, 'utf8');
 
     // 1. Must declare and export showRerankFullMetrics ref (defaulting to false)

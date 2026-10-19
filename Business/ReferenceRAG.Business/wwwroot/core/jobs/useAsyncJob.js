@@ -1,4 +1,4 @@
-import { ref, computed, onMounted, onUnmounted, unref } from 'vue';
+import { ref, computed, onMounted, onUnmounted, unref } from '../../vendor/vue.js';
 import { JobCenter } from './JobCenter.js';
 
 /**
