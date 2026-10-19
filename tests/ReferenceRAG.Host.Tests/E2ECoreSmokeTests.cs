@@ -22,9 +22,12 @@ using ReferenceRAG.Core.Features.ModelManagement.StateMachine;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using System.Net;
+using System.Net.Http;
 using ReferenceRAG.Service.Controllers;
 using ReferenceRAG.Service.Extensions;
 using ReferenceRAG.Service.Middleware;
+using ReferenceRAG.Service.Services;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -248,6 +251,53 @@ public sealed class DeterministicRerankService : IRerankService
 }
 
 /// <summary>
+/// 端对端测试确定性 Chat 上游模拟器，支持流式 SSE 与单次 JSON 响应
+/// </summary>
+public sealed class DeterministicSmokeChatHandler : HttpMessageHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var isStream = false;
+        string model = "gpt-4o-mini";
+        if (request.Content != null)
+        {
+            var body = await request.Content.ReadAsStringAsync(cancellationToken);
+            isStream = body.Contains("\"stream\":true");
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("model", out var modelEl) && modelEl.ValueKind == JsonValueKind.String)
+                {
+                    model = modelEl.GetString() ?? "gpt-4o-mini";
+                }
+            }
+            catch { }
+        }
+
+        if (isStream)
+        {
+            var sse = $"data: {{\"id\":\"chatcmpl-smoke-chunk-1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"{model}\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":\"ReferenceRAG 核心检索设计支持密集向量与 BM25 混合搜索。\"}},\"finish_reason\":null}}]}}\n\n" +
+                      $"data: {{\"id\":\"chatcmpl-smoke-chunk-2\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"{model}\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n" +
+                      "data: [DONE]\n\n";
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(sse, Encoding.UTF8, "text/event-stream")
+            };
+        }
+        else
+        {
+            var json = $"{{\"id\":\"chatcmpl-smoke-resp\",\"object\":\"chat.completion\",\"created\":1700000000,\"model\":\"{model}\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"ReferenceRAG 核心检索架构基于 SQLite FTS5 与向量数据库混合检索。\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":28,\"completion_tokens\":14,\"total_tokens\":42}}}}";
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+        }
+    }
+}
+
+/// <summary>
 /// 端对端测试宿主生命周期夹具
 /// </summary>
 public sealed class E2ESmokeFixture : IAsyncLifetime
@@ -350,6 +400,11 @@ public sealed class E2ESmokeFixture : IAsyncLifetime
                 o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
             });
 
+        builder.Configuration["Chat:Endpoint"] = "https://mock-openai.test/v1";
+        builder.Configuration["Chat:ApiKey"] = "sk-smoke-test-key";
+        builder.Configuration["Chat:Model"] = "gpt-4o-mini";
+        builder.Configuration["Chat:SystemPrompt"] = "你是 ReferenceRAG 智能助手。";
+
         builder.Services.AddRagCoreServices(builder.Configuration);
 
         // 注入确定性且高效的 Embedding / Rerank 测试服务，实现全隔离真实运行
@@ -357,6 +412,17 @@ public sealed class E2ESmokeFixture : IAsyncLifetime
         builder.Services.AddSingleton<IEmbeddingService>(new DeterministicEmbeddingService(384));
         builder.Services.RemoveAll<IRerankService>();
         builder.Services.AddSingleton<IRerankService>(new DeterministicRerankService());
+
+        // 注入确定性 Chat 处理管道，隔离外部网络并支持流式与非流式真实冒烟验证
+        var mockChatHandler = new DeterministicSmokeChatHandler();
+        builder.Services.RemoveAll<MafChatService>();
+        builder.Services.AddSingleton<MafChatService>(sp => new MafChatService(
+            sp.GetRequiredService<IConfiguration>(),
+            sp.GetRequiredService<IServiceScopeFactory>(),
+            sp.GetRequiredService<IHttpClientFactory>(),
+            sp.GetRequiredService<ILogger<MafChatService>>(),
+            timeProvider: null,
+            httpMessageHandler: mockChatHandler));
 
         App = builder.Build();
         App.UseApiKeyAuthentication();
@@ -810,5 +876,224 @@ public class E2ECoreSmokeTests : IClassFixture<E2ESmokeFixture>
         Assert.DoesNotContain(finalStats, s => s.Source == "ExtraSource");
         var finalConfig = configManager.Load();
         Assert.DoesNotContain(finalConfig.Sources, s => s.Name == "ExtraSource");
+    }
+
+    /// <summary>
+    /// 场景 7：OpenAI 兼容 REST 接口全链路真实冒烟测试
+    /// 覆盖统一模型发现 (/v1/models)、向量嵌入计算 (/v1/embeddings)、两阶段重排评分 (/v1/rerank)、
+    /// 直连与 RAG 知识增强聊天补全 (/v1/chat/completions 非流式与流式 SSE)，以及输入异常与 SLA 门限。
+    /// </summary>
+    [Fact]
+    public async Task TC_SMOKE_07_OpenAICompatibility_EndToEnd_FullPipeline()
+    {
+        // 1. 统一模型列表发现 (GET /v1/models & GET /v1/models/{modelId})
+        var modelsSw = Stopwatch.StartNew();
+        var (modelsStatus, modelsBody) = await _fixture.DispatchAsync("GET", "/v1/models");
+        modelsSw.Stop();
+
+        Assert.Equal(200, modelsStatus);
+        SmokePerformanceTracker.Record("OpenAI Compat: Models", "ListModelsLatency", modelsSw.Elapsed.TotalMilliseconds, 100.0, "Active models list");
+        Assert.True(modelsSw.ElapsedMilliseconds <= 100, $"获取模型列表耗时 {modelsSw.ElapsedMilliseconds}ms 超出 100ms 门限");
+
+        using (var modelsDoc = JsonDocument.Parse(modelsBody))
+        {
+            var root = modelsDoc.RootElement;
+            Assert.Equal("list", root.GetProperty("object").GetString());
+            var data = root.GetProperty("data").EnumerateArray().ToList();
+            Assert.True(data.Count >= 4, $"模型数量应至少包含 4 个激活项，实际为 {data.Count}");
+
+            var modelIds = data.Select(m => m.GetProperty("id").GetString()).ToList();
+            Assert.Contains("reference-rag", modelIds);
+            Assert.Contains("gpt-4o-mini", modelIds);
+            Assert.Contains("mock-embedding", modelIds);
+            Assert.Contains("mock-reranker", modelIds);
+
+            // 验证规范遵循度：owned_by 均为统一组织标识
+            foreach (var item in data)
+            {
+                Assert.Equal("reference-rag", item.GetProperty("owned_by").GetString());
+                Assert.Equal("model", item.GetProperty("object").GetString());
+                Assert.True(item.GetProperty("created").GetInt64() > 0);
+            }
+        }
+
+        // 单模型元数据查询
+        var (singleModelStatus, singleModelBody) = await _fixture.DispatchAsync("GET", "/v1/models/reference-rag");
+        Assert.Equal(200, singleModelStatus);
+        using (var singleDoc = JsonDocument.Parse(singleModelBody))
+        {
+            Assert.Equal("reference-rag", singleDoc.RootElement.GetProperty("id").GetString());
+            Assert.Equal("model", singleDoc.RootElement.GetProperty("object").GetString());
+            Assert.Equal("reference-rag", singleDoc.RootElement.GetProperty("owned_by").GetString());
+        }
+
+        // 2. 向量嵌入计算 (POST /v1/embeddings)
+        var embSw = Stopwatch.StartNew();
+        var embReq = new
+        {
+            input = new[] { "ReferenceRAG 混合检索架构", "两阶段重排精排能力" },
+            model = "mock-embedding"
+        };
+        var (embStatus, embBody) = await _fixture.DispatchAsync("POST", "/v1/embeddings", embReq);
+        embSw.Stop();
+
+        Assert.Equal(200, embStatus);
+        SmokePerformanceTracker.Record("OpenAI Compat: Embeddings", "BatchEmbeddingsLatency", embSw.Elapsed.TotalMilliseconds, 200.0, "2 texts batch encoded");
+        Assert.True(embSw.ElapsedMilliseconds <= 200, $"向量计算耗时 {embSw.ElapsedMilliseconds}ms 超出 200ms 门限");
+
+        using (var embDoc = JsonDocument.Parse(embBody))
+        {
+            var root = embDoc.RootElement;
+            Assert.Equal("list", root.GetProperty("object").GetString());
+            Assert.Equal("mock-embedding", root.GetProperty("model").GetString());
+
+            var items = root.GetProperty("data").EnumerateArray().ToList();
+            Assert.Equal(2, items.Count);
+            foreach (var item in items)
+            {
+                Assert.Equal("embedding", item.GetProperty("object").GetString());
+                var vec = item.GetProperty("embedding").EnumerateArray().Select(v => v.GetSingle()).ToArray();
+                Assert.Equal(384, vec.Length);
+            }
+
+            var usage = root.GetProperty("usage");
+            Assert.True(usage.GetProperty("total_tokens").GetInt32() > 0);
+        }
+
+        // 3. 重排精排评分 (POST /v1/rerank)
+        var rerankSw = Stopwatch.StartNew();
+        var rerankReq = new
+        {
+            query = "系统架构",
+            documents = new[] { "无关说明文本", "ReferenceRAG 系统架构核心规范", "普通配置文档" },
+            top_n = 2,
+            return_documents = true
+        };
+        var (rrStatus, rrBody) = await _fixture.DispatchAsync("POST", "/v1/rerank", rerankReq);
+        rerankSw.Stop();
+
+        Assert.Equal(200, rrStatus);
+        SmokePerformanceTracker.Record("OpenAI Compat: Rerank", "BatchRerankLatency", rerankSw.Elapsed.TotalMilliseconds, 150.0, "3 docs top_n=2 rerank");
+        Assert.True(rerankSw.ElapsedMilliseconds <= 150, $"重排评分耗时 {rerankSw.ElapsedMilliseconds}ms 超出 150ms 门限");
+
+        using (var rrDoc = JsonDocument.Parse(rrBody))
+        {
+            var root = rrDoc.RootElement;
+            Assert.Equal("list", root.GetProperty("object").GetString());
+            var results = root.GetProperty("results").EnumerateArray().ToList();
+            Assert.Equal(2, results.Count);
+
+            var first = results[0];
+            var second = results[1];
+            Assert.True(first.GetProperty("relevance_score").GetDouble() >= second.GetProperty("relevance_score").GetDouble());
+            Assert.Equal("ReferenceRAG 系统架构核心规范", first.GetProperty("document").GetString());
+        }
+
+        // 4. 直连对话非流式补全 (Mode A: Direct LLM 透传 POST /v1/chat/completions)
+        var directSw = Stopwatch.StartNew();
+        var directChatReq = new
+        {
+            model = "gpt-4o-mini",
+            stream = false,
+            messages = new[]
+            {
+                new { role = "user", content = "你好，请确认服务正常。" }
+            }
+        };
+        var (directStatus, directBody) = await _fixture.DispatchAsync("POST", "/v1/chat/completions", directChatReq);
+        directSw.Stop();
+
+        Assert.Equal(200, directStatus);
+        SmokePerformanceTracker.Record("OpenAI Compat: Chat", "DirectCompletionLatency", directSw.Elapsed.TotalMilliseconds, 300.0, "Direct LLM non-streaming");
+        Assert.True(directSw.ElapsedMilliseconds <= 300, $"直连对话补全耗时 {directSw.ElapsedMilliseconds}ms 超出 300ms 门限");
+
+        using (var directDoc = JsonDocument.Parse(directBody))
+        {
+            var root = directDoc.RootElement;
+            Assert.Equal("chat.completion", root.GetProperty("object").GetString());
+            Assert.Equal("gpt-4o-mini", root.GetProperty("model").GetString());
+
+            var choices = root.GetProperty("choices").EnumerateArray().ToList();
+            Assert.Single(choices);
+            Assert.Equal("assistant", choices[0].GetProperty("message").GetProperty("role").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(choices[0].GetProperty("message").GetProperty("content").GetString()));
+
+            var usage = root.GetProperty("usage");
+            Assert.True(usage.GetProperty("prompt_tokens").GetInt32() > 0);
+            Assert.True(usage.GetProperty("completion_tokens").GetInt32() > 0);
+            Assert.Equal(
+                usage.GetProperty("prompt_tokens").GetInt32() + usage.GetProperty("completion_tokens").GetInt32(),
+                usage.GetProperty("total_tokens").GetInt32());
+        }
+
+        // 5. 知识库增强非流式补全 (Mode B: RAG 增强生成 model="reference-rag")
+        // 本请求真实触发 SQLite FTS5 + 向量检索 + 提示词注入 + 上游补全全管道
+        var ragSw = Stopwatch.StartNew();
+        var ragChatReq = new
+        {
+            model = "reference-rag",
+            stream = false,
+            messages = new[]
+            {
+                new { role = "user", content = "ReferenceRAG 的核心架构和检索设计是什么？" }
+            }
+        };
+        var (ragStatus, ragBody) = await _fixture.DispatchAsync("POST", "/v1/chat/completions", ragChatReq);
+        ragSw.Stop();
+
+        Assert.Equal(200, ragStatus);
+        SmokePerformanceTracker.Record("OpenAI Compat: Chat", "RagCompletionLatency", ragSw.Elapsed.TotalMilliseconds, 500.0, "RAG Hybrid context injection + completion");
+        Assert.True(ragSw.ElapsedMilliseconds <= 500, $"RAG 对话补全耗时 {ragSw.ElapsedMilliseconds}ms 超出 500ms 门限");
+
+        using (var ragDoc = JsonDocument.Parse(ragBody))
+        {
+            var root = ragDoc.RootElement;
+            Assert.Equal("chat.completion", root.GetProperty("object").GetString());
+            Assert.Equal("reference-rag", root.GetProperty("model").GetString());
+
+            var choices = root.GetProperty("choices").EnumerateArray().ToList();
+            Assert.Single(choices);
+            Assert.Equal("assistant", choices[0].GetProperty("message").GetProperty("role").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(choices[0].GetProperty("message").GetProperty("content").GetString()));
+        }
+
+        // 6. 流式 Chat 补全测试 (SSE 协议 stream=true, model="reference-rag")
+        var streamSw = Stopwatch.StartNew();
+        var streamReq = new
+        {
+            model = "reference-rag",
+            stream = true,
+            messages = new[]
+            {
+                new { role = "user", content = "流式输出核心架构总结" }
+            }
+        };
+        var (streamStatus, streamBody) = await _fixture.DispatchAsync("POST", "/v1/chat/completions", streamReq);
+        streamSw.Stop();
+
+        Assert.Equal(200, streamStatus);
+        SmokePerformanceTracker.Record("OpenAI Compat: Chat", "RagStreamLatency", streamSw.Elapsed.TotalMilliseconds, 500.0, "RAG SSE streaming chunks + [DONE]");
+        Assert.True(streamSw.ElapsedMilliseconds <= 500, $"RAG 流式补全耗时 {streamSw.ElapsedMilliseconds}ms 超出 500ms 门限");
+
+        Assert.Contains("data: ", streamBody);
+        Assert.Contains("chat.completion.chunk", streamBody);
+        Assert.Contains("data: [DONE]", streamBody);
+
+        // 7. 边界异常与标准 OpenAI 错误协议校验
+        var errReq = new { messages = Array.Empty<object>() };
+        var (errStatus, errBody) = await _fixture.DispatchAsync("POST", "/v1/chat/completions", errReq);
+        Assert.Equal(400, errStatus);
+        using (var errDoc = JsonDocument.Parse(errBody))
+        {
+            var error = errDoc.RootElement.GetProperty("error");
+            Assert.Equal("invalid_request_error", error.GetProperty("type").GetString());
+            Assert.Contains("cannot be empty", error.GetProperty("message").GetString());
+        }
+
+        var (embErrStatus, _) = await _fixture.DispatchAsync("POST", "/v1/embeddings", new { model = "mock-embedding" });
+        Assert.Equal(400, embErrStatus);
+
+        var (rrErrStatus, _) = await _fixture.DispatchAsync("POST", "/v1/rerank", new { query = "test" });
+        Assert.Equal(400, rrErrStatus);
     }
 }

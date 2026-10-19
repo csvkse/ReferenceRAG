@@ -2,6 +2,28 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.16] - 2026-10-20
+
+### OpenAI 兼容 API 体系与全链路 E2E 冒烟测试
+- **OpenAI 兼容 Chat Completions 接口 (`POST /v1/chat/completions`)**：
+  - 双模式自适应：支持 Direct LLM 纯模型透传模式与本地知识库检索增强模式（`model: "reference-rag"`）。
+  - 流式 SSE 传输：支持标准 `text/event-stream` 增量 `chat.completion.chunk` 输出与 `data: [DONE]` 终结帧，支持客户端中途取消；流式结束自动附加 token usage 统计。
+  - 非流式 JSON 输出：严格遵循 OpenAI camelCase 规范，计算 `prompt_tokens`、`completion_tokens` 与 `total_tokens`。
+  - 标准错误协议：针对缺失消息、空消息或超限输入返回规范的 `invalid_request_error` JSON 响应。
+  - 核心设计与架构规范已收录于 `docs/openai-compatible-chat-completions-api-architecture-design.md`。
+- **统一模型发现接口 (`GET /v1/models` & `GET /v1/models/{modelId}`)**：
+  - 默认严格列出当前激活就绪的模型列表（`reference-rag`、激活的聊天模型、激活的嵌入模型、激活的重排模型）。
+  - 规范统一：所有激活模型的 `owned_by` 字段严格统一为 `"reference-rag"`，规避第三方客户端碎片化分组。
+  - 提供 `?include_all=true` 参数支持开发者枚举本地已下载模型。
+  - 消除与原嵌入模型控制器重复注册的路由冲突。
+- **模型管理与设置页面多后端协同演进**：
+  - 模型测试页面新增聊天模型相关标签与测试项；
+  - 设置页面支持多后端类型共存与本地聊天模型配置持久化；
+  - 适配与扩展 ONNX / GGUF 模型生命周期状态机与硬件加速策略。
+- **端对端真实宿主冒烟测试验收 (`TC_SMOKE_07`)**：
+  - 在 `E2ECoreSmokeTests` 中新增 `TC_SMOKE_07_OpenAICompatibility_EndToEnd_FullPipeline`，通过真实的 ASP.NET Core 进程内 HTTP 管道贯通验证模型发现、向量嵌入计算、重排评分、Direct 对话补全、RAG 知识注入补全与 SSE 流式生成。
+  - 22 项性能与耗时 SLA 指标 100% 达标，0 违规，全套 468 项 C# 测试与 23 项前端测试全部通过。
+
 ## [1.0.15] - 2026-10-20
 
 ### 双平台硬件加速架构与 CI/CD 全矩阵发布对齐
@@ -77,6 +99,7 @@
 - 支持本地 ONNX Embedding/Reranker、CUDA 加速及 OpenAI 兼容 API 模式。
 - 历史版本详情见 [Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+[1.0.16]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.16
 [1.0.15]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.15
 [1.0.14]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.14
 [1.0.13]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.13

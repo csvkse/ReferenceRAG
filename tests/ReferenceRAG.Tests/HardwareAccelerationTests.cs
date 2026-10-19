@@ -202,4 +202,126 @@ public class HardwareAccelerationTests
         Assert.Equal("NativeCuda", result.StrategyName);
         Assert.Equal("NativeCuda", autoStrategy.GetActiveStrategy().Name);
     }
+
+    [Fact]
+    public void HardwareAccelerationConfig_LegacyBridge_ShouldMapUseCudaCorrectly()
+    {
+        var config = new ReferenceRAG.Core.Models.EmbeddingConfig();
+        
+        // 初始默认 Backend = Auto (IsEnabled = true, UseCuda = true)
+        Assert.Equal(ReferenceRAG.Core.Models.AccelerationBackend.Auto, config.Acceleration.Backend);
+        Assert.True(config.UseCuda);
+
+        // 设置 UseCuda = false 应自动降级为 Cpu
+        config.UseCuda = false;
+        Assert.Equal(ReferenceRAG.Core.Models.AccelerationBackend.Cpu, config.Acceleration.Backend);
+        Assert.False(config.UseCuda);
+
+        // 设置 UseCuda = true 应自动升级为 Auto
+        config.UseCuda = true;
+        Assert.Equal(ReferenceRAG.Core.Models.AccelerationBackend.Auto, config.Acceleration.Backend);
+        Assert.True(config.UseCuda);
+
+        // 设置为 DirectML 时，UseCuda 表现为 true (IsEnabled)，但不会被 UseCuda=true 冲掉
+        config.Acceleration.Backend = ReferenceRAG.Core.Models.AccelerationBackend.DirectML;
+        Assert.True(config.UseCuda);
+        config.UseCuda = true;
+        Assert.Equal(ReferenceRAG.Core.Models.AccelerationBackend.DirectML, config.Acceleration.Backend);
+
+        // DeviceId 与 LibraryPath 桥接
+        config.CudaDeviceId = 2;
+        Assert.Equal(2, config.Acceleration.DeviceId);
+        config.CudaLibraryPath = @"C:\Cuda";
+        Assert.Equal(@"C:\Cuda", config.Acceleration.CustomLibraryPath);
+    }
+
+    [Fact]
+    public void HardwareAccelerationConfig_JsonDeserialization_OldFormat_ShouldMapCorrectly()
+    {
+        var legacyJson = @"{
+            ""UseCuda"": false,
+            ""CudaDeviceId"": 3,
+            ""CudaLibraryPath"": ""/opt/cuda""
+        }";
+
+        var config = System.Text.Json.JsonSerializer.Deserialize<ReferenceRAG.Core.Models.EmbeddingConfig>(legacyJson);
+        Assert.NotNull(config);
+        Assert.Equal(ReferenceRAG.Core.Models.AccelerationBackend.Cpu, config.Acceleration.Backend);
+        Assert.False(config.UseCuda);
+        Assert.Equal(3, config.Acceleration.DeviceId);
+        Assert.Equal("/opt/cuda", config.Acceleration.CustomLibraryPath);
+    }
+
+    [Fact]
+    public void HardwareAccelerationConfig_JsonDeserialization_NewFormat_ShouldMapCorrectly()
+    {
+        var newJson = @"{
+            ""Acceleration"": {
+                ""Backend"": ""DirectML"",
+                ""DeviceId"": 1,
+                ""CustomLibraryPath"": ""C:\\DirectML"",
+                ""FallbackToCpuOnFailure"": true
+            }
+        }";
+
+        var config = System.Text.Json.JsonSerializer.Deserialize<ReferenceRAG.Core.Models.EmbeddingConfig>(newJson);
+        Assert.NotNull(config);
+        Assert.Equal(ReferenceRAG.Core.Models.AccelerationBackend.DirectML, config.Acceleration.Backend);
+        Assert.True(config.UseCuda);
+        Assert.Equal(1, config.Acceleration.DeviceId);
+        Assert.Equal(@"C:\DirectML", config.Acceleration.CustomLibraryPath);
+    }
+
+    [Fact]
+    public void MultiBackendProfiles_EmbeddingAndRerank_ShouldIsolateModelNamesWithoutOverwrite()
+    {
+        var config = new ReferenceRAG.Core.Models.EmbeddingConfig();
+        config.LocalOnnx.ModelName = "bge-small-zh-v1.5";
+        config.OpenAiApi.ModelName = "text-embedding-3-small";
+        config.OpenAiApi.BaseUrl = "https://api.openai.com/v1";
+
+        // ActiveBackend 默认为 LocalOnnx
+        Assert.Equal("LocalOnnx", config.ActiveBackend);
+        Assert.Equal("bge-small-zh-v1.5", config.ModelName);
+        Assert.Equal("onnx", config.Mode);
+
+        // 切换到 OpenAiApi
+        config.ActiveBackend = "OpenAiApi";
+        Assert.Equal("text-embedding-3-small", config.ModelName);
+        Assert.Equal("openai", config.Mode);
+        Assert.Equal("https://api.openai.com/v1", config.ApiBaseUrl);
+
+        // 切回 LocalOnnx，本地模型名称依然保持原样，未被破坏性覆盖！
+        config.ActiveBackend = "LocalOnnx";
+        Assert.Equal("bge-small-zh-v1.5", config.ModelName);
+        Assert.Equal("text-embedding-3-small", config.OpenAiApi.ModelName);
+
+        // 重排同样测试隔离
+        var rerank = new ReferenceRAG.Core.Models.RerankConfig();
+        rerank.LocalOnnx.ModelName = "bge-reranker-base";
+        rerank.OpenAiApi.ModelName = "jina-reranker-v2";
+
+        rerank.ActiveBackend = "LocalOnnx";
+        Assert.Equal("bge-reranker-base", rerank.ModelName);
+        rerank.ActiveBackend = "OpenAiApi";
+        Assert.Equal("jina-reranker-v2", rerank.ModelName);
+        rerank.ActiveBackend = "LocalOnnx";
+        Assert.Equal("bge-reranker-base", rerank.ModelName);
+    }
+
+    [Fact]
+    public void MultiBackendProfiles_ChatConfig_ShouldMapProfilesAndBridgeProperly()
+    {
+        var chat = new ReferenceRAG.Core.Models.ChatModelConfig();
+        chat.LocalGguf.ModelName = "Qwen2.5-7B-Instruct-GGUF";
+        chat.OpenAiApi.Model = "gpt-4o-mini";
+        chat.OpenAiApi.Endpoint = "https://api.deepseek.com/v1";
+
+        chat.ActiveBackend = "OpenAiApi";
+        Assert.Equal("gpt-4o-mini", chat.Model);
+        Assert.Equal("https://api.deepseek.com/v1", chat.Endpoint);
+
+        chat.ActiveBackend = "LocalGguf";
+        Assert.Equal("Qwen2.5-7B-Instruct-GGUF", chat.Model);
+    }
 }

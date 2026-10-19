@@ -220,6 +220,64 @@ public class ConfigManagerTests : IDisposable
         Assert.StartsWith("/data/", loaded.DataPath);
     }
 
+    [Fact]
+    public void EmbeddingConfig_MultiBackendIsolatedProfiles_DoNotOverwriteEachOther()
+    {
+        var config = new ObsidianRagConfig();
+        config.Embedding.LocalOnnx.ModelName = "bge-small-zh-v1.5";
+        config.Embedding.LocalOnnx.ModelPath = "models/Embedding/bge-small-zh-v1.5/model.onnx";
+        config.Embedding.OpenAiApi.ModelName = "text-embedding-3-small";
+        config.Embedding.OpenAiApi.BaseUrl = "https://api.openai.com/v1";
+
+        // Active mode: local ONNX
+        config.Embedding.Mode = "onnx";
+        Assert.Equal("bge-small-zh-v1.5", config.Embedding.ModelName);
+
+        // Switch active mode to openai
+        config.Embedding.Mode = "openai";
+        Assert.Equal("text-embedding-3-small", config.Embedding.ModelName);
+        Assert.Equal("https://api.openai.com/v1", config.Embedding.ApiBaseUrl);
+
+        // Modifying API modelName does not affect localOnnx
+        config.Embedding.ModelName = "bge-m3-remote";
+        Assert.Equal("bge-m3-remote", config.Embedding.OpenAiApi.ModelName);
+        Assert.Equal("bge-small-zh-v1.5", config.Embedding.LocalOnnx.ModelName);
+    }
+
+    [Fact]
+    public void RerankConfig_MultiBackendIsolatedProfiles_DoNotOverwriteEachOther()
+    {
+        var config = new ObsidianRagConfig();
+        config.Rerank.LocalOnnx.ModelName = "bge-reranker-base";
+        config.Rerank.LocalOnnx.ModelPath = "models/Rerank/bge-reranker-base/model.onnx";
+        config.Rerank.OpenAiApi.ModelName = "jina-reranker-v2";
+
+        // Active mode: local
+        config.Rerank.Mode = "onnx";
+        Assert.Equal("bge-reranker-base", config.Rerank.ModelName);
+
+        // Switch to api
+        config.Rerank.Mode = "openai";
+        Assert.Equal("jina-reranker-v2", config.Rerank.ModelName);
+
+        // Updating API model does not corrupt local
+        config.Rerank.ModelName = "cohere-rerank-v3";
+        Assert.Equal("cohere-rerank-v3", config.Rerank.OpenAiApi.ModelName);
+        Assert.Equal("bge-reranker-base", config.Rerank.LocalOnnx.ModelName);
+    }
+
+    [Fact]
+    public void ChatModelConfig_Initialization_And_Properties()
+    {
+        var config = new ObsidianRagConfig();
+        Assert.NotNull(config.Chat);
+        Assert.Equal("OpenAiApi", config.Chat.ActiveBackend);
+        Assert.NotNull(config.Chat.LocalGguf);
+        Assert.NotNull(config.Chat.LocalOnnxGenAi);
+        Assert.NotNull(config.Chat.OpenAiApi);
+        Assert.Equal("Qwen2.5-7B-Instruct-GGUF", config.Chat.LocalGguf.ModelName);
+    }
+
     public void Dispose()
     {
         try { Directory.SetCurrentDirectory(_originalDir); } catch { }

@@ -56,12 +56,14 @@ public class ModelsController : ControllerBase
             // 返回扫描后的模型列表
             var embeddingModels = await _modelManager.GetAvailableModelsAsync("embedding");
             var rerankModels = await _modelManager.GetAvailableModelsAsync("reranker");
+            var chatModels = await _modelManager.GetAvailableModelsAsync("chat");
 
             return Ok(new
             {
                 message = "模型扫描完成",
                 embeddingModels,
-                rerankModels
+                rerankModels,
+                chatModels
             });
         }
         catch (Exception ex)
@@ -143,10 +145,36 @@ public class ModelsController : ControllerBase
             };
         }
 
+        var currentChatModel = _modelManager.GetCurrentChatModel();
+        SingleModelStatusResponse? chatStatus = null;
+        if (currentChatModel != null)
+        {
+            var activeVariant = currentChatModel.InstalledVariants.FirstOrDefault(v => v.IsActive) ?? currentChatModel.InstalledVariants.FirstOrDefault();
+            chatStatus = new SingleModelStatusResponse
+            {
+                ModelName = currentChatModel.Name,
+                DisplayName = currentChatModel.DisplayName,
+                ActiveVariant = currentChatModel.ActiveVariantFileName ?? (currentChatModel.LocalPath != null ? Path.GetFileName(currentChatModel.LocalPath) : null),
+                ActiveVariantPath = currentChatModel.LocalPath,
+                State = 2,
+                StateName = "Ready",
+                StateDescription = "就绪",
+                IsReady = true,
+                IsGpuMode = cfg.Chat?.LocalGguf?.GpuLayers > 0,
+                ExecutionDevice = (cfg.Chat?.LocalGguf?.GpuLayers > 0) ? "GPU" : "CPU",
+                Quantization = activeVariant?.Quantization,
+                ModelFormat = activeVariant?.Format ?? "gguf",
+                Dimension = currentChatModel.Dimension,
+                MaxSequenceLength = currentChatModel.MaxSequenceLength,
+                InstalledVariants = currentChatModel.InstalledVariants
+            };
+        }
+
         return Ok(new ModelsRuntimeStatusResponse
         {
             Embedding = embStatus,
-            Rerank = rerankStatus
+            Rerank = rerankStatus,
+            Chat = chatStatus
         });
     }
 
@@ -175,7 +203,11 @@ public class ModelsController : ControllerBase
             }
 
             var cfg = _configManager.Load();
-            if (request.IsRerank)
+            if (request.ModelType == "chat" || (!request.IsRerank && _modelManager.GetChatModels().Any(m => m.Name == request.ModelName)))
+            {
+                // Chat 模型变体切换（配置和激活变体已由 _modelManager 更新，事件已触发）
+            }
+            else if (request.IsRerank)
             {
                 if (_rerankService != null)
                 {
@@ -1130,6 +1162,139 @@ public async Task<ActionResult<ModelDownloadOptions>> GetRerankDownloadOptions(s
     var options = await _modelManager.GetDownloadOptionsAsync(modelName, cancellationToken);
     return Ok(options);
 }
+
+    // ==================== 聊天模型管理 API ====================
+
+    /// <summary>
+    /// 获取所有聊天模型列表
+    /// </summary>
+    [HttpGet("chat")]
+    public async Task<ActionResult<List<ModelInfo>>> GetChatModels()
+    {
+        var models = await _modelManager.GetAvailableModelsAsync("chat");
+        return Ok(models);
+    }
+
+    /// <summary>
+    /// 获取已下载的聊天模型列表
+    /// </summary>
+    [HttpGet("chat/downloaded")]
+    public ActionResult<List<ModelInfo>> GetDownloadedChatModels()
+    {
+        var models = _modelManager.GetDownloadedChatModels();
+        return Ok(models);
+    }
+
+    /// <summary>
+    /// 获取当前聊天模型
+    /// </summary>
+    [HttpGet("chat/current")]
+    public ActionResult<ModelInfo?> GetCurrentChatModel()
+    {
+        var model = _modelManager.GetCurrentChatModel();
+        return Ok(model);
+    }
+
+    /// <summary>
+    /// 切换聊天模型
+    /// </summary>
+    [HttpPost("chat/switch")]
+    public async Task<ActionResult> SwitchChatModel([FromBody] SwitchModelRequest request)
+    {
+        if (string.IsNullOrEmpty(request.ModelName))
+        {
+            return BadRequest(new { error = "模型名称不能为空" });
+        }
+
+        var models = _modelManager.GetChatModels();
+        var model = models.FirstOrDefault(m => m.Name == request.ModelName);
+
+        if (model == null)
+        {
+            return NotFound(new { error = $"聊天模型不存在: {request.ModelName}" });
+        }
+
+        if (!model.IsDownloaded)
+        {
+            return BadRequest(new { error = $"聊天模型尚未下载: {request.ModelName}", needDownload = true });
+        }
+
+        _logger.LogInformation("开始切换聊天模型: {ModelName}", request.ModelName);
+
+        var success = await _modelManager.SwitchChatModelAsync(request.ModelName);
+
+        if (!success)
+        {
+            _logger.LogError("聊天模型切换失败: {ModelName}", request.ModelName);
+            return StatusCode(500, new { error = "聊天模型切换失败" });
+        }
+
+        _logger.LogInformation("聊天模型切换成功: {ModelName}", request.ModelName);
+        return Ok(new
+        {
+            message = $"已切换到聊天模型: {model.DisplayName}",
+            model
+        });
+    }
+
+    /// <summary>
+    /// 下载聊天模型
+    /// </summary>
+    [HttpPost("chat/download/{modelName}")]
+    public async Task<ActionResult> DownloadChatModel(string modelName, [FromBody] DownloadModelRequest? request = null)
+    {
+        return await DownloadModel(modelName, request);
+    }
+
+    /// <summary>
+    /// 获取聊天模型下载进度
+    /// </summary>
+    [HttpGet("chat/download/{modelName}/progress")]
+    public ActionResult<DownloadProgress> GetChatDownloadProgress(string modelName)
+    {
+        return GetDownloadProgress(modelName);
+    }
+
+    /// <summary>
+    /// 取消聊天模型下载
+    /// </summary>
+    [HttpDelete("chat/download/{modelName}")]
+    public ActionResult CancelChatDownload(string modelName)
+    {
+        return CancelDownload(modelName);
+    }
+
+    /// <summary>
+    /// 获取聊天模型下载选项
+    /// </summary>
+    [HttpGet("chat/download-options/{modelName}")]
+    public async Task<ActionResult<ModelDownloadOptions>> GetChatDownloadOptions(string modelName, CancellationToken cancellationToken = default)
+    {
+        var options = await _modelManager.GetDownloadOptionsAsync(modelName, cancellationToken);
+        return Ok(options);
+    }
+
+    /// <summary>
+    /// 删除聊天模型
+    /// </summary>
+    [HttpDelete("chat/{modelName}")]
+    public async Task<ActionResult> DeleteChatModel(string modelName)
+    {
+        var config = _configManager.Load();
+        if (config.Chat?.Model == modelName)
+        {
+            return BadRequest(new { error = "无法删除当前正在使用的聊天模型" });
+        }
+
+        var success = await _modelManager.DeleteModelAsync(modelName);
+        if (success)
+        {
+            _downloadProgress.TryRemove(modelName, out _);
+            return Ok(new { message = "聊天模型已删除" });
+        }
+
+        return NotFound(new { error = "聊天模型不存在或删除失败" });
+    }
 }
 
 /// <summary>
@@ -1204,12 +1369,13 @@ public class ActiveDownloadItem
 }
 
 /// <summary>
-/// 模型运行时双模型协同状态快照
+/// 模型运行时多模型协同状态快照
 /// </summary>
 public class ModelsRuntimeStatusResponse
 {
     public SingleModelStatusResponse? Embedding { get; set; }
     public SingleModelStatusResponse? Rerank { get; set; }
+    public SingleModelStatusResponse? Chat { get; set; }
 }
 
 /// <summary>
@@ -1249,5 +1415,6 @@ public class SwitchVariantRequest
     public string ModelName { get; set; } = string.Empty;
     public string VariantFileName { get; set; } = string.Empty;
     public bool IsRerank { get; set; }
+    public string? ModelType { get; set; }
 }
 

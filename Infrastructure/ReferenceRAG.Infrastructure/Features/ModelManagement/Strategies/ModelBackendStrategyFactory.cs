@@ -62,7 +62,7 @@ public sealed class GgufBackendStrategy : IBackendResolutionStrategy
         // 结合 GPU 环境与模型大小动态计算最优 GPU Offload 层数
         var offloadPlan = _offloadCalculator.CalculateOffload(
             resolvedPath,
-            useGpu: config.UseCuda,
+            useGpu: config.Acceleration.IsEnabled,
             contextLength: contextSize);
 
         _logger.LogInformation("[GgufStrategy] 嵌入模型 GGUF 动态 Offload 规划: {Rationale}", offloadPlan.Rationale);
@@ -90,7 +90,7 @@ public sealed class GgufBackendStrategy : IBackendResolutionStrategy
         // 结合 GPU 环境与模型大小动态计算最优 GPU Offload 层数
         var offloadPlan = _offloadCalculator.CalculateOffload(
             resolvedPath,
-            useGpu: config.UseCuda,
+            useGpu: config.Acceleration.IsEnabled,
             contextLength: 4096);
 
         _logger.LogInformation("[GgufStrategy] 重排模型 GGUF 动态 Offload 规划: {Rationale}", offloadPlan.Rationale);
@@ -118,8 +118,7 @@ public sealed class GgufBackendStrategy : IBackendResolutionStrategy
                     {
                         ModelPath = onnxCandidate,
                         ModelName = modelName,
-                        UseCuda = config.UseCuda,
-                        CudaDeviceId = config.CudaDeviceId
+                        Acceleration = config.Acceleration
                     };
                     var onnxAdapter = new OnnxRerankAdapter(onnxOptions, memoryManager);
                     try
@@ -219,9 +218,7 @@ public sealed class OnnxBackendStrategy : IBackendResolutionStrategy
             ModelName = modelName,
             MaxSequenceLength = config.MaxSequenceLength,
             BatchSize = config.BatchSize,
-            UseCuda = config.UseCuda,
-            CudaDeviceId = config.CudaDeviceId,
-            CudaLibraryPath = config.CudaLibraryPath
+            Acceleration = config.Acceleration
         };
 
         var adapter = new OnnxEmbeddingAdapter(options, memoryManager);
@@ -242,8 +239,7 @@ public sealed class OnnxBackendStrategy : IBackendResolutionStrategy
         {
             ModelPath = resolvedPath,
             ModelName = modelName,
-            UseCuda = config.UseCuda,
-            CudaDeviceId = config.CudaDeviceId
+            Acceleration = config.Acceleration
         };
 
         var adapter = new OnnxRerankAdapter(options, memoryManager);

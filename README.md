@@ -324,6 +324,8 @@ CUDA/cuDNN 的 DLL 不在系统 PATH 时，用 `ReferenceRAG:embedding:cudaLibra
 
 ## API 与使用文档
 
+- **系统架构与项目结构全景：** [docs/project-structure-and-system-architecture-overview.md](docs/project-structure-and-system-architecture-overview.md)
+- **OpenAI 兼容 API 架构设计规范：** [docs/openai-compatible-chat-completions-api-architecture-design.md](docs/openai-compatible-chat-completions-api-architecture-design.md)
 - **Swagger：** `http://localhost:7897/swagger`
 - **Skill 文档：** [skill/ReferenceRAG/SKILL.md](support/skill/ReferenceRAG/SKILL.md)
 - **桌面端构建脚本指南：** [docs/cmd/build-desktop-batch-guide.md](docs/cmd/build-desktop-batch-guide.md)
@@ -333,9 +335,16 @@ CUDA/cuDNN 的 DLL 不在系统 PATH 时，用 `ReferenceRAG:embedding:cudaLibra
 
 ## 版本与改动历史
 
-当前稳定版本为 [v1.0.15](https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.15)。版本级改动和升级提示见 [CHANGELOG.md](CHANGELOG.md)。
+当前稳定版本为 [v1.0.16](https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.16)。版本级改动和升级提示见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 近期重点演进摘要
+
+#### OpenAI 兼容 API 体系与全链路 E2E 冒烟测试（v1.0.16）
+- **feat:** 新增标准化 OpenAI 兼容 API 体系（`POST /v1/chat/completions`、`GET /v1/models`、`POST /v1/embeddings`、`POST /v1/rerank`），无缝接入 Obsidian Copilot、Cherry Studio、NextChat、Chatbox、Cursor 等第三方客户端生态
+- **feat:** 支持 Direct LLM 直连透传与 `model: "reference-rag"` 知识库混合检索双模式自适应，支持 SSE 流式与非流式输出及精准 Token 统计
+- **feat:** 统一模型列表发现，规范 `owned_by: "reference-rag"`，支持 `?include_all=true` 探测本地已下载模型
+- **feat:** 模型测试与设置页面支持本地聊天模型管理与多后端类型配置持久化
+- **test:** 落地端对端真实宿主冒烟测试套件（`TC_SMOKE_07`），通过真实 HTTP 管道全面验收 7 大核心场景，22 项 SLA 性能指标 100% 达标
 
 #### 双平台硬件加速架构与 CI/CD 全矩阵发布对齐（v1.0.15）
 - **feat:** 落地 Windows & Linux 双平台双引擎（ONNX & GGUF）混合部署架构，提供 Windows 通用版（DirectML+Vulkan）、NVIDIA 专属满血版（CUDA 12 原生+绿色微型库+平滑降级）、Linux 原生容器与 Mesa Vulkan 免配直连加速

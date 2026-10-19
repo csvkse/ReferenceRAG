@@ -135,4 +135,106 @@ public static class OnnxExecutionProviderHelper
             sessionOptions.AppendExecutionProvider_CPU();
         }
     }
+
+    /// <summary>
+    /// 根据硬件加速配置装配 ONNX Runtime 会话执行提供者
+    /// </summary>
+    public static void ConfigureHardwareAcceleration(
+        SessionOptions sessionOptions,
+        ReferenceRAG.Core.Models.HardwareAccelerationConfig? config,
+        ILogger? logger = null)
+    {
+        sessionOptions.EnableMemoryPattern = false;
+
+        var backend = config?.Backend ?? ReferenceRAG.Core.Models.AccelerationBackend.Auto;
+        var deviceId = config?.DeviceId ?? 0;
+        var fallbackToCpu = config?.FallbackToCpuOnFailure ?? true;
+
+        switch (backend)
+        {
+            case ReferenceRAG.Core.Models.AccelerationBackend.Cpu:
+                sessionOptions.AppendExecutionProvider_CPU();
+                logger?.LogInformation("已配置纯 CPU 确定性推理执行提供者");
+                break;
+
+            case ReferenceRAG.Core.Models.AccelerationBackend.Cuda:
+                if (TryAppendCuda(sessionOptions, deviceId))
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    logger?.LogInformation("使用 NVIDIA CUDA GPU 硬件加速 (设备: {DeviceId})", deviceId);
+                }
+                else if (fallbackToCpu)
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    logger?.LogWarning("CUDA 执行提供者不可用，已自动平滑降级至 CPU (设备: {DeviceId})", deviceId);
+                }
+                else
+                {
+                    throw new InvalidOperationException($"无法挂载 CUDA 执行提供者 (设备: {deviceId}) 且已关闭 CPU 降级");
+                }
+                break;
+
+            case ReferenceRAG.Core.Models.AccelerationBackend.DirectML:
+                if (TryAppendDirectMl(sessionOptions, deviceId))
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    logger?.LogInformation("使用 DirectML 跨平台硬件加速 (设备: {DeviceId})", deviceId);
+                }
+                else if (fallbackToCpu)
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    logger?.LogWarning("DirectML 执行提供者不可用，已自动平滑降级至 CPU (设备: {DeviceId})", deviceId);
+                }
+                else
+                {
+                    throw new InvalidOperationException($"无法挂载 DirectML 执行提供者 (设备: {deviceId}) 且已关闭 CPU 降级");
+                }
+                break;
+
+            case ReferenceRAG.Core.Models.AccelerationBackend.OpenVino:
+                if (TryAppendOpenVino(sessionOptions, "GPU"))
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    logger?.LogInformation("使用 OpenVINO 硬件加速 (GPU)");
+                }
+                else if (fallbackToCpu)
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    logger?.LogWarning("OpenVINO 执行提供者不可用，已自动平滑降级至 CPU");
+                }
+                else
+                {
+                    throw new InvalidOperationException("无法挂载 OpenVINO 执行提供者 且已关闭 CPU 降级");
+                }
+                break;
+
+            case ReferenceRAG.Core.Models.AccelerationBackend.Auto:
+            default:
+                // 自动感知协商策略：依次尝试 CUDA -> DirectML -> OpenVINO -> CPU
+                if (TryAppendCuda(sessionOptions, deviceId))
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    logger?.LogInformation("自适应协商成功：挂载 CUDA 硬件加速 (设备: {DeviceId})", deviceId);
+                    return;
+                }
+
+                if (TryAppendDirectMl(sessionOptions, deviceId))
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    logger?.LogInformation("自适应协商成功：挂载 DirectML 跨平台硬件加速 (设备: {DeviceId})", deviceId);
+                    return;
+                }
+
+                if (TryAppendOpenVino(sessionOptions, "GPU"))
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    logger?.LogInformation("自适应协商成功：挂载 OpenVINO 硬件加速 (GPU)");
+                    return;
+                }
+
+                logger?.LogInformation("自适应协商就绪：未探测到原生 GPU 执行提供者，使用 CPU 多核计算");
+                sessionOptions.AppendExecutionProvider_CPU();
+                break;
+        }
+    }
 }

@@ -69,6 +69,11 @@ public class ObsidianRagConfig
     /// 仅在最小化到托盘时才启用滑动过期（窗口打开使用期间保持常驻）
     /// </summary>
     public bool UnloadOnlyWhenMinimizedToTray { get; set; } = true;
+
+    /// <summary>
+    /// 聊天对话模型配置
+    /// </summary>
+    public ChatModelConfig Chat { get; set; } = new();
 }
 
 /// <summary>
@@ -178,69 +183,275 @@ public enum SourceType
 }
 
 /// <summary>
+/// 硬件加速后端方案
+/// </summary>
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+public enum AccelerationBackend
+{
+    /// <summary>自动感知协商（智能推荐，平滑降级）</summary>
+    Auto = 0,
+    /// <summary>NVIDIA CUDA 专有硬件加速</summary>
+    Cuda = 1,
+    /// <summary>通用 DirectML 跨平台算力 (AMD/Intel/Windows)</summary>
+    DirectML = 2,
+    /// <summary>通用 Vulkan 跨平台算力 (GGUF/llama.cpp)</summary>
+    Vulkan = 3,
+    /// <summary>AMD ROCm / HIP</summary>
+    Rocm = 4,
+    /// <summary>Intel OpenVINO / Level Zero</summary>
+    OpenVino = 5,
+    /// <summary>纯 CPU 运算</summary>
+    Cpu = 6
+}
+
+/// <summary>
+/// 硬件加速配置
+/// </summary>
+public class HardwareAccelerationConfig
+{
+    /// <summary>
+    /// 加速后端方案（默认 Auto 自动感知协商）
+    /// </summary>
+    public AccelerationBackend Backend { get; set; } = AccelerationBackend.Auto;
+
+    /// <summary>
+    /// 设备 ID (0-based)
+    /// </summary>
+    public int DeviceId { get; set; } = 0;
+
+    /// <summary>
+    /// 自定义库搜索路径（可选）
+    /// </summary>
+    public string? CustomLibraryPath { get; set; }
+
+    /// <summary>
+    /// 发生异常时是否自动平滑回退至 CPU
+    /// </summary>
+    public bool FallbackToCpuOnFailure { get; set; } = true;
+
+    /// <summary>
+    /// 是否请求启用硬件加速（非纯 CPU）
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsEnabled => Backend != AccelerationBackend.Cpu;
+}
+
+/// <summary>
+/// 本地 ONNX 向量嵌入 Profile
+/// </summary>
+public class LocalOnnxEmbeddingProfile
+{
+    public string ModelPath { get; set; } = "";
+    public string ModelName { get; set; } = "bge-small-zh-v1.5";
+    public HardwareAccelerationConfig Acceleration { get; set; } = new();
+    public int MaxSequenceLength { get; set; } = 512;
+    public int BatchSize { get; set; } = 32;
+}
+
+/// <summary>
+/// 本地 GGUF 向量嵌入 Profile
+/// </summary>
+public class LocalGgufEmbeddingProfile
+{
+    public string ModelPath { get; set; } = "";
+    public string ModelName { get; set; } = "bge-m3-gguf";
+    public HardwareAccelerationConfig Acceleration { get; set; } = new();
+    public int GpuLayers { get; set; } = 33;
+    public int MaxSequenceLength { get; set; } = 512;
+}
+
+/// <summary>
+/// OpenAI 兼容 API 向量嵌入 Profile
+/// </summary>
+public class OpenAiApiEmbeddingProfile
+{
+    public string? BaseUrl { get; set; }
+    public string? ApiKey { get; set; }
+    public string ModelName { get; set; } = "bge-m3";
+    public int? Dimension { get; set; }
+    public int? MaxInputTokens { get; set; } = 512;
+}
+
+/// <summary>
 /// 向量模型配置
 /// </summary>
 public class EmbeddingConfig
 {
-    /// <summary>
-    /// 模型路径
-    /// </summary>
-    public string ModelPath { get; set; } = "";
+    /// <summary>当前激活后端方案：LocalOnnx | LocalGguf | OpenAiApi</summary>
+    public string ActiveBackend { get; set; } = "LocalOnnx";
 
-    /// <summary>
-    /// 模型名称
-    /// </summary>
-    public string ModelName { get; set; } = "bge-small-zh-v1.5";
+    public LocalOnnxEmbeddingProfile LocalOnnx { get; set; } = new();
+    public LocalGgufEmbeddingProfile LocalGguf { get; set; } = new();
+    public OpenAiApiEmbeddingProfile OpenAiApi { get; set; } = new();
 
-    /// <summary>
-    /// 是否使用 CUDA
-    /// </summary>
-    public bool UseCuda { get; set; } = false;
+    private string _modelPath = "";
+    private string _modelName = "bge-small-zh-v1.5";
+    private HardwareAccelerationConfig _acceleration = new();
+    private int _maxSequenceLength = 512;
+    private int _batchSize = 32;
+    private string _mode = "onnx";
+    private string? _apiBaseUrl;
+    private string? _apiKey;
+    private int? _apiDimension;
+    private int? _apiMaxInputTokens = 512;
 
-    /// <summary>
-    /// CUDA 设备 ID
-    /// </summary>
-    public int CudaDeviceId { get; set; } = 0;
+    /// <summary>模型路径</summary>
+    public string ModelPath
+    {
+        get => !string.IsNullOrEmpty(LocalOnnx?.ModelPath) ? LocalOnnx.ModelPath : _modelPath;
+        set
+        {
+            _modelPath = value;
+            if (LocalOnnx != null) LocalOnnx.ModelPath = value;
+        }
+    }
 
-    /// <summary>
-    /// CUDA 库路径（可选，用于指定 CUDA DLL 所在目录）
-    /// </summary>
-    public string? CudaLibraryPath { get; set; }
+    /// <summary>模型名称</summary>
+    public string ModelName
+    {
+        get
+        {
+            if (ActiveBackend == "OpenAiApi" && !string.IsNullOrEmpty(OpenAiApi?.ModelName))
+                return OpenAiApi.ModelName;
+            if (ActiveBackend == "LocalGguf" && !string.IsNullOrEmpty(LocalGguf?.ModelName))
+                return LocalGguf.ModelName;
+            if (!string.IsNullOrEmpty(LocalOnnx?.ModelName))
+                return LocalOnnx.ModelName;
+            return _modelName;
+        }
+        set
+        {
+            _modelName = value;
+            if (ActiveBackend == "OpenAiApi" && OpenAiApi != null) OpenAiApi.ModelName = value;
+            else if (ActiveBackend == "LocalGguf" && LocalGguf != null) LocalGguf.ModelName = value;
+            else if (LocalOnnx != null) LocalOnnx.ModelName = value;
+        }
+    }
 
-    /// <summary>
-    /// 最大序列长度
-    /// </summary>
-    public int MaxSequenceLength { get; set; } = 512;
+    /// <summary>统一硬件加速配置</summary>
+    public HardwareAccelerationConfig Acceleration
+    {
+        get => LocalOnnx?.Acceleration ?? _acceleration;
+        set
+        {
+            _acceleration = value ?? new HardwareAccelerationConfig();
+            if (LocalOnnx != null) LocalOnnx.Acceleration = _acceleration;
+            if (LocalGguf != null) LocalGguf.Acceleration = _acceleration;
+        }
+    }
 
-    /// <summary>
-    /// 批处理大小（RTX 4060 推荐 64-128）
-    /// </summary>
-    public int BatchSize { get; set; } = 32;
+    [Obsolete("请使用 Acceleration.Backend 配置硬件加速")]
+    public bool UseCuda
+    {
+        get => Acceleration.IsEnabled;
+        set
+        {
+            if (!value) Acceleration.Backend = AccelerationBackend.Cpu;
+            else if (Acceleration.Backend == AccelerationBackend.Cpu) Acceleration.Backend = AccelerationBackend.Auto;
+        }
+    }
 
-    // ── OpenAI 兼容 API 模式 ──
+    [Obsolete("请使用 Acceleration.DeviceId")]
+    public int CudaDeviceId
+    {
+        get => Acceleration.DeviceId;
+        set => Acceleration.DeviceId = value;
+    }
+
+    [Obsolete("请使用 Acceleration.CustomLibraryPath")]
+    public string? CudaLibraryPath
+    {
+        get => Acceleration.CustomLibraryPath;
+        set => Acceleration.CustomLibraryPath = value;
+    }
+
+    /// <summary>最大序列长度</summary>
+    public int MaxSequenceLength
+    {
+        get => LocalOnnx?.MaxSequenceLength ?? _maxSequenceLength;
+        set
+        {
+            _maxSequenceLength = value;
+            if (LocalOnnx != null) LocalOnnx.MaxSequenceLength = value;
+        }
+    }
+
+    /// <summary>批处理大小</summary>
+    public int BatchSize
+    {
+        get => LocalOnnx?.BatchSize ?? _batchSize;
+        set
+        {
+            _batchSize = value;
+            if (LocalOnnx != null) LocalOnnx.BatchSize = value;
+        }
+    }
 
     /// <summary>推理模式：onnx（本地）| openai（兼容 API）</summary>
-    public string Mode { get; set; } = "onnx";
+    public string Mode
+    {
+        get => ActiveBackend == "OpenAiApi" ? "openai" : "onnx";
+        set
+        {
+            _mode = value;
+            if (string.Equals(value, "openai", StringComparison.OrdinalIgnoreCase))
+            {
+                ActiveBackend = "OpenAiApi";
+            }
+            else if (string.Equals(value, "llama", StringComparison.OrdinalIgnoreCase) || string.Equals(value, "gguf", StringComparison.OrdinalIgnoreCase))
+            {
+                ActiveBackend = "LocalGguf";
+            }
+            else
+            {
+                ActiveBackend = "LocalOnnx";
+            }
+        }
+    }
 
-    /// <summary>
-    /// API 基础地址，必须包含 /v1（代码只在其后追加端点路径）。
-    /// 例如 http://localhost:11434/v1。
-    /// 漏掉 /v1 会打到服务端的非 OpenAI 兼容端点（如 llama.cpp 的 /embeddings），
-    /// 其响应结构与 OpenAI 规范不同，会导致解析失败。
-    /// </summary>
-    public string? ApiBaseUrl { get; set; }
+    /// <summary>API 基础地址</summary>
+    public string? ApiBaseUrl
+    {
+        get => OpenAiApi?.BaseUrl ?? _apiBaseUrl;
+        set
+        {
+            _apiBaseUrl = value;
+            if (OpenAiApi != null) OpenAiApi.BaseUrl = value;
+        }
+    }
 
-    /// <summary>API Key（留空则不发送 Authorization 头）</summary>
-    public string? ApiKey { get; set; }
+    /// <summary>API Key</summary>
+    public string? ApiKey
+    {
+        get => OpenAiApi?.ApiKey ?? _apiKey;
+        set
+        {
+            _apiKey = value;
+            if (OpenAiApi != null) OpenAiApi.ApiKey = value;
+        }
+    }
 
-    /// <summary>API 模式的向量维度（留空则自动探测）</summary>
-    public int? ApiDimension { get; set; }
+    /// <summary>API 模式的向量维度</summary>
+    public int? ApiDimension
+    {
+        get => OpenAiApi?.Dimension ?? _apiDimension;
+        set
+        {
+            _apiDimension = value;
+            if (OpenAiApi != null) OpenAiApi.Dimension = value;
+        }
+    }
 
-    /// <summary>
-    /// OpenAI 兼容 API 单条输入的最大 token 数。
-    /// 某些本地推理服务会按单条输入限制物理 batch 大小（如 llama.cpp 的 512）。
-    /// </summary>
-    public int? ApiMaxInputTokens { get; set; } = 512;
+    /// <summary>OpenAI 兼容 API 单条输入的最大 token 数</summary>
+    public int? ApiMaxInputTokens
+    {
+        get => OpenAiApi?.MaxInputTokens ?? _apiMaxInputTokens;
+        set
+        {
+            _apiMaxInputTokens = value;
+            if (OpenAiApi != null) OpenAiApi.MaxInputTokens = value;
+        }
+    }
 }
 
 /// <summary>
@@ -412,79 +623,190 @@ public class ServiceConfig
 }
 
 /// <summary>
+/// 本地 ONNX 重排 Profile
+/// </summary>
+public class LocalOnnxRerankProfile
+{
+    public string ModelName { get; set; } = "bge-reranker-base";
+    public string? CurrentModel { get; set; }
+    public string? ModelPath { get; set; }
+    public HardwareAccelerationConfig Acceleration { get; set; } = new();
+}
+
+/// <summary>
+/// 本地 GGUF 重排 Profile
+/// </summary>
+public class LocalGgufRerankProfile
+{
+    public string ModelName { get; set; } = "bge-reranker-v2-m3-gguf";
+    public string? CurrentModel { get; set; }
+    public string? ModelPath { get; set; }
+    public int GpuLayers { get; set; } = 28;
+    public HardwareAccelerationConfig Acceleration { get; set; } = new();
+}
+
+/// <summary>
+/// OpenAI 兼容 API 重排 Profile
+/// </summary>
+public class OpenAiApiRerankProfile
+{
+    public string? BaseUrl { get; set; }
+    public string? ApiKey { get; set; }
+    public string ModelName { get; set; } = "bge-reranker-v2-m3";
+}
+
+/// <summary>
 /// 重排模型配置
 /// </summary>
 public class RerankConfig
 {
-    /// <summary>
-    /// 是否启用重排功能
-    /// </summary>
+    /// <summary>是否启用重排功能</summary>
     public bool Enabled { get; set; } = false;
 
-    /// <summary>
-    /// 模型名称
-    /// </summary>
-    public string ModelName { get; set; } = "bge-reranker-base";
+    /// <summary>当前激活后端方案：LocalOnnx | LocalGguf | OpenAiApi</summary>
+    public string ActiveBackend { get; set; } = "LocalOnnx";
 
-    /// <summary>
-    /// 当前使用的重排模型
-    /// </summary>
-    public string? CurrentModel { get; set; }
+    public LocalOnnxRerankProfile LocalOnnx { get; set; } = new();
+    public LocalGgufRerankProfile LocalGguf { get; set; } = new();
+    public OpenAiApiRerankProfile OpenAiApi { get; set; } = new();
 
-    /// <summary>
-    /// 模型路径（相对于 ModelsRootPath）
-    /// </summary>
-    public string? ModelPath { get; set; }
-
-    /// <summary>
-    /// 是否使用 CUDA
-    /// </summary>
-    public bool UseCuda { get; set; } = false;
-
-    /// <summary>
-    /// CUDA 设备 ID
-    /// </summary>
-    public int CudaDeviceId { get; set; } = 0;
-
-    /// <summary>
-    /// 重排后返回的最大文档数
-    /// </summary>
     public int TopN { get; set; } = 10;
-
-    /// <summary>
-    /// 召回倍数（候选文档数 = TopN * RecallFactor）
-    /// 推荐 3-5 倍，确保召回足够的候选
-    /// </summary>
     public int RecallFactor { get; set; } = 3;
-
-    /// <summary>
-    /// 是否在 Hybrid 模式下自动启用重排
-    /// true: Hybrid 模式自动进行两阶段搜索
-    /// false: 仅当 QueryMode.HybridRerank 时才重排
-    /// </summary>
     public bool AutoRerankInHybrid { get; set; } = true;
-
-    /// <summary>
-    /// 重排分数阈值（低于此阈值的文档将被过滤）
-    /// 0 表示不过滤
-    /// </summary>
     public float ScoreThreshold { get; set; } = 0.05f;
 
-    // ── OpenAI 兼容 API 模式 ──
+    private string _modelName = "bge-reranker-base";
+    private string? _currentModel;
+    private string? _modelPath;
+    private HardwareAccelerationConfig _acceleration = new();
+    private string _mode = "onnx";
+    private string? _apiBaseUrl;
+    private string? _apiKey;
+
+    /// <summary>模型名称</summary>
+    public string ModelName
+    {
+        get
+        {
+            if (ActiveBackend == "OpenAiApi" && !string.IsNullOrEmpty(OpenAiApi?.ModelName))
+                return OpenAiApi.ModelName;
+            if (ActiveBackend == "LocalGguf" && !string.IsNullOrEmpty(LocalGguf?.ModelName))
+                return LocalGguf.ModelName;
+            if (!string.IsNullOrEmpty(LocalOnnx?.ModelName))
+                return LocalOnnx.ModelName;
+            return _modelName;
+        }
+        set
+        {
+            _modelName = value;
+            if (ActiveBackend == "OpenAiApi" && OpenAiApi != null) OpenAiApi.ModelName = value;
+            else if (ActiveBackend == "LocalGguf" && LocalGguf != null) LocalGguf.ModelName = value;
+            else if (LocalOnnx != null) LocalOnnx.ModelName = value;
+        }
+    }
+
+    /// <summary>当前使用的重排模型</summary>
+    public string? CurrentModel
+    {
+        get => LocalOnnx?.CurrentModel ?? _currentModel;
+        set
+        {
+            _currentModel = value;
+            if (LocalOnnx != null) LocalOnnx.CurrentModel = value;
+        }
+    }
+
+    /// <summary>模型路径</summary>
+    public string? ModelPath
+    {
+        get => LocalOnnx?.ModelPath ?? _modelPath;
+        set
+        {
+            _modelPath = value;
+            if (LocalOnnx != null) LocalOnnx.ModelPath = value;
+        }
+    }
+
+    /// <summary>统一硬件加速配置</summary>
+    public HardwareAccelerationConfig Acceleration
+    {
+        get => LocalOnnx?.Acceleration ?? _acceleration;
+        set
+        {
+            _acceleration = value ?? new HardwareAccelerationConfig();
+            if (LocalOnnx != null) LocalOnnx.Acceleration = _acceleration;
+            if (LocalGguf != null) LocalGguf.Acceleration = _acceleration;
+        }
+    }
+
+    [Obsolete("请使用 Acceleration.Backend 配置硬件加速")]
+    public bool UseCuda
+    {
+        get => Acceleration.IsEnabled;
+        set
+        {
+            if (!value) Acceleration.Backend = AccelerationBackend.Cpu;
+            else if (Acceleration.Backend == AccelerationBackend.Cpu) Acceleration.Backend = AccelerationBackend.Auto;
+        }
+    }
+
+    [Obsolete("请使用 Acceleration.DeviceId")]
+    public int CudaDeviceId
+    {
+        get => Acceleration.DeviceId;
+        set => Acceleration.DeviceId = value;
+    }
+
+    [Obsolete("请使用 Acceleration.CustomLibraryPath")]
+    public string? CudaLibraryPath
+    {
+        get => Acceleration.CustomLibraryPath;
+        set => Acceleration.CustomLibraryPath = value;
+    }
 
     /// <summary>推理模式：onnx（本地）| openai（兼容 API）</summary>
-    public string Mode { get; set; } = "onnx";
+    public string Mode
+    {
+        get => ActiveBackend == "OpenAiApi" ? "openai" : "onnx";
+        set
+        {
+            _mode = value;
+            if (string.Equals(value, "openai", StringComparison.OrdinalIgnoreCase))
+            {
+                ActiveBackend = "OpenAiApi";
+            }
+            else if (string.Equals(value, "llama", StringComparison.OrdinalIgnoreCase) || string.Equals(value, "gguf", StringComparison.OrdinalIgnoreCase))
+            {
+                ActiveBackend = "LocalGguf";
+            }
+            else
+            {
+                ActiveBackend = "LocalOnnx";
+            }
+        }
+    }
 
-    /// <summary>
-    /// API 基础地址，必须包含 /v1（代码只在其后追加端点路径）。
-    /// 例如 http://localhost:11434/v1。
-    /// 漏掉 /v1 会打到服务端的非 OpenAI 兼容端点（如 llama.cpp 的 /embeddings），
-    /// 其响应结构与 OpenAI 规范不同，会导致解析失败。
-    /// </summary>
-    public string? ApiBaseUrl { get; set; }
+    /// <summary>API 基础地址</summary>
+    public string? ApiBaseUrl
+    {
+        get => OpenAiApi?.BaseUrl ?? _apiBaseUrl;
+        set
+        {
+            _apiBaseUrl = value;
+            if (OpenAiApi != null) OpenAiApi.BaseUrl = value;
+        }
+    }
 
-    /// <summary>API Key（留空则不发送 Authorization 头）</summary>
-    public string? ApiKey { get; set; }
+    /// <summary>API Key</summary>
+    public string? ApiKey
+    {
+        get => OpenAiApi?.ApiKey ?? _apiKey;
+        set
+        {
+            _apiKey = value;
+            if (OpenAiApi != null) OpenAiApi.ApiKey = value;
+        }
+    }
 }
 
 /// <summary>
@@ -539,3 +861,93 @@ public class ModelHubConfig
     /// </summary>
     public int TimeoutSeconds { get; set; } = 30;
 }
+
+/// <summary>
+/// 本地 GGUF 对话模型 Profile
+/// </summary>
+public class LocalGgufChatProfile
+{
+    public string ModelName { get; set; } = "Qwen2.5-7B-Instruct-GGUF";
+    public string? Variant { get; set; } = "qwen2.5-7b-instruct-q4_k_m.gguf";
+    public string? ModelPath { get; set; }
+    public int GpuLayers { get; set; } = 28;
+    public int ContextSize { get; set; } = 4096;
+    public HardwareAccelerationConfig Acceleration { get; set; } = new();
+}
+
+/// <summary>
+/// 本地 ONNX GenAI 对话模型 Profile
+/// </summary>
+public class LocalOnnxGenAiChatProfile
+{
+    public string ModelName { get; set; } = "Phi-3.5-mini-instruct-onnx";
+    public string? ModelPath { get; set; }
+    public HardwareAccelerationConfig Acceleration { get; set; } = new();
+}
+
+/// <summary>
+/// OpenAI 兼容 API 对话模型 Profile
+/// </summary>
+public class OpenAiApiChatProfile
+{
+    public string Endpoint { get; set; } = "https://api.openai.com/v1";
+    public string ApiKey { get; set; } = "";
+    public string Model { get; set; } = "gpt-4o-mini";
+    public int TimeoutSeconds { get; set; } = 60;
+}
+
+/// <summary>
+/// 聊天对话模型配置
+/// </summary>
+public class ChatModelConfig
+{
+    /// <summary>当前激活后端方案：LocalGguf | LocalOnnxGenAi | OpenAiApi</summary>
+    public string ActiveBackend { get; set; } = "OpenAiApi";
+
+    public LocalGgufChatProfile LocalGguf { get; set; } = new();
+    public LocalOnnxGenAiChatProfile LocalOnnxGenAi { get; set; } = new();
+    public OpenAiApiChatProfile OpenAiApi { get; set; } = new();
+
+    public string SystemPrompt { get; set; } = "你是 ReferenceRAG 智能助手。";
+    public float Temperature { get; set; } = 0.7f;
+    public float TopP { get; set; } = 0.9f;
+    public int IdleTimeoutSeconds { get; set; } = 300;
+
+    /// <summary>API 端点地址</summary>
+    public string Endpoint
+    {
+        get => OpenAiApi?.Endpoint ?? "";
+        set
+        {
+            if (OpenAiApi != null) OpenAiApi.Endpoint = value;
+        }
+    }
+
+    /// <summary>API Key</summary>
+    public string ApiKey
+    {
+        get => OpenAiApi?.ApiKey ?? "";
+        set
+        {
+            if (OpenAiApi != null) OpenAiApi.ApiKey = value;
+        }
+    }
+
+    /// <summary>模型名称</summary>
+    public string Model
+    {
+        get
+        {
+            if (ActiveBackend == "LocalGguf") return LocalGguf?.ModelName ?? "";
+            if (ActiveBackend == "LocalOnnxGenAi") return LocalOnnxGenAi?.ModelName ?? "";
+            return OpenAiApi?.Model ?? "";
+        }
+        set
+        {
+            if (ActiveBackend == "LocalGguf" && LocalGguf != null) LocalGguf.ModelName = value;
+            else if (ActiveBackend == "LocalOnnxGenAi" && LocalOnnxGenAi != null) LocalOnnxGenAi.ModelName = value;
+            else if (OpenAiApi != null) OpenAiApi.Model = value;
+        }
+    }
+}
+

@@ -214,6 +214,28 @@ public interface IModelManager
     /// </summary>
     List<ModelInfo> GetDownloadedRerankModels();
 
+    // ========== 聊天模型管理 ==========
+
+    /// <summary>
+    /// 获取当前聊天模型
+    /// </summary>
+    ModelInfo? GetCurrentChatModel();
+
+    /// <summary>
+    /// 切换聊天模型
+    /// </summary>
+    Task<bool> SwitchChatModelAsync(string modelName);
+
+    /// <summary>
+    /// 获取所有聊天模型列表
+    /// </summary>
+    List<ModelInfo> GetChatModels();
+
+    /// <summary>
+    /// 获取已下载的聊天模型列表
+    /// </summary>
+    List<ModelInfo> GetDownloadedChatModels();
+
     // ========== 模型变更事件 ==========
 
     /// <summary>
@@ -230,6 +252,11 @@ public interface IModelManager
     /// 当 Rerank 模型切换时触发
     /// </summary>
     event EventHandler<ModelSwitchedEventArgs>? RerankModelSwitched;
+
+    /// <summary>
+    /// 当 Chat 模型切换时触发
+    /// </summary>
+    event EventHandler<ModelSwitchedEventArgs>? ChatModelSwitched;
 }
 
 /// <summary>
@@ -260,12 +287,14 @@ public class ModelManager : IModelManager, IDisposable
     private static readonly Dictionary<string, ModelInfo> _modelRegistry = new();
     private ModelInfo? _currentModel;
     private ModelInfo? _currentRerankModel;
+    private ModelInfo? _currentChatModel;
     private bool _disposed;
 
     // 事件声明
     public event EventHandler<ModelPathChangedEventArgs>? ModelPathChanged;
     public event EventHandler<ModelSwitchedEventArgs>? EmbeddingModelSwitched;
     public event EventHandler<ModelSwitchedEventArgs>? RerankModelSwitched;
+    public event EventHandler<ModelSwitchedEventArgs>? ChatModelSwitched;
 
     // 预定义模型库 - 包含 ONNX 和 PyTorch 版本信息
     private static readonly List<ModelInfo> PredefinedModels = new()
@@ -888,6 +917,49 @@ public class ModelManager : IModelManager, IDisposable
             DownloadUrl = "infgrad/stella-base-zh-v3-1792",
             ModelSizeBytes = 406 * 1024 * 1024,
             HasOnnx = false
+        },
+        // ========== 聊天大语言模型 (Chat) ==========
+        new ModelInfo
+        {
+            Name = "Qwen2.5-1.5B-Instruct-GGUF",
+            DisplayName = "Qwen 2.5 1.5B Instruct (极速小钢炮)",
+            Description = "通义千问 1.5B 轻量指令大模型，占用显存极小 (~1.5GB)，纯 CPU 或核显即可极速流畅运行",
+            Dimension = 1536,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.88f,
+            DownloadUrl = "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+            ModelSizeBytes = (long)(1.0 * 1024 * 1024 * 1024),
+            HasOnnx = true
+        },
+        new ModelInfo
+        {
+            Name = "Qwen2.5-7B-Instruct-GGUF",
+            DisplayName = "Qwen 2.5 7B Instruct (主流推荐)",
+            Description = "通义千问 7B 满血指令模型，中文、代码与复杂推理能力极强，推荐 6GB~8GB+ 独显运行",
+            Dimension = 3584,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.95f,
+            DownloadUrl = "Qwen/Qwen2.5-7B-Instruct-GGUF",
+            ModelSizeBytes = (long)(4.7 * 1024 * 1024 * 1024),
+            HasOnnx = true
+        },
+        new ModelInfo
+        {
+            Name = "DeepSeek-R1-Distill-Qwen-1.5B-GGUF",
+            DisplayName = "DeepSeek R1 Distill Qwen 1.5B (深度思维链)",
+            Description = "DeepSeek-R1 强化学习蒸馏模型，具备强大深度思考推理（CoT）能力，兼具小巧体积与高智商",
+            Dimension = 1536,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.90f,
+            DownloadUrl = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-GGUF",
+            ModelSizeBytes = (long)(1.1 * 1024 * 1024 * 1024),
+            HasOnnx = true
         }
     };
 
@@ -934,6 +1006,15 @@ public class ModelManager : IModelManager, IDisposable
             {
                 _currentRerankModel = rerankModel;
                 Console.WriteLine($"[ModelManager] 当前重排模型: {rerankModel.Name}, 路径: {rerankModel.LocalPath}");
+            }
+
+            var chatModelName = config.Chat?.Model ?? config.Chat?.LocalGguf?.ModelName;
+            if (!string.IsNullOrEmpty(chatModelName) &&
+                _modelRegistry.TryGetValue(chatModelName, out var chatModel) &&
+                chatModel.IsDownloaded)
+            {
+                _currentChatModel = chatModel;
+                Console.WriteLine($"[ModelManager] 当前聊天模型: {chatModel.Name}, 路径: {chatModel.LocalPath}");
             }
         }
         catch (Exception ex)
@@ -1080,6 +1161,7 @@ public class ModelManager : IModelManager, IDisposable
         var config = _configManager.Load();
         var configuredEmbPath = config.Embedding?.ModelPath;
         var configuredRerankPath = config.Rerank?.ModelPath;
+        var configuredChatPath = config.Chat?.LocalGguf?.ModelPath;
 
         // 首先将所有模型的 IsDownloaded 重置为 false（路径变更后需要重新检测）
         foreach (var model in _modelRegistry.Values)
@@ -1099,6 +1181,10 @@ public class ModelManager : IModelManager, IDisposable
         if (Directory.Exists(rerankerPath))
             ScanModelDirectory(rerankerPath, "reranker", configuredRerankPath);
 
+        var chatPath = Path.Combine(_modelsPath, "Chat");
+        if (Directory.Exists(chatPath))
+            ScanModelDirectory(chatPath, "chat", configuredChatPath);
+
         // 兼容扫描：扁平结构（旧版下载直接放在 _modelsPath/modelName/）
         // 仅处理尚未被子目录扫描命中的已注册模型
         foreach (var model in _modelRegistry.Values.Where(m => !m.IsDownloaded))
@@ -1106,7 +1192,7 @@ public class ModelManager : IModelManager, IDisposable
             var flatDir = Path.Combine(_modelsPath, model.Name);
             if (Directory.Exists(flatDir))
             {
-                var targetConfigPath = model.ModelType == "reranker" ? configuredRerankPath : configuredEmbPath;
+                var targetConfigPath = model.ModelType == "reranker" ? configuredRerankPath : (model.ModelType == "chat" ? configuredChatPath : configuredEmbPath);
                 ScanModelDirectory(_modelsPath, model.ModelType, targetConfigPath, new[] { model.Name });
             }
         }
@@ -1388,7 +1474,20 @@ public class ModelManager : IModelManager, IDisposable
         try
         {
             var config = await LoadConfigAsync();
-            if (isRerank || model.ModelType == "reranker")
+            if (model.ModelType == "chat")
+            {
+                if (config.Chat == null) config.Chat = new ChatModelConfig();
+                config.Chat.Model = modelName;
+                if (config.Chat.LocalGguf == null) config.Chat.LocalGguf = new LocalGgufChatProfile();
+                config.Chat.LocalGguf.ModelName = modelName;
+                config.Chat.LocalGguf.ModelPath = variant.FullPath;
+                if (model.MaxSequenceLength > 0)
+                {
+                    config.Chat.LocalGguf.ContextSize = model.MaxSequenceLength;
+                }
+                _currentChatModel = model;
+            }
+            else if (isRerank || model.ModelType == "reranker")
             {
                 if (config.Rerank == null) config.Rerank = new RerankConfig();
                 config.Rerank.CurrentModel = modelName;
@@ -1415,7 +1514,15 @@ public class ModelManager : IModelManager, IDisposable
 
             Console.WriteLine($"[ModelManager] 成功切换模型变体: {modelName} -> {variant.FileName} (Path={variant.FullPath})");
 
-            if (isRerank || model.ModelType == "reranker")
+            if (model.ModelType == "chat")
+            {
+                ChatModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
+                {
+                    ModelName = modelName,
+                    ModelPath = variant.FullPath
+                });
+            }
+            else if (isRerank || model.ModelType == "reranker")
             {
                 RerankModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
                 {
@@ -1553,8 +1660,13 @@ public class ModelManager : IModelManager, IDisposable
             }
         }
 
-        // 新下载写入子目录（Embedding/ 或 Reranker/），与 ScanLocalModels 保持一致
-        var subDir = model.ModelType == "reranker" ? "Reranker" : "Embedding";
+        // 新下载写入子目录（Embedding/、Reranker/ 或 Chat/），与 ScanLocalModels 保持一致
+        var subDir = model.ModelType switch
+        {
+            "reranker" => "Reranker",
+            "chat" => "Chat",
+            _ => "Embedding"
+        };
         var modelDir = Path.Combine(_modelsPath, subDir, modelName);
 
         try
@@ -2405,6 +2517,108 @@ public class ModelManager : IModelManager, IDisposable
     {
         return _modelRegistry.Values
             .Where(m => m.ModelType == "reranker" && m.IsDownloaded)
+            .ToList();
+    }
+
+    // ========== 聊天模型管理实现 ==========
+
+    /// <summary>
+    /// 获取当前聊天模型
+    /// </summary>
+    public ModelInfo? GetCurrentChatModel()
+    {
+        var cfg = _configManager.Load();
+        if (cfg.Chat?.ActiveBackend == "OpenAiApi" && !string.IsNullOrEmpty(cfg.Chat.OpenAiApi?.Model))
+        {
+            return new ModelInfo
+            {
+                Name = cfg.Chat.OpenAiApi.Model,
+                DisplayName = $"{cfg.Chat.OpenAiApi.Model} (API)",
+                ModelType = "chat",
+                IsDownloaded = true
+            };
+        }
+
+        return _currentChatModel;
+    }
+
+    /// <summary>
+    /// 切换聊天模型
+    /// </summary>
+    public async Task<bool> SwitchChatModelAsync(string modelName)
+    {
+        if (!_modelRegistry.TryGetValue(modelName, out var model))
+        {
+            Console.WriteLine($"[ModelManager] 聊天模型不存在: {modelName}");
+            return false;
+        }
+
+        if (model.ModelType != "chat")
+        {
+            Console.WriteLine($"[ModelManager] 模型 {modelName} 不是聊天模型 (ModelType: {model.ModelType})");
+            return false;
+        }
+
+        if (!model.IsDownloaded)
+        {
+            Console.WriteLine($"[ModelManager] 聊天模型未下载: {modelName}");
+            return false;
+        }
+
+        try
+        {
+            _currentChatModel = model;
+
+            var config = await LoadConfigAsync();
+            if (config.Chat == null)
+            {
+                config.Chat = new ChatModelConfig();
+            }
+            var resolvedPath = ResolveModelFilePath(model.LocalPath, model.ActiveVariantFileName);
+            config.Chat.Model = modelName;
+            if (config.Chat.LocalGguf == null) config.Chat.LocalGguf = new LocalGgufChatProfile();
+            config.Chat.LocalGguf.ModelName = modelName;
+            config.Chat.LocalGguf.ModelPath = resolvedPath;
+            if (model.MaxSequenceLength > 0)
+            {
+                config.Chat.LocalGguf.ContextSize = model.MaxSequenceLength;
+            }
+            await SaveConfigAsync(config);
+
+            Console.WriteLine($"[ModelManager] 已切换聊天模型: {model.DisplayName} (Path={resolvedPath})");
+
+            ChatModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
+            {
+                ModelName = modelName,
+                ModelPath = resolvedPath
+            });
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 切换聊天模型失败: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 获取所有聊天模型列表
+    /// </summary>
+    public List<ModelInfo> GetChatModels()
+    {
+        return _modelRegistry.Values
+            .Where(m => m.ModelType == "chat")
+            .ToList();
+    }
+
+    /// <summary>
+    /// 获取已下载的聊天模型列表
+    /// </summary>
+    public List<ModelInfo> GetDownloadedChatModels()
+    {
+        return _modelRegistry.Values
+            .Where(m => m.ModelType == "chat" && m.IsDownloaded)
             .ToList();
     }
 

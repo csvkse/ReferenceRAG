@@ -10,6 +10,7 @@ using System.Diagnostics;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Injection;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Scanning;
 using ReferenceRAG.Core.Features.HardwareAcceleration;
+using ReferenceRAG.Core.Models;
 
 namespace ReferenceRAG.Core.Services.Rerank;
 
@@ -121,32 +122,10 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
             using var sessionOptions = new SessionOptions();
             sessionOptions.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
 
-            if (_options.UseCuda)
-            {
-                try
-                {
-                    // 设置确定性推理模式，避免 CUDA 非确定性操作
-                    sessionOptions.EnableMemoryPattern = false;
-
-                    if (!OnnxExecutionProviderHelper.TryAppendCuda(sessionOptions, _options.CudaDeviceId) &&
-                        !OnnxExecutionProviderHelper.TryAppendDirectMl(sessionOptions, _options.CudaDeviceId))
-                    {
-                        throw new InvalidOperationException("当前环境或构建未提供有效的 GPU 执行提供者");
-                    }
-                    sessionOptions.AppendExecutionProvider_CPU();
-                    _logger.LogInformation("使用 CUDA GPU: {DeviceId} (确定性模式)", _options.CudaDeviceId);
-                }
-                catch (Exception ex)
-                {
-                    // 回退 CPU 会让重排显著变慢，且不中断服务，必须显式记录原因（如 CUDA 主版本不匹配）。
-                    _logger.LogWarning(ex, "CUDA 不可用，回退到 CPU。请检查 CUDA/cuDNN 版本与 cudaLibraryPath 配置");
-                    sessionOptions.AppendExecutionProvider_CPU();
-                }
-            }
-            else
-            {
-                sessionOptions.AppendExecutionProvider_CPU();
-            }
+            OnnxExecutionProviderHelper.ConfigureHardwareAcceleration(
+                sessionOptions,
+                _options.Acceleration,
+                _logger);
 
             _session = new InferenceSession(modelPath, sessionOptions);
 
@@ -652,9 +631,26 @@ public class RerankOptions
 {
     public string ModelPath { get; set; } = "";
     public string ModelName { get; set; } = "bge-reranker-base";
-    public bool UseCuda { get; set; } = false;
-    public int CudaDeviceId { get; set; } = 0;
-    public string? CudaLibraryPath { get; set; }
+    public HardwareAccelerationConfig Acceleration { get; set; } = new();
+    public bool UseCuda
+    {
+        get => Acceleration.IsEnabled;
+        set
+        {
+            if (!value) Acceleration.Backend = AccelerationBackend.Cpu;
+            else if (Acceleration.Backend == AccelerationBackend.Cpu) Acceleration.Backend = AccelerationBackend.Auto;
+        }
+    }
+    public int CudaDeviceId
+    {
+        get => Acceleration.DeviceId;
+        set => Acceleration.DeviceId = value;
+    }
+    public string? CudaLibraryPath
+    {
+        get => Acceleration.CustomLibraryPath;
+        set => Acceleration.CustomLibraryPath = value;
+    }
     public int MaxSequenceLength { get; set; } = 512;
     public int IdleTimeoutSeconds { get; set; } = 30;
 }

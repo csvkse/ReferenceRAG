@@ -21,6 +21,7 @@ public class MafChatService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHttpClientFactory _httpClientFactory;
     private volatile string _systemPrompt;
+    private volatile string _model = "gpt-4o-mini";
     private readonly AITool[] _tools;
     private readonly ConcurrentDictionary<string, ChatSession> _sessions = new();
     private readonly ILogger<MafChatService> _logger;
@@ -28,23 +29,33 @@ public class MafChatService
     private readonly int _maxSessions;
     private readonly int _maxMessagesPerSession;
     private readonly TimeSpan _sessionIdleTimeout;
+    private readonly HttpMessageHandler? _httpMessageHandler;
+
+    public IChatClient? Client => _client;
+    public bool IsConfigured => _client != null;
+    public string CurrentModel => _model;
+    public string SystemPrompt => _systemPrompt;
+    public AITool[] Tools => _tools;
 
     public MafChatService(
         IConfiguration config,
         IServiceScopeFactory scopeFactory,
         IHttpClientFactory httpClientFactory,
         ILogger<MafChatService> logger,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        HttpMessageHandler? httpMessageHandler = null)
     {
         _scopeFactory = scopeFactory;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _httpMessageHandler = httpMessageHandler;
 
         var section = config.GetSection("Chat");
         var endpoint = section["Endpoint"] ?? "https://api.openai.com/v1";
         var apiKey = section["ApiKey"];
         var model = section["Model"] ?? "gpt-4o-mini";
+        _model = model;
         _systemPrompt = section["SystemPrompt"] ?? "你是 ReferenceRAG 智能助手。";
         _maxSessions = Math.Max(1, section.GetValue("MaxSessions", 100));
         _maxMessagesPerSession = Math.Max(3, section.GetValue("MaxMessagesPerSession", 50));
@@ -75,7 +86,9 @@ public class MafChatService
     {
         if (string.IsNullOrWhiteSpace(apiKey)) return null;
 
-        var sanitizingHandler = new OpenAiToolCallSanitizingHandler();
+        var sanitizingHandler = _httpMessageHandler != null
+            ? new OpenAiToolCallSanitizingHandler(_httpMessageHandler)
+            : new OpenAiToolCallSanitizingHandler();
         var httpClient = new HttpClient(sanitizingHandler)
         {
             Timeout = Timeout.InfiniteTimeSpan
@@ -109,6 +122,7 @@ public class MafChatService
         _logger.LogInformation("正在热更新 AI 聊天配置: Endpoint={Endpoint}, Model={Model}, HasKey={HasKey}",
             ep, mdl, !string.IsNullOrWhiteSpace(key));
 
+        _model = mdl;
         _systemPrompt = string.IsNullOrWhiteSpace(systemPrompt) ? "你是 ReferenceRAG 智能助手。" : systemPrompt.Trim();
 
         if (string.IsNullOrWhiteSpace(key))
@@ -578,6 +592,92 @@ public class MafChatService
         }
 
         yield return new SseEvent("done");
+    }
+
+    /// <summary>
+    /// 检索本地知识库并格式化为 RAG 知识注入提示词（用于 OpenAI 兼容接口 reference-rag 模式）
+    /// </summary>
+    public async Task<string> RetrieveRagContextAsync(string query, int topK = 5, CancellationToken ct = default)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(query)) return string.Empty;
+
+            using var scope = _scopeFactory.CreateScope();
+            var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
+            var request = new AIQueryRequest
+            {
+                Query = query,
+                TopK = topK,
+                Mode = QueryMode.HybridRerank,
+                ContextWindow = 1
+            };
+            var response = await searchService.SearchAsync(request);
+
+            if (response.Chunks.Count == 0)
+                return string.Empty;
+
+            var sb = new StringBuilder();
+            sb.AppendLine("## 本地知识库参考片段 (Local Knowledge Base Context)");
+            sb.AppendLine("以下内容检索自用户的本地知识库。请优先结合这些参考资料准确回答问题，并在引用的观点后标注对应出处，例如 [1] 或《笔记标题》：\n");
+
+            for (int i = 0; i < response.Chunks.Count; i++)
+            {
+                var c = response.Chunks[i];
+                var title = c.Title ?? Path.GetFileNameWithoutExtension(c.FilePath);
+                var heading = string.IsNullOrEmpty(c.HeadingPath) ? "" : $" > {c.HeadingPath}";
+                sb.AppendLine($"[{i + 1}] 《{title}》{heading} (来源: {c.FilePath})");
+                sb.AppendLine("```markdown");
+                sb.AppendLine(c.Content);
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+            return sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "RetrieveRagContextAsync 失败: {Query}", query);
+            return string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// 无状态多轮流式生成（供 OpenAI 兼容 POST /v1/chat/completions 调用）
+    /// </summary>
+    public async IAsyncEnumerable<string> StreamCompletionAsync(
+        IList<ChatMessage> messages,
+        ChatOptions? options = null,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var client = _client;
+        if (client is null)
+            throw new InvalidOperationException("Chat API Key 未配置，请在设置中配置 Chat ApiKey 后使用");
+
+        options ??= new ChatOptions { Tools = [.. _tools] };
+        await foreach (var update in client.GetStreamingResponseAsync(messages, options, ct))
+        {
+            if (!string.IsNullOrEmpty(update.Text))
+            {
+                yield return update.Text;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 无状态多轮单次响应生成（供 OpenAI 兼容 POST /v1/chat/completions 调用）
+    /// </summary>
+    public async Task<string> CompleteAsync(
+        IList<ChatMessage> messages,
+        ChatOptions? options = null,
+        CancellationToken ct = default)
+    {
+        var client = _client;
+        if (client is null)
+            throw new InvalidOperationException("Chat API Key 未配置，请在设置中配置 Chat ApiKey 后使用");
+
+        options ??= new ChatOptions { Tools = [.. _tools] };
+        var response = await client.GetResponseAsync(messages, options, ct);
+        return response?.Text ?? string.Empty;
     }
 
     private void RemoveExpiredSessions()

@@ -191,28 +191,6 @@ public class OpenAIEmbeddingsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /v1/models
-    /// </summary>
-    [HttpGet("v1/models")]
-    public ActionResult GetModels()
-    {
-        return CamelCaseJson(new
-        {
-            @object = "list",
-            data = new[]
-            {
-                new
-                {
-                    id = _embeddingService.ModelName,
-                    @object = "model",
-                    owned_by = "reference-rag",
-                    created = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                }
-            }
-        });
-    }
-
-    /// <summary>
     /// 使用 camelCase 序列化返回响应
     /// </summary>
     private ContentResult CamelCaseJson(object value, int statusCode = 200)

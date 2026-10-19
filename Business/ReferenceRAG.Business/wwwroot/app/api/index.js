@@ -98,6 +98,7 @@ export const settingsApi = {
     save: (config) => api.post('/Settings', config),
     updateModelsPath: (modelsPath, migrateExisting = false) => api.patch('/Settings/models-path', { modelsPath, migrateExisting }),
     getCudaAvailability: () => api.get('/Settings/cuda-availability'),
+    getHardwareAccelerationStatus: () => api.get('/Settings/hardware-acceleration/status'),
     verifyHfToken: (token, endpoint) => api.post('/Settings/verify-hf-token', { token, endpoint })
 };
 // Performance
@@ -146,8 +147,18 @@ export const modelsApi = {
     getRerankDownloadProgress: (modelName) => api.get(`/Models/rerank/download/${modelName}/progress`),
     deleteRerankModel: (modelName) => api.delete(`/Models/rerank/${modelName}`),
     getRerankDownloadOptions: (modelName, config) => api.get(`/Models/rerank/download-options/${modelName}`, config),
+    // Chat Models
+    getChatModels: () => api.get('/Models/chat'),
+    getDownloadedChatModels: () => api.get('/Models/chat/downloaded'),
+    getCurrentChatModel: () => api.get('/Models/chat/current'),
+    switchChatModel: (modelName) => api.post('/Models/chat/switch', { modelName }),
+    downloadChatModel: (modelName, onnxFilePath, format, repository) => api.post(`/Models/chat/download/${modelName}`, { onnxFilePath, format, repository }),
+    getChatDownloadProgress: (modelName) => api.get(`/Models/chat/download/${modelName}/progress`),
+    deleteChatModel: (modelName) => api.delete(`/Models/chat/${modelName}`),
+    getChatDownloadOptions: (modelName, config) => api.get(`/Models/chat/download-options/${modelName}`, config),
     cancelDownload: (modelName) => api.delete(`/Models/download/${encodeURIComponent(modelName)}`),
     cancelRerankDownload: (modelName) => api.delete(`/Models/rerank/download/${encodeURIComponent(modelName)}`),
+    cancelChatDownload: (modelName) => api.delete(`/Models/chat/download/${encodeURIComponent(modelName)}`),
     // 搜索开源社区模型变种与查看详情
     searchVariants: (query, format = null, limit = 15) => api.get('/Models/variants/search', { params: { query, format, limit } }),
     getVariantDetail: (repository) => api.get('/Models/variants/detail', { params: { repository } }),
@@ -155,8 +166,8 @@ export const modelsApi = {
     scanModels: () => api.post('/Models/scan'),
     // 模型运行时状态
     getRuntimeStatus: () => api.get('/Models/runtime-status'),
-    // 切换模型变体（嵌入或重排）
-    switchVariant: (modelName, variantFileName, isRerank = false) => api.post('/Models/switch-variant', { modelName, variantFileName, isRerank }),
+    // 切换模型变体（嵌入、重排或聊天）
+    switchVariant: (modelName, variantFileName, isRerank = false, modelType = null) => api.post('/Models/switch-variant', { modelName, variantFileName, isRerank, modelType }),
     // 删除模型特定变体
     deleteVariant: (modelName, variantFileName, isRerank = false) => api.delete(`/Models/variant?modelName=${encodeURIComponent(modelName)}&variantFileName=${encodeURIComponent(variantFileName)}&isRerank=${isRerank}`)
 };

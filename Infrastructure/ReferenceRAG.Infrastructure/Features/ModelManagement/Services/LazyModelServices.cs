@@ -244,6 +244,7 @@ internal sealed class LazyEmbeddingService : IEmbeddingService, IModelRuntimeTel
         _modelName = config.ModelName ?? "";
         _options.ModelPath = _modelPath;
         _options.ModelName = _modelName;
+        _options.Acceleration = config.Acceleration;
         _options.UseCuda = config.UseCuda;
         _options.CudaDeviceId = config.CudaDeviceId;
         _options.CudaLibraryPath = config.CudaLibraryPath;
@@ -430,6 +431,7 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
     private readonly IGpuMemoryManager? _memoryManager;
     private bool _useCuda;
     private int _deviceId;
+    private HardwareAccelerationConfig _acceleration = new();
     private readonly IWindowStateService? _windowStateService;
     private readonly ConfigManager? _configManager;
     private readonly ModelLifecycleStateMachine<IRerankBackendAdapter> _stateMachine;
@@ -467,6 +469,10 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
             _retentionStrategy = cfg.ModelRetentionStrategy;
             _idleTimeoutSeconds = cfg.ModelIdleTimeoutSeconds;
             _unloadOnlyWhenMinimizedToTray = cfg.UnloadOnlyWhenMinimizedToTray;
+            if (cfg.Rerank != null)
+            {
+                _acceleration = cfg.Rerank.Acceleration;
+            }
         }
         else
         {
@@ -548,6 +554,7 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
                     {
                         ModelPath = _modelPath,
                         ModelName = _modelName,
+                        Acceleration = _acceleration,
                         UseCuda = _useCuda,
                         CudaDeviceId = _deviceId,
                         CudaLibraryPath = cfg?.Embedding?.CudaLibraryPath
@@ -561,6 +568,7 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
                 {
                     ModelName = _modelName,
                     ModelPath = _modelPath,
+                    Acceleration = _acceleration,
                     UseCuda = _useCuda,
                     CudaDeviceId = _deviceId
                 };
@@ -632,6 +640,7 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
 
         _modelName = config.ModelName ?? "";
         _modelPath = config.ModelPath ?? "";
+        _acceleration = config.Acceleration;
         _useCuda = config.UseCuda;
         _deviceId = config.CudaDeviceId;
 
