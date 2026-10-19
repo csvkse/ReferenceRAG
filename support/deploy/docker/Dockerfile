@@ -1,12 +1,31 @@
+# syntax=docker/dockerfile:1
 # ReferenceRAG: shared static ES modules, no frontend build stage.
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
+
+# Stage 1: Restore dependencies (cached independently of source code changes)
 COPY Directory.Build.props Directory.Packages.props ./
+COPY Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.csproj ./Infrastructure/ReferenceRAG.Infrastructure/
+COPY Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj ./Business/ReferenceRAG.Business/
+COPY Host/ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj ./Host/ReferenceRAG.ApiHost/
+COPY Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj ./Host/ReferenceRAG.WebHost/
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
+    dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj
+
+# Stage 2: Build & Publish (prune Windows/macOS native runtimes to shrink Linux image)
 COPY Infrastructure/ ./Infrastructure/
 COPY Business/ ./Business/
 COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
 COPY Host/ReferenceRAG.WebHost/ ./Host/ReferenceRAG.WebHost/
-RUN dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -c Release -o /app/publish /p:UseAppHost=false /p:DebugType=none /p:DebugSymbols=false
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
+    dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
+    -c Release \
+    -o /app/publish \
+    --no-restore \
+    /p:UseAppHost=false \
+    /p:DebugType=none \
+    /p:DebugSymbols=false \
+    && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx*
 
 # ============================================================
 # Stage 3: Runtime (CPU version)
@@ -14,10 +33,10 @@ RUN dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -c Rele
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-# Install wget for health check and other utilities
+# Install wget for health check and libgomp1 for native CPU inference
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
-    unzip \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create data directory and non-root user
@@ -31,7 +50,6 @@ COPY --from=build /app/publish .
 
 # Copy Docker-specific configuration
 COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
-
 
 # Environment variables
 ENV ASPNETCORE_URLS=http://+:5000
@@ -50,8 +68,3 @@ USER appuser
 EXPOSE 5000
 
 ENTRYPOINT ["dotnet", "ReferenceRAG.WebHost.dll"]
-
-# ============================================================
-# GPU variant: build with
-#   docker build -t reference-rag:gpu --build-arg VARIANT=gpu .
-# ============================================================
