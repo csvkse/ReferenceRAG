@@ -41,11 +41,6 @@ const component = /*@__PURE__*/ _defineComponent({
                         icon: renderIcon(SearchOutline)
                     },
                     {
-                        label: '知识图谱',
-                        key: 'Graph',
-                        icon: renderIcon(GitNetworkOutline)
-                    },
-                    {
                         label: 'AI 对话',
                         key: 'Chat',
                         icon: renderIcon(ChatbubblesOutline)
@@ -71,6 +66,11 @@ const component = /*@__PURE__*/ _defineComponent({
                         label: 'BM25索引',
                         key: 'BM25Index',
                         icon: renderIcon(BookOutline)
+                    },
+                    {
+                        label: '知识图谱',
+                        key: 'Graph',
+                        icon: renderIcon(GitNetworkOutline)
                     }
                 ]
             },
