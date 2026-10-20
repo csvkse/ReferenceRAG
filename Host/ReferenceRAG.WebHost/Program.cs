@@ -19,6 +19,7 @@ using ReferenceRAG.ApiHost.Transport;
 Directory.SetCurrentDirectory(Environment.GetEnvironmentVariable("REFERENCERAG_CONTENT_ROOT") ?? AppContext.BaseDirectory);
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.InputEncoding = System.Text.Encoding.UTF8;
+ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.EnsureInitialized();
 #endregion
 
 

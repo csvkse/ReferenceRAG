@@ -99,7 +99,8 @@ export const settingsApi = {
     updateModelsPath: (modelsPath, migrateExisting = false) => api.patch('/Settings/models-path', { modelsPath, migrateExisting }),
     getCudaAvailability: () => api.get('/Settings/cuda-availability'),
     getHardwareAccelerationStatus: () => api.get('/Settings/hardware-acceleration/status'),
-    verifyHfToken: (token, endpoint) => api.post('/Settings/verify-hf-token', { token, endpoint })
+    verifyHfToken: (token, endpoint) => api.post('/Settings/verify-hf-token', { token, endpoint }),
+    previewChatPerformance: (data) => api.post('/Settings/chat-performance/preview', data)
 };
 // Performance
 export const performanceApi = {

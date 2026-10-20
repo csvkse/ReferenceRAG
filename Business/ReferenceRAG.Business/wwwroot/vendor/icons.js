@@ -18,6 +18,7 @@ export {default as GridOutline} from './icons/GridOutline.js';
 export {default as HelpCircleOutline} from './icons/HelpCircleOutline.js';
 export {default as HomeOutline} from './icons/HomeOutline.js';
 export {default as InformationCircleOutline} from './icons/InformationCircleOutline.js';
+export {default as ImageOutline} from './icons/ImageOutline.js';
 export {default as LayersOutline} from './icons/LayersOutline.js';
 export {default as LogOutOutline} from './icons/LogOutOutline.js';
 export {default as LogoMarkdown} from './icons/LogoMarkdown.js';

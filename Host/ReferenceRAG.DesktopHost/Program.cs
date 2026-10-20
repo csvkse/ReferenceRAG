@@ -73,6 +73,7 @@ internal static partial class Program
         }
 
         Directory.SetCurrentDirectory(Environment.GetEnvironmentVariable("REFERENCERAG_CONTENT_ROOT") ?? AppContext.BaseDirectory);
+        ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.EnsureInitialized();
         var builder=WebApplication.CreateBuilder(new WebApplicationOptions {Args=args,ContentRootPath=Directory.GetCurrentDirectory()});
         // 与 WebHost 共用日志配置：桌面端是 WinExe 无控制台，没有文件日志就无法排障。
         ServiceManager.ConfigureLogging(builder);

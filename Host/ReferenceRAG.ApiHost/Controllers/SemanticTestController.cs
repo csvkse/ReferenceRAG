@@ -995,27 +995,67 @@ public class TestRecordStore
 
     private async Task LoadRecordsAsync()
     {
-        var file = Path.Combine(_dataPath, "records.json");
-        if (File.Exists(file))
+        await _fileLock.WaitAsync();
+        try
         {
-            var json = await File.ReadAllTextAsync(file);
-            var records = System.Text.Json.JsonSerializer.Deserialize<List<TestRecord>>(json, _jsonOptions);
-            if (records != null)
+            var file = Path.Combine(_dataPath, "records.json");
+            if (File.Exists(file))
             {
-                lock (_lock)
+                for (int retry = 0; retry < 5; retry++)
                 {
-                    _records.AddRange(records);
+                    try
+                    {
+                        var json = await File.ReadAllTextAsync(file);
+                        var records = System.Text.Json.JsonSerializer.Deserialize<List<TestRecord>>(json, _jsonOptions);
+                        if (records != null)
+                        {
+                            lock (_lock)
+                            {
+                                _records.AddRange(records);
+                            }
+                        }
+                        break;
+                    }
+                    catch (IOException) when (retry < 4)
+                    {
+                        await Task.Delay(50 * (retry + 1));
+                    }
                 }
             }
         }
+        finally
+        {
+            _fileLock.Release();
+        }
     }
+
+    private static readonly SemaphoreSlim _fileLock = new(1, 1);
 
     private async Task SaveRecordsAsync()
     {
-        Directory.CreateDirectory(_dataPath);
-        var file = Path.Combine(_dataPath, "records.json");
-        var json = System.Text.Json.JsonSerializer.Serialize(_records, _jsonOptions);
-        await File.WriteAllTextAsync(file, json);
+        await _fileLock.WaitAsync();
+        try
+        {
+            Directory.CreateDirectory(_dataPath);
+            var file = Path.Combine(_dataPath, "records.json");
+            var json = System.Text.Json.JsonSerializer.Serialize(_records, _jsonOptions);
+            for (int retry = 0; retry < 5; retry++)
+            {
+                try
+                {
+                    await File.WriteAllTextAsync(file, json);
+                    break;
+                }
+                catch (IOException) when (retry < 4)
+                {
+                    await Task.Delay(50 * (retry + 1));
+                }
+            }
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
     }
 }
 

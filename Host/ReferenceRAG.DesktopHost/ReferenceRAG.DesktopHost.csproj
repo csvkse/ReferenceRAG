@@ -17,7 +17,8 @@
     <PackageReference Include="InfiniLore.InfiniFrame.Shared" />
     <EmbeddedResource Include="Assets/icon.ico" LogicalName="app.ico" />
     <EmbeddedResource Include="Assets/window-icon.ico" LogicalName="window.ico" />
-    <Content Include="../../support/config/local/appsettings*.json" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../support/config/local/appsettings*.json" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+    <Content Include="../../support/config/appsettings.template.json" Link="appsettings.template.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets/icon.ico" Link="icon.ico" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets/window-icon.ico" Link="window-icon.ico" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets/tray-icon.ico" Link="tray-icon.ico" CopyToOutputDirectory="PreserveNewest" />

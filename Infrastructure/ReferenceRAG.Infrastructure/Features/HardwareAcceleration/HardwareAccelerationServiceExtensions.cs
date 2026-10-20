@@ -31,6 +31,9 @@ public static class HardwareAccelerationServiceExtensions
         // 注册动态 GPU Offload 计算器
         services.AddSingleton<IGpuOffloadCalculator, GpuOffloadCalculator>();
 
+        // 注册对话模型自适应性能规划器 (对标嵌入模型的自适应硬件卸载与批处理)
+        services.AddSingleton<IChatPerformancePlanner, ChatPerformancePlanner>();
+
         return services;
     }
 }

@@ -2,6 +2,27 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.17] - 2026-10-20
+
+### 设置页面二级分类重构、名称统一与对话模型启动延迟加载
+- **设置页面二级分类标签栏重构（2-Tier Navigation）**：
+  - 顶部分类重构为三大 Segmented 胶囊大类：🤖 **模型与推理 (`models`)**、🔍 **检索与分段 (`retrieval`)**、⚙️ **系统与存储 (`system`)**，彻底解决 9+ 个横向一级 Tab 扁平拥挤与视觉杂乱问题。
+  - 二级子标签无缝联动，使用 `v-show` 保护表单 DOM 实例与输入响应式状态，避免切换分类丢失未保存的参数。
+  - 支持 URL 查询参数（`?tab=xxx`）与哈希双向智能同步映射，外部跳转或刷新直接精准定位目标子项。
+- **对话模型与嵌入/重排配置项完全对齐与统一**：
+  - 设置页面中将原 `后端方案` 统一命名为 `推理模式`；
+  - 单选选项统一为 `本地 GGUF`（或 `本地 ONNX`）与 `OpenAI 兼容 API`，彻底消除冗余括号与混杂文案；
+  - 本地模型选择统一字段标签为 `模型名称`，表单交互风格在全系统彻底一致。
+- **对话模型生命周期同构与启动延迟加载（Lazy Loading & Idle Eviction）**：
+  - 本地对话模型（`LocalLlamaChatClient` / `LocalOnnxChatClient`）采用虚拟代理惰性加载，程序启动时默认不加载显存/内存权重；
+  - 首次提问按需加载，支持滑动空闲超时（默认 300 秒无活动）自动释放权重与 KV Cache；
+  - 遥测接口（`GET /api/models/runtime-status`）精准反映 `Unloaded`（未加载）与 `Ready`（已就绪）状态；
+  - 修改模型存储目录时自动卸载对话模型，下次调用自动热加载新目录。
+- **自适应性能规划架构与自愈上下文保障**：
+  - 支持固定参数模式与自适应规划模式双模切换，提供 8K 黄金平衡、极速吞吐、长上下文与轻量低显存偏好策略；
+  - 支持自然标点断点与 Markdown/XML 自愈修复防截断；
+  - 建立自动化质量门禁 `ChatPerformanceModeAndSettingsQualityGateTests`，603 项单元测试 100% 通过。
+
 ## [1.0.16] - 2026-10-20
 
 ### OpenAI 兼容 API 体系与全链路 E2E 冒烟测试
@@ -99,6 +120,7 @@
 - 支持本地 ONNX Embedding/Reranker、CUDA 加速及 OpenAI 兼容 API 模式。
 - 历史版本详情见 [Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+[1.0.17]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.17
 [1.0.16]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.16
 [1.0.15]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.15
 [1.0.14]: https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.14

@@ -5,6 +5,8 @@ using Microsoft.Extensions.Logging;
 
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Infrastructure.Features.Storage.Bootstrap;
+using ReferenceRAG.Infrastructure.Features.Storage.Migrations;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -16,10 +18,12 @@ public class ConfigManager
     private ObsidianRagConfig? _config;
     private static readonly ILogger _logger = StaticLogger.GetLogger("ConfigManager");
     private static readonly object _fileLock = new();
+    private readonly string? _customConfigPath;
 
-    public ConfigManager(ObsidianRagConfig? initialConfig = null)
+    public ConfigManager(ObsidianRagConfig? initialConfig = null, string? customConfigPath = null)
     {
         _config = initialConfig;
+        _customConfigPath = customConfigPath;
     }
 
     /// <summary>
@@ -45,10 +49,12 @@ public class ConfigManager
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    private static string GetAppSettingsPath()
+    private string GetAppSettingsPath()
     {
-        return Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+        return _customConfigPath ?? Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
     }
+
+    public static string GetConfigPath() => Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
 
     /// <summary>
     /// 加载配置 - 仅从 appsettings.json 的 ReferenceRAG 节读取
@@ -62,6 +68,9 @@ public class ConfigManager
             if (_config != null) return _config;
 
             var appSettingsPath = GetAppSettingsPath();
+            // 确保配置文件就绪（缺失自动创建、损坏自动自愈、存量自动迁移）
+            ConfigBootstrap.EnsureInitialized(customConfigPath: appSettingsPath);
+
             if (File.Exists(appSettingsPath))
             {
                 try
@@ -73,7 +82,7 @@ public class ConfigManager
                         _config = ragConfig.Deserialize<ObsidianRagConfig>(_readOptions);
                         if (_config != null)
                         {
-                            _logger.LogInformation("[ConfigManager] 已从 appsettings.json 加载配置");
+                            _logger.LogInformation("[ConfigManager] 已从 appsettings.json 加载配置 (SchemaVersion {Version})", _config.SchemaVersion);
                             ApplyEnvironmentVariables(_config);
                             return _config;
                         }
@@ -114,6 +123,7 @@ public class ConfigManager
                     root = new JsonObject();
                 }
 
+                config.SchemaVersion = 2;
                 root["ReferenceRAG"] = JsonSerializer.SerializeToNode(config, _writeOptions) ?? new JsonObject();
                 File.WriteAllText(appSettingsPath, root.ToJsonString(_writeOptions));
 
@@ -422,9 +432,4 @@ public class ConfigManager
                 "配合增强文本（标题/章节/标签）时仍可能被 tokenizer 截断，建议 ≤ " + effectiveBudget + "。");
         }
     }
-
-    /// <summary>
-    /// 获取配置文件路径
-    /// </summary>
-    public static string GetConfigPath() => GetAppSettingsPath();
 }

@@ -4,6 +4,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using ReferenceRAG.Core.Services;
 using ReferenceRAG.Service.Controllers;
 using ReferenceRAG.Service.Services;
 using Xunit;
@@ -88,6 +89,33 @@ public class MafChatControllerConfigTests : IDisposable
     }
 
     [Fact]
+    public void MafChatController_CanBeActivatedByActivatorUtilities_WithoutAmbiguity()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddHttpClient();
+
+        var config = new ConfigurationBuilder().Build();
+        services.AddSingleton<IConfiguration>(config);
+        services.AddSingleton(new ConfigManager());
+        services.AddSingleton<Microsoft.Extensions.Hosting.IHostEnvironment>(new TestHostEnvironment { ContentRootPath = _tempDir });
+
+        var sp = services.BuildServiceProvider();
+        var chatService = new MafChatService(
+            config,
+            sp.GetRequiredService<IServiceScopeFactory>(),
+            sp.GetRequiredService<IHttpClientFactory>(),
+            NullLogger<MafChatService>.Instance);
+        services.AddSingleton(chatService);
+
+        var fullSp = services.BuildServiceProvider();
+
+        // 当存在多个可用构造函数且无 [ActivatorUtilitiesConstructor] 时，此处将抛出 InvalidOperationException
+        var controller = ActivatorUtilities.CreateInstance<MafChatController>(fullSp);
+        Assert.NotNull(controller);
+    }
+
+    [Fact]
     public void GetConfig_DesensitizesApiKey_AndReportsConfigured()
     {
         var controller = CreateController("sk-test-secret-key");
@@ -117,13 +145,14 @@ public class MafChatControllerConfigTests : IDisposable
 
         Assert.IsType<OkObjectResult>(saveResult);
 
-        // 验证 appsettings.json 中原有的有效 ApiKey 坚决不被抹空
+        // 验证 appsettings.json 中原有的有效 ApiKey 坚决不被抹空，且顶层 Chat 已自动迁移至 ReferenceRAG
         var savedJson = File.ReadAllText(_appSettingsPath);
         var root = JsonNode.Parse(savedJson)?.AsObject();
-        var keyInFile = root?["Chat"]?["ApiKey"]?.GetValue<string>();
+        var keyInFile = root?["ReferenceRAG"]?["chat"]?["openAiApi"]?["apiKey"]?.GetValue<string>();
 
         Assert.Equal("sk-existing-protected-key", keyInFile);
-        Assert.Equal("deepseek-chat", root?["Chat"]?["Model"]?.GetValue<string>());
+        Assert.Equal("deepseek-chat", root?["ReferenceRAG"]?["chat"]?["openAiApi"]?["model"]?.GetValue<string>());
+        Assert.Null(root?["Chat"]);
 
         // 再次获取配置确认仍标记为已配置
         var getConfigResult = controller.GetConfig();
@@ -149,9 +178,10 @@ public class MafChatControllerConfigTests : IDisposable
 
         var savedJson = File.ReadAllText(_appSettingsPath);
         var root = JsonNode.Parse(savedJson)?.AsObject();
-        var keyInFile = root?["Chat"]?["ApiKey"]?.GetValue<string>();
+        var keyInFile = root?["ReferenceRAG"]?["chat"]?["openAiApi"]?["apiKey"]?.GetValue<string>();
 
         Assert.Equal("sk-brand-new-key", keyInFile);
+        Assert.Null(root?["Chat"]);
     }
 
     [Fact]
@@ -171,9 +201,10 @@ public class MafChatControllerConfigTests : IDisposable
 
         var savedJson = File.ReadAllText(_appSettingsPath);
         var root = JsonNode.Parse(savedJson)?.AsObject();
-        var keyInFile = root?["Chat"]?["ApiKey"]?.GetValue<string>();
+        var keyInFile = root?["ReferenceRAG"]?["chat"]?["openAiApi"]?["apiKey"]?.GetValue<string>();
 
         Assert.Equal(string.Empty, keyInFile);
+        Assert.Null(root?["Chat"]);
 
         var getConfigResult = controller.GetConfig();
         var okResult = Assert.IsType<OkObjectResult>(getConfigResult.Result);

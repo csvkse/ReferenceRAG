@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # merge-appsettings.ps1
 # Preserves user configuration (API keys, sources, data paths) when republishing
 # ==============================================================================
@@ -58,8 +58,11 @@ try {
     # Diagnostic tracking for preserved secrets and core paths
     $preserved = [System.Collections.Generic.List[string]]::new()
 
+    if ($backupObj.ReferenceRAG -and $backupObj.ReferenceRAG.chat -and $backupObj.ReferenceRAG.chat.openAiApi -and -not [string]::IsNullOrWhiteSpace($backupObj.ReferenceRAG.chat.openAiApi.apiKey)) {
+        $preserved.Add("ReferenceRAG.chat.openAiApi.apiKey")
+    }
     if ($backupObj.Chat -and -not [string]::IsNullOrWhiteSpace($backupObj.Chat.ApiKey)) {
-        $preserved.Add("Chat.ApiKey")
+        $preserved.Add("Chat.ApiKey (legacy)")
     }
     if ($backupObj.ReferenceRAG -and $backupObj.ReferenceRAG.service -and -not [string]::IsNullOrWhiteSpace($backupObj.ReferenceRAG.service.apiKey)) {
         $preserved.Add("ReferenceRAG.service.apiKey")

@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using OpenAI;
+using ReferenceRAG.Business.Features.Chat.Services;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -15,11 +16,14 @@ namespace ReferenceRAG.Service.Services;
 
 public record SseEvent(string Type, string? Delta = null, string? Message = null);
 
-public class MafChatService
+public class MafChatService : IDisposable
 {
     private volatile IChatClient? _client;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ConfigManager? _configManager;
+    private readonly IModelManager? _modelManager;
+    private volatile bool _isLocalGguf;
     private volatile string _systemPrompt;
     private volatile string _model = "gpt-4o-mini";
     private readonly AITool[] _tools;
@@ -30,12 +34,50 @@ public class MafChatService
     private readonly int _maxMessagesPerSession;
     private readonly TimeSpan _sessionIdleTimeout;
     private readonly HttpMessageHandler? _httpMessageHandler;
+    private readonly IMultimodalMessageAdapter _multimodalAdapter;
+    private DateTime _lastChatActivityUtc = DateTime.UtcNow;
+    private int _chatModelIdleTimeoutSeconds = 300;
+    private readonly System.Threading.Timer? _chatIdleEvictionTimer;
 
     public IChatClient? Client => _client;
     public bool IsConfigured => _client != null;
+    public bool IsLocalGguf => _isLocalGguf;
+    public bool IsLocalChat => _isLocalGguf;
     public string CurrentModel => _model;
     public string SystemPrompt => _systemPrompt;
     public AITool[] Tools => _tools;
+
+    /// <summary>
+    /// 指示本地对话模型是否已实际加载至显存/内存（程序启动时默认不加载，首次对话时按需延迟加载）
+    /// </summary>
+    public bool IsModelLoaded
+    {
+        get
+        {
+            if (_client == null) return false;
+            if (!_isLocalGguf) return true; // 在线 API 模式不占用本地显存，视作就绪
+
+            var llama = _client.GetService<LocalLlamaChatClient>();
+            if (llama != null) return llama.IsModelLoaded;
+
+            var onnx = _client.GetService<LocalOnnxChatClient>();
+            if (onnx != null) return onnx.IsModelLoaded;
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 显式卸载本地对话模型并释放显存/内存（与嵌入模型和重排模型一致）
+    /// </summary>
+    public void UnloadModel()
+    {
+        if (_client == null || !_isLocalGguf) return;
+        var llama = _client.GetService<LocalLlamaChatClient>();
+        llama?.Unload();
+        var onnx = _client.GetService<LocalOnnxChatClient>();
+        onnx?.Unload();
+    }
 
     public MafChatService(
         IConfiguration config,
@@ -43,13 +85,19 @@ public class MafChatService
         IHttpClientFactory httpClientFactory,
         ILogger<MafChatService> logger,
         TimeProvider? timeProvider = null,
-        HttpMessageHandler? httpMessageHandler = null)
+        HttpMessageHandler? httpMessageHandler = null,
+        ConfigManager? configManager = null,
+        IModelManager? modelManager = null,
+        IMultimodalMessageAdapter? multimodalAdapter = null)
     {
         _scopeFactory = scopeFactory;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _httpMessageHandler = httpMessageHandler;
+        _configManager = configManager;
+        _modelManager = modelManager;
+        _multimodalAdapter = multimodalAdapter ?? new MultimodalMessageAdapter(logger);
 
         var section = config.GetSection("Chat");
         var endpoint = section["Endpoint"] ?? "https://api.openai.com/v1";
@@ -72,14 +120,77 @@ public class MafChatService
             AIFunctionFactory.Create(GetIndexStatusAsync)
         ];
 
-        if (string.IsNullOrWhiteSpace(apiKey))
+        if (_configManager != null)
         {
-            _logger.LogWarning("聊天 API Key 未配置；聊天接口将在调用时返回配置错误");
+            ReloadConfiguration();
         }
         else
         {
-            _client = BuildChatClient(endpoint, apiKey, model);
+            var activeBackend = section["ActiveBackend"] ?? "OpenAiApi";
+            if (string.Equals(activeBackend, "LocalGguf", StringComparison.OrdinalIgnoreCase))
+            {
+                _isLocalGguf = true;
+                var modelPath = section["ModelPath"] ?? string.Empty;
+                var planner = new ReferenceRAG.Core.Features.HardwareAcceleration.ChatPerformancePlanner();
+                var plan = planner.PlanProfile(new ReferenceRAG.Core.Features.HardwareAcceleration.ChatPerformancePlanningRequest
+                {
+                    ModelPath = modelPath,
+                    ModelName = _model,
+                    PerformanceMode = section["PerformanceMode"] ?? "Adaptive",
+                    AdaptiveStrategy = section["AdaptiveStrategy"] ?? "Balanced",
+                    UserContextSize = section.GetValue<int?>("ContextSize"),
+                    UserGpuLayers = section.GetValue<int?>("GpuLayers"),
+                    UserBatchSize = section.GetValue<int?>("BatchSize"),
+                    UserUBatchSize = section.GetValue<int?>("UBatchSize")
+                });
+
+                var rawClient = new LocalLlamaChatClient(
+                    modelPath: modelPath,
+                    modelName: _model,
+                    gpuLayers: plan.GpuLayers,
+                    contextSize: plan.ContextSize,
+                    batchSize: plan.BatchSize,
+                    uBatchSize: plan.UBatchSize,
+                    logger: _logger);
+                _client = rawClient.AsBuilder().UseFunctionInvocation().Build();
+            }
+            else if (string.Equals(activeBackend, "LocalOnnxGenAi", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(activeBackend, "LocalOnnx", StringComparison.OrdinalIgnoreCase))
+            {
+                _isLocalGguf = true;
+                var modelPath = section["ModelPath"] ?? string.Empty;
+                var rawClient = new LocalOnnxChatClient(
+                    modelPath: modelPath,
+                    modelName: _model,
+                    logger: _logger);
+                _client = rawClient.AsBuilder().UseFunctionInvocation().Build();
+            }
+            else
+            {
+                _isLocalGguf = false;
+                if (string.IsNullOrWhiteSpace(apiKey))
+                {
+                    _logger.LogWarning("聊天 API Key 未配置；聊天接口将在调用时返回配置错误");
+                }
+                else
+                {
+                    _client = BuildChatClient(endpoint, apiKey, model);
+                }
+            }
         }
+
+        if (_modelManager != null)
+        {
+            _modelManager.ChatModelSwitched += OnChatModelSwitched;
+        }
+
+        _chatIdleEvictionTimer = new System.Threading.Timer(CheckChatModelIdleEviction, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
+    private void OnChatModelSwitched(object? sender, ModelSwitchedEventArgs e)
+    {
+        _logger.LogInformation("检测到本地对话模型切换事件: {ModelName} -> {ModelPath}", e.ModelName, e.ModelPath);
+        ReloadConfiguration();
     }
 
     private IChatClient? BuildChatClient(string endpoint, string? apiKey, string model)
@@ -111,10 +222,187 @@ public class MafChatService
     }
 
     /// <summary>
+    /// 根据系统配置动态重载 AI 聊天客户端（支持 LocalGguf 本地模型与 OpenAiApi 远程端点双向切换）
+    /// </summary>
+    public void ReloadConfiguration()
+    {
+        if (_configManager == null) return;
+
+        var config = _configManager.Load();
+        var chatConfig = config.Chat ?? new ChatModelConfig();
+        var activeBackend = chatConfig.ActiveBackend ?? "OpenAiApi";
+        _chatModelIdleTimeoutSeconds = chatConfig.IdleTimeoutSeconds > 0 ? chatConfig.IdleTimeoutSeconds : 300;
+
+        _systemPrompt = string.IsNullOrWhiteSpace(chatConfig.SystemPrompt)
+            ? "你是 ReferenceRAG 智能助手。"
+            : chatConfig.SystemPrompt.Trim();
+
+        if (string.Equals(activeBackend, "LocalGguf", StringComparison.OrdinalIgnoreCase))
+        {
+            _isLocalGguf = true;
+            var localGguf = chatConfig.LocalGguf ?? new LocalGgufChatProfile();
+            var modelName = string.IsNullOrWhiteSpace(localGguf.ModelName) ? "Qwen2.5-7B-Instruct-GGUF" : localGguf.ModelName;
+            _model = modelName;
+
+            var modelPath = localGguf.ModelPath;
+            if (string.IsNullOrWhiteSpace(modelPath) || !File.Exists(modelPath))
+            {
+                if (_modelManager != null)
+                {
+                    var registered = _modelManager.GetChatModels().FirstOrDefault(m => string.Equals(m.Name, modelName, StringComparison.OrdinalIgnoreCase));
+                    if (registered != null)
+                    {
+                        var resolved = ModelManager.ResolveModelFilePath(registered.LocalPath, localGguf.Variant);
+                        if (!string.IsNullOrWhiteSpace(resolved))
+                        {
+                            modelPath = resolved;
+                        }
+                    }
+                }
+            }
+
+            var planner = new ReferenceRAG.Core.Features.HardwareAcceleration.ChatPerformancePlanner();
+            var plan = planner.PlanProfile(new ReferenceRAG.Core.Features.HardwareAcceleration.ChatPerformancePlanningRequest
+            {
+                ModelPath = modelPath,
+                ModelName = modelName,
+                UseGpu = localGguf.Acceleration?.Backend != AccelerationBackend.Cpu,
+                PerformanceMode = localGguf.PerformanceMode,
+                AdaptiveStrategy = localGguf.AdaptiveStrategy,
+                UserContextSize = localGguf.ContextSize > 0 ? localGguf.ContextSize : null,
+                UserGpuLayers = localGguf.GpuLayers >= 0 ? localGguf.GpuLayers : null,
+                UserBatchSize = localGguf.BatchSize > 0 ? localGguf.BatchSize : null,
+                UserUBatchSize = localGguf.UBatchSize > 0 ? localGguf.UBatchSize : null
+            });
+
+            int gpuLayers = plan.GpuLayers;
+            int contextSize = plan.ContextSize;
+            int batchSize = plan.BatchSize;
+            int uBatchSize = plan.UBatchSize;
+
+            _logger.LogInformation(
+                "正在初始化本地 GGUF 聊天客户端: ModelName={ModelName}, Path={Path}, GpuLayers={Layers}, ContextSize={Ctx}, BatchSize={Batch}, UBatchSize={UBatch} ({Rationale})",
+                modelName, modelPath, gpuLayers, contextSize, batchSize, uBatchSize, plan.Rationale);
+
+            try
+            {
+                var rawClient = new LocalLlamaChatClient(
+                    modelPath: modelPath ?? string.Empty,
+                    modelName: modelName,
+                    gpuLayers: gpuLayers,
+                    contextSize: contextSize,
+                    batchSize: batchSize,
+                    uBatchSize: uBatchSize,
+                    logger: _logger);
+
+                var newClient = rawClient
+                    .AsBuilder()
+                    .UseFunctionInvocation()
+                    .Build();
+
+                var oldClient = Interlocked.Exchange(ref _client, newClient);
+                (oldClient as IDisposable)?.Dispose();
+
+                _logger.LogInformation("本地 GGUF 聊天客户端装配完成并已激活: {ModelName}", modelName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "初始化本地 GGUF 聊天客户端失败: {ModelName}", modelName);
+                var oldClient = Interlocked.Exchange(ref _client, null);
+                (oldClient as IDisposable)?.Dispose();
+            }
+        }
+        else if (string.Equals(activeBackend, "LocalOnnxGenAi", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(activeBackend, "LocalOnnx", StringComparison.OrdinalIgnoreCase))
+        {
+            _isLocalGguf = true;
+            var localOnnx = chatConfig.LocalOnnxGenAi ?? new LocalOnnxGenAiChatProfile();
+            var modelName = string.IsNullOrWhiteSpace(localOnnx.ModelName) ? "Phi-3.5-mini-instruct-onnx" : localOnnx.ModelName;
+            _model = modelName;
+
+            var modelPath = localOnnx.ModelPath;
+            if (string.IsNullOrWhiteSpace(modelPath) || (!File.Exists(modelPath) && !Directory.Exists(modelPath)))
+            {
+                if (_modelManager != null)
+                {
+                    var registered = _modelManager.GetChatModels().FirstOrDefault(m => string.Equals(m.Name, modelName, StringComparison.OrdinalIgnoreCase));
+                    if (registered != null && !string.IsNullOrWhiteSpace(registered.LocalPath))
+                    {
+                        var resolved = ModelManager.ResolveModelFilePath(registered.LocalPath, registered.ActiveVariantFileName);
+                        modelPath = !string.IsNullOrWhiteSpace(resolved) ? resolved : registered.LocalPath;
+                    }
+                }
+            }
+
+            _logger.LogInformation(
+                "正在初始化本地 ONNX 聊天客户端: ModelName={ModelName}, Path={Path}, Backend={Backend}",
+                modelName, modelPath, localOnnx.Acceleration?.Backend);
+
+            try
+            {
+                var rawClient = new LocalOnnxChatClient(
+                    modelPath: modelPath ?? string.Empty,
+                    modelName: modelName,
+                    acceleration: localOnnx.Acceleration,
+                    logger: _logger);
+
+                var newClient = rawClient
+                    .AsBuilder()
+                    .UseFunctionInvocation()
+                    .Build();
+
+                var oldClient = Interlocked.Exchange(ref _client, newClient);
+                (oldClient as IDisposable)?.Dispose();
+
+                _logger.LogInformation("本地 ONNX 聊天客户端装配完成并已激活: {ModelName}", modelName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "初始化本地 ONNX 聊天客户端失败: {ModelName}", modelName);
+                var oldClient = Interlocked.Exchange(ref _client, null);
+                (oldClient as IDisposable)?.Dispose();
+            }
+        }
+        else
+        {
+            _isLocalGguf = false;
+            var openAiProfile = chatConfig.OpenAiApi ?? new OpenAiApiChatProfile();
+            var ep = string.IsNullOrWhiteSpace(openAiProfile.Endpoint) ? "https://api.openai.com/v1" : openAiProfile.Endpoint.Trim();
+            var mdl = string.IsNullOrWhiteSpace(openAiProfile.Model) ? "gpt-4o-mini" : openAiProfile.Model.Trim();
+            var key = openAiProfile.ApiKey?.Trim();
+            _model = mdl;
+
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                var oldClient = Interlocked.Exchange(ref _client, null);
+                (oldClient as IDisposable)?.Dispose();
+                _logger.LogWarning("AI 聊天 API Key 未配置，聊天接口将提示配置");
+            }
+            else
+            {
+                try
+                {
+                    var newClient = BuildChatClient(ep, key, mdl);
+                    var oldClient = Interlocked.Exchange(ref _client, newClient);
+                    (oldClient as IDisposable)?.Dispose();
+                    _logger.LogInformation("OpenAI 兼容聊天客户端热更新成功，立即生效");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "热更新 OpenAI 聊天客户端失败");
+                    var oldClient = Interlocked.Exchange(ref _client, null);
+                    (oldClient as IDisposable)?.Dispose();
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// 热更新 AI 聊天配置（无需重启即时生效）
     /// </summary>
     public void UpdateConfiguration(string? endpoint, string? apiKey, string? model, string? systemPrompt)
     {
+        _isLocalGguf = false;
         var ep = string.IsNullOrWhiteSpace(endpoint) ? "https://api.openai.com/v1" : endpoint.Trim();
         var mdl = string.IsNullOrWhiteSpace(model) ? "gpt-4o-mini" : model.Trim();
         var key = apiKey?.Trim();
@@ -127,7 +415,8 @@ public class MafChatService
 
         if (string.IsNullOrWhiteSpace(key))
         {
-            _client = null;
+            var old = Interlocked.Exchange(ref _client, null);
+            (old as IDisposable)?.Dispose();
             _logger.LogWarning("AI 聊天 API Key 已清空，聊天接口将提示配置");
             return;
         }
@@ -135,7 +424,8 @@ public class MafChatService
         try
         {
             var newClient = BuildChatClient(ep, key, mdl);
-            _client = newClient;
+            var old = Interlocked.Exchange(ref _client, newClient);
+            (old as IDisposable)?.Dispose();
             _logger.LogInformation("AI 聊天客户端热更新成功，立即生效");
         }
         catch (Exception ex)
@@ -143,6 +433,31 @@ public class MafChatService
             _logger.LogError(ex, "热更新 AI 聊天客户端失败");
             throw;
         }
+    }
+
+    private void CheckChatModelIdleEviction(object? state)
+    {
+        if (!_isLocalGguf || _client == null) return;
+        if (_chatModelIdleTimeoutSeconds <= 0) return;
+
+        if (IsModelLoaded && (DateTime.UtcNow - _lastChatActivityUtc).TotalSeconds >= _chatModelIdleTimeoutSeconds)
+        {
+            _logger.LogInformation(
+                "[MafChatService] 本地对话模型已空闲超过 {Timeout} 秒，触发自动显存卸载释放...",
+                _chatModelIdleTimeoutSeconds);
+            UnloadModel();
+        }
+    }
+
+    public void Dispose()
+    {
+        _chatIdleEvictionTimer?.Dispose();
+        if (_modelManager != null)
+        {
+            _modelManager.ChatModelSwitched -= OnChatModelSwitched;
+        }
+        var old = Interlocked.Exchange(ref _client, null);
+        (old as IDisposable)?.Dispose();
     }
 
     // ── 工具定义 ──────────────────────────────────────────────────────
@@ -168,20 +483,33 @@ public class MafChatService
             if (response.Chunks.Count == 0)
                 return "知识库中未找到相关内容。";
 
+            const int maxChunkChars = 800;
+            const int maxTotalChars = 5000;
+
             var sb = new StringBuilder();
-            sb.AppendLine($"## 语义检索结果（共 {response.Chunks.Count} 条，耗时 {response.Stats.DurationMs}ms）");
-            sb.AppendLine();
+            sb.AppendLine($"## 语义检索结果（共 {response.Chunks.Count} 条，耗时 {response.Stats.DurationMs}ms）\n");
 
             for (int i = 0; i < response.Chunks.Count; i++)
             {
                 var c = response.Chunks[i];
                 var title = c.Title ?? Path.GetFileNameWithoutExtension(c.FilePath);
                 var heading = string.IsNullOrEmpty(c.HeadingPath) ? "" : $" > {c.HeadingPath}";
-                sb.AppendLine($"[{i + 1}] 《{title}》{heading}");
-                sb.AppendLine($"    文件: {c.FilePath}（行 {c.StartLine}-{c.EndLine}，refId: {c.RefId}，score: {c.Score:F3}）");
-                sb.AppendLine("    ---");
-                sb.AppendLine(c.Content);
-                sb.AppendLine();
+                var chunkHeader = $"[{i + 1}] 《{title}》{heading}\n    文件: {c.FilePath}（行 {c.StartLine}-{c.EndLine}，refId: {c.RefId}，score: {c.Score:F3}）\n    ---";
+
+                var content = c.Content ?? string.Empty;
+                if (content.Length > maxChunkChars)
+                {
+                    content = content[..maxChunkChars] + $"\n    ... [片段内容较长已截断，如需完整正文可调用 DrillDownChunk(refId: \"{c.RefId}\")]";
+                }
+
+                var chunkBlock = $"{chunkHeader}\n{content}\n\n";
+                if (sb.Length + chunkBlock.Length > maxTotalChars)
+                {
+                    sb.AppendLine($"... [为适配模型上下文限制，已省略剩余 {response.Chunks.Count - i} 条较低相关度检索结果]");
+                    break;
+                }
+
+                sb.Append(chunkBlock);
             }
             return sb.ToString();
         }
@@ -268,15 +596,27 @@ public class MafChatService
             if (filteredResults.Count == 0)
                 return $"未找到关键词「{keyword}」的匹配内容。";
 
+            const int maxChunkChars = 800;
+            const int maxTotalChars = 5000;
             var sb = new StringBuilder();
-            sb.AppendLine($"## BM25 精确检索（词：{keyword}）");
-            sb.AppendLine();
+            sb.AppendLine($"## BM25 精确检索（词：{keyword}）\n");
             int idx = 1;
-            foreach (var item in filteredResults)
+            for (int i = 0; i < filteredResults.Count; i++)
             {
-                sb.AppendLine($"[{idx++}] score: {item.Score:F2}");
-                sb.AppendLine(item.Content);
-                sb.AppendLine();
+                var item = filteredResults[i];
+                var header = $"[{idx++}] score: {item.Score:F2}\n";
+                var content = item.Content ?? string.Empty;
+                if (content.Length > maxChunkChars)
+                {
+                    content = content[..maxChunkChars] + "\n... [内容过长已截断]";
+                }
+                var itemBlock = $"{header}{content}\n\n";
+                if (sb.Length + itemBlock.Length > maxTotalChars)
+                {
+                    sb.AppendLine($"... [已省略剩余 {filteredResults.Count - i} 条检索结果以适配上下文限制]");
+                    break;
+                }
+                sb.Append(itemBlock);
             }
             return sb.ToString();
         }
@@ -479,10 +819,22 @@ public class MafChatService
                                    .OrderBy(c => c.ChunkOrder);
             }
 
+            const int maxFileChars = 6000;
             var sb = new StringBuilder();
             foreach (var chunk in filtered)
             {
-                sb.AppendLine(chunk.Content);
+                var text = chunk.Content ?? string.Empty;
+                if (sb.Length + text.Length > maxFileChars)
+                {
+                    var remain = Math.Max(0, maxFileChars - sb.Length);
+                    if (remain > 100)
+                    {
+                        sb.AppendLine(text[..remain]);
+                    }
+                    sb.AppendLine("\n... [为保护模型上下文窗口，已截断后续内容。建议传入具体的 startLine 与 endLine 分段精准读取]");
+                    break;
+                }
+                sb.AppendLine(text);
             }
 
             return sb.Length == 0 ? "未读取到内容。" : sb.ToString();
@@ -518,6 +870,7 @@ public class MafChatService
     public string CreateSession()
     {
         RemoveExpiredSessions();
+        _lastChatActivityUtc = DateTime.UtcNow;
         while (_sessions.Count >= _maxSessions)
         {
             var oldest = _sessions.MinBy(item => item.Value.LastAccessUtc);
@@ -540,20 +893,43 @@ public class MafChatService
         }).Where(s => !string.IsNullOrEmpty(s)).ToList();
     }
 
+    public IAsyncEnumerable<SseEvent> StreamAsync(
+        string sessionId,
+        string userMessage,
+        CancellationToken ct = default)
+        => StreamAsync(sessionId, userMessage, null, ct);
+
     public async IAsyncEnumerable<SseEvent> StreamAsync(
         string sessionId,
         string userMessage,
+        IReadOnlyList<string>? images,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         var client = _client;
         if (client is null)
         {
-            yield return new SseEvent("error", Message: "聊天 API Key 未配置，请在项目设置中配置 Chat ApiKey 后使用");
+            var msg = _isLocalGguf
+                ? "本地聊天模型未就绪或未找到模型文件，请在设置中检查模型配置"
+                : "聊天 API Key 未配置，请在项目设置中配置 Chat ApiKey 后使用";
+            yield return new SseEvent("error", Message: msg);
             yield return new SseEvent("done");
             yield break;
         }
 
+        // 校验输入图像列表安全合规性
+        if (images != null && images.Count > 0)
+        {
+            var (valid, validationErr) = _multimodalAdapter.ValidateImages(images);
+            if (!valid)
+            {
+                yield return new SseEvent("error", Message: validationErr ?? "图片校验失败");
+                yield return new SseEvent("done");
+                yield break;
+            }
+        }
+
         RemoveExpiredSessions();
+        _lastChatActivityUtc = DateTime.UtcNow;
         if (!_sessions.TryGetValue(sessionId, out var session))
         {
             yield return new SseEvent("error", Message: "会话不存在，请创建新会话");
@@ -565,7 +941,7 @@ public class MafChatService
         List<ChatMessage> history;
         lock (session.Messages)
         {
-            session.Messages.Add(new ChatMessage(ChatRole.User, userMessage));
+            session.Messages.Add(_multimodalAdapter.AdaptUserMessage(userMessage, images));
             TrimHistory(session.Messages);
             history = [.. session.Messages];
         }
@@ -651,9 +1027,15 @@ public class MafChatService
     {
         var client = _client;
         if (client is null)
-            throw new InvalidOperationException("Chat API Key 未配置，请在设置中配置 Chat ApiKey 后使用");
+        {
+            var msg = _isLocalGguf
+                ? "本地聊天模型未就绪或未找到模型文件，请在设置中检查模型配置"
+                : "Chat API Key 未配置，请在设置中配置 Chat ApiKey 后使用";
+            throw new InvalidOperationException(msg);
+        }
 
         options ??= new ChatOptions { Tools = [.. _tools] };
+        _lastChatActivityUtc = DateTime.UtcNow;
         await foreach (var update in client.GetStreamingResponseAsync(messages, options, ct))
         {
             if (!string.IsNullOrEmpty(update.Text))
@@ -673,9 +1055,15 @@ public class MafChatService
     {
         var client = _client;
         if (client is null)
-            throw new InvalidOperationException("Chat API Key 未配置，请在设置中配置 Chat ApiKey 后使用");
+        {
+            var msg = _isLocalGguf
+                ? "本地聊天模型未就绪或未找到模型文件，请在设置中检查模型配置"
+                : "Chat API Key 未配置，请在设置中配置 Chat ApiKey 后使用";
+            throw new InvalidOperationException(msg);
+        }
 
         options ??= new ChatOptions { Tools = [.. _tools] };
+        _lastChatActivityUtc = DateTime.UtcNow;
         var response = await client.GetResponseAsync(messages, options, ct);
         return response?.Text ?? string.Empty;
     }

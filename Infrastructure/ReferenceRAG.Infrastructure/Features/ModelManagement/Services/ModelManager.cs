@@ -931,7 +931,7 @@ public class ModelManager : IModelManager, IDisposable
             BenchmarkScore = 0.88f,
             DownloadUrl = "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
             ModelSizeBytes = (long)(1.0 * 1024 * 1024 * 1024),
-            HasOnnx = true
+            HasOnnx = false
         },
         new ModelInfo
         {
@@ -945,7 +945,7 @@ public class ModelManager : IModelManager, IDisposable
             BenchmarkScore = 0.95f,
             DownloadUrl = "Qwen/Qwen2.5-7B-Instruct-GGUF",
             ModelSizeBytes = (long)(4.7 * 1024 * 1024 * 1024),
-            HasOnnx = true
+            HasOnnx = false
         },
         new ModelInfo
         {
@@ -959,7 +959,204 @@ public class ModelManager : IModelManager, IDisposable
             BenchmarkScore = 0.90f,
             DownloadUrl = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-GGUF",
             ModelSizeBytes = (long)(1.1 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Qwen2.5-3B-Instruct-GGUF",
+            DisplayName = "Qwen 2.5 3B Instruct (黄金甜点位)",
+            Description = "通义千问 3B 指令模型，兼顾极小显存占用 (~2.5GB) 与高智能水平，纯 CPU 或 4GB+ 显存均可极佳运行",
+            Dimension = 2048,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.91f,
+            DownloadUrl = "Qwen/Qwen2.5-3B-Instruct-GGUF",
+            ModelSizeBytes = (long)(2.1 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "DeepSeek-R1-Distill-Qwen-7B-GGUF",
+            DisplayName = "DeepSeek R1 Distill Qwen 7B (最强深度推理)",
+            Description = "DeepSeek-R1 强化学习蒸馏 7B 满血版，拥有强大的长思维链（CoT）深度分析与复杂逻辑解题能力",
+            Dimension = 3584,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.96f,
+            DownloadUrl = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+            ModelSizeBytes = (long)(4.7 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Qwen2.5-Coder-7B-Instruct-GGUF",
+            DisplayName = "Qwen 2.5 Coder 7B Instruct (代码与技术专家)",
+            Description = "通义千问专业代码大模型，针对编程、算法、技术文档解析与知识库问答进行了深度强化",
+            Dimension = 3584,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.95f,
+            DownloadUrl = "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+            ModelSizeBytes = (long)(4.7 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Llama-3.2-3B-Instruct-GGUF",
+            DisplayName = "Llama 3.2 3B Instruct (Meta 端侧旗舰)",
+            Description = "Meta 针对端侧设备推出的最新一代多语言模型，架构先进、响应飞快，英文与通用问答表现优异",
+            Dimension = 3072,
+            MaxSequenceLength = 131072,
+            ModelType = "chat",
+            Languages = new[] { "en", "multilingual", "code" },
+            BenchmarkScore = 0.92f,
+            DownloadUrl = "bartowski/Llama-3.2-3B-Instruct-GGUF",
+            ModelSizeBytes = (long)(2.2 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Phi-3.5-mini-instruct-onnx",
+            DisplayName = "Phi-3.5-mini-instruct (ONNX DirectML)",
+            Description = "微软专为 DirectML / ONNX Runtime 优化的 3.8B 参数轻量旗舰模型，支持 128k 超长上下文，多语言与代码推理表现优异",
+            Dimension = 3072,
+            MaxSequenceLength = 131072,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.93f,
+            DownloadUrl = "microsoft/Phi-3.5-mini-instruct-onnx",
+            ModelSizeBytes = (long)(2.3 * 1024 * 1024 * 1024),
             HasOnnx = true
+        },
+        new ModelInfo
+        {
+            Name = "Qwen2.5-1.5B-Instruct-ONNX",
+            DisplayName = "Qwen 2.5 1.5B Instruct (ONNX DirectML)",
+            Description = "通义千问 1.5B ONNX 格式版本，适配 Windows DirectML / NPU / GPU 加速，轻量高速端侧推理",
+            Dimension = 1536,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.88f,
+            DownloadUrl = "Qwen/Qwen2.5-1.5B-Instruct-ONNX",
+            ModelSizeBytes = (long)(1.2 * 1024 * 1024 * 1024),
+            HasOnnx = true
+        },
+        // ========== 2026 前沿轻量/视觉/高跑分端侧模型 ==========
+        new ModelInfo
+        {
+            Name = "FunctionGemma-270M-IT",
+            DisplayName = "FunctionGemma 270M IT (超轻量工具路由)",
+            Description = "谷歌针对工具/函数调用专项优化的 270M 极简模型，INT8 量化仅 288MB，BFCL 得分 61.6，专精函数路由与工具决策",
+            Dimension = 1024,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "en", "code" },
+            BenchmarkScore = 0.85f,
+            DownloadUrl = "google/function-gemma-270m-it-gguf",
+            ModelSizeBytes = 288L * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "LFM2.5-350M-Instruct-GGUF",
+            DisplayName = "LFM2.5 350M Instruct (极致轻量首选)",
+            Description = "Liquid AI 350M 极致微型模型，Q4_K_M 仅 229MB，支持工具调用、JSON 结构化与文本提取，冷启动与内存零压力",
+            Dimension = 1024,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.82f,
+            DownloadUrl = "LiquidAI/LFM-2.5-350M-Instruct-GGUF",
+            ModelSizeBytes = 229L * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Qwen3.5-0.8B-Instruct-GGUF",
+            DisplayName = "Qwen3.5 0.8B Instruct (体积与通用平衡/视觉)",
+            Description = "通义千问 0.8B 紧凑全能模型，Q4_0 仅 563MB，原生支持 262K 超长上下文，集成视觉感知、深度推理与代码工具能力",
+            Dimension = 1024,
+            MaxSequenceLength = 262144,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.86f,
+            DownloadUrl = "Qwen/Qwen3.5-0.8B-Instruct-GGUF",
+            ModelSizeBytes = 563L * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "LFM2.5-1.2B-Instruct-GGUF",
+            DisplayName = "LFM2.5 1.2B Instruct (离线RAG轻量专家)",
+            Description = "Liquid AI 1.2B 指令模型，Q4_K_M 约 731MB，专精离线 RAG 知识库问答、JSON 与工具调用 (BFCL 49.12)",
+            Dimension = 1536,
+            MaxSequenceLength = 32768,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.88f,
+            DownloadUrl = "LiquidAI/LFM-2.5-1.2B-Instruct-GGUF",
+            ModelSizeBytes = 731L * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Bonsai-2-2B-GGUF",
+            DisplayName = "Bonsai 2 2B (紧凑视觉与高智商推理)",
+            Description = "高压缩比紧凑型视觉与代码推理模型，体积仅 480MB 左右，支持 262K 超大上下文与图像感知 (BFCL 60.53)",
+            Dimension = 2048,
+            MaxSequenceLength = 262144,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.90f,
+            DownloadUrl = "Bonsai/Bonsai-2-2B-GGUF",
+            ModelSizeBytes = 480L * 1024 * 1024,
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Qwen3.5-2B-Instruct-GGUF",
+            DisplayName = "Qwen3.5 2B Instruct (综合能力首选/视觉推荐)",
+            Description = "通义千问 2B 黄金规格模型，Q4_K_M 约 1.28GB，支持 262K 上下文、原生多模态视觉感知、高阶工具调用与代码生成",
+            Dimension = 2048,
+            MaxSequenceLength = 262144,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.92f,
+            DownloadUrl = "Qwen/Qwen3.5-2B-Instruct-GGUF",
+            ModelSizeBytes = (long)(1.28 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Qwen3.5-4B-Instruct-GGUF",
+            DisplayName = "Qwen3.5 4B Instruct (多模态高阶主力/视觉)",
+            Description = "通义千问 4B 强劲多模态模型，Q4_K_M 约 2.74GB，支持 262K 上下文、视觉/代码/工具深度协同 (BFCL 50.3)",
+            Dimension = 2560,
+            MaxSequenceLength = 262144,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.94f,
+            DownloadUrl = "Qwen/Qwen3.5-4B-Instruct-GGUF",
+            ModelSizeBytes = (long)(2.74 * 1024 * 1024 * 1024),
+            HasOnnx = false
+        },
+        new ModelInfo
+        {
+            Name = "Gemma-4-E2B-IT-GGUF",
+            DisplayName = "Gemma 4 E2B IT (谷歌全能视听多模态)",
+            Description = "谷歌 Gemma 4 视听一体多模态端侧模型，Q4_K_M 约 3.11GB，支持 128K 上下文、图像/音频输入与代码推理",
+            Dimension = 2560,
+            MaxSequenceLength = 131072,
+            ModelType = "chat",
+            Languages = new[] { "zh", "en", "code" },
+            BenchmarkScore = 0.91f,
+            DownloadUrl = "google/gemma-4-e2b-it-gguf",
+            ModelSizeBytes = (long)(3.11 * 1024 * 1024 * 1024),
+            HasOnnx = false
         }
     };
 
@@ -1161,7 +1358,9 @@ public class ModelManager : IModelManager, IDisposable
         var config = _configManager.Load();
         var configuredEmbPath = config.Embedding?.ModelPath;
         var configuredRerankPath = config.Rerank?.ModelPath;
-        var configuredChatPath = config.Chat?.LocalGguf?.ModelPath;
+        var configuredChatPath = !string.IsNullOrEmpty(config.Chat?.LocalOnnxGenAi?.ModelPath)
+            ? config.Chat.LocalOnnxGenAi.ModelPath
+            : config.Chat?.LocalGguf?.ModelPath;
 
         // 首先将所有模型的 IsDownloaded 重置为 false（路径变更后需要重新检测）
         foreach (var model in _modelRegistry.Values)
@@ -1228,7 +1427,7 @@ public class ModelManager : IModelManager, IDisposable
                     model.LocalPath = dir;
                     model.ModelSizeBytes = directorySize;
                     model.OnnxFormat = onnxFormat;
-                    model.HasOnnx = hasValidOnnx;
+                    model.HasOnnx = onnxFormat != "gguf" && hasValidOnnx;
                     model.CanConvertFormat = canConvert;
                     model.InstalledVariants = variants;
                     model.ActiveVariantFileName = activeVariant.FileName;
@@ -1246,7 +1445,7 @@ public class ModelManager : IModelManager, IDisposable
                         IsDownloaded = hasValidOnnx,
                         LocalPath = dir,
                         ModelSizeBytes = directorySize,
-                        HasOnnx = hasValidOnnx,
+                        HasOnnx = onnxFormat != "gguf" && hasValidOnnx,
                         OnnxFormat = onnxFormat,
                         CanConvertFormat = canConvert,
                         InstalledVariants = variants,
@@ -1291,7 +1490,7 @@ public class ModelManager : IModelManager, IDisposable
                     IsDownloaded = true,
                     LocalPath = ggufFile,
                     ModelSizeBytes = fileInfo.Length,
-                    HasOnnx = true,
+                    HasOnnx = false,
                     OnnxFormat = "gguf",
                     CanConvertFormat = false,
                     InstalledVariants = new List<ModelVariantInfo> { singleVariant },
@@ -1476,14 +1675,37 @@ public class ModelManager : IModelManager, IDisposable
             var config = await LoadConfigAsync();
             if (model.ModelType == "chat")
             {
+                var isGguf = variant.FileName.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) || variant.Format == "gguf";
+                var isOnnx = variant.FileName.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase) || variant.Format == "onnx" ||
+                             variant.FileName.EndsWith("genai_config.json", StringComparison.OrdinalIgnoreCase);
+
+                if (!isGguf && !isOnnx)
+                {
+                    Console.WriteLine($"[ModelManager] 切换聊天模型变体失败：当前仅支持 GGUF 与 ONNX 格式聊天模型，不支持 {variant.FileName}");
+                    return false;
+                }
+
                 if (config.Chat == null) config.Chat = new ChatModelConfig();
                 config.Chat.Model = modelName;
-                if (config.Chat.LocalGguf == null) config.Chat.LocalGguf = new LocalGgufChatProfile();
-                config.Chat.LocalGguf.ModelName = modelName;
-                config.Chat.LocalGguf.ModelPath = variant.FullPath;
-                if (model.MaxSequenceLength > 0)
+
+                if (isOnnx)
                 {
-                    config.Chat.LocalGguf.ContextSize = model.MaxSequenceLength;
+                    config.Chat.ActiveBackend = "LocalOnnxGenAi";
+                    if (config.Chat.LocalOnnxGenAi == null) config.Chat.LocalOnnxGenAi = new LocalOnnxGenAiChatProfile();
+                    config.Chat.LocalOnnxGenAi.ModelName = modelName;
+                    config.Chat.LocalOnnxGenAi.ModelPath = variant.FullPath;
+                }
+                else
+                {
+                    config.Chat.ActiveBackend = "LocalGguf";
+                    if (config.Chat.LocalGguf == null) config.Chat.LocalGguf = new LocalGgufChatProfile();
+                    config.Chat.LocalGguf.ModelName = modelName;
+                    config.Chat.LocalGguf.Variant = variant.FileName;
+                    config.Chat.LocalGguf.ModelPath = variant.FullPath;
+                    if (model.MaxSequenceLength > 0)
+                    {
+                        config.Chat.LocalGguf.ContextSize = model.MaxSequenceLength;
+                    }
                 }
                 _currentChatModel = model;
             }
@@ -1733,7 +1955,7 @@ public class ModelManager : IModelManager, IDisposable
                         model.ModelSizeBytes = new FileInfo(mainGguf).Length;
                         model.Dimension = DetectModelDimension(modelDir);
                         model.OnnxFormat = "gguf";
-                        model.HasOnnx = true;
+                        model.HasOnnx = false;
                         model.CanConvertFormat = false;
 
                         Console.WriteLine($"[ModelManager] GGUF 模型下载完成: {model.DisplayName}");
@@ -2539,7 +2761,21 @@ public class ModelManager : IModelManager, IDisposable
             };
         }
 
-        return _currentChatModel;
+        if (_currentChatModel != null)
+        {
+            return _currentChatModel;
+        }
+
+        var activeName = cfg.Chat?.ActiveBackend == "LocalOnnxGenAi"
+            ? cfg.Chat.LocalOnnxGenAi?.ModelName
+            : cfg.Chat?.LocalGguf?.ModelName;
+
+        if (!string.IsNullOrEmpty(activeName) && _modelRegistry.TryGetValue(activeName, out var found))
+        {
+            return found;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -2575,17 +2811,45 @@ public class ModelManager : IModelManager, IDisposable
                 config.Chat = new ChatModelConfig();
             }
             var resolvedPath = ResolveModelFilePath(model.LocalPath, model.ActiveVariantFileName);
+            var isGguf = (resolvedPath != null && resolvedPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase)) ||
+                         model.Name.Contains("GGUF", StringComparison.OrdinalIgnoreCase) ||
+                         (model.ActiveVariantFileName != null && model.ActiveVariantFileName.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase));
+
+            var isOnnx = !isGguf &&
+                         ((resolvedPath != null && (resolvedPath.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase) ||
+                                                   (Directory.Exists(resolvedPath) && (File.Exists(Path.Combine(resolvedPath, "genai_config.json")) || File.Exists(Path.Combine(resolvedPath, "model.onnx")))))) ||
+                          model.Name.Contains("onnx", StringComparison.OrdinalIgnoreCase));
+
             config.Chat.Model = modelName;
-            if (config.Chat.LocalGguf == null) config.Chat.LocalGguf = new LocalGgufChatProfile();
-            config.Chat.LocalGguf.ModelName = modelName;
-            config.Chat.LocalGguf.ModelPath = resolvedPath;
-            if (model.MaxSequenceLength > 0)
+
+            if (isOnnx)
             {
-                config.Chat.LocalGguf.ContextSize = model.MaxSequenceLength;
+                config.Chat.ActiveBackend = "LocalOnnxGenAi";
+                if (config.Chat.LocalOnnxGenAi == null) config.Chat.LocalOnnxGenAi = new LocalOnnxGenAiChatProfile();
+                config.Chat.LocalOnnxGenAi.ModelName = modelName;
+                config.Chat.LocalOnnxGenAi.ModelPath = resolvedPath;
+            }
+            else
+            {
+                config.Chat.ActiveBackend = "LocalGguf";
+                if (config.Chat.LocalGguf == null) config.Chat.LocalGguf = new LocalGgufChatProfile();
+                config.Chat.LocalGguf.ModelName = modelName;
+                config.Chat.LocalGguf.Variant = model.ActiveVariantFileName;
+                config.Chat.LocalGguf.ModelPath = resolvedPath;
+                var planner = new ReferenceRAG.Core.Features.HardwareAcceleration.ChatPerformancePlanner();
+                var plan = planner.PlanProfile(
+                    resolvedPath,
+                    modelName,
+                    useGpu: config.Chat.LocalGguf.Acceleration?.Backend != AccelerationBackend.Cpu);
+
+                config.Chat.LocalGguf.ContextSize = plan.ContextSize;
+                config.Chat.LocalGguf.GpuLayers = plan.GpuLayers;
+                config.Chat.LocalGguf.BatchSize = plan.BatchSize;
+                config.Chat.LocalGguf.UBatchSize = plan.UBatchSize;
             }
             await SaveConfigAsync(config);
 
-            Console.WriteLine($"[ModelManager] 已切换聊天模型: {model.DisplayName} (Path={resolvedPath})");
+            Console.WriteLine($"[ModelManager] 已切换聊天模型: {model.DisplayName} (Path={resolvedPath}, Backend={config.Chat.ActiveBackend})");
 
             ChatModelSwitched?.Invoke(this, new ModelSwitchedEventArgs
             {

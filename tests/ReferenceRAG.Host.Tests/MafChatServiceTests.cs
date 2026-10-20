@@ -155,4 +155,72 @@ public class MafChatServiceTests
         var newSession = service.CreateSession();
         Assert.NotNull(newSession);
     }
+
+    [Fact]
+    public async Task LocalGguf_WithConfigManager_StreamsSuccessfullyWithoutApiKey()
+    {
+        var config = new ReferenceRAG.Core.Models.ObsidianRagConfig();
+        config.Chat.ActiveBackend = "LocalGguf";
+        config.Chat.LocalGguf.ModelName = "Qwen2.5-1.5B-Instruct-GGUF";
+        config.Chat.LocalGguf.ModelPath = @"C:\models\dummy-qwen.gguf";
+
+        var configManager = new ReferenceRAG.Core.Services.ConfigManager(config);
+        var services = new ServiceCollection()
+            .AddLogging()
+            .AddHttpClient()
+            .BuildServiceProvider();
+
+        var configuration = new ConfigurationBuilder().Build();
+
+        var service = new MafChatService(
+            configuration,
+            services.GetRequiredService<IServiceScopeFactory>(),
+            services.GetRequiredService<IHttpClientFactory>(),
+            services.GetRequiredService<ILogger<MafChatService>>(),
+            configManager: configManager);
+
+        Assert.True(service.IsConfigured);
+        Assert.True(service.IsLocalGguf);
+        Assert.Equal("Qwen2.5-1.5B-Instruct-GGUF", service.CurrentModel);
+
+        var events = new List<SseEvent>();
+        await foreach (var item in service.StreamAsync(service.CreateSession(), "你好，请自我介绍"))
+        {
+            events.Add(item);
+        }
+
+        // 验证没有输出缺少 ApiKey 错误，且正常完成
+        Assert.DoesNotContain(events, e => e.Type == "error" && (e.Message?.Contains("ApiKey") ?? false));
+        Assert.Contains(events, e => e.Type == "text" && (e.Delta?.Contains("本地模型") ?? false));
+        Assert.Contains(events, e => e.Type == "done");
+    }
+
+    [Fact]
+    public async Task LocalLlamaChatClient_SimulationMode_StreamsTokensAndCompletes()
+    {
+        using var client = new ReferenceRAG.Business.Features.Chat.Services.LocalLlamaChatClient(
+            modelPath: @"C:\non_existent_path\test.gguf",
+            modelName: "Test-Qwen-GGUF");
+
+        var messages = new List<Microsoft.Extensions.AI.ChatMessage>
+        {
+            new(Microsoft.Extensions.AI.ChatRole.System, "你是一个助手"),
+            new(Microsoft.Extensions.AI.ChatRole.User, "测试问题")
+        };
+
+        var updates = new List<Microsoft.Extensions.AI.ChatResponseUpdate>();
+        await foreach (var update in client.GetStreamingResponseAsync(messages))
+        {
+            updates.Add(update);
+        }
+
+        Assert.NotEmpty(updates);
+        var fullText = string.Join("", updates.Select(u => u.Text));
+        Assert.Contains("Test-Qwen-GGUF", fullText);
+        Assert.Contains("测试问题", fullText);
+
+        var response = await client.GetResponseAsync(messages);
+        Assert.NotNull(response);
+        Assert.Contains("Test-Qwen-GGUF", response.Text);
+    }
 }

@@ -1,12 +1,17 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 using ReferenceRAG.Service.Services;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace ReferenceRAG.Service.Controllers;
 
-public record ChatStreamRequest(string SessionId, string Message);
+public record ChatStreamRequest(string SessionId, string Message, IReadOnlyList<string>? Images = null);
 public record CreateSessionResponse(string SessionId);
 
 public class ChatConfig
@@ -23,31 +28,46 @@ public class ChatConfig
 public class MafChatController : ControllerBase
 {
     private readonly MafChatService _chatService;
-    private readonly IConfiguration _configuration;
     private readonly ILogger<MafChatController> _logger;
-    private readonly Microsoft.Extensions.Hosting.IHostEnvironment? _environment;
+    private readonly ConfigManager _configManager;
 
     private static readonly JsonSerializerOptions _sseOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
-    private static readonly JsonSerializerOptions _writeOptions = new()
+
+    [ActivatorUtilitiesConstructor]
+    public MafChatController(
+        MafChatService chatService,
+        ILogger<MafChatController> logger,
+        ConfigManager? configManager = null,
+        IHostEnvironment? environment = null)
     {
-        WriteIndented = true,
-        PropertyNamingPolicy = null
-    };
+        _chatService = chatService;
+        _logger = logger;
+        if (configManager != null)
+        {
+            _configManager = configManager;
+        }
+        else if (environment != null && !string.IsNullOrWhiteSpace(environment.ContentRootPath))
+        {
+            var configPath = Path.Combine(environment.ContentRootPath, "appsettings.json");
+            _configManager = new ConfigManager(customConfigPath: configPath);
+        }
+        else
+        {
+            _configManager = new ConfigManager();
+        }
+    }
 
     public MafChatController(
         MafChatService chatService,
         IConfiguration configuration,
         ILogger<MafChatController> logger,
-        Microsoft.Extensions.Hosting.IHostEnvironment? environment = null)
+        IHostEnvironment? environment = null)
+        : this(chatService, logger, null, environment)
     {
-        _chatService = chatService;
-        _configuration = configuration;
-        _logger = logger;
-        _environment = environment;
     }
 
     [HttpPost("sessions")]
@@ -79,7 +99,7 @@ public class MafChatController : ControllerBase
 
         try
         {
-            await foreach (var evt in _chatService.StreamAsync(request.SessionId, request.Message, ct))
+            await foreach (var evt in _chatService.StreamAsync(request.SessionId, request.Message, request.Images, ct))
             {
                 var json = JsonSerializer.Serialize(evt, _sseOptions);
                 await Response.WriteAsync($"data: {json}\n\n", ct);
@@ -89,6 +109,7 @@ public class MafChatController : ControllerBase
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
+            _logger.LogError(ex, "Chat streaming failed: {Message}", ex.Message);
             var errJson = JsonSerializer.Serialize(new { type = "error", message = ex.Message }, _sseOptions);
             await Response.WriteAsync($"data: {errJson}\n\n");
             var doneJson = JsonSerializer.Serialize(new { type = "done" }, _sseOptions);
@@ -100,46 +121,15 @@ public class MafChatController : ControllerBase
     [HttpGet("config")]
     public ActionResult<ChatConfig> GetConfig()
     {
-        var section = _configuration.GetSection("Chat");
-        var baseDir = _environment?.ContentRootPath ?? Directory.GetCurrentDirectory();
-        var appSettingsPath = Path.Combine(baseDir, "appsettings.json");
-        string endpoint = section["Endpoint"] ?? string.Empty;
-        string model = section["Model"] ?? string.Empty;
-        string systemPrompt = section["SystemPrompt"] ?? string.Empty;
-        bool hasApiKey = !string.IsNullOrWhiteSpace(section["ApiKey"]);
-
-        // 若 appsettings.json 存在，补充核对文件中的最新状态（避免 IConfiguration reload 延迟）
-        if (System.IO.File.Exists(appSettingsPath))
-        {
-            try
-            {
-                var json = System.IO.File.ReadAllText(appSettingsPath);
-                var root = JsonNode.Parse(json)?.AsObject();
-                if (root?["Chat"] is JsonObject chatObj)
-                {
-                    if (chatObj["Endpoint"] != null) endpoint = chatObj["Endpoint"]?.GetValue<string>() ?? endpoint;
-                    if (chatObj["Model"] != null) model = chatObj["Model"]?.GetValue<string>() ?? model;
-                    if (chatObj["SystemPrompt"] != null) systemPrompt = chatObj["SystemPrompt"]?.GetValue<string>() ?? systemPrompt;
-                    if (chatObj["ApiKey"] != null)
-                    {
-                        var keyInFile = chatObj["ApiKey"]?.GetValue<string>();
-                        hasApiKey = !string.IsNullOrWhiteSpace(keyInFile);
-                    }
-                }
-            }
-            catch
-            {
-                // fallback to IConfiguration
-            }
-        }
-
+        var ragConfig = _configManager.Load();
+        var openAi = ragConfig.Chat?.OpenAiApi ?? new OpenAiApiChatProfile();
         return Ok(new ChatConfig
         {
-            Endpoint = endpoint,
+            Endpoint = openAi.Endpoint,
             ApiKey = string.Empty,
-            ApiKeyConfigured = hasApiKey,
-            Model = model,
-            SystemPrompt = systemPrompt
+            ApiKeyConfigured = !string.IsNullOrWhiteSpace(openAi.ApiKey),
+            Model = openAi.Model,
+            SystemPrompt = ragConfig.Chat?.SystemPrompt ?? string.Empty
         });
     }
 
@@ -148,51 +138,28 @@ public class MafChatController : ControllerBase
     {
         try
         {
-            var baseDir = _environment?.ContentRootPath ?? Directory.GetCurrentDirectory();
-            var appSettingsPath = Path.Combine(baseDir, "appsettings.json");
-            JsonObject root;
-            if (System.IO.File.Exists(appSettingsPath))
-            {
-                var json = System.IO.File.ReadAllText(appSettingsPath);
-                root = JsonNode.Parse(json)?.AsObject() ?? new JsonObject();
-            }
-            else
-            {
-                root = new JsonObject();
-            }
+            var ragConfig = _configManager.Load();
+            ragConfig.Chat ??= new ChatModelConfig();
+            ragConfig.Chat.OpenAiApi ??= new OpenAiApiChatProfile();
 
-            var existingApiKey = root["Chat"]?["ApiKey"]?.GetValue<string>()
-                ?? _configuration.GetSection("Chat")["ApiKey"]
-                ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(config.Endpoint))
+                ragConfig.Chat.OpenAiApi.Endpoint = config.Endpoint.Trim();
 
-            string effectiveApiKey;
             if (string.Equals(config.ApiKey, "__CLEAR__", StringComparison.OrdinalIgnoreCase))
-            {
-                effectiveApiKey = string.Empty;
-            }
-            else if (string.IsNullOrWhiteSpace(config.ApiKey) && !string.IsNullOrWhiteSpace(existingApiKey))
-            {
-                // 前端脱敏留空：自动继承已有有效 Key，防止意外抹除
-                effectiveApiKey = existingApiKey;
-            }
-            else
-            {
-                effectiveApiKey = config.ApiKey?.Trim() ?? string.Empty;
-            }
+                ragConfig.Chat.OpenAiApi.ApiKey = string.Empty;
+            else if (!string.IsNullOrWhiteSpace(config.ApiKey))
+                ragConfig.Chat.OpenAiApi.ApiKey = config.ApiKey.Trim();
 
-            var chatObj = root["Chat"]?.AsObject() ?? new JsonObject();
-            chatObj["Endpoint"] = config.Endpoint;
-            chatObj["ApiKey"] = effectiveApiKey;
-            chatObj["Model"] = config.Model;
-            chatObj["SystemPrompt"] = config.SystemPrompt;
-            root["Chat"] = chatObj;
+            if (!string.IsNullOrWhiteSpace(config.Model))
+                ragConfig.Chat.OpenAiApi.Model = config.Model.Trim();
 
-            System.IO.File.WriteAllText(appSettingsPath, root.ToJsonString(_writeOptions));
+            if (!string.IsNullOrWhiteSpace(config.SystemPrompt))
+                ragConfig.Chat.SystemPrompt = config.SystemPrompt.Trim();
 
-            // 即时热更新 MafChatService 客户端
-            _chatService.UpdateConfiguration(config.Endpoint, effectiveApiKey, config.Model, config.SystemPrompt);
+            _configManager.Save(ragConfig);
+            _chatService.ReloadConfiguration();
 
-            _logger.LogInformation("Chat 配置已保存并即时生效");
+            _logger.LogInformation("Chat 配置已通过 ConfigManager 保存并即时热更新");
             return Ok(new { message = "配置已保存并即时生效" });
         }
         catch (Exception ex)

@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="../ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj" />
     <Content Include="../../Business/ReferenceRAG.Business/wwwroot/**/*" Exclude="../../Business/ReferenceRAG.Business/wwwroot/tests/**;../../Business/ReferenceRAG.Business/wwwroot/package.json;../../Business/ReferenceRAG.Business/wwwroot/check.mjs" Link="wwwroot/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="../../support/config/local/appsettings*.json" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../support/config/local/appsettings*.json" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+    <Content Include="../../support/config/appsettings.template.json" Link="appsettings.template.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

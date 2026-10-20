@@ -47,6 +47,7 @@ public sealed class IpcDispatcher(InProcessServer server, Action<string> send, I
     {
         try {
             if(request.Path is null || (!request.Path.StartsWith("/api/",StringComparison.OrdinalIgnoreCase)
+                && !request.Path.StartsWith("/v1/",StringComparison.OrdinalIgnoreCase)
                 && !request.Path.StartsWith("/swagger/",StringComparison.OrdinalIgnoreCase))) throw new ArgumentException("Unsupported IPC route");
             if(request.Path.Contains("..",StringComparison.Ordinal) || request.Body?.Length>8*1024*1024) throw new ArgumentException("Invalid IPC request");
             if(!new[]{"GET","POST","PUT","PATCH","DELETE","OPTIONS"}.Contains(request.Method)) throw new ArgumentException("Unsupported method");

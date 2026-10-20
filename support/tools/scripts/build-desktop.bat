@@ -413,8 +413,12 @@ goto publish_failed
 
 :publish_success
 if exist "%CONFIG_BACKUP%" (
-    echo [build-desktop] 正在将用户个性化配置合并回新发布的 appsettings.json...
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%\support\tools\scripts\merge-appsettings.ps1" -PublishedPath "%OUTPUT%\appsettings.json" -BackupPath "%CONFIG_BACKUP%"
+    if not exist "%OUTPUT%\appsettings.json" (
+        copy /y "%CONFIG_BACKUP%" "%OUTPUT%\appsettings.json" >nul 2>nul
+    ) else (
+        echo [build-desktop] 正在将用户个性化配置合并回 appsettings.json...
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%\support\tools\scripts\merge-appsettings.ps1" -PublishedPath "%OUTPUT%\appsettings.json" -BackupPath "%CONFIG_BACKUP%"
+    )
     del /f /q "%CONFIG_BACKUP%" >nul 2>nul
 )
 if /i "%STRIP_PDB%"=="true" (

@@ -335,7 +335,16 @@ CUDA/cuDNN 的 DLL 不在系统 PATH 时，用 `ReferenceRAG:embedding:cudaLibra
 
 ## 版本与改动历史
 
-当前稳定版本为 [v1.0.16](https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.16)。版本级改动和升级提示见 [CHANGELOG.md](CHANGELOG.md)。
+当前稳定版本为 [v1.0.17](https://github.com/csvkse/ReferenceRAG/releases/tag/v1.0.17)。版本级改动和升级提示见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 近期重点演进摘要
+
+#### 设置页面二级分类重构与对话模型启动延迟加载（v1.0.17）
+- **feat:** 设置页面重构为二级分类标签栏（`🤖 模型与推理`、`🔍 检索与分段`、`⚙️ 系统与存储`），支持 URL 参数联动与表单状态保持
+- **feat:** 统一聊天模型与嵌入/重排模型的配置术语与表单布局（`推理模式`、`本地 GGUF`、`OpenAI 兼容 API`、`模型名称`）
+- **feat:** 对话模型全面实现启动默认不加载（零显存/内存占用），首次提问按需加载，支持滑动空闲超时自动卸载与真实遥测状态反映
+- **feat:** 落地对话模型自适应性能规划架构（8K 黄金平衡与偏好策略）与上下文溢出自愈修复
+- **test:** 建立自动化质量门禁与全流程测试，603 项单元测试与桌面端发布打包 100% 通过
 
 ### 近期重点演进摘要
 

@@ -122,4 +122,16 @@ public class TransportTests
         Assert.Equal("小说",json.RootElement.GetProperty("name").GetString());
         await app.StopAsync();
     }
+    [Fact]
+    public async Task IpcAllowsV1Route()
+    {
+        await using var app=await StartAsync();
+        app.MapPost("/v1/chat/completions",()=>Results.Ok(new{id="chatcmpl-test"}));
+        var messages=new ConcurrentQueue<string>();
+        await using var ipc=new IpcDispatcher(app.Services.GetRequiredService<InProcessServer>(),messages.Enqueue,app.Services.GetRequiredService<ILogger<IpcDispatcher>>());
+        await ipc.ReceiveAsync(JsonSerializer.Serialize(new{id="v1-test",type="request",method="POST",path="/v1/chat/completions",headers=new Dictionary<string,string>{{"X-API-Key","test-key"}}}));
+        var response=messages.FirstOrDefault(m=>m.Contains("chatcmpl-test"));
+        Assert.NotNull(response);
+        await app.StopAsync();
+    }
 }

@@ -62,8 +62,12 @@ set "BUILD_STATUS=%ERRORLEVEL%"
 
 if %BUILD_STATUS% equ 0 (
     if exist "%CONFIG_BACKUP%" (
-        echo [build] Merging user configuration into published appsettings.json...
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0merge-appsettings.ps1" -PublishedPath "%WEB_OUTPUT%\appsettings.json" -BackupPath "%CONFIG_BACKUP%"
+        if not exist "%WEB_OUTPUT%\appsettings.json" (
+            copy /y "%CONFIG_BACKUP%" "%WEB_OUTPUT%\appsettings.json" >nul 2>nul
+        ) else (
+            echo [build] Merging user configuration into published appsettings.json...
+            powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0merge-appsettings.ps1" -PublishedPath "%WEB_OUTPUT%\appsettings.json" -BackupPath "%CONFIG_BACKUP%"
+        )
         del /f /q "%CONFIG_BACKUP%" >nul 2>nul
     )
 

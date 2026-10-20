@@ -7,6 +7,7 @@ using ReferenceRAG.Core.Features.HardwareAcceleration.Injection;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Scanning;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Models;
 using ReferenceRAG.Core.Features.HardwareAcceleration;
+using ReferenceRAG.Service.Services;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -21,6 +22,7 @@ public class SettingsController : ControllerBase
     private readonly IModelManager _modelManager;
     private readonly IEmbeddingService? _embeddingService;
     private readonly IRerankService? _rerankService;
+    private readonly MafChatService? _chatService;
     private readonly ILogger<SettingsController> _logger;
 
     public SettingsController(
@@ -28,13 +30,15 @@ public class SettingsController : ControllerBase
         IModelManager modelManager,
         ILogger<SettingsController> logger,
         IEmbeddingService? embeddingService = null,
-        IRerankService? rerankService = null)
+        IRerankService? rerankService = null,
+        MafChatService? chatService = null)
     {
         _configManager = configManager;
         _modelManager = modelManager;
         _logger = logger;
         _embeddingService = embeddingService;
         _rerankService = rerankService;
+        _chatService = chatService;
     }
 
     /// <summary>
@@ -44,6 +48,12 @@ public class SettingsController : ControllerBase
     public ActionResult<ObsidianRagConfig> Get()
     {
         var config = _configManager.Load();
+
+        // 统一脱敏标记：设置 ApiKeyConfigured，供前端安全感知
+        if (config.Chat?.OpenAiApi != null)
+        {
+            config.Chat.OpenAiApi.ApiKeyConfigured = !string.IsNullOrWhiteSpace(config.Chat.OpenAiApi.ApiKey);
+        }
 
         // 获取模型根目录（优先使用顶层配置）
         var modelsRoot = !string.IsNullOrEmpty(config.ModelsRootPath)
@@ -295,6 +305,19 @@ public class SettingsController : ControllerBase
         // 关键保护：数据源由 Sources 模块独立管理，设置保存不能覆盖可能已并发修改的 Sources 列表
         config.Sources = current.Sources;
 
+        // 关键保护：前端脱敏留空时，若旧配置已有有效 API Key，则继承旧 Key 防止意外被覆盖为清空
+        if (config.Chat?.OpenAiApi != null)
+        {
+            if (string.Equals(config.Chat.OpenAiApi.ApiKey, "__CLEAR__", StringComparison.OrdinalIgnoreCase))
+            {
+                config.Chat.OpenAiApi.ApiKey = string.Empty;
+            }
+            else if (string.IsNullOrWhiteSpace(config.Chat.OpenAiApi.ApiKey) && !string.IsNullOrWhiteSpace(current.Chat?.OpenAiApi?.ApiKey))
+            {
+                config.Chat.OpenAiApi.ApiKey = current.Chat.OpenAiApi.ApiKey;
+            }
+        }
+
         _configManager.Save(config);
 
         // 热更新模型驻留与滑动过期策略（无需重启服务即时生效）
@@ -318,6 +341,9 @@ public class SettingsController : ControllerBase
         {
             await rerankConfigurable.ApplyConfigurationAsync(config.Rerank);
         }
+
+        // 热重载聊天模型配置（支持 LocalGguf 与 OpenAiApi 双向热切）
+        _chatService?.ReloadConfiguration();
 
         var message = networkBindingChanged
             ? "配置已保存，网络端口/外网设置需重启服务后生效"
@@ -357,7 +383,8 @@ public class SettingsController : ControllerBase
         // 卸载当前加载的模型，下次使用时将自动加载新路径的模型
         _embeddingService?.UnloadModel();
         _rerankService?.UnloadModel();
-        _logger.LogInformation("已卸载嵌入模型和重排模型，新模型将在下次使用时自动加载");
+        _chatService?.UnloadModel();
+        _logger.LogInformation("已卸载嵌入模型、重排模型和对话模型，新模型将在下次使用时自动加载");
 
         return Ok(new
         {
@@ -367,6 +394,27 @@ public class SettingsController : ControllerBase
             embeddingModels = result.EmbeddingModels,
             rerankModels = result.RerankModels
         });
+    }
+
+    /// <summary>
+    /// 对话模型自适应性能规划测算（供设置看板与实时画像预览）
+    /// </summary>
+    [HttpPost("chat-performance/preview")]
+    public ActionResult<ChatPerformanceProfile> PreviewChatPerformance([FromBody] ChatPerformancePlanningRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ModelPath) && !string.IsNullOrWhiteSpace(request.ModelName))
+        {
+            var chatModel = _modelManager.GetChatModels().FirstOrDefault(m => string.Equals(m.Name, request.ModelName, StringComparison.OrdinalIgnoreCase));
+            if (chatModel != null && !string.IsNullOrWhiteSpace(chatModel.LocalPath))
+            {
+                var resolved = ModelManager.ResolveModelFilePath(chatModel.LocalPath, chatModel.ActiveVariantFileName);
+                request = request with { ModelPath = !string.IsNullOrWhiteSpace(resolved) ? resolved : chatModel.LocalPath };
+            }
+        }
+
+        var planner = new ChatPerformancePlanner();
+        var profile = planner.PlanProfile(request);
+        return Ok(profile);
     }
 
     /// <summary>

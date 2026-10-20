@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
+using ReferenceRAG.Business.Features.Chat.Services;
 using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models;
+using ReferenceRAG.Service.Services;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -19,6 +21,7 @@ public class ModelsController : ControllerBase
     private readonly IEmbeddingService _embeddingService;
     private readonly IRerankService? _rerankService;
     private readonly IModelTelemetryService? _telemetryService;
+    private readonly MafChatService? _chatService;
     private readonly IVectorStore _vectorStore;
     private readonly ILogger<ModelsController> _logger;
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DownloadProgress> _downloadProgress = new();
@@ -32,7 +35,8 @@ public class ModelsController : ControllerBase
         IVectorStore vectorStore,
         ILogger<ModelsController> logger,
         IRerankService? rerankService = null,
-        IModelTelemetryService? telemetryService = null)
+        IModelTelemetryService? telemetryService = null,
+        MafChatService? chatService = null)
     {
         _configManager = configManager;
         _modelManager = modelManager;
@@ -41,6 +45,7 @@ public class ModelsController : ControllerBase
         _logger = logger;
         _rerankService = rerankService;
         _telemetryService = telemetryService;
+        _chatService = chatService;
     }
 
     /// <summary>
@@ -150,18 +155,19 @@ public class ModelsController : ControllerBase
         if (currentChatModel != null)
         {
             var activeVariant = currentChatModel.InstalledVariants.FirstOrDefault(v => v.IsActive) ?? currentChatModel.InstalledVariants.FirstOrDefault();
+            var isChatLoaded = _chatService?.IsModelLoaded ?? false;
             chatStatus = new SingleModelStatusResponse
             {
                 ModelName = currentChatModel.Name,
                 DisplayName = currentChatModel.DisplayName,
                 ActiveVariant = currentChatModel.ActiveVariantFileName ?? (currentChatModel.LocalPath != null ? Path.GetFileName(currentChatModel.LocalPath) : null),
                 ActiveVariantPath = currentChatModel.LocalPath,
-                State = 2,
-                StateName = "Ready",
-                StateDescription = "就绪",
-                IsReady = true,
-                IsGpuMode = cfg.Chat?.LocalGguf?.GpuLayers > 0,
-                ExecutionDevice = (cfg.Chat?.LocalGguf?.GpuLayers > 0) ? "GPU" : "CPU",
+                State = isChatLoaded ? 2 : 0,
+                StateName = isChatLoaded ? "Ready" : "Unloaded",
+                StateDescription = isChatLoaded ? "已就绪" : "未加载 (首次提问时按需加载)",
+                IsReady = isChatLoaded,
+                IsGpuMode = cfg.Chat?.LocalGguf?.GpuLayers != 0,
+                ExecutionDevice = (cfg.Chat?.LocalGguf?.GpuLayers != 0) ? "GPU" : "CPU",
                 Quantization = activeVariant?.Quantization,
                 ModelFormat = activeVariant?.Format ?? "gguf",
                 Dimension = currentChatModel.Dimension,

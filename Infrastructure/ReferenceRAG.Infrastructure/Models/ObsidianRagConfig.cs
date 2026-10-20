@@ -6,6 +6,11 @@ namespace ReferenceRAG.Core.Models;
 public class ObsidianRagConfig
 {
     /// <summary>
+    /// 配置文件结构版本（用于自动版本迁移，默认 2）
+    /// </summary>
+    public int SchemaVersion { get; set; } = 2;
+
+    /// <summary>
     /// 数据存储路径
     /// </summary>
     public string DataPath { get; set; } = "data";
@@ -870,8 +875,39 @@ public class LocalGgufChatProfile
     public string ModelName { get; set; } = "Qwen2.5-7B-Instruct-GGUF";
     public string? Variant { get; set; } = "qwen2.5-7b-instruct-q4_k_m.gguf";
     public string? ModelPath { get; set; }
-    public int GpuLayers { get; set; } = 28;
-    public int ContextSize { get; set; } = 4096;
+
+    private string _performanceMode = "Adaptive";
+    private bool _isExplicitModeSet;
+
+    /// <summary>
+    /// 性能规划模式：Adaptive（自适应规划 - 智能推荐）| Fixed（固定参数 - 手动精调）
+    /// </summary>
+    public string PerformanceMode
+    {
+        get
+        {
+            if (_isExplicitModeSet)
+                return _performanceMode;
+            if (ContextSize > 0)
+                return "Fixed";
+            return _performanceMode;
+        }
+        set
+        {
+            _performanceMode = value;
+            _isExplicitModeSet = !string.IsNullOrWhiteSpace(value);
+        }
+    }
+
+    /// <summary>
+    /// 自适应策略类型：Balanced（通用平衡）| HighThroughput（高吞吐）| LongContext（长窗口）| LowMemory（轻量低显存）
+    /// </summary>
+    public string AdaptiveStrategy { get; set; } = "Balanced";
+
+    public int GpuLayers { get; set; } = -1;
+    public int ContextSize { get; set; } = 0; // 0 表示自适应
+    public int BatchSize { get; set; } = 0;   // 0 表示自适应
+    public int UBatchSize { get; set; } = 0;  // 0 表示自适应
     public HardwareAccelerationConfig Acceleration { get; set; } = new();
 }
 
@@ -894,6 +930,11 @@ public class OpenAiApiChatProfile
     public string ApiKey { get; set; } = "";
     public string Model { get; set; } = "gpt-4o-mini";
     public int TimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// 是否已配置有效密钥（脱敏传输标志）
+    /// </summary>
+    public bool ApiKeyConfigured { get; set; }
 }
 
 /// <summary>
@@ -914,6 +955,7 @@ public class ChatModelConfig
     public int IdleTimeoutSeconds { get; set; } = 300;
 
     /// <summary>API 端点地址</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public string Endpoint
     {
         get => OpenAiApi?.Endpoint ?? "";
@@ -924,6 +966,7 @@ public class ChatModelConfig
     }
 
     /// <summary>API Key</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public string ApiKey
     {
         get => OpenAiApi?.ApiKey ?? "";
@@ -934,6 +977,7 @@ public class ChatModelConfig
     }
 
     /// <summary>模型名称</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public string Model
     {
         get
