@@ -143,9 +143,51 @@ public sealed class LocalLlamaChatClient : IChatClient
 
         var messageList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
 
+        // 确定性工具意图分发器（对显式指令如 'GetIndexStatus'、'搜索: xxx' 实施 100% 确定性分发，杜绝小模型幻觉漏调）
+        var lastMsg = messageList.LastOrDefault();
+        if (lastMsg?.Role == ChatRole.User &&
+            !string.IsNullOrWhiteSpace(lastMsg.Text) &&
+            options?.Tools != null &&
+            options.Tools.Count > 0 &&
+            ChatToolCallingHelper.TryDetectDirectToolCall(lastMsg.Text, options.Tools, out var directName, out var directArgs))
+        {
+            var callId = $"call_{Guid.NewGuid():N}";
+            yield return new ChatResponseUpdate
+            {
+                Role = ChatRole.Assistant,
+                Contents = [new FunctionCallContent(callId, directName!, directArgs)],
+                ModelId = _modelName
+            };
+            yield break;
+        }
+
         if (_isSimulationMode)
         {
             var userText = messageList.LastOrDefault(m => m.Role == ChatRole.User)?.Text ?? "你好";
+            var toolMsg = messageList.LastOrDefault(m => m.Role == ChatRole.Tool);
+            string? toolResultText = null;
+            if (toolMsg != null)
+            {
+                var fr = toolMsg.Contents.OfType<FunctionResultContent>().FirstOrDefault();
+                toolResultText = fr?.Result?.ToString() ?? toolMsg.Text;
+            }
+
+            if (!string.IsNullOrWhiteSpace(toolResultText))
+            {
+                var toolSummary = toolResultText.Contains("向量索引")
+                    ? $"知识库当前已成功构建索引：{toolResultText}。"
+                    : (toolResultText.Contains("未找到")
+                        ? $"知识库中未检索到相关内容：{toolResultText}"
+                        : $"已成功为您执行工具并检索到以下参考内容：\n\n{toolResultText}");
+
+                yield return new ChatResponseUpdate
+                {
+                    Role = ChatRole.Assistant,
+                    Contents = [new TextContent(toolSummary)],
+                    ModelId = _modelName
+                };
+                yield break;
+            }
 
             // 若包含工具且用户提出搜索提问，模拟工具调用
             if (options?.Tools != null && options.Tools.Count > 0 &&
@@ -180,24 +222,6 @@ public sealed class LocalLlamaChatClient : IChatClient
                 };
                 await Task.Yield();
             }
-            yield break;
-        }
-
-        // 确定性工具意图分发器（对显式指令如 'GetIndexStatus'、'搜索: xxx' 实施 100% 确定性分发，杜绝小模型幻觉漏调）
-        var lastMsg = messageList.LastOrDefault();
-        if (lastMsg?.Role == ChatRole.User &&
-            !string.IsNullOrWhiteSpace(lastMsg.Text) &&
-            options?.Tools != null &&
-            options.Tools.Count > 0 &&
-            ChatToolCallingHelper.TryDetectDirectToolCall(lastMsg.Text, options.Tools, out var directName, out var directArgs))
-        {
-            var callId = $"call_{Guid.NewGuid():N}";
-            yield return new ChatResponseUpdate
-            {
-                Role = ChatRole.Assistant,
-                Contents = [new FunctionCallContent(callId, directName!, directArgs)],
-                ModelId = _modelName
-            };
             yield break;
         }
 

@@ -110,6 +110,35 @@ public class ModelInfo
     /// 当前选中的激活变体文件名称（若有）
     /// </summary>
     public string? ActiveVariantFileName { get; set; }
+
+    public ModelInfo Clone() => new ModelInfo
+    {
+        Name = Name,
+        DisplayName = DisplayName,
+        Description = Description,
+        Dimension = Dimension,
+        MaxSequenceLength = MaxSequenceLength,
+        ModelType = ModelType,
+        IsQuantized = IsQuantized,
+        QuantizationType = QuantizationType,
+        ModelSizeBytes = ModelSizeBytes,
+        DownloadUrl = DownloadUrl,
+        IsDownloaded = IsDownloaded,
+        LocalPath = LocalPath,
+        IsGpuSupported = IsGpuSupported,
+        Languages = Languages != null ? (string[])Languages.Clone() : null,
+        BenchmarkScore = BenchmarkScore,
+        HasOnnx = HasOnnx,
+        AsymmetricEncoding = AsymmetricEncoding != null ? new AsymmetricEncodingConfig
+        {
+            QueryPrefix = AsymmetricEncoding.QueryPrefix,
+            DocumentPrefix = AsymmetricEncoding.DocumentPrefix
+        } : null,
+        OnnxFormat = OnnxFormat,
+        CanConvertFormat = CanConvertFormat,
+        InstalledVariants = InstalledVariants != null ? new List<ModelVariantInfo>(InstalledVariants) : new(),
+        ActiveVariantFileName = ActiveVariantFileName
+    };
 }
 
 /// <summary>
@@ -284,7 +313,7 @@ public class ModelManager : IModelManager, IDisposable
 {
     private string _modelsPath;
     private readonly ConfigManager _configManager;
-    private static readonly Dictionary<string, ModelInfo> _modelRegistry = new();
+    private readonly Dictionary<string, ModelInfo> _modelRegistry = new();
     private ModelInfo? _currentModel;
     private ModelInfo? _currentRerankModel;
     private ModelInfo? _currentChatModel;
@@ -1170,8 +1199,9 @@ public class ModelManager : IModelManager, IDisposable
 
     private void InitializeRegistry()
     {
+        _modelRegistry.Clear();
         foreach (var model in PredefinedModels)
-            _modelRegistry[model.Name] = model;
+            _modelRegistry[model.Name] = model.Clone();
 
         // 先扫描目录，填充 IsDownloaded + LocalPath
         ScanLocalModels();
