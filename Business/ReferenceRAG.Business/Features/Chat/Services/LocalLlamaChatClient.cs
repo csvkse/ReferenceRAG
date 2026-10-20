@@ -275,18 +275,23 @@ public sealed class LocalLlamaChatClient : IChatClient
                         }
                         else
                         {
-                            if (currentText.EndsWith("<") || currentText.EndsWith("<t") || currentText.EndsWith("<tool") || currentText.EndsWith("<tool_"))
+                            if (currentText.EndsWith("<") || currentText.EndsWith("<t") || currentText.EndsWith("<to") ||
+                                currentText.EndsWith("<too") || currentText.EndsWith("<tool") || currentText.EndsWith("<tool_") ||
+                                currentText.EndsWith("<tool_c") || currentText.EndsWith("<tool_ca") || currentText.EndsWith("<tool_cal") ||
+                                currentText.EndsWith("<tool_call"))
                             {
                                 continue;
                             }
 
+                            var textToEmit = buffer.ToString();
+                            buffer.Clear();
+
                             yield return new ChatResponseUpdate
                             {
                                 Role = ChatRole.Assistant,
-                                Contents = [new TextContent(token)],
+                                Contents = [new TextContent(textToEmit)],
                                 ModelId = _modelName
                             };
-                            buffer.Clear();
                         }
                     }
                     else

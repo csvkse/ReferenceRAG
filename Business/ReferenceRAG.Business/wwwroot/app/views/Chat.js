@@ -296,6 +296,10 @@ const component = /*@__PURE__*/ _defineComponent({
                                 messages.value[messages.value.length - 1].content += evt.delta;
                                 await scrollToBottom();
                             }
+                            else if (evt.type === 'replace' && evt.delta !== undefined) {
+                                messages.value[messages.value.length - 1].content = evt.delta;
+                                await scrollToBottom();
+                            }
                             else if (evt.type === 'error') {
                                 message.error(evt.message || '发生错误');
                             }

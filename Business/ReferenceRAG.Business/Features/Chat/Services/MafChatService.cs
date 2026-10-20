@@ -111,13 +111,13 @@ public class MafChatService : IDisposable
 
         _tools =
         [
-            AIFunctionFactory.Create(SearchKnowledgeAsync),
-            AIFunctionFactory.Create(DrillDownChunkAsync),
-            AIFunctionFactory.Create(BM25SearchAsync),
-            AIFunctionFactory.Create(SearchNoteByTitleAsync),
-            AIFunctionFactory.Create(GetFileStructureAsync),
-            AIFunctionFactory.Create(ReadFileContentAsync),
-            AIFunctionFactory.Create(GetIndexStatusAsync)
+            AIFunctionFactory.Create(SearchKnowledgeAsync, "SearchKnowledge", "检索本地知识库，返回与提问最相关的笔记切片、相似度与文件路径。"),
+            AIFunctionFactory.Create(DrillDownChunkAsync, "DrillDownChunk", "展开某个特定分块的完整上下文，可向前向后查看邻近段落。"),
+            AIFunctionFactory.Create(BM25SearchAsync, "BM25Search", "精确关键词检索本地知识库文档。"),
+            AIFunctionFactory.Create(SearchNoteByTitleAsync, "SearchNoteByTitle", "按笔记标题检索本地笔记。"),
+            AIFunctionFactory.Create(GetFileStructureAsync, "GetFileStructure", "获取知识库文件目录结构树。"),
+            AIFunctionFactory.Create(ReadFileContentAsync, "ReadFileContent", "读取指定文件的全部或部分内容。"),
+            AIFunctionFactory.Create(GetIndexStatusAsync, "GetIndexStatus", "获取知识库当前索引状态：向量分块总数、BM25 文档总数。")
         ];
 
         if (_configManager != null)
@@ -959,9 +959,16 @@ public class MafChatService : IDisposable
 
         if (responseText.Length > 0)
         {
+            var rawText = responseText.ToString();
+            var sanitized = ChatToolCallingHelper.SanitizeAssistantResponse(rawText);
+            if (!string.Equals(sanitized, rawText, StringComparison.Ordinal))
+            {
+                yield return new SseEvent("replace", Delta: sanitized);
+            }
+
             lock (session.Messages)
             {
-                session.Messages.Add(new ChatMessage(ChatRole.Assistant, responseText.ToString()));
+                session.Messages.Add(new ChatMessage(ChatRole.Assistant, sanitized));
                 TrimHistory(session.Messages);
                 session.LastAccessUtc = _timeProvider.GetUtcNow();
             }

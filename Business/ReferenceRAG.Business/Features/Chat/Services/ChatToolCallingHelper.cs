@@ -56,7 +56,11 @@ public static class ChatToolCallingHelper
         sb.Append("<tool_call>\n");
         sb.Append("{\"name\": <function-name>, \"arguments\": <args-json-object>}\n");
         sb.Append("</tool_call>\n\n");
-        sb.Append("IMPORTANT: When a user query requires searching knowledge or retrieving information, call the appropriate tool IMMEDIATELY using <tool_call> tags. Do not explain the tools to the user unless explicitly asked.\n");
+        sb.Append("IMPORTANT INSTRUCTIONS:\n");
+        sb.Append("1. When a user query requires searching knowledge, reading notes, or retrieving system index status, call the appropriate tool IMMEDIATELY using <tool_call> tags. Do not explain the tools to the user unless explicitly asked.\n");
+        sb.Append("2. After receiving tool results (<tool_response>), you MUST synthesize the findings and answer the user in clear, polite, natural human language (Markdown format). Even if the user directly inputted a tool name or command (such as 'GetIndexStatus' or '调用: GetIndexStatus'), present the information helpfully in conversational text.\n");
+        sb.Append("3. NEVER return raw JSON objects, JSON code blocks, or machine-readable dictionaries as your final response to the user.\n");
+        sb.Append("4. NEVER output XML tags like <tool_call> or <tool_response> in your final answer to the user.\n");
 
         return sb.ToString();
     }
@@ -241,8 +245,7 @@ public static class ChatToolCallingHelper
                         resStr = resStr.Substring(0, cut) + "\n... [检索结果正文过长已自动截断以保护上下文]";
                         resStr = RepairTruncatedMarkdownAndXml(resStr);
                     }
-                    var jsonPayload = JsonSerializer.Serialize(new { call_id = fr.CallId, content = resStr });
-                    resSb.AppendLine($"<tool_response>\n{jsonPayload}\n</tool_response>");
+                    resSb.AppendLine($"<tool_response>\n{resStr}\n</tool_response>");
                 }
                 text = resSb.ToString().TrimEnd();
             }
@@ -492,5 +495,83 @@ public static class ChatToolCallingHelper
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// 对助手回复进行后处理过滤与自愈清洗（剥离幻觉伪词元如 &lt;nlink...&gt;，若小模型输出了裸 JSON 状态结构则自动规整为清晰的 Markdown 自然语言）
+    /// </summary>
+    public static string SanitizeAssistantResponse(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return text;
+
+        // 1. 清理 hallucinated 畸形分词标记（如 <nlinkcount, <nlink..., <unk>, <pad>）
+        var cleaned = System.Text.RegularExpressions.Regex.Replace(text, @"<\s*nlink\w*[^>]*>?", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"<\s*(?:unk|pad)\s*>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        // 2. 检查是否输出了裸 JSON 状态结构（常见于小参数模型对 GetIndexStatus 的过度格式模仿）
+        var trimmed = cleaned.Trim();
+        string candidateJson = trimmed;
+        if (candidateJson.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
+        {
+            candidateJson = candidateJson.Substring(7);
+            if (candidateJson.EndsWith("```")) candidateJson = candidateJson.Substring(0, candidateJson.Length - 3);
+            candidateJson = candidateJson.Trim();
+        }
+        else if (candidateJson.StartsWith("```") && candidateJson.EndsWith("```"))
+        {
+            candidateJson = candidateJson.Substring(3, candidateJson.Length - 6).Trim();
+        }
+
+        if (candidateJson.StartsWith("{") && (candidateJson.Contains("status", StringComparison.OrdinalIgnoreCase) || candidateJson.Contains("BM25") || candidateJson.Contains("分块") || candidateJson.Contains("向量")))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(candidateJson);
+                var root = doc.RootElement;
+                JsonElement statusElem = root;
+                if (root.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.Object)
+                {
+                    statusElem = s;
+                }
+
+                int? vectorCount = null;
+                int? bm25Count = null;
+
+                foreach (var prop in statusElem.EnumerateObject())
+                {
+                    var pName = prop.Name;
+                    if (pName.Contains("向量") || pName.Contains("分块") || pName.Contains("vector", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (prop.Value.TryGetInt32(out var v)) vectorCount = v;
+                        else if (int.TryParse(prop.Value.GetString(), out var v2)) vectorCount = v2;
+                    }
+                    else if (pName.Contains("BM25") || pName.Contains("文档") || pName.Contains("doc", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (prop.Value.TryGetInt32(out var b)) bm25Count = b;
+                        else if (int.TryParse(prop.Value.GetString(), out var b2)) bm25Count = b2;
+                    }
+                }
+
+                if (vectorCount.HasValue || bm25Count.HasValue)
+                {
+                    return $"知识库当前已成功构建索引：包含 **{vectorCount ?? 0}** 个向量分块和 **{bm25Count ?? 0}** 个 BM25 检索文档。";
+                }
+            }
+            catch
+            {
+                // 若 JSON 畸形（如截断缺失闭合括号），尝试通过正则提取数值并自愈
+                var bmMatch = System.Text.RegularExpressions.Regex.Match(candidateJson, @"BM25[^\d]*(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var vecMatch = System.Text.RegularExpressions.Regex.Match(candidateJson, @"(?:向量|分块)[^\d]*(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+                if (bmMatch.Success || vecMatch.Success)
+                {
+                    var bmVal = bmMatch.Success ? bmMatch.Groups[1].Value : "0";
+                    var vecVal = vecMatch.Success ? vecMatch.Groups[1].Value : "0";
+                    return $"知识库当前已成功构建索引：包含 **{vecVal}** 个向量分块和 **{bmVal}** 个 BM25 检索文档。";
+                }
+            }
+        }
+
+        return cleaned;
     }
 }

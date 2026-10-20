@@ -179,4 +179,68 @@ public class ChatToolCallingAndLocalClientTests
             }
         }
     }
+
+    [Fact]
+    public void ModelManager_ChatModels_HaveCleanDisplayNamesWithoutChineseParentheses()
+    {
+        var chatModels = ModelManager.PredefinedModels.Where(m => m.ModelType == "chat").ToList();
+        Assert.NotEmpty(chatModels);
+
+        foreach (var m in chatModels)
+        {
+            // 验证 DisplayName 严禁包含中文括号介绍（如 (极速小钢炮)）
+            Assert.DoesNotMatch(@"\([^)]*[\u4e00-\u9fa5]+[^)]*\)", m.DisplayName);
+            // 验证 DisplayName 严禁包含中文字符，保持官方纯净英文名以供社区检索
+            Assert.DoesNotMatch(@"[\u4e00-\u9fa5]", m.DisplayName);
+            // 验证中文介绍已完好保留在 Description 字段中
+            Assert.Matches(@"[\u4e00-\u9fa5]", m.Description);
+        }
+    }
+
+    [Fact]
+    public void FormatToolsPrompt_IncludesResponseGuidelines()
+    {
+        var tool = AIFunctionFactory.Create(() => "ok", "GetIndexStatus", "获取知识库状态");
+        var prompt = ChatToolCallingHelper.FormatToolsPrompt([tool]);
+
+        Assert.Contains("IMPORTANT INSTRUCTIONS:", prompt);
+        Assert.Contains("synthesize the findings and answer the user in clear, polite, natural human language", prompt);
+        Assert.Contains("NEVER return raw JSON objects", prompt);
+        Assert.Contains("NEVER output XML tags like <tool_call> or <tool_response>", prompt);
+    }
+
+    [Fact]
+    public void SanitizeAssistantResponse_CleansHallucinatedNlinkTokens()
+    {
+        var raw = "这是正常的回答内容 <nlinkcount> 知识库状态正常 <nlink123> 结束";
+        var cleaned = ChatToolCallingHelper.SanitizeAssistantResponse(raw);
+
+        Assert.DoesNotContain("<nlinkcount>", cleaned);
+        Assert.DoesNotContain("<nlink123>", cleaned);
+        Assert.Contains("这是正常的回答内容", cleaned);
+        Assert.Contains("知识库状态正常", cleaned);
+    }
+
+    [Fact]
+    public void SanitizeAssistantResponse_HealsRawJsonStatusToNaturalLanguage()
+    {
+        var rawJson = "{\n  \"status\": {\n    \"BM25文档总数\": 5392,\n    \"向量分块总数\": 280\n  }\n}";
+        var healed = ChatToolCallingHelper.SanitizeAssistantResponse(rawJson);
+
+        Assert.Contains("知识库当前已成功构建索引", healed);
+        Assert.Contains("280", healed);
+        Assert.Contains("5392", healed);
+        Assert.DoesNotContain("{", healed);
+    }
+
+    [Fact]
+    public void SanitizeAssistantResponse_HealsTruncatedRawJsonGracefully()
+    {
+        var truncatedJson = "{\n  \"status\": {\n    \"BM25文档总数\": 5392,\n    \"向量分块总数\": 280";
+        var healed = ChatToolCallingHelper.SanitizeAssistantResponse(truncatedJson);
+
+        Assert.Contains("知识库当前已成功构建索引", healed);
+        Assert.Contains("280", healed);
+        Assert.Contains("5392", healed);
+    }
 }

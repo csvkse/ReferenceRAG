@@ -1080,8 +1080,20 @@ const component = /*@__PURE__*/ _defineComponent({
         const handleRerankDownload = (model) => startDownloadFlow(model, true);
         const handleChatDownload = (model) => startDownloadFlow(model, 'chat');
 
+        const cleanSearchKeyword = (text) => {
+            if (!text) return '';
+            return text
+                .replace(/\s*\([^)]*[\u4e00-\u9fa5]+[^)]*\)/g, '')
+                .replace(/\s*\([^)]*\)/g, '')
+                .replace(/[\u4e00-\u9fa5]/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+        };
+
         const openVariantSearch = (initialQuery = '', preferredFormat = 'all') => {
-            variantSearchQuery.value = initialQuery || selectedModel.value?.displayName || selectedModel.value?.name || '';
+            const rawQuery = initialQuery || selectedModel.value?.displayName || selectedModel.value?.name || '';
+            const cleaned = cleanSearchKeyword(rawQuery);
+            variantSearchQuery.value = cleaned || rawQuery;
             variantSearchFormat.value = preferredFormat || (downloadOptions.value?.hasGguf ? 'gguf' : 'all');
             variantSearchResults.value = [];
             selectedVariantDetail.value = null;

@@ -297,7 +297,7 @@ public class ModelManager : IModelManager, IDisposable
     public event EventHandler<ModelSwitchedEventArgs>? ChatModelSwitched;
 
     // 预定义模型库 - 包含 ONNX 和 PyTorch 版本信息
-    private static readonly List<ModelInfo> PredefinedModels = new()
+    public static readonly IReadOnlyList<ModelInfo> PredefinedModels = new List<ModelInfo>
     {
         // 中文模型
         new ModelInfo
@@ -922,8 +922,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Qwen2.5-1.5B-Instruct-GGUF",
-            DisplayName = "Qwen 2.5 1.5B Instruct (极速小钢炮)",
-            Description = "通义千问 1.5B 轻量指令大模型，占用显存极小 (~1.5GB)，纯 CPU 或核显即可极速流畅运行",
+            DisplayName = "Qwen 2.5 1.5B Instruct",
+            Description = "通义千问 1.5B 轻量指令大模型（极速小钢炮），占用显存极小 (~1.5GB)，纯 CPU 或核显即可极速流畅运行",
             Dimension = 1536,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -936,8 +936,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Qwen2.5-7B-Instruct-GGUF",
-            DisplayName = "Qwen 2.5 7B Instruct (主流推荐)",
-            Description = "通义千问 7B 满血指令模型，中文、代码与复杂推理能力极强，推荐 6GB~8GB+ 独显运行",
+            DisplayName = "Qwen 2.5 7B Instruct",
+            Description = "通义千问 7B 满血指令模型（主流推荐），中文、代码与复杂推理能力极强，推荐 6GB~8GB+ 独显运行",
             Dimension = 3584,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -950,8 +950,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "DeepSeek-R1-Distill-Qwen-1.5B-GGUF",
-            DisplayName = "DeepSeek R1 Distill Qwen 1.5B (深度思维链)",
-            Description = "DeepSeek-R1 强化学习蒸馏模型，具备强大深度思考推理（CoT）能力，兼具小巧体积与高智商",
+            DisplayName = "DeepSeek R1 Distill Qwen 1.5B",
+            Description = "DeepSeek-R1 强化学习蒸馏模型（深度思维链），具备强大深度思考推理（CoT）能力，兼具小巧体积与高智商",
             Dimension = 1536,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -964,8 +964,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Qwen2.5-3B-Instruct-GGUF",
-            DisplayName = "Qwen 2.5 3B Instruct (黄金甜点位)",
-            Description = "通义千问 3B 指令模型，兼顾极小显存占用 (~2.5GB) 与高智能水平，纯 CPU 或 4GB+ 显存均可极佳运行",
+            DisplayName = "Qwen 2.5 3B Instruct",
+            Description = "通义千问 3B 指令模型（黄金甜点位），兼顾极小显存占用 (~2.5GB) 与高智能水平，纯 CPU 或 4GB+ 显存均可极佳运行",
             Dimension = 2048,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -978,8 +978,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "DeepSeek-R1-Distill-Qwen-7B-GGUF",
-            DisplayName = "DeepSeek R1 Distill Qwen 7B (最强深度推理)",
-            Description = "DeepSeek-R1 强化学习蒸馏 7B 满血版，拥有强大的长思维链（CoT）深度分析与复杂逻辑解题能力",
+            DisplayName = "DeepSeek R1 Distill Qwen 7B",
+            Description = "DeepSeek-R1 强化学习蒸馏 7B 满血版（最强深度推理），拥有强大的长思维链（CoT）深度分析与复杂逻辑解题能力",
             Dimension = 3584,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -992,8 +992,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Qwen2.5-Coder-7B-Instruct-GGUF",
-            DisplayName = "Qwen 2.5 Coder 7B Instruct (代码与技术专家)",
-            Description = "通义千问专业代码大模型，针对编程、算法、技术文档解析与知识库问答进行了深度强化",
+            DisplayName = "Qwen 2.5 Coder 7B Instruct",
+            Description = "通义千问专业代码大模型（代码与技术专家），针对编程、算法、技术文档解析与知识库问答进行了深度强化",
             Dimension = 3584,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -1006,8 +1006,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Llama-3.2-3B-Instruct-GGUF",
-            DisplayName = "Llama 3.2 3B Instruct (Meta 端侧旗舰)",
-            Description = "Meta 针对端侧设备推出的最新一代多语言模型，架构先进、响应飞快，英文与通用问答表现优异",
+            DisplayName = "Llama 3.2 3B Instruct",
+            Description = "Meta 针对端侧设备推出的最新一代多语言模型（Meta 端侧旗舰），架构先进、响应飞快，英文与通用问答表现优异",
             Dimension = 3072,
             MaxSequenceLength = 131072,
             ModelType = "chat",
@@ -1020,8 +1020,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Phi-3.5-mini-instruct-onnx",
-            DisplayName = "Phi-3.5-mini-instruct (ONNX DirectML)",
-            Description = "微软专为 DirectML / ONNX Runtime 优化的 3.8B 参数轻量旗舰模型，支持 128k 超长上下文，多语言与代码推理表现优异",
+            DisplayName = "Phi-3.5-mini-instruct",
+            Description = "微软专为 DirectML / ONNX Runtime 优化的 3.8B 参数轻量旗舰模型 (ONNX DirectML)，支持 128k 超长上下文，多语言与代码推理表现优异",
             Dimension = 3072,
             MaxSequenceLength = 131072,
             ModelType = "chat",
@@ -1034,8 +1034,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Qwen2.5-1.5B-Instruct-ONNX",
-            DisplayName = "Qwen 2.5 1.5B Instruct (ONNX DirectML)",
-            Description = "通义千问 1.5B ONNX 格式版本，适配 Windows DirectML / NPU / GPU 加速，轻量高速端侧推理",
+            DisplayName = "Qwen 2.5 1.5B Instruct ONNX",
+            Description = "通义千问 1.5B ONNX 格式版本 (ONNX DirectML)，适配 Windows DirectML / NPU / GPU 加速，轻量高速端侧推理",
             Dimension = 1536,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -1049,8 +1049,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "FunctionGemma-270M-IT",
-            DisplayName = "FunctionGemma 270M IT (超轻量工具路由)",
-            Description = "谷歌针对工具/函数调用专项优化的 270M 极简模型，INT8 量化仅 288MB，BFCL 得分 61.6，专精函数路由与工具决策",
+            DisplayName = "FunctionGemma 270M IT",
+            Description = "谷歌针对工具/函数调用专项优化的 270M 极简模型（超轻量工具路由），INT8 量化仅 288MB，BFCL 得分 61.6，专精函数路由与工具决策",
             Dimension = 1024,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -1063,8 +1063,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "LFM2.5-350M-Instruct-GGUF",
-            DisplayName = "LFM2.5 350M Instruct (极致轻量首选)",
-            Description = "Liquid AI 350M 极致微型模型，Q4_K_M 仅 229MB，支持工具调用、JSON 结构化与文本提取，冷启动与内存零压力",
+            DisplayName = "LFM2.5 350M Instruct",
+            Description = "Liquid AI 350M 极致微型模型（极致轻量首选），Q4_K_M 仅 229MB，支持工具调用、JSON 结构化与文本提取，冷启动与内存零压力",
             Dimension = 1024,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -1077,8 +1077,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Qwen3.5-0.8B-Instruct-GGUF",
-            DisplayName = "Qwen3.5 0.8B Instruct (体积与通用平衡/视觉)",
-            Description = "通义千问 0.8B 紧凑全能模型，Q4_0 仅 563MB，原生支持 262K 超长上下文，集成视觉感知、深度推理与代码工具能力",
+            DisplayName = "Qwen3.5 0.8B Instruct",
+            Description = "通义千问 0.8B 紧凑全能模型（体积与通用平衡/视觉），Q4_0 仅 563MB，原生支持 262K 超长上下文，集成视觉感知、深度推理与代码工具能力",
             Dimension = 1024,
             MaxSequenceLength = 262144,
             ModelType = "chat",
@@ -1091,8 +1091,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "LFM2.5-1.2B-Instruct-GGUF",
-            DisplayName = "LFM2.5 1.2B Instruct (离线RAG轻量专家)",
-            Description = "Liquid AI 1.2B 指令模型，Q4_K_M 约 731MB，专精离线 RAG 知识库问答、JSON 与工具调用 (BFCL 49.12)",
+            DisplayName = "LFM2.5 1.2B Instruct",
+            Description = "Liquid AI 1.2B 指令模型（离线RAG轻量专家），Q4_K_M 约 731MB，专精离线 RAG 知识库问答、JSON 与工具调用 (BFCL 49.12)",
             Dimension = 1536,
             MaxSequenceLength = 32768,
             ModelType = "chat",
@@ -1105,8 +1105,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Bonsai-2-2B-GGUF",
-            DisplayName = "Bonsai 2 2B (紧凑视觉与高智商推理)",
-            Description = "高压缩比紧凑型视觉与代码推理模型，体积仅 480MB 左右，支持 262K 超大上下文与图像感知 (BFCL 60.53)",
+            DisplayName = "Bonsai 2 2B",
+            Description = "高压缩比紧凑型视觉与代码推理模型（紧凑视觉与高智商推理），体积仅 480MB 左右，支持 262K 超大上下文与图像感知 (BFCL 60.53)",
             Dimension = 2048,
             MaxSequenceLength = 262144,
             ModelType = "chat",
@@ -1119,8 +1119,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Qwen3.5-2B-Instruct-GGUF",
-            DisplayName = "Qwen3.5 2B Instruct (综合能力首选/视觉推荐)",
-            Description = "通义千问 2B 黄金规格模型，Q4_K_M 约 1.28GB，支持 262K 上下文、原生多模态视觉感知、高阶工具调用与代码生成",
+            DisplayName = "Qwen3.5 2B Instruct",
+            Description = "通义千问 2B 黄金规格模型（综合能力首选/视觉推荐），Q4_K_M 约 1.28GB，支持 262K 上下文、原生多模态视觉感知、高阶工具调用与代码生成",
             Dimension = 2048,
             MaxSequenceLength = 262144,
             ModelType = "chat",
@@ -1133,8 +1133,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Qwen3.5-4B-Instruct-GGUF",
-            DisplayName = "Qwen3.5 4B Instruct (多模态高阶主力/视觉)",
-            Description = "通义千问 4B 强劲多模态模型，Q4_K_M 约 2.74GB，支持 262K 上下文、视觉/代码/工具深度协同 (BFCL 50.3)",
+            DisplayName = "Qwen3.5 4B Instruct",
+            Description = "通义千问 4B 强劲多模态模型（多模态高阶主力/视觉），Q4_K_M 约 2.74GB，支持 262K 上下文、视觉/代码/工具深度协同 (BFCL 50.3)",
             Dimension = 2560,
             MaxSequenceLength = 262144,
             ModelType = "chat",
@@ -1147,8 +1147,8 @@ public class ModelManager : IModelManager, IDisposable
         new ModelInfo
         {
             Name = "Gemma-4-E2B-IT-GGUF",
-            DisplayName = "Gemma 4 E2B IT (谷歌全能视听多模态)",
-            Description = "谷歌 Gemma 4 视听一体多模态端侧模型，Q4_K_M 约 3.11GB，支持 128K 上下文、图像/音频输入与代码推理",
+            DisplayName = "Gemma 4 E2B IT",
+            Description = "谷歌 Gemma 4 视听一体多模态端侧模型（谷歌全能视听多模态），Q4_K_M 约 3.11GB，支持 128K 上下文、图像/音频输入与代码推理",
             Dimension = 2560,
             MaxSequenceLength = 131072,
             ModelType = "chat",
