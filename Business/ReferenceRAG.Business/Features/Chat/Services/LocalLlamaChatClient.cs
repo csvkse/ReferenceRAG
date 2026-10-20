@@ -183,6 +183,24 @@ public sealed class LocalLlamaChatClient : IChatClient
             yield break;
         }
 
+        // 确定性工具意图分发器（对显式指令如 'GetIndexStatus'、'搜索: xxx' 实施 100% 确定性分发，杜绝小模型幻觉漏调）
+        var lastMsg = messageList.LastOrDefault();
+        if (lastMsg?.Role == ChatRole.User &&
+            !string.IsNullOrWhiteSpace(lastMsg.Text) &&
+            options?.Tools != null &&
+            options.Tools.Count > 0 &&
+            ChatToolCallingHelper.TryDetectDirectToolCall(lastMsg.Text, options.Tools, out var directName, out var directArgs))
+        {
+            var callId = $"call_{Guid.NewGuid():N}";
+            yield return new ChatResponseUpdate
+            {
+                Role = ChatRole.Assistant,
+                Contents = [new FunctionCallContent(callId, directName!, directArgs)],
+                ModelId = _modelName
+            };
+            yield break;
+        }
+
         var maxOutputTokens = Math.Clamp(options?.MaxOutputTokens ?? 1024, 128, 2048);
         var prompt = ChatToolCallingHelper.BuildChatMlPrompt(messageList, options?.Tools, _contextSize, maxOutputTokens);
         var pipeline = new DefaultSamplingPipeline

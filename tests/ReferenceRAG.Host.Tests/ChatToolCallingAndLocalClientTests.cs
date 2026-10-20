@@ -198,15 +198,78 @@ public class ChatToolCallingAndLocalClientTests
     }
 
     [Fact]
-    public void FormatToolsPrompt_IncludesResponseGuidelines()
+    public void FormatToolsPrompt_NoNegativeSuppression_AndHasPositiveFewShot()
     {
         var tool = AIFunctionFactory.Create(() => "ok", "GetIndexStatus", "获取知识库状态");
         var prompt = ChatToolCallingHelper.FormatToolsPrompt([tool]);
 
-        Assert.Contains("IMPORTANT INSTRUCTIONS:", prompt);
-        Assert.Contains("synthesize the findings and answer the user in clear, polite, natural human language", prompt);
-        Assert.Contains("NEVER return raw JSON objects", prompt);
-        Assert.Contains("NEVER output XML tags like <tool_call> or <tool_response>", prompt);
+        // GATE-TC-01 门禁：严禁包含负向抑制指令（避免微型模型被禁言导致工具调用瘫痪）
+        Assert.DoesNotContain("NEVER output XML tags like <tool_call>", prompt);
+        Assert.DoesNotContain("NEVER return raw JSON", prompt);
+
+        // 正向协议与 1-Shot 示例
+        Assert.Contains("<tools>", prompt);
+        Assert.Contains("GetIndexStatus", prompt);
+        Assert.Contains("<tool_call>", prompt);
+        Assert.Contains("Example:", prompt);
+    }
+
+    [Fact]
+    public void TryDetectDirectToolCall_ExactToolName_EmitsFunctionCall()
+    {
+        var tool = AIFunctionFactory.Create(() => "ok", "GetIndexStatus", "获取知识库状态");
+        
+        // 门禁：用户输入精确指令 "GetIndexStatus" 时 100% 触发确定性意图分发
+        var detected = ChatToolCallingHelper.TryDetectDirectToolCall("GetIndexStatus", [tool], out var name, out var args);
+
+        Assert.True(detected);
+        Assert.Equal("GetIndexStatus", name);
+        Assert.NotNull(args);
+    }
+
+    [Fact]
+    public void TryDetectDirectToolCall_SearchDirectives_ExtractsQueryAccurately()
+    {
+        var searchTool = AIFunctionFactory.Create((string query, int topK = 10) => "ok", "SearchKnowledge", "语义检索");
+        var tools = new List<AITool> { searchTool };
+
+        // 门禁：针对 "搜索: 你好"
+        var d1 = ChatToolCallingHelper.TryDetectDirectToolCall("搜索: 你好", tools, out var n1, out var a1);
+        Assert.True(d1);
+        Assert.Equal("SearchKnowledge", n1);
+        Assert.NotNull(a1);
+        Assert.Equal("你好", a1["query"]?.ToString());
+
+        // 门禁：针对 "SearchKnowledge 搜索: 你好"
+        var d2 = ChatToolCallingHelper.TryDetectDirectToolCall("SearchKnowledge 搜索: 你好", tools, out var n2, out var a2);
+        Assert.True(d2);
+        Assert.Equal("SearchKnowledge", n2);
+        Assert.NotNull(a2);
+        Assert.Equal("你好", a2["query"]?.ToString());
+
+        // 门禁：针对 "查一下: 向量数据库"
+        var d3 = ChatToolCallingHelper.TryDetectDirectToolCall("查一下: 向量数据库", tools, out var n3, out var a3);
+        Assert.True(d3);
+        Assert.Equal("SearchKnowledge", n3);
+        Assert.NotNull(a3);
+        Assert.Equal("向量数据库", a3["query"]?.ToString());
+    }
+
+    [Fact]
+    public void TryParseToolCall_LenientParsing_SupportsBareJsonAndMarkdown()
+    {
+        // 1. 裸 JSON 对象容错
+        var bareJson = "{\"name\": \"GetIndexStatus\", \"arguments\": {}}";
+        var r1 = ChatToolCallingHelper.TryParseToolCall(bareJson);
+        Assert.True(r1.Success);
+        Assert.Equal("GetIndexStatus", r1.Name);
+
+        // 2. Markdown 代码块包裹裸 JSON
+        var mdJson = "```json\n{\"name\": \"SearchKnowledge\", \"arguments\": {\"query\": \"test\"}}\n```";
+        var r2 = ChatToolCallingHelper.TryParseToolCall(mdJson);
+        Assert.True(r2.Success);
+        Assert.Equal("SearchKnowledge", r2.Name);
+        Assert.Equal("test", r2.Arguments!["query"]?.ToString());
     }
 
     [Fact]

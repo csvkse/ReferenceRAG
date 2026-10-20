@@ -38,6 +38,16 @@ public class MafChatService : IDisposable
     private DateTime _lastChatActivityUtc = DateTime.UtcNow;
     private int _chatModelIdleTimeoutSeconds = 300;
     private readonly System.Threading.Timer? _chatIdleEvictionTimer;
+    private readonly AsyncLocal<List<string>?> _currentRequestExecutedTools = new();
+
+    private void RecordExecutedTool(string toolName)
+    {
+        var list = _currentRequestExecutedTools.Value;
+        if (list != null && !list.Contains(toolName))
+        {
+            list.Add(toolName);
+        }
+    }
 
     public IChatClient? Client => _client;
     public bool IsConfigured => _client != null;
@@ -467,6 +477,7 @@ public class MafChatService : IDisposable
         [Description("查询词，建议补充同义词、中英双语、相关术语以提高召回率")] string query,
         [Description("返回数量，默认 10")] int topK = 10)
     {
+        RecordExecutedTool("SearchKnowledge");
         try
         {
             using var scope = _scopeFactory.CreateScope();
@@ -526,6 +537,7 @@ public class MafChatService : IDisposable
         [Description("原始查询词")] string query,
         [Description("上下文扩展窗口大小，默认 2")] int expandContext = 2)
     {
+        RecordExecutedTool("DrillDownChunk");
         try
         {
             using var scope = _scopeFactory.CreateScope();
@@ -552,6 +564,7 @@ public class MafChatService : IDisposable
         [Description("精确关键词")] string keyword,
         [Description("返回数量，默认 10")] int topK = 10)
     {
+        RecordExecutedTool("BM25Search");
         try
         {
             if (string.IsNullOrWhiteSpace(keyword)) return "搜索关键词不能为空。";
@@ -632,6 +645,7 @@ public class MafChatService : IDisposable
         [Description("笔记标题关键词")] string titleQuery,
         [Description("返回数量，默认 10")] int limit = 10)
     {
+        RecordExecutedTool("SearchNoteByTitle");
         try
         {
             if (string.IsNullOrWhiteSpace(titleQuery)) return "笔记标题关键词不能为空。";
@@ -705,6 +719,7 @@ public class MafChatService : IDisposable
     private async Task<string> GetFileStructureAsync(
         [Description("文件绝对路径列表，多个路径用英文逗号分隔")] string filePaths)
     {
+        RecordExecutedTool("GetFileStructure");
         try
         {
             var paths = filePaths.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -777,6 +792,7 @@ public class MafChatService : IDisposable
         [Description("起始行，0 表示从头")] int startLine = 0,
         [Description("结束行，0 表示到末尾")] int endLine = 0)
     {
+        RecordExecutedTool("ReadFileContent");
         try
         {
             if (string.IsNullOrWhiteSpace(filePath) || filePath.Contains(".."))
@@ -849,6 +865,7 @@ public class MafChatService : IDisposable
     [Description("获取知识库当前索引状态：向量分块总数、BM25 文档总数。")]
     private async Task<string> GetIndexStatusAsync()
     {
+        RecordExecutedTool("GetIndexStatus");
         try
         {
             using var scope = _scopeFactory.CreateScope();
@@ -929,6 +946,7 @@ public class MafChatService : IDisposable
         }
 
         RemoveExpiredSessions();
+        _currentRequestExecutedTools.Value = new List<string>();
         _lastChatActivityUtc = DateTime.UtcNow;
         if (!_sessions.TryGetValue(sessionId, out var session))
         {
@@ -948,8 +966,17 @@ public class MafChatService : IDisposable
         var options = new ChatOptions { Tools = [.. _tools] };
         var responseText = new StringBuilder();
 
+        var streamedBadge = false;
         await foreach (var update in client.GetStreamingResponseAsync(history, options, ct))
         {
+            if (!streamedBadge && _currentRequestExecutedTools.Value is { Count: > 0 } execTools)
+            {
+                var badge = $"> 🔧 **已执行工具**: {string.Join(", ", execTools.Select(t => $"`{t}`"))}\n\n";
+                responseText.Append(badge);
+                yield return new SseEvent("text", Delta: badge);
+                streamedBadge = true;
+            }
+
             if (!string.IsNullOrEmpty(update.Text))
             {
                 responseText.Append(update.Text);
@@ -957,10 +984,24 @@ public class MafChatService : IDisposable
             }
         }
 
-        if (responseText.Length > 0)
+        var rawText = responseText.ToString();
+        var sanitized = ChatToolCallingHelper.SanitizeAssistantResponse(rawText);
+
+        if (_currentRequestExecutedTools.Value is { Count: > 0 } finishedTools)
         {
-            var rawText = responseText.ToString();
-            var sanitized = ChatToolCallingHelper.SanitizeAssistantResponse(rawText);
+            var badge = $"> 🔧 **已执行工具**: {string.Join(", ", finishedTools.Select(t => $"`{t}`"))}\n\n";
+            if (string.IsNullOrWhiteSpace(sanitized))
+            {
+                sanitized = badge + "工具执行完毕。";
+            }
+            else if (!sanitized.StartsWith("> 🔧 **已执行工具**", StringComparison.Ordinal))
+            {
+                sanitized = badge + sanitized;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(sanitized))
+        {
             if (!string.Equals(sanitized, rawText, StringComparison.Ordinal))
             {
                 yield return new SseEvent("replace", Delta: sanitized);
@@ -1041,10 +1082,18 @@ public class MafChatService : IDisposable
             throw new InvalidOperationException(msg);
         }
 
+        _currentRequestExecutedTools.Value = new List<string>();
         options ??= new ChatOptions { Tools = [.. _tools] };
         _lastChatActivityUtc = DateTime.UtcNow;
+        var streamedBadge = false;
         await foreach (var update in client.GetStreamingResponseAsync(messages, options, ct))
         {
+            if (!streamedBadge && _currentRequestExecutedTools.Value is { Count: > 0 } execTools)
+            {
+                yield return $"> 🔧 **已执行工具**: {string.Join(", ", execTools.Select(t => $"`{t}`"))}\n\n";
+                streamedBadge = true;
+            }
+
             if (!string.IsNullOrEmpty(update.Text))
             {
                 yield return update.Text;
@@ -1069,10 +1118,25 @@ public class MafChatService : IDisposable
             throw new InvalidOperationException(msg);
         }
 
+        _currentRequestExecutedTools.Value = new List<string>();
         options ??= new ChatOptions { Tools = [.. _tools] };
         _lastChatActivityUtc = DateTime.UtcNow;
         var response = await client.GetResponseAsync(messages, options, ct);
-        return response?.Text ?? string.Empty;
+        var rawText = response?.Text ?? string.Empty;
+        var sanitized = ChatToolCallingHelper.SanitizeAssistantResponse(rawText);
+        if (_currentRequestExecutedTools.Value is { Count: > 0 } finishedTools)
+        {
+            var badge = $"> 🔧 **已执行工具**: {string.Join(", ", finishedTools.Select(t => $"`{t}`"))}\n\n";
+            if (string.IsNullOrWhiteSpace(sanitized))
+            {
+                sanitized = badge + "工具执行完毕。";
+            }
+            else if (!sanitized.StartsWith("> 🔧 **已执行工具**", StringComparison.Ordinal))
+            {
+                sanitized = badge + sanitized;
+            }
+        }
+        return sanitized;
     }
 
     private void RemoveExpiredSessions()

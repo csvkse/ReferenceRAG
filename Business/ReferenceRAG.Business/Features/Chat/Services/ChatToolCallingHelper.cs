@@ -56,11 +56,14 @@ public static class ChatToolCallingHelper
         sb.Append("<tool_call>\n");
         sb.Append("{\"name\": <function-name>, \"arguments\": <args-json-object>}\n");
         sb.Append("</tool_call>\n\n");
-        sb.Append("IMPORTANT INSTRUCTIONS:\n");
-        sb.Append("1. When a user query requires searching knowledge, reading notes, or retrieving system index status, call the appropriate tool IMMEDIATELY using <tool_call> tags. Do not explain the tools to the user unless explicitly asked.\n");
-        sb.Append("2. After receiving tool results (<tool_response>), you MUST synthesize the findings and answer the user in clear, polite, natural human language (Markdown format). Even if the user directly inputted a tool name or command (such as 'GetIndexStatus' or '调用: GetIndexStatus'), present the information helpfully in conversational text.\n");
-        sb.Append("3. NEVER return raw JSON objects, JSON code blocks, or machine-readable dictionaries as your final response to the user.\n");
-        sb.Append("4. NEVER output XML tags like <tool_call> or <tool_response> in your final answer to the user.\n");
+        sb.Append("# Two-Phase Tool Execution Protocol:\n");
+        sb.Append("Phase 1 (Tool Call): When a user query requires searching knowledge, reading notes, or retrieving system index status, call the appropriate tool IMMEDIATELY using <tool_call> tags. Do not explain the tools to the user unless explicitly asked.\n");
+        sb.Append("Example:\n");
+        sb.Append("User: 查询知识库状态\n");
+        sb.Append("Assistant: <tool_call>\n");
+        sb.Append("{\"name\": \"GetIndexStatus\", \"arguments\": {}}\n");
+        sb.Append("</tool_call>\n\n");
+        sb.Append("Phase 2 (Final Answer): After receiving tool results (<tool_response>), synthesize the findings and answer the user in clear, polite, natural human language (Markdown format). Even if the user directly inputted a tool command, present the information helpfully in conversational text.\n");
 
         return sb.ToString();
     }
@@ -392,6 +395,23 @@ public static class ChatToolCallingHelper
             }
         }
 
+        // 3. 容错匹配：Markdown 代码块包裹或裸 JSON 对象（端侧小模型偶发丢失 <tool_call> 标签）
+        if (text.Contains("\"name\"", StringComparison.OrdinalIgnoreCase))
+        {
+            if (TryParseFunctionJson(text, out var name, out var args) && !string.IsNullOrWhiteSpace(name))
+            {
+                return (true, name, args, string.Empty);
+            }
+        }
+
+        // 4. 容错匹配：伪代码调用指令（如 '调用: GetIndexStatus' 或 'call GetIndexStatus()'）
+        var pseudoMatch = System.Text.RegularExpressions.Regex.Match(text.Trim(), @"^(?:调用|call|执行)[:：\s]+([A-Za-z0-9_]+)(?:\(\))?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (pseudoMatch.Success)
+        {
+            var pName = pseudoMatch.Groups[1].Value;
+            return (true, pName, new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), string.Empty);
+        }
+
         return (false, null, null, text);
     }
 
@@ -573,5 +593,158 @@ public static class ChatToolCallingHelper
         }
 
         return cleaned;
+    }
+
+    /// <summary>
+    /// 检测用户提问是否为明确的工具调用指令（如 'GetIndexStatus'、'搜索: xxx'、'SearchKnowledge 搜索: xxx'），
+    /// 实施确定性意图分发，保障端侧小模型（&lt;1B）100% 避免幻觉跳过工具执行。
+    /// </summary>
+    public static bool TryDetectDirectToolCall(
+        string userText,
+        IList<AITool>? tools,
+        out string? functionName,
+        out IDictionary<string, object?>? arguments)
+    {
+        functionName = null;
+        arguments = null;
+
+        if (string.IsNullOrWhiteSpace(userText) || tools == null || tools.Count == 0)
+            return false;
+
+        var availableFuncs = tools.OfType<AIFunction>().ToList();
+        if (availableFuncs.Count == 0) return false;
+
+        var trimmed = userText.Trim();
+
+        // 1. 去除常见命令前缀: '调用: ', '调用：', 'call ', '/call ', '/'
+        string cleanCommand = trimmed;
+        if (cleanCommand.StartsWith("调用:", StringComparison.OrdinalIgnoreCase) ||
+            cleanCommand.StartsWith("调用：", StringComparison.OrdinalIgnoreCase))
+        {
+            cleanCommand = cleanCommand.Substring(3).Trim();
+        }
+        else if (cleanCommand.StartsWith("/call ", StringComparison.OrdinalIgnoreCase))
+        {
+            cleanCommand = cleanCommand.Substring(6).Trim();
+        }
+        else if (cleanCommand.StartsWith("call ", StringComparison.OrdinalIgnoreCase))
+        {
+            cleanCommand = cleanCommand.Substring(5).Trim();
+        }
+        else if (cleanCommand.StartsWith("/"))
+        {
+            cleanCommand = cleanCommand.Substring(1).Trim();
+        }
+
+        // 2. 检查是否为完全匹配函数名（如 'GetIndexStatus'、'GetIndexStatusAsync'、'GetFileStructure'）
+        var matchedExact = availableFuncs.FirstOrDefault(f =>
+            string.Equals(f.Name, cleanCommand, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(f.Name + "Async", cleanCommand, StringComparison.OrdinalIgnoreCase) ||
+            (f.Name.EndsWith("Async") && string.Equals(f.Name[..^5], cleanCommand, StringComparison.OrdinalIgnoreCase)));
+
+        if (matchedExact != null)
+        {
+            functionName = matchedExact.Name;
+            arguments = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            return true;
+        }
+
+        // 3. 检查中文自然语言直白状态指令: "查询知识库状态" / "获取知识库状态" / "知识库状态" / "索引状态"
+        if (cleanCommand.Contains("索引状态") || cleanCommand.Contains("知识库状态"))
+        {
+            var statusFunc = availableFuncs.FirstOrDefault(f =>
+                f.Name.Contains("GetIndexStatus", StringComparison.OrdinalIgnoreCase));
+            if (statusFunc != null)
+            {
+                functionName = statusFunc.Name;
+                arguments = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                return true;
+            }
+        }
+
+        // 4. 检查目录结构指令: "获取目录结构" / "查看文件结构" / "文件树"
+        if (cleanCommand.Contains("目录结构") || cleanCommand.Contains("文件树") || cleanCommand.Contains("文件结构"))
+        {
+            var structFunc = availableFuncs.FirstOrDefault(f =>
+                f.Name.Contains("GetFileStructure", StringComparison.OrdinalIgnoreCase));
+            if (structFunc != null)
+            {
+                functionName = structFunc.Name;
+                arguments = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                return true;
+            }
+        }
+
+        // 5. 检查搜索指令:
+        // 支持模式:
+        //   - "SearchKnowledge 搜索: 你好"
+        //   - "SearchKnowledge: 你好"
+        //   - "搜索: 你好" / "搜索：你好" / "搜索 你好"
+        //   - "检索: 你好" / "检索：你好"
+        //   - "BM25Search 搜索: 你好" / "BM25: 你好"
+        var searchFunc = availableFuncs.FirstOrDefault(f =>
+            f.Name.Contains("SearchKnowledge", StringComparison.OrdinalIgnoreCase) ||
+            f.Name.Contains("BM25Search", StringComparison.OrdinalIgnoreCase));
+
+        if (searchFunc != null)
+        {
+            string? query = null;
+            string targetFuncName = searchFunc.Name;
+
+            // 模式 A: 指定了明确搜索工具名前缀 "SearchKnowledge 搜索: xxx" 或 "BM25Search: xxx"
+            if (cleanCommand.StartsWith("SearchKnowledge", StringComparison.OrdinalIgnoreCase))
+            {
+                var remainder = cleanCommand.Substring(15).Trim();
+                if (remainder.StartsWith("搜索:", StringComparison.OrdinalIgnoreCase) ||
+                    remainder.StartsWith("搜索：", StringComparison.OrdinalIgnoreCase) ||
+                    remainder.StartsWith(":", StringComparison.OrdinalIgnoreCase) ||
+                    remainder.StartsWith("：", StringComparison.OrdinalIgnoreCase))
+                {
+                    query = remainder.TrimStart(':', '：', '搜', '索').Trim();
+                }
+                else
+                {
+                    query = remainder.Trim();
+                }
+                targetFuncName = "SearchKnowledge";
+            }
+            else if (cleanCommand.StartsWith("BM25Search", StringComparison.OrdinalIgnoreCase) ||
+                     cleanCommand.StartsWith("BM25:", StringComparison.OrdinalIgnoreCase) ||
+                     cleanCommand.StartsWith("BM25：", StringComparison.OrdinalIgnoreCase))
+            {
+                var remainder = cleanCommand.StartsWith("BM25Search", StringComparison.OrdinalIgnoreCase)
+                    ? cleanCommand.Substring(10).Trim()
+                    : cleanCommand.Substring(5).Trim();
+                query = remainder.TrimStart(':', '：', '搜', '索').Trim();
+                targetFuncName = "BM25Search";
+            }
+            else if (cleanCommand.StartsWith("搜索:", StringComparison.OrdinalIgnoreCase) ||
+                     cleanCommand.StartsWith("搜索：", StringComparison.OrdinalIgnoreCase) ||
+                     cleanCommand.StartsWith("检索:", StringComparison.OrdinalIgnoreCase) ||
+                     cleanCommand.StartsWith("检索：", StringComparison.OrdinalIgnoreCase) ||
+                     cleanCommand.StartsWith("查询:", StringComparison.OrdinalIgnoreCase) ||
+                     cleanCommand.StartsWith("查询：", StringComparison.OrdinalIgnoreCase))
+            {
+                query = cleanCommand.Substring(3).Trim();
+            }
+            else if (cleanCommand.StartsWith("查一下:", StringComparison.OrdinalIgnoreCase) ||
+                     cleanCommand.StartsWith("查一下：", StringComparison.OrdinalIgnoreCase))
+            {
+                query = cleanCommand.Substring(4).Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(query))
+            {
+                functionName = targetFuncName;
+                arguments = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["query"] = query,
+                    ["topK"] = 5
+                };
+                return true;
+            }
+        }
+
+        return false;
     }
 }
