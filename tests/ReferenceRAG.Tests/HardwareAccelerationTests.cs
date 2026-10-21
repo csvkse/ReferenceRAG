@@ -324,4 +324,28 @@ public class HardwareAccelerationTests
         chat.ActiveBackend = "LocalGguf";
         Assert.Equal("Qwen2.5-7B-Instruct-GGUF", chat.Model);
     }
+
+    [Theory]
+    [InlineData("0x8086", GpuVendor.Intel)]
+    [InlineData("0x1002", GpuVendor.Amd)]
+    [InlineData("0x10de", GpuVendor.Nvidia)]
+    [InlineData("0x9999", GpuVendor.Unknown)]
+    public void HardwareDetector_ParseLinuxVendorId_ShouldDetectIntelAndAmdGpu(string vendorHex, GpuVendor expected)
+    {
+        var vendor = HardwareDetector.ParseLinuxVendorId(vendorHex);
+        Assert.Equal(expected, vendor);
+    }
+
+    [Theory]
+    [InlineData("Intel(R) Iris(R) Xe Graphics", "PCI\\VEN_8086&DEV_9A49", GpuVendor.Intel)]
+    [InlineData("Intel(R) UHD Graphics 770", null, GpuVendor.Intel)]
+    [InlineData("Intel(R) Arc(TM) A770 Graphics", null, GpuVendor.Intel)]
+    [InlineData("AMD Radeon 780M Graphics", "PCI\\VEN_1002&DEV_15BF", GpuVendor.Amd)]
+    [InlineData("AMD Radeon Graphics", null, GpuVendor.Amd)]
+    [InlineData("NVIDIA GeForce RTX 4070", "PCI\\VEN_10DE&DEV_2786", GpuVendor.Nvidia)]
+    public void HardwareDetector_ParseVendor_ShouldRecognizeIntegratedIntelAndAmdGpus(string name, string? pnpId, GpuVendor expected)
+    {
+        var vendor = HardwareDetector.ParseVendor(name, pnpId);
+        Assert.Equal(expected, vendor);
+    }
 }

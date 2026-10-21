@@ -227,8 +227,15 @@ public class HardwareDetector : IHardwareDetector
             const string drmPath = "/sys/class/drm";
             if (Directory.Exists(drmPath))
             {
-                foreach (var cardDir in Directory.GetDirectories(drmPath, "card[0-9]*"))
+                foreach (var cardDir in Directory.GetDirectories(drmPath))
                 {
+                    var dirName = Path.GetFileName(cardDir);
+                    if (!dirName.StartsWith("card", StringComparison.OrdinalIgnoreCase) &&
+                        !dirName.StartsWith("renderD", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
                     var deviceDir = Path.Combine(cardDir, "device");
                     if (!Directory.Exists(deviceDir)) continue;
 
@@ -242,16 +249,50 @@ public class HardwareDetector : IHardwareDetector
                         var name = vendor switch
                         {
                             GpuVendor.Nvidia => "NVIDIA GPU",
-                            GpuVendor.Amd => "AMD Radeon GPU",
-                            GpuVendor.Intel => "Intel Graphics / Arc GPU",
+                            GpuVendor.Amd => "AMD Radeon GPU / APU",
+                            GpuVendor.Intel => "Intel Graphics (核显 / Arc 独显)",
                             _ => "Linux GPU"
                         };
 
+                        if (!result.Any(g => g.Vendor == vendor))
+                        {
+                            result.Add(new GpuDeviceInfo
+                            {
+                                Name = name,
+                                Vendor = vendor,
+                                PnpDeviceId = dirName
+                            });
+                        }
+                    }
+                }
+            }
+
+            // 如果 sysfs 未完整映射，但挂载了 /dev/dri 节点（如 Docker 容器环境）
+            if (result.Count == 0 && Directory.Exists("/dev/dri"))
+            {
+                var driFiles = Directory.GetFiles("/dev/dri");
+                if (driFiles.Any(f => f.Contains("renderD") || f.Contains("card")))
+                {
+                    // 检测是否具备 Intel 驱动环境或 OpenVINO 运行时
+                    if (File.Exists("/usr/lib/x86_64-linux-gnu/libze_intel_gpu.so.1") ||
+                        File.Exists("/usr/lib/x86_64-linux-gnu/intel-opencl/libigdrcl.so") ||
+                        Directory.Exists("/etc/OpenCL/vendors") ||
+                        OnnxExecutionProviderHelper.HasOpenVino)
+                    {
                         result.Add(new GpuDeviceInfo
                         {
-                            Name = name,
-                            Vendor = vendor,
-                            PnpDeviceId = Path.GetFileName(cardDir)
+                            Name = "Intel Graphics (核显 / Arc 独显)",
+                            Vendor = GpuVendor.Intel,
+                            PnpDeviceId = "dev-dri"
+                        });
+                    }
+                    else if (Directory.Exists("/opt/rocm"))
+                    {
+                        result.Add(new GpuDeviceInfo
+                        {
+                            Name = "AMD Radeon GPU / APU",
+                            Vendor = GpuVendor.Amd,
+                            PnpDeviceId = "dev-dri"
                         });
                     }
                 }
@@ -262,7 +303,7 @@ public class HardwareDetector : IHardwareDetector
         return result;
     }
 
-    private static GpuVendor ParseLinuxVendorId(string vendorIdHex)
+    internal static GpuVendor ParseLinuxVendorId(string vendorIdHex)
     {
         if (vendorIdHex.Equals("0x10de", StringComparison.OrdinalIgnoreCase)) return GpuVendor.Nvidia;
         if (vendorIdHex.Equals("0x1002", StringComparison.OrdinalIgnoreCase)) return GpuVendor.Amd;
@@ -270,7 +311,7 @@ public class HardwareDetector : IHardwareDetector
         return GpuVendor.Unknown;
     }
 
-    private static GpuVendor ParseVendor(string name, string? pnpId)
+    internal static GpuVendor ParseVendor(string name, string? pnpId)
     {
         var upperPnp = pnpId?.ToUpperInvariant() ?? "";
         var upperName = name.ToUpperInvariant();

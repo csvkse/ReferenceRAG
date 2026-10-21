@@ -2,6 +2,19 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.26] - 2026-10-22
+
+### Intel / AMD 核显（集成显卡）硬件加速识别与 OpenVINO 状态回显支持
+- **Docker 容器环境 GPU 设备探测增强 (`HardwareDetector`)**：
+  - 支持 `/dev/dri` 渲染节点（`renderD*`）与 Intel Level Zero / OpenCL 运行时自动探测，解决容器内无 sysfs 完整映射时显卡识别漏判的问题；
+  - 自动区分识别并展示 `Intel Graphics (核显 / Arc 独显)` 与 `AMD Radeon GPU / APU`；
+- **设置控制面板接入 Intel OpenVINO 硬件加速选项 (`SettingsController`)**：
+  - 在 `availableBackends` 中正式补全 `OpenVino (Arc独显 / 酷睿核显)` 加速项与运行时可用性校验；
+  - 优化显卡检测状态提示文案，明确将集成核显（共享系统内存）与独立显卡进行区分，消除“系统未检测到独立显卡”引起的歧义；
+- **自动化测试扩充**：
+  - 在 `HardwareAccelerationTests` 中新增核显厂商与设备标识解析理论覆盖测试；
+  - 架构设计与 Docker 部署指南沉淀至 `docs/intel-amd-igpu-hardware-acceleration-architecture.md`。
+
 ## [1.0.25] - 2026-10-22
 
 ### Docker 挂载目录权限完全自愈与日志目录大小写兼容修复

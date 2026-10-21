@@ -222,6 +222,42 @@ public class SettingsController : ControllerBase
             Reason = dmlReason
         });
 
+        // OpenVINO (Intel Arc 独显 / 酷睿 Iris Xe & UHD 核显)
+        bool openVinoSupported = false;
+        string openVinoReason;
+        if (OnnxExecutionProviderHelper.HasOpenVino)
+        {
+            try
+            {
+                using var testOptions = new Microsoft.ML.OnnxRuntime.SessionOptions();
+                if (OnnxExecutionProviderHelper.TryAppendOpenVino(testOptions, "GPU"))
+                {
+                    openVinoSupported = true;
+                    openVinoReason = "已就绪 (Intel GPU / 酷睿核显 OpenVINO 原生硬件加速)";
+                }
+                else
+                {
+                    openVinoReason = "OpenVINO 运行时就绪，但未检测到支持的 Intel GPU 设备";
+                }
+            }
+            catch (Exception ex)
+            {
+                openVinoReason = $"OpenVINO 初始化异常: {ex.Message}";
+            }
+        }
+        else
+        {
+            openVinoReason = "当前构建未包含 OpenVINO 模块 (可选用 Intel 专属版镜像)";
+        }
+
+        availableBackends.Add(new AvailableBackendInfo
+        {
+            Backend = "OpenVino",
+            Name = "Intel OpenVINO (Arc独显 / 酷睿核显)",
+            Supported = openVinoSupported,
+            Reason = openVinoReason
+        });
+
         // CPU
         availableBackends.Add(new AvailableBackendInfo
         {
@@ -232,11 +268,24 @@ public class SettingsController : ControllerBase
         });
 
         string recommended = "Auto";
-        string active = cudaSupported ? "Cuda" : (dmlSupported ? "DirectML" : "Cpu");
+        string active = cudaSupported ? "Cuda"
+            : (openVinoSupported ? "OpenVino"
+            : (dmlSupported ? "DirectML" : "Cpu"));
 
-        string mainMessage = primaryGpu != null
-            ? $"检测到主显卡: {primaryGpu.Name} (显存: {primaryGpu.TotalVramGb} GB)，推荐加速方案: {recommended}"
-            : "系统未检测到独立显卡，已就绪 CPU 高精度运算";
+        string mainMessage;
+        if (primaryGpu != null)
+        {
+            var vramText = primaryGpu.TotalVramGb > 0 ? $" (显存: {primaryGpu.TotalVramGb} GB)" : " (集成核显 / 共享内存)";
+            mainMessage = $"检测到图形加速硬件: {primaryGpu.Name}{vramText}，推荐加速方案: {recommended}";
+        }
+        else if (openVinoSupported)
+        {
+            mainMessage = "检测到 Intel 硬件加速算力 (已就绪 OpenVINO GPU/核显加速)，推荐加速方案: OpenVino";
+        }
+        else
+        {
+            mainMessage = "系统未检测到物理加速显卡，已就绪 CPU 高精度运算";
+        }
 
         return new HardwareAccelerationStatusResult
         {
