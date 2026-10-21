@@ -2,6 +2,23 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.24] - 2026-10-22
+
+### Docker 挂载卷权限自愈、网络回环绑定修复与主配置持久化优化
+- **Docker 容器挂载卷写权限自愈与特权降权 (Permissions & PUID / PGID)**：
+  - 引入 `docker-entrypoint.sh` 与 `gosu` 动态降权架构，自动检测并修复宿主机挂载卷（`/app/data` 与 `/app/logs`）的文件系统写入权限；
+  - 支持环境变量自定义 `PUID` 与 `PGID`（如 Unraid 的 `PUID=99 / PGID=100` 或以 root 运行的 `PUID=0 / PGID=0`）；
+  - 自动检测宿主机 `/dev/dri` GPU 渲染设备组真实 GID 并加入应用用户，杜绝 Intel / AMD 显卡硬件加速权限冲突；
+  - `DataDirectoryLease` 增强排他锁异常捕获，对缺少写权限提供包含具体修复命令的诊断指引。
+- **Kestrel 网络端点解析器与容器多网卡监听修复**：
+  - 引入 `NetworkBindingResolver` 智能解析监听地址，彻底解决容器冷启动无配置时回退到 `localhost:5000` 导致外部无法访问的致命网络缺陷；
+  - 容器环境下默认自动监听 `0.0.0.0:5000` 并优先保留 `ASPNETCORE_URLS=http://+:5000`，同时保护本地桌面/开发安全默认值。
+- **统一主配置文件定位至 `data/appsettings.json`**：
+  - 全平台宿主默认统一直接使用 `程序目录/data/appsettings.json` 作为主配置文件；
+  - 容器环境只需挂载 `-v host/data:/app/data`，首次启动自动释放默认模板，宿主机改动或界面配置保存直接落盘，镜像升级零丢失。
+- **自动化质量门禁与测试体系**：
+  - 新增 `NetworkBindingResolverTests` 与 `DataDirectoryLeaseTests` 测试套件，纳入 `scripts/verify-gate.ps1` 核心回归门禁，136 项自动化测试 100% 通过。
+
 ## [1.0.23] - 2026-10-22
 
 ### Docker 全矩阵跨平台构建修复与桌面端静默启动协调器
