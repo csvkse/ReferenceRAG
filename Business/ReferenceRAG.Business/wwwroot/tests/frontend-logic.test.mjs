@@ -331,3 +331,89 @@ test('Performance.js supports compact minimalist summary bar and collapsible ful
     assert.ok(source.includes('MAE:'), 'Compact bar must show MAE');
     assert.ok(source.includes('耗时:'), 'Compact bar must show 耗时');
 });
+
+test('Chat.js and safe-markdown.js: thought fusion and truncation detection guardrails', async () => {
+    const fs = await import('node:fs');
+    const chatFile = new URL('../app/views/Chat.js', import.meta.url);
+    const chatSource = fs.readFileSync(chatFile, 'utf8');
+
+    // 1. Chat.js must declare and export truncation detection and continuation
+    assert.match(chatSource, /const\s+isTruncatedMessage\s*=/, 'Chat.js must declare isTruncatedMessage');
+    assert.match(chatSource, /const\s+continueGeneration\s*=/, 'Chat.js must declare continueGeneration');
+    assert.ok(chatSource.includes('isTruncatedMessage'), 'isTruncatedMessage must be in __returned__');
+    assert.ok(chatSource.includes('continueGeneration'), 'continueGeneration must be in __returned__');
+    assert.ok(chatSource.includes('PlayOutline'), 'PlayOutline must be in __returned__');
+    assert.ok(chatSource.includes('继续生成'), 'Template must include 继续生成 button');
+
+    // 2. safe-markdown.js must implement thought fusion strategy
+    const safeMdFile = new URL('../shared/safe-markdown.js', import.meta.url);
+    const safeMdSource = fs.readFileSync(safeMdFile, 'utf8');
+    assert.ok(safeMdSource.includes('chat-thought-container'), 'safe-markdown.js must use chat-thought-container');
+    assert.ok(safeMdSource.includes('chat-thought-step'), 'safe-markdown.js must use chat-thought-step for multi-round fusion');
+    assert.ok(safeMdSource.includes('thoughtSteps.length'), 'safe-markdown.js must fuse multiple thought blocks into one');
+
+    // 3. Truncation heuristic logic validation
+    function isTruncatedMessage(content) {
+        if (!content || typeof content !== 'string') return false;
+        const trimmed = content.trim();
+        if (trimmed.length < 60) return false;
+        const terminalChars = new Set(['。', '！', '？', '!', '?', '.', '`', '"', '”', '」', '）', ')', '}', ']', '>', '…', ';', '；']);
+        const lastChar = trimmed[trimmed.length - 1];
+        return !terminalChars.has(lastChar);
+    }
+
+    const longComplete = '这是一段非常长非常长的助手回复正文内容，包含了丰富的细节与论据。针对小说中的宁姚角色经历进行了极为全面深刻的总结与梳理，条理清晰，层次分明，逻辑严谨。总结如下：宁姚是剑道第一人。';
+    assert.equal(isTruncatedMessage(longComplete), false, 'Complete sentence with period must not be marked truncated');
+
+    const longTruncated = '这是一段非常长非常长的助手回复正文内容，包含了丰富的细节与论据。针对小说中的宁姚角色经历进行了极为全面深刻的总结与梳理，条理清晰，层次分明，逻辑严谨。总结如下：宁姚正在飞升途中独自探寻第五天下的万千';
+    assert.equal(isTruncatedMessage(longTruncated), true, 'Truncated sentence without terminal punctuation must be marked truncated');
+
+    const shortTruncated = '宁姚独自探寻第五天下的万千';
+    assert.equal(isTruncatedMessage(shortTruncated), false, 'Short sentence (<60) must not trigger truncation warning');
+});
+
+test('safe-markdown.js balanceTags and thought extraction: prevents cumulative thought nesting and text swallowing', async () => {
+    const { balanceTags, getDirectThoughtContent } = await import('../shared/safe-markdown.js');
+
+    // 1. 测试多阶段未闭合思考标签自动在下一轮前或工具前闭合，避免跨阶段嵌套
+    const rawMultiStage = '<think>阶段 1 思考<tool_call>{"name":"Search"}</tool_call>\n<think>阶段 2 思考\n<think>阶段 3 最终决策</think>';
+    const balanced = balanceTags(rawMultiStage);
+
+    // 确保阶段 1 在 tool_call 前被闭合
+    assert.match(balanced, /阶段 1 思考\s*<\/think>\s*<tool_call>/);
+    // 确保阶段 2 在阶段 3 前被闭合
+    assert.match(balanced, /阶段 2 思考\s*<\/think>\s*<think>阶段 3/);
+    // 确保总开闭标签数量完全平衡
+    const thinkOpen = (balanced.match(/<think\b/gi) || []).length;
+    const thinkClose = (balanced.match(/<\/think>/gi) || []).length;
+    assert.equal(thinkOpen, thinkClose, `All think open tags (${thinkOpen}) must match close tags (${thinkClose})`);
+
+    // 2. 测试未闭合思考标签后紧随正文时，智能在此处闭合，防止正文被吸入折叠卡片
+    const rawUnclosedWithAnswer = '<think>用户发送了图片，我应该礼貌向用户问好并说明情况。\n\n您好！收到您的图片和问候，请问有什么可以帮助您的吗？';
+    const balancedAnswer = balanceTags(rawUnclosedWithAnswer);
+    assert.match(balancedAnswer, /<\/think>\s*您好！收到您的图片和问候/, 'Should automatically close </think> before greeting answer');
+
+    // 3. 测试 getDirectThoughtContent：模拟 DOM 嵌套结构时，各阶段仅提取自身的直接文本，杜绝阶梯式累加重复
+    // 模拟 DOM 树: <think>阶段 1 文本 <think>阶段 2 文本</think></think>
+    const mockChildThink = {
+        nodeType: 1,
+        tagName: 'THINK',
+        textContent: '阶段 2 文本',
+        childNodes: [{ nodeType: 3, nodeValue: '阶段 2 文本' }]
+    };
+    const mockParentThink = {
+        nodeType: 1,
+        tagName: 'THINK',
+        textContent: '阶段 1 文本 阶段 2 文本',
+        childNodes: [
+            { nodeType: 3, nodeValue: '阶段 1 文本 ' },
+            mockChildThink
+        ]
+    };
+
+    const directParentText = getDirectThoughtContent(mockParentThink);
+    const directChildText = getDirectThoughtContent(mockChildThink);
+
+    assert.equal(directParentText, '阶段 1 文本', 'Parent think step must only contain its own direct text, ignoring child think');
+    assert.equal(directChildText, '阶段 2 文本', 'Child think step must only contain its own direct text');
+});

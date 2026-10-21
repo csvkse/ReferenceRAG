@@ -11,19 +11,23 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 
 /// <summary>
 /// 基于 ONNX / ONNX Runtime GenAI 的本地大语言模型聊天客户端（实现 Microsoft.Extensions.AI.IChatClient）。
 /// 完整支持多轮会话、流式 Token 生成、DirectML / CUDA 硬件加速及 ChatML 工具调用拦截。
+/// 内部采用适配器模式与策略模式解耦原生推理解码引擎与自愈降级兜底逻辑。
 /// </summary>
-public sealed class LocalOnnxChatClient : IChatClient
+public sealed class LocalOnnxChatClient : IChatClient, IChatModelCapabilityProvider
 {
     private readonly string _modelPath;
     private readonly string _modelName;
     private readonly HardwareAccelerationConfig? _acceleration;
     private readonly ILogger? _logger;
+    private readonly IOnnxGenAiEngineAdapter? _customAdapter;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
 
+    private IOnnxGenAiEngineAdapter? _engineAdapter;
     private bool _initialized;
     private bool _isSimulationMode;
     private bool _disposed;
@@ -33,17 +37,39 @@ public sealed class LocalOnnxChatClient : IChatClient
     public bool IsSimulationMode => _isSimulationMode;
     public bool IsInitialized => _initialized;
     public bool IsModelLoaded => _initialized && !_isSimulationMode;
+    public IOnnxGenAiEngineAdapter? EngineAdapter => _engineAdapter;
+
+    private readonly OnnxVisionMatchingStrategy _visionMatcher = new();
+
+    public ChatModelCapabilities GetCapabilities()
+    {
+        var match = _visionMatcher.Match(_modelName, _modelPath);
+        var backendDesc = _engineAdapter?.BackendDescription ?? "本地 ONNX Runtime GenAI 引擎";
+        return new(
+            SupportsVision: match.SupportsVision,
+            SupportsToolCalling: true,
+            ModelName: _modelName,
+            BackendType: "LocalOnnx",
+            MaxContextTokens: 8192,
+            Description: backendDesc,
+            VisionUnsupportedReason: match.SupportsVision ? null : match.GuidanceMessage,
+            VisionStatus: match.Status.ToString(),
+            MatchedProjectorPath: match.MatchedProjectorPath,
+            GuidanceMessage: match.GuidanceMessage);
+    }
 
     public LocalOnnxChatClient(
         string modelPath,
         string modelName,
         HardwareAccelerationConfig? acceleration = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        IOnnxGenAiEngineAdapter? engineAdapter = null)
     {
         _modelPath = modelPath;
         _modelName = string.IsNullOrWhiteSpace(modelName) ? "Local-ONNX" : modelName;
         _acceleration = acceleration;
         _logger = logger;
+        _customAdapter = engineAdapter;
     }
 
     private async Task EnsureInitializedAsync(CancellationToken ct)
@@ -55,9 +81,21 @@ public sealed class LocalOnnxChatClient : IChatClient
         {
             if (_initialized) return;
 
+            if (_customAdapter != null)
+            {
+                _engineAdapter = _customAdapter;
+                await _engineAdapter.InitializeAsync(_modelPath, _acceleration, ct);
+                _isSimulationMode = !_engineAdapter.IsNativeAccelerated;
+                _initialized = true;
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(_modelPath) || (!File.Exists(_modelPath) && !Directory.Exists(_modelPath)))
             {
                 _logger?.LogWarning("[LocalOnnxChat] ONNX 模型路径不存在: '{Path}'，启用模拟就绪模式", _modelPath);
+                var fallback = new ContextAwareFallbackAdapter(_modelName, _logger);
+                await fallback.InitializeAsync(_modelPath, _acceleration, ct);
+                _engineAdapter = fallback;
                 _isSimulationMode = true;
                 _initialized = true;
                 return;
@@ -68,21 +106,38 @@ public sealed class LocalOnnxChatClient : IChatClient
                 "[LocalOnnxChat] 正在初始化本地 ONNX Chat 引擎: ModelName={ModelName}, Path={Path}, Backend={Backend}",
                 _modelName, _modelPath, backend);
 
-            // 检查模型目录完整性（支持包含 genai_config.json 的 OGA 标准目录，或独立 model.onnx）
-            var isOgaDir = Directory.Exists(_modelPath) &&
-                           (File.Exists(Path.Combine(_modelPath, "genai_config.json")) || File.Exists(Path.Combine(_modelPath, "model.onnx")));
+            // 自愈并识别 OGA 标准模型目录（支持 model.onnx 物理路径、模型根目录及带有 gpu/cpu 分支子目录的标准分发结构）
+            var ogaDir = OnnxGenAiPathResolver.ResolveModelDirectory(_modelPath);
 
-            if (isOgaDir || File.Exists(_modelPath))
+            if (!string.IsNullOrEmpty(ogaDir) && OnnxGenAiPathResolver.IsValidOgaDirectory(ogaDir))
             {
-                _initialized = true;
-                _logger?.LogInformation("[LocalOnnxChat] ONNX 对话模型环境就绪: {ModelName}", _modelName);
+                try
+                {
+                    _logger?.LogInformation("[LocalOnnxChat] 成功识别并解析 OGA 物理模型目录: '{OgaDir}'", ogaDir);
+                    var nativeAdapter = new NativeOgaDirectMlAdapter(_logger);
+                    var initOk = await nativeAdapter.InitializeAsync(ogaDir, _acceleration, ct);
+                    if (initOk)
+                    {
+                        _engineAdapter = nativeAdapter;
+                        _isSimulationMode = false;
+                        _initialized = true;
+                        _logger?.LogInformation("[LocalOnnxChat] 原生 DirectML OGA 对话模型环境就绪: {ModelName} ({Dir})", _modelName, ogaDir);
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "[LocalOnnxChat] 原生 OGA 引擎加载失败，准备降级至自愈模式: {Message}", ex.Message);
+                }
             }
-            else
-            {
-                _logger?.LogWarning("[LocalOnnxChat] 目标目录未检测到有效 ONNX 权重文件，启用降级模拟模式");
-                _isSimulationMode = true;
-                _initialized = true;
-            }
+
+            // 降级自愈适配器
+            _logger?.LogWarning("[LocalOnnxChat] 目标目录未满足原生 OGA 运行条件，启用自愈降级适配器: Path={Path}", _modelPath);
+            var fallbackAdapter = new ContextAwareFallbackAdapter(_modelName, _logger);
+            await fallbackAdapter.InitializeAsync(_modelPath, _acceleration, ct);
+            _engineAdapter = fallbackAdapter;
+            _isSimulationMode = true;
+            _initialized = true;
         }
         finally
         {
@@ -118,72 +173,14 @@ public sealed class LocalOnnxChatClient : IChatClient
             yield break;
         }
 
-        if (_isSimulationMode)
-        {
-            var userText = messageList.LastOrDefault(m => m.Role == ChatRole.User)?.Text ?? "你好";
-            var toolMsg = messageList.LastOrDefault(m => m.Role == ChatRole.Tool);
-            string? toolResultText = null;
-            if (toolMsg != null)
-            {
-                var fr = toolMsg.Contents.OfType<FunctionResultContent>().FirstOrDefault();
-                toolResultText = fr?.Result?.ToString() ?? toolMsg.Text;
-            }
-
-            if (!string.IsNullOrWhiteSpace(toolResultText))
-            {
-                var toolSummary = toolResultText.Contains("向量索引")
-                    ? $"知识库当前已成功构建索引：{toolResultText}。"
-                    : (toolResultText.Contains("未找到")
-                        ? $"知识库中未检索到相关内容：{toolResultText}"
-                        : $"已成功为您执行工具并检索到以下参考内容：\n\n{toolResultText}");
-
-                yield return new ChatResponseUpdate
-                {
-                    Role = ChatRole.Assistant,
-                    Contents = [new TextContent(toolSummary)],
-                    ModelId = _modelName
-                };
-                yield break;
-            }
-
-            // 如果包含工具定义且用户意图为查询知识库，模拟工具调用流
-            if (options?.Tools != null && options.Tools.Count > 0 &&
-                (userText.Contains("知识库") || userText.Contains("搜索") || userText.Contains("查找") || userText.Contains("笔记")))
-            {
-                // 模拟发出工具调用
-                var callId = $"call_{Guid.NewGuid():N}";
-                yield return new ChatResponseUpdate
-                {
-                    Role = ChatRole.Assistant,
-                    Contents = [new FunctionCallContent(callId, "SearchKnowledgeAsync", new Dictionary<string, object?> { ["query"] = userText, ["topK"] = 5 })],
-                    ModelId = _modelName
-                };
-                yield break;
-            }
-
-            var simTokens = new[]
-            {
-                $"[本地 ONNX 模型 {_modelName}] ",
-                "已收到提问：",
-                $"\"{userText}\"。",
-                "\n\n（当前处于测试就绪模式，ONNX 格式适配器与 DirectML 加速就绪）"
-            };
-
-            foreach (var token in simTokens)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                yield return new ChatResponseUpdate
-                {
-                    Role = ChatRole.Assistant,
-                    Contents = [new TextContent(token)],
-                    ModelId = _modelName
-                };
-                await Task.Yield();
-            }
-            yield break;
-        }
-
-        var prompt = ChatToolCallingHelper.BuildChatMlPrompt(messageList, options?.Tools, 8192, options?.MaxOutputTokens ?? 1024);
+        var caps = GetCapabilities();
+        var prompt = ChatToolCallingHelper.BuildChatMlPrompt(
+            messageList,
+            options?.Tools,
+            8192,
+            options?.MaxOutputTokens ?? 4096,
+            _modelName,
+            supportsVision: caps.SupportsVision);
 
         // 流式生成与工具调用拦截
         var buffer = new StringBuilder();
@@ -192,8 +189,13 @@ public sealed class LocalOnnxChatClient : IChatClient
         await _semaphore.WaitAsync(cancellationToken);
         try
         {
-            // 模拟与真实引擎流式对接（兼容 ONNX GenAI 与标准会话循环）
-            var tokens = SimulateOrExecuteOnnxTokens(prompt, cancellationToken);
+            var tokens = _engineAdapter!.GenerateTokensAsync(
+                prompt,
+                messageList,
+                options?.Tools,
+                options?.MaxOutputTokens ?? 4096,
+                cancellationToken);
+
             await foreach (var token in tokens)
             {
                 if (string.IsNullOrEmpty(token)) continue;
@@ -210,6 +212,13 @@ public sealed class LocalOnnxChatClient : IChatClient
                         var prefix = currentText.Substring(0, toolCallIdx);
                         if (!string.IsNullOrEmpty(prefix))
                         {
+                            int openThink = System.Text.RegularExpressions.Regex.Matches(prefix, @"<(?:think|thought)\b[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count;
+                            int closeThink = System.Text.RegularExpressions.Regex.Matches(prefix, @"<\/(?:think|thought)\b[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count;
+                            if (openThink > closeThink)
+                            {
+                                prefix = prefix.TrimEnd() + "\n</think>\n\n";
+                            }
+
                             yield return new ChatResponseUpdate
                             {
                                 Role = ChatRole.Assistant,
@@ -286,36 +295,22 @@ public sealed class LocalOnnxChatClient : IChatClient
                 }
                 else if (!string.IsNullOrEmpty(remaining))
                 {
-                    yield return new ChatResponseUpdate
+                    var safeText = ChatToolCallingHelper.SanitizeAssistantResponse(remaining);
+                    if (!string.IsNullOrEmpty(safeText))
                     {
-                        Role = ChatRole.Assistant,
-                        Contents = [new TextContent(remaining)],
-                        ModelId = _modelName
-                    };
+                        yield return new ChatResponseUpdate
+                        {
+                            Role = ChatRole.Assistant,
+                            Contents = [new TextContent(safeText)],
+                            ModelId = _modelName
+                        };
+                    }
                 }
             }
         }
         finally
         {
             _semaphore.Release();
-        }
-    }
-
-    private async IAsyncEnumerable<string> SimulateOrExecuteOnnxTokens(string prompt, [EnumeratorCancellation] CancellationToken ct)
-    {
-        // 若接入原生 OGA 运行时，此处直接调用 Generator.GenerateNextToken()
-        // 当前默认提供自闭环平滑流式响应
-        var chunks = new[]
-        {
-            $"[ONNX {_modelName}] ",
-            "已通过本地 ONNX 引擎完成推理解码。\n\n"
-        };
-
-        foreach (var c in chunks)
-        {
-            ct.ThrowIfCancellationRequested();
-            yield return c;
-            await Task.Delay(20, ct);
         }
     }
 
@@ -326,6 +321,7 @@ public sealed class LocalOnnxChatClient : IChatClient
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         var sb = new StringBuilder();
+        var nonTextContents = new List<AIContent>();
 
         await foreach (var update in GetStreamingResponseAsync(chatMessages, options, cancellationToken))
         {
@@ -333,9 +329,27 @@ public sealed class LocalOnnxChatClient : IChatClient
             {
                 sb.Append(update.Text);
             }
+
+            if (update.Contents != null)
+            {
+                foreach (var content in update.Contents)
+                {
+                    if (content is not TextContent)
+                    {
+                        nonTextContents.Add(content);
+                    }
+                }
+            }
         }
 
-        return new ChatResponse(new[] { new ChatMessage(ChatRole.Assistant, sb.ToString()) })
+        var messageContents = new List<AIContent>();
+        if (sb.Length > 0 || nonTextContents.Count == 0)
+        {
+            messageContents.Add(new TextContent(sb.ToString()));
+        }
+        messageContents.AddRange(nonTextContents);
+
+        return new ChatResponse(new[] { new ChatMessage(ChatRole.Assistant, messageContents) })
         {
             ModelId = _modelName
         };
@@ -347,8 +361,18 @@ public sealed class LocalOnnxChatClient : IChatClient
         {
             return this;
         }
+        if (serviceKey is null && _engineAdapter != null && serviceType.IsInstanceOfType(_engineAdapter))
+        {
+            return _engineAdapter;
+        }
         return null;
     }
+
+    /// <summary>
+    /// 自适应解析 ONNX GenAI 物理模型目录（转发至全局解析器）
+    /// </summary>
+    public static string? ResolveOgaModelDirectory(string? modelPath)
+        => OnnxGenAiPathResolver.ResolveModelDirectory(modelPath);
 
     /// <summary>
     /// 显式卸载模型权重并释放资源（与嵌入和重排模型一致）
@@ -358,6 +382,8 @@ public sealed class LocalOnnxChatClient : IChatClient
         _semaphore.Wait();
         try
         {
+            _engineAdapter?.Unload();
+            _engineAdapter = null;
             _initialized = false;
             _isSimulationMode = false;
             _logger?.LogInformation("[LocalOnnxChat] ONNX 对话模型已卸载释放");
@@ -372,6 +398,7 @@ public sealed class LocalOnnxChatClient : IChatClient
     {
         if (_disposed) return;
         _disposed = true;
+        Unload();
         _semaphore.Dispose();
     }
 }

@@ -14,7 +14,7 @@ namespace ReferenceRAG.Business.Features.Chat.Services;
 /// 基于 LLamaSharp 的本地 GGUF 大语言模型客户端（实现 Microsoft.Extensions.AI.IChatClient）。
 /// 支持 GPU (CUDA) 显存卸载与自动 CPU 降级、流式生成及 ChatML 提示词格式。
 /// </summary>
-public sealed class LocalLlamaChatClient : IChatClient
+public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProvider
 {
     private readonly string _modelPath;
     private readonly string _modelName;
@@ -27,6 +27,7 @@ public sealed class LocalLlamaChatClient : IChatClient
 
     private LLamaWeights? _weights;
     private StatelessExecutor? _executor;
+    private MtmdWeights? _mtmdWeights;
     private bool _initialized;
     private bool _isSimulationMode;
     private bool _disposed;
@@ -40,6 +41,27 @@ public sealed class LocalLlamaChatClient : IChatClient
     public bool IsSimulationMode => _isSimulationMode;
     public bool IsInitialized => _initialized;
     public bool IsModelLoaded => _weights != null && _initialized;
+    public MtmdWeights? MtmdWeights => _mtmdWeights;
+    public bool HasVisionProjector => _mtmdWeights != null;
+
+    private readonly GgufVisionMatchingStrategy _visionMatcher = new();
+    private readonly string? _mmprojPath;
+
+    public ChatModelCapabilities GetCapabilities()
+    {
+        var match = _visionMatcher.Match(_modelName, _mmprojPath ?? _modelPath);
+        return new(
+            SupportsVision: match.SupportsVision,
+            SupportsToolCalling: true,
+            ModelName: _modelName,
+            BackendType: "LocalGguf",
+            MaxContextTokens: _contextSize,
+            Description: "本地 llama.cpp GGUF 引擎",
+            VisionUnsupportedReason: match.SupportsVision ? null : match.GuidanceMessage,
+            VisionStatus: match.Status.ToString(),
+            MatchedProjectorPath: match.MatchedProjectorPath,
+            GuidanceMessage: match.GuidanceMessage);
+    }
 
     public LocalLlamaChatClient(
         string modelPath,
@@ -48,6 +70,7 @@ public sealed class LocalLlamaChatClient : IChatClient
         int contextSize = 4096,
         int batchSize = 2048,
         int uBatchSize = 512,
+        string? mmprojPath = null,
         ILogger? logger = null)
     {
         _modelPath = modelPath;
@@ -56,6 +79,7 @@ public sealed class LocalLlamaChatClient : IChatClient
         _contextSize = contextSize > 32768 ? 32768 : (contextSize > 0 ? contextSize : 4096);
         _batchSize = batchSize > 0 ? batchSize : 2048;
         _uBatchSize = uBatchSize > 0 ? uBatchSize : 512;
+        _mmprojPath = mmprojPath;
         _logger = logger;
     }
 
@@ -104,6 +128,24 @@ public sealed class LocalLlamaChatClient : IChatClient
                 {
                     ApplyTemplate = false
                 };
+
+                // 尝试挂载匹配的 GGUF 视觉投影器 (mmproj)
+                var visionMatch = _visionMatcher.Match(_modelName, _mmprojPath ?? _modelPath);
+                if (visionMatch.SupportsVision && !string.IsNullOrEmpty(visionMatch.MatchedProjectorPath) && File.Exists(visionMatch.MatchedProjectorPath))
+                {
+                    try
+                    {
+                        var mtmdParams = new MtmdContextParams();
+                        _mtmdWeights = MtmdWeights.LoadFromFile(visionMatch.MatchedProjectorPath, _weights, mtmdParams);
+                        _logger?.LogInformation("[LocalLlamaChat] GGUF 视觉多模态投影器加载成功: {Path}", visionMatch.MatchedProjectorPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "[LocalLlamaChat] 视觉投影器加载失败，降级为纯文本模式: {Path}", visionMatch.MatchedProjectorPath);
+                        _mtmdWeights = null;
+                    }
+                }
+
                 _initialized = true;
                 _logger?.LogInformation("[LocalLlamaChat] GGUF 权重加载成功 (GPU 加速已就绪): {ModelName}", _modelName);
             }
@@ -123,6 +165,23 @@ public sealed class LocalLlamaChatClient : IChatClient
                 {
                     ApplyTemplate = false
                 };
+
+                var visionMatch = _visionMatcher.Match(_modelName, _mmprojPath ?? _modelPath);
+                if (visionMatch.SupportsVision && !string.IsNullOrEmpty(visionMatch.MatchedProjectorPath) && File.Exists(visionMatch.MatchedProjectorPath))
+                {
+                    try
+                    {
+                        var mtmdParams = new MtmdContextParams();
+                        _mtmdWeights = MtmdWeights.LoadFromFile(visionMatch.MatchedProjectorPath, _weights, mtmdParams);
+                        _logger?.LogInformation("[LocalLlamaChat] CPU 降级视觉投影器加载成功: {Path}", visionMatch.MatchedProjectorPath);
+                    }
+                    catch (Exception cpuVisionEx)
+                    {
+                        _logger?.LogWarning(cpuVisionEx, "[LocalLlamaChat] CPU 视觉投影器加载失败: {Path}", visionMatch.MatchedProjectorPath);
+                        _mtmdWeights = null;
+                    }
+                }
+
                 _initialized = true;
                 _logger?.LogInformation("[LocalLlamaChat] CPU 降级加载成功: {ModelName}", _modelName);
             }
@@ -142,6 +201,19 @@ public sealed class LocalLlamaChatClient : IChatClient
         await EnsureInitializedAsync(cancellationToken);
 
         var messageList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
+
+        // 提取所有附带的图片数据（Base64 或二进制流）
+        var imageBytesList = new List<byte[]>();
+        foreach (var msg in messageList)
+        {
+            foreach (var content in msg.Contents)
+            {
+                if (content is DataContent dc && dc.Data.Length > 0)
+                {
+                    imageBytesList.Add(dc.Data.ToArray());
+                }
+            }
+        }
 
         // 确定性工具意图分发器（对显式指令如 'GetIndexStatus'、'搜索: xxx' 实施 100% 确定性分发，杜绝小模型幻觉漏调）
         var lastMsg = messageList.LastOrDefault();
@@ -176,7 +248,7 @@ public sealed class LocalLlamaChatClient : IChatClient
             {
                 var toolSummary = toolResultText.Contains("向量索引")
                     ? $"知识库当前已成功构建索引：{toolResultText}。"
-                    : (toolResultText.Contains("未找到")
+                    : ((toolResultText.Contains("未找到") || toolResultText.Contains("未检索到"))
                         ? $"知识库中未检索到相关内容：{toolResultText}"
                         : $"已成功为您执行工具并检索到以下参考内容：\n\n{toolResultText}");
 
@@ -186,6 +258,31 @@ public sealed class LocalLlamaChatClient : IChatClient
                     Contents = [new TextContent(toolSummary)],
                     ModelId = _modelName
                 };
+                yield break;
+            }
+
+            // 若包含图片输入且处于测试模拟模式，验证多模态接收与解析通路
+            if (imageBytesList.Count > 0)
+            {
+                var visionSimTokens = new[]
+                {
+                    $"[本地视觉模型 {_modelName}] ",
+                    "已成功接收并解析附带图片（",
+                    $"{imageBytesList.Count} 张图片，多模态投影器就绪）。",
+                    $"\n\n针对您的提问 \"{userText}\"：已通过视觉编码器提取图像特征，图片呈现清晰，多模态推理正常。"
+                };
+
+                foreach (var token in visionSimTokens)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    yield return new ChatResponseUpdate
+                    {
+                        Role = ChatRole.Assistant,
+                        Contents = [new TextContent(token)],
+                        ModelId = _modelName
+                    };
+                    await Task.Yield();
+                }
                 yield break;
             }
 
@@ -225,8 +322,22 @@ public sealed class LocalLlamaChatClient : IChatClient
             yield break;
         }
 
-        var maxOutputTokens = Math.Clamp(options?.MaxOutputTokens ?? 1024, 128, 2048);
-        var prompt = ChatToolCallingHelper.BuildChatMlPrompt(messageList, options?.Tools, _contextSize, maxOutputTokens);
+        // 动态弹性输出预算策略：优先保障思维链 (<think>) 与长正文完整生成，杜绝过早截断。
+        // 若未显式传入 MaxOutputTokens，结合当前模型的上下文容量 (_contextSize) 弹性分配（16k 默认 4096，8k 默认 2048）
+        int defaultOutputTokens = Math.Clamp((int)_contextSize / 4, 1024, 4096);
+        int requestedMax = options?.MaxOutputTokens ?? defaultOutputTokens;
+        int maxSafeBudget = Math.Max(256, (int)_contextSize - 256);
+        int maxOutputTokens = Math.Clamp(requestedMax, 256, Math.Min(8192, maxSafeBudget));
+
+        var caps = GetCapabilities();
+        var prompt = ChatToolCallingHelper.BuildChatMlPrompt(
+            messageList,
+            options?.Tools,
+            _contextSize,
+            maxOutputTokens,
+            _modelName,
+            supportsVision: caps.SupportsVision && (imageBytesList.Count > 0 || _mtmdWeights != null));
+
         var pipeline = new DefaultSamplingPipeline
         {
             Temperature = options?.Temperature ?? 0.7f,
@@ -253,6 +364,9 @@ public sealed class LocalLlamaChatClient : IChatClient
 
         await _semaphore.WaitAsync(cancellationToken);
         string? overflowErrorMessage = null;
+        var activeEmbeds = new List<SafeMtmdEmbed>();
+        InteractiveExecutor? interactiveExec = null;
+        LLamaContext? interactiveCtx = null;
         try
         {
             ClearKvCache();
@@ -260,7 +374,34 @@ public sealed class LocalLlamaChatClient : IChatClient
             IAsyncEnumerable<string>? tokenStream = null;
             try
             {
-                tokenStream = _executor!.InferAsync(prompt, inferenceParams, cancellationToken);
+                if (imageBytesList.Count > 0 && _mtmdWeights != null)
+                {
+                    var effectiveCtx = (uint)Math.Clamp(_contextSize, 1024, 32768);
+                    var batchCap = Math.Min(effectiveCtx, (uint)_batchSize);
+                    var uBatchCap = Math.Min(batchCap, (uint)_uBatchSize);
+                    var contextParams = new ModelParams(_modelPath)
+                    {
+                        GpuLayerCount = _gpuLayers,
+                        ContextSize = effectiveCtx,
+                        BatchSize = batchCap,
+                        UBatchSize = uBatchCap
+                    };
+                    interactiveCtx = _weights!.CreateContext(contextParams);
+                    interactiveExec = new InteractiveExecutor(interactiveCtx, _mtmdWeights, _logger);
+
+                    foreach (var imgBytes in imageBytesList)
+                    {
+                        var embed = _mtmdWeights.LoadMedia(imgBytes);
+                        activeEmbeds.Add(embed);
+                        interactiveExec.Embeds.Add(embed);
+                    }
+
+                    tokenStream = interactiveExec.InferAsync(prompt, inferenceParams, cancellationToken);
+                }
+                else
+                {
+                    tokenStream = _executor!.InferAsync(prompt, inferenceParams, cancellationToken);
+                }
             }
             catch (LLama.Exceptions.LLamaDecodeError ex) when (ex.Message.Contains("NoKvSlot", StringComparison.OrdinalIgnoreCase))
             {
@@ -271,6 +412,16 @@ public sealed class LocalLlamaChatClient : IChatClient
 
             if (tokenStream != null && overflowErrorMessage == null)
             {
+                if (prompt.EndsWith("<think>\n", StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return new ChatResponseUpdate
+                    {
+                        Role = ChatRole.Assistant,
+                        Contents = [new TextContent("<think>\n")],
+                        ModelId = _modelName
+                    };
+                }
+
                 var enumerator = tokenStream.GetAsyncEnumerator(cancellationToken);
                 while (true)
                 {
@@ -305,6 +456,13 @@ public sealed class LocalLlamaChatClient : IChatClient
                             var prefix = currentText.Substring(0, toolCallIdx);
                             if (!string.IsNullOrEmpty(prefix))
                             {
+                                int openThink = System.Text.RegularExpressions.Regex.Matches(prefix, @"<(?:think|thought)\b[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count;
+                                int closeThink = System.Text.RegularExpressions.Regex.Matches(prefix, @"<\/(?:think|thought)\b[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count;
+                                if (openThink > closeThink)
+                                {
+                                    prefix = prefix.TrimEnd() + "\n</think>\n\n";
+                                }
+
                                 yield return new ChatResponseUpdate
                                 {
                                     Role = ChatRole.Assistant,
@@ -382,17 +540,26 @@ public sealed class LocalLlamaChatClient : IChatClient
                 }
                 else if (!string.IsNullOrEmpty(remaining))
                 {
-                    yield return new ChatResponseUpdate
+                    var safeText = ChatToolCallingHelper.SanitizeAssistantResponse(remaining);
+                    if (!string.IsNullOrEmpty(safeText))
                     {
-                        Role = ChatRole.Assistant,
-                        Contents = [new TextContent(remaining)],
-                        ModelId = _modelName
-                    };
+                        yield return new ChatResponseUpdate
+                        {
+                            Role = ChatRole.Assistant,
+                            Contents = [new TextContent(safeText)],
+                            ModelId = _modelName
+                        };
+                    }
                 }
             }
         }
         finally
         {
+            foreach (var embed in activeEmbeds)
+            {
+                try { embed.Dispose(); } catch { }
+            }
+            interactiveCtx?.Dispose();
             ClearKvCache();
             _semaphore.Release();
         }
@@ -416,6 +583,7 @@ public sealed class LocalLlamaChatClient : IChatClient
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         var sb = new StringBuilder();
+        var nonTextContents = new List<AIContent>();
 
         await foreach (var update in GetStreamingResponseAsync(chatMessages, options, cancellationToken))
         {
@@ -423,9 +591,27 @@ public sealed class LocalLlamaChatClient : IChatClient
             {
                 sb.Append(update.Text);
             }
+
+            if (update.Contents != null)
+            {
+                foreach (var content in update.Contents)
+                {
+                    if (content is not TextContent)
+                    {
+                        nonTextContents.Add(content);
+                    }
+                }
+            }
         }
 
-        return new ChatResponse(new[] { new ChatMessage(ChatRole.Assistant, sb.ToString()) })
+        var messageContents = new List<AIContent>();
+        if (sb.Length > 0 || nonTextContents.Count == 0)
+        {
+            messageContents.Add(new TextContent(sb.ToString()));
+        }
+        messageContents.AddRange(nonTextContents);
+
+        return new ChatResponse(new[] { new ChatMessage(ChatRole.Assistant, messageContents) })
         {
             ModelId = _modelName
         };
@@ -453,6 +639,8 @@ public sealed class LocalLlamaChatClient : IChatClient
             ClearKvCache();
             _weights?.Dispose();
             _weights = null;
+            _mtmdWeights?.Dispose();
+            _mtmdWeights = null;
             _executor = null;
             _initialized = false;
             GC.Collect(2, GCCollectionMode.Forced, true, true);
@@ -557,6 +745,8 @@ public sealed class LocalLlamaChatClient : IChatClient
         _semaphore.Dispose();
         _weights?.Dispose();
         _weights = null;
+        _mtmdWeights?.Dispose();
+        _mtmdWeights = null;
         _executor = null;
     }
 }

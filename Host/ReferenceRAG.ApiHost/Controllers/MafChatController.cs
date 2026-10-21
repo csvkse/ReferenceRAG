@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Business.Features.Chat.Services;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Service.Services;
@@ -12,7 +13,7 @@ using System.Text.Json.Serialization;
 namespace ReferenceRAG.Service.Controllers;
 
 public record ChatStreamRequest(string SessionId, string Message, IReadOnlyList<string>? Images = null);
-public record CreateSessionResponse(string SessionId);
+public record CreateSessionResponse(string SessionId, int UsedTokens = 0, int MaxTokens = 8192, double Percent = 0.0);
 
 public class ChatConfig
 {
@@ -73,8 +74,14 @@ public class MafChatController : ControllerBase
     [HttpPost("sessions")]
     public ActionResult<CreateSessionResponse> CreateSession()
     {
-        var sessionId = _chatService.CreateSession();
-        return Ok(new CreateSessionResponse(sessionId));
+        var (sessionId, usage) = _chatService.CreateSessionWithUsage();
+        return Ok(new CreateSessionResponse(sessionId, usage.UsedTokens, usage.MaxContextTokens, usage.Percent));
+    }
+
+    [HttpGet("sessions/{sessionId}/context")]
+    public ActionResult<ContextUsageInfo> GetSessionContext(string sessionId)
+    {
+        return Ok(_chatService.GetSessionContextUsage(sessionId));
     }
 
     [HttpDelete("sessions/{sessionId}")]
@@ -82,6 +89,12 @@ public class MafChatController : ControllerBase
     {
         _chatService.DeleteSession(sessionId);
         return NoContent();
+    }
+
+    [HttpGet("capabilities")]
+    public ActionResult<ChatModelCapabilities> GetCapabilities()
+    {
+        return Ok(_chatService.GetCapabilities());
     }
 
     [HttpGet("tools")]

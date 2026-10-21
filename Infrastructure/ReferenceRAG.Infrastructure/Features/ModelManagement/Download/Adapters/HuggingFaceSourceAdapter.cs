@@ -483,22 +483,51 @@ public class HuggingFaceSourceAdapter : IModelSourceAdapter
         };
 
         // 提取并结构化 GGUF 文件
-        var ggufFiles = manifest.GetGgufFiles();
-        foreach (var file in ggufFiles)
-        {
-            var match = System.Text.RegularExpressions.Regex.Match(file.FileName.ToLowerInvariant(), @"(q[0-9]_[a-z0-9_]+|f16|f32|bf16)");
-            var quant = match.Success ? match.Groups[1].Value.ToUpperInvariant() : "GGUF";
-            bool isRecommended = quant.Contains("Q4_K") || quant.Contains("Q4_0");
+        var textGgufFiles = manifest.GetTextGgufFiles();
+        var mmprojFiles = manifest.GetMmprojFiles();
+        var companionMmproj = ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Strategies.GgufMultimodalCompanionStrategy.PickBestMmproj(repositoryId, mmprojFiles);
+        var ggufFilesToExpose = textGgufFiles.Count > 0 ? textGgufFiles : mmprojFiles;
 
-            detail.GgufFiles.Add(new ModelVariantFileOption
+        detail.HasMmproj = mmprojFiles.Count > 0;
+        foreach (var file in mmprojFiles)
+        {
+            var isRec = companionMmproj != null && file.Path == companionMmproj.Path;
+            var mmprojOpt = new ModelVariantFileOption
             {
                 Path = file.Path,
                 FileName = file.FileName,
                 FileSize = file.Size,
                 Format = "gguf",
-                Quantization = quant,
+                Quantization = "mmproj",
+                IsRecommended = isRec,
+                IsMultimodal = true,
+                Description = $"独立视觉投影器 ({file.FileName}, {file.Size / 1024.0 / 1024.0:F1} MB)" + (isRec ? " [推荐配对]" : "")
+            };
+            detail.MmprojFiles.Add(mmprojOpt);
+            if (isRec) detail.RecommendedMmproj = mmprojOpt;
+        }
+
+        foreach (var file in ggufFilesToExpose)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(file.FileName.ToLowerInvariant(), @"(q[0-9]_[a-z0-9_]+|f16|f32|bf16)");
+            var quant = match.Success ? match.Groups[1].Value.ToUpperInvariant() : "GGUF";
+            bool isRecommended = quant.Contains("Q4_K") || quant.Contains("Q4_0");
+            var isMultimodal = companionMmproj != null && !file.IsMmproj;
+
+            detail.GgufFiles.Add(new ModelVariantFileOption
+            {
+                Path = file.Path,
+                FileName = file.FileName,
+                FileSize = file.Size + (isMultimodal ? companionMmproj!.Size : 0),
+                Format = "gguf",
+                Quantization = isMultimodal ? $"{quant} (含视觉模型)" : quant,
                 IsRecommended = isRecommended,
-                Description = $"GGUF 量化版本 ({quant})"
+                IsMultimodal = isMultimodal,
+                CompanionMmprojPath = isMultimodal ? companionMmproj!.Path : null,
+                CompanionMmprojSize = isMultimodal ? companionMmproj!.Size : 0,
+                Description = isMultimodal
+                    ? $"GGUF 多模态模型 ({quant}) + 视觉投影器 ({companionMmproj!.FileName}, {companionMmproj.Size / 1024.0 / 1024.0:F1} MB)"
+                    : $"GGUF 量化版本 ({quant})"
             });
         }
 

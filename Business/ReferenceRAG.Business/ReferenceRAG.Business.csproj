@@ -6,6 +6,7 @@
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
     <PackageReference Include="Microsoft.Extensions.Http" />
     <PackageReference Include="Rougamo.Fody" />
+    <PackageReference Condition="'$(OS)' == 'Windows_NT'" Include="Microsoft.ML.OnnxRuntimeGenAI.DirectML" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Microsoft.Extensions.Logging" />

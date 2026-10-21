@@ -83,6 +83,21 @@ public class OnnxFileOption
     /// 来源模型仓库（主仓库或社区候选源）
     /// </summary>
     public string? Repository { get; set; }
+
+    /// <summary>
+    /// 是否为多模态视觉模型（具备配套 mmproj 视觉投影器）
+    /// </summary>
+    public bool IsMultimodal { get; set; }
+
+    /// <summary>
+    /// 伴生视觉投影器文件名或路径 (如 "mmproj-model-f16.gguf")
+    /// </summary>
+    public string? CompanionMmprojPath { get; set; }
+
+    /// <summary>
+    /// 伴生视觉投影器大小 (字节)
+    /// </summary>
+    public long CompanionMmprojSize { get; set; }
 }
 
 /// <summary>
@@ -114,6 +129,21 @@ public class ModelDownloadOptions
     /// 是否需要从 PyTorch 转换
     /// </summary>
     public bool NeedsConversion { get; set; }
+
+    /// <summary>
+    /// 是否检测到可用的伴生视觉投影器 (mmproj) 文件
+    /// </summary>
+    public bool HasMmproj => MmprojOptions.Count > 0;
+
+    /// <summary>
+    /// 伴生/独立的视觉投影器选项集合
+    /// </summary>
+    public List<OnnxFileOption> MmprojOptions { get; set; } = new();
+
+    /// <summary>
+    /// 推荐的最佳视觉投影器选项
+    /// </summary>
+    public OnnxFileOption? RecommendedMmproj { get; set; }
 
     /// <summary>
     /// 是否为受限/需授权仓库 (Hugging Face Gated Model, HTTP 401/403)

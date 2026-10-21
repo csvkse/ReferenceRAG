@@ -42,6 +42,16 @@ public class ModelFileItem
     /// </summary>
     public bool IsGguf => Path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// 是否为多模态视觉投影器/编码器文件 (mmproj)
+    /// </summary>
+    public bool IsMmproj => IsGguf && FileName.Contains("mmproj", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 是否为纯语言文本 GGUF 模型（非伴生视觉投影器）
+    /// </summary>
+    public bool IsTextGguf => IsGguf && !IsMmproj;
+
     public override string ToString() => $"{Path} ({Size / 1024.0 / 1024.0:F2} MB)";
 }
 
@@ -56,7 +66,10 @@ public class ModelManifest
 
     public bool HasOnnx => Files.Any(f => f.IsOnnx);
     public bool HasGguf => Files.Any(f => f.IsGguf);
+    public bool HasMmproj => Files.Any(f => f.IsMmproj);
 
     public List<ModelFileItem> GetOnnxFiles() => Files.Where(f => f.IsOnnx).ToList();
     public List<ModelFileItem> GetGgufFiles() => Files.Where(f => f.IsGguf).ToList();
+    public List<ModelFileItem> GetTextGgufFiles() => Files.Where(f => f.IsTextGguf).ToList();
+    public List<ModelFileItem> GetMmprojFiles() => Files.Where(f => f.IsMmproj).ToList();
 }

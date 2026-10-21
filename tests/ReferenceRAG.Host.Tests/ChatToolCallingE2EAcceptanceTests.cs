@@ -1,3 +1,4 @@
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -58,10 +59,16 @@ public class ChatToolCallingE2EAcceptanceTests
             });
 
         // 模拟精确 BM25 搜索
-        mockBm25.Setup(b => b.SearchAsync("错误码", It.IsAny<int>()))
+        mockBm25.Setup(b => b.SearchAsync(It.Is<string>(s => s.Contains("错误码")), It.IsAny<int>()))
             .ReturnsAsync(new List<BM25SearchResult>
             {
                 new() { ChunkId = "101", Score = 8.5, Content = "错误码 404 表示资源未找到，错误码 500 表示内部服务器异常。" }
+            });
+
+        mockBm25.Setup(b => b.SearchAsync(It.Is<string>(s => s.Contains("数据库连接超时")), It.IsAny<int>()))
+            .ReturnsAsync(new List<BM25SearchResult>
+            {
+                new() { ChunkId = "102", Score = 9.0, Content = "数据库连接超时说明网络中断或连接池耗尽。" }
             });
 
         var config = new ObsidianRagConfig();
@@ -211,5 +218,149 @@ public class ChatToolCallingE2EAcceptanceTests
         // 不含工具徽标
         Assert.DoesNotContain("> 🔧 **已执行工具**", finalContent);
         Assert.Contains("本地模型", finalContent);
+    }
+
+    [Fact]
+    public async Task E2E_Acceptance_CompleteAsync_NonStreaming_GetIndexStatus_ExecutesTool_AndEmitsBadge()
+    {
+        // 门禁：覆盖非流式 POST /v1/chat/completions (stream: false) 调用 GetIndexStatus
+        var (service, mockVector, mockBm25, _) = CreateE2ETestContext();
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "GetIndexStatus")
+        };
+
+        var response = await service.CompleteAsync(messages);
+
+        mockVector.Verify(v => v.GetVectorStatsAsync(It.IsAny<CancellationToken>()), Times.Once);
+        mockBm25.Verify(b => b.GetStatsAsync(), Times.Once);
+
+        Assert.Contains("> 🔧 **已执行工具**: `GetIndexStatus`", response);
+        Assert.Contains("280", response);
+        Assert.Contains("5392", response);
+    }
+
+    [Fact]
+    public async Task E2E_Acceptance_CompleteAsync_NonStreaming_SearchKnowledge_ExecutesTool_AndEmitsBadge()
+    {
+        // 门禁：覆盖非流式 POST /v1/chat/completions (stream: false) 调用 SearchKnowledge
+        var (service, _, _, mockSearch) = CreateE2ETestContext();
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "搜索: 向量数据库")
+        };
+
+        var response = await service.CompleteAsync(messages);
+
+        mockSearch.Verify(s => s.SearchAsync(It.Is<AIQueryRequest>(r => r.Query == "向量数据库"), It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Contains("> 🔧 **已执行工具**: `SearchKnowledge`", response);
+        Assert.Contains("向量", response);
+    }
+
+    [Fact]
+    public async Task E2E_Acceptance_CompleteAsync_ToolCallPrefix_D7_ParsesAndExecutesTool()
+    {
+        // 门禁：针对评测用例 D7-01 "tool_call: GetIndexStatus" 的非流式自愈执行
+        var (service, mockVector, mockBm25, _) = CreateE2ETestContext();
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "tool_call: GetIndexStatus")
+        };
+
+        var response = await service.CompleteAsync(messages);
+
+        mockVector.Verify(v => v.GetVectorStatsAsync(It.IsAny<CancellationToken>()), Times.Once);
+        mockBm25.Verify(b => b.GetStatsAsync(), Times.Once);
+
+        Assert.Contains("> 🔧 **已执行工具**: `GetIndexStatus`", response);
+    }
+
+    [Fact]
+    public async Task E2E_Acceptance_CompleteAsync_NonStreaming_BM25Search_D4_02_ExecutesTool_AndEmitsBadge()
+    {
+        // 门禁：针对评测用例 D4-02 "BM25Search 搜索: 数据库连接超时" 的精准分发与参数别名绑定
+        var (service, _, mockBm25, _) = CreateE2ETestContext();
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "BM25Search 搜索: 数据库连接超时")
+        };
+
+        var response = await service.CompleteAsync(messages);
+
+        mockBm25.Verify(b => b.SearchAsync(It.Is<string>(s => s.Contains("数据库连接超时")), It.IsAny<int>()), Times.Once);
+        Assert.Contains("> 🔧 **已执行工具**: `BM25Search`", response);
+    }
+
+    [Fact]
+    public async Task E2E_Acceptance_CompleteAsync_NonStreaming_BM25Prefix_D4_01_ExecutesTool_AndEmitsBadge()
+    {
+        // 门禁：针对评测用例 D4-01 "BM25: 错误码" 的精准分发
+        var (service, _, mockBm25, _) = CreateE2ETestContext();
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "BM25: 错误码")
+        };
+
+        var response = await service.CompleteAsync(messages);
+
+        mockBm25.Verify(b => b.SearchAsync(It.Is<string>(s => s.Contains("错误码")), It.IsAny<int>()), Times.Once);
+        Assert.Contains("> 🔧 **已执行工具**: `BM25Search`", response);
+    }
+
+    [Fact]
+    public async Task E2E_Acceptance_SearchKnowledgeIn_Multiline_ExecutesTool_AndEmitsBadge()
+    {
+        // 门禁：针对用户截图 2 “搜索知识库中: 你好\n相关内容\n梳理有哪些文档” 出现的空白框问题
+        // 验证：
+        // 1. 100% 触发 SearchKnowledge 工具调用；
+        // 2. 能够自愈多行输入，提取有效查询词；
+        // 3. 输出必须包含工具执行徽标，且绝对不输出空的响应框，绝不泄漏裸 <tool_call> 标签！
+        var (service, _, _, mockSearch) = CreateE2ETestContext();
+        var sessionId = service.CreateSession();
+
+        var multilineInput = "搜索知识库中: 你好\n相关内容\n梳理有哪些文档";
+        var events = new List<SseEvent>();
+        await foreach (var evt in service.StreamAsync(sessionId, multilineInput))
+        {
+            events.Add(evt);
+        }
+
+        mockSearch.Verify(s => s.SearchAsync(It.Is<AIQueryRequest>(r => r.Query.Contains("你好")), It.IsAny<CancellationToken>()), Times.Once);
+
+        var fullText = string.Join("", events.Where(e => e.Type == "text" && !string.IsNullOrEmpty(e.Delta)).Select(e => e.Delta));
+        var replaceEvent = events.FirstOrDefault(e => e.Type == "replace");
+        var finalContent = replaceEvent?.Delta ?? fullText;
+
+        Assert.NotEmpty(finalContent.Trim());
+        Assert.Contains("> 🔧 **已执行工具**: `SearchKnowledge`", finalContent);
+        Assert.DoesNotContain("<tool_call>", finalContent);
+        Assert.DoesNotContain("</tool_call>", finalContent);
+    }
+
+    [Fact]
+    public async Task E2E_Acceptance_SearchKnowledge_NonExistentQuery_AnchorsSpecificKeyword_AndAvoidsGenericGreeting()
+    {
+        // 门禁：针对用户截图 1 “搜索: 你好” 返回教导用户如何使用搜索指令的元对话幻觉问题
+        // 验证：
+        // 1. 底层精准调用 SearchKnowledge(query: "你好")；
+        // 2. 结果明确锚定搜索关键词“你好”，严禁说教教导用户“如果你只是想简单问候...我会用‘搜索: xxx’这样的指令”！
+        var (service, _, _, mockSearch) = CreateE2ETestContext();
+        var sessionId = service.CreateSession();
+
+        var events = new List<SseEvent>();
+        await foreach (var evt in service.StreamAsync(sessionId, "搜索: 你好"))
+        {
+            events.Add(evt);
+        }
+
+        mockSearch.Verify(s => s.SearchAsync(It.Is<AIQueryRequest>(r => r.Query == "你好"), It.IsAny<CancellationToken>()), Times.Once);
+
+        var fullText = string.Join("", events.Where(e => e.Type == "text" && !string.IsNullOrEmpty(e.Delta)).Select(e => e.Delta));
+        var replaceEvent = events.FirstOrDefault(e => e.Type == "replace");
+        var finalContent = replaceEvent?.Delta ?? fullText;
+
+        Assert.Contains("> 🔧 **已执行工具**: `SearchKnowledge`", finalContent);
+        Assert.DoesNotContain("如果你只是想简单问候", finalContent);
+        Assert.DoesNotContain("我会用“搜索: xxx”这样的指令", finalContent);
     }
 }

@@ -5,6 +5,7 @@ using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Adapters;
 using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Coordinator;
 using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Models;
 using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.StateMachine;
+using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Strategies;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -62,6 +63,26 @@ public class ModelVariantInfo
     /// 当前是否处于选中激活状态
     /// </summary>
     public bool IsActive { get; set; }
+
+    /// <summary>
+    /// 是否包含视觉投影器或为视觉多模态变体
+    /// </summary>
+    public bool IsMultimodal { get; set; }
+
+    /// <summary>
+    /// 伴生视觉投影器文件名（如 "mmproj-F16.gguf"）
+    /// </summary>
+    public string? CompanionMmprojFileName { get; set; }
+
+    /// <summary>
+    /// 伴生视觉投影器大小 (字节)
+    /// </summary>
+    public long CompanionMmprojSizeBytes { get; set; }
+
+    /// <summary>
+    /// 本地是否已下载就绪该变体的投影器
+    /// </summary>
+    public bool HasMmprojLocally { get; set; }
 }
 
 /// <summary>
@@ -85,6 +106,46 @@ public class ModelInfo
     public string[]? Languages { get; set; }
     public float? BenchmarkScore { get; set; }
     public bool HasOnnx { get; set; } = true; // 是否在 HuggingFace 上有 ONNX 版本
+
+    /// <summary>
+    /// 是否为多模态架构（支持视觉理解/需配套 mmproj 视觉投影器）
+    /// </summary>
+    public bool IsMultimodal { get; set; }
+
+    /// <summary>
+    /// 本地是否已存在视觉投影器（如 mmproj-F16.gguf）
+    /// </summary>
+    public bool HasMmprojLocally { get; set; }
+
+    /// <summary>
+    /// 本地视觉投影器文件名（如 "mmproj-F16.gguf"）
+    /// </summary>
+    public string? LocalMmprojFileName { get; set; }
+
+    /// <summary>
+    /// 本地视觉投影器文件大小 (字节)
+    /// </summary>
+    public long LocalMmprojSizeBytes { get; set; }
+
+    /// <summary>
+    /// 远端仓库是否提供视觉投影器
+    /// </summary>
+    public bool RemoteProjectorAvailable { get; set; }
+
+    /// <summary>
+    /// 远端推荐视觉投影器文件名（如 "mmproj-F16.gguf"）
+    /// </summary>
+    public string? RemoteProjectorFileName { get; set; }
+
+    /// <summary>
+    /// 远端推荐视觉投影器文件大小 (字节)
+    /// </summary>
+    public long RemoteProjectorSizeBytes { get; set; }
+
+    /// <summary>
+    /// 视觉投影器状态: "not_applicable" | "ready" | "missing" | "downloading"
+    /// </summary>
+    public string ProjectorStatus { get; set; } = "not_applicable";
 
     /// <summary>
     /// 非对称编码配置（null 表示不支持非对称编码）
@@ -129,6 +190,14 @@ public class ModelInfo
         Languages = Languages != null ? (string[])Languages.Clone() : null,
         BenchmarkScore = BenchmarkScore,
         HasOnnx = HasOnnx,
+        IsMultimodal = IsMultimodal,
+        HasMmprojLocally = HasMmprojLocally,
+        LocalMmprojFileName = LocalMmprojFileName,
+        LocalMmprojSizeBytes = LocalMmprojSizeBytes,
+        RemoteProjectorAvailable = RemoteProjectorAvailable,
+        RemoteProjectorFileName = RemoteProjectorFileName,
+        RemoteProjectorSizeBytes = RemoteProjectorSizeBytes,
+        ProjectorStatus = ProjectorStatus,
         AsymmetricEncoding = AsymmetricEncoding != null ? new AsymmetricEncodingConfig
         {
             QueryPrefix = AsymmetricEncoding.QueryPrefix,
@@ -139,6 +208,26 @@ public class ModelInfo
         InstalledVariants = InstalledVariants != null ? new List<ModelVariantInfo>(InstalledVariants) : new(),
         ActiveVariantFileName = ActiveVariantFileName
     };
+}
+
+/// <summary>
+/// 视觉投影器状态与远端探测结果
+/// </summary>
+public class ProjectorStatusResult
+{
+    public string ModelName { get; set; } = string.Empty;
+    public bool IsMultimodal { get; set; }
+    public bool HasLocalMmproj { get; set; }
+    public string? LocalMmprojFileName { get; set; }
+    public long LocalMmprojSizeBytes { get; set; }
+    public bool HasRemoteMmproj { get; set; }
+    public string? RemoteMmprojFileName { get; set; }
+    public long RemoteMmprojSizeBytes { get; set; }
+    public string? RemoteMmprojPath { get; set; }
+    public string? RemoteRepository { get; set; }
+    public List<ModelVariantFileOption> AvailableRemoteMmprojs { get; set; } = new();
+    public string Status { get; set; } = "not_applicable"; // "ready" | "missing" | "not_applicable" | "downloading"
+    public string Message { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -286,6 +375,23 @@ public interface IModelManager
     /// 当 Chat 模型切换时触发
     /// </summary>
     event EventHandler<ModelSwitchedEventArgs>? ChatModelSwitched;
+
+    /// <summary>
+    /// 查询模型视觉投影器（mmproj）的本地与远端就绪状态
+    /// </summary>
+    Task<ProjectorStatusResult> CheckProjectorStatusAsync(
+        string modelName,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 单独下载/补全模型的视觉投影器（mmproj）
+    /// </summary>
+    Task<(bool Success, string? Error)> DownloadProjectorAsync(
+        string modelName,
+        string? projectorPath = null,
+        string? repository = null,
+        IProgress<DownloadProgress>? progress = null,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -1143,7 +1249,8 @@ public class ModelManager : IModelManager, IDisposable
             BenchmarkScore = 0.90f,
             DownloadUrl = "Bonsai/Bonsai-2-2B-GGUF",
             ModelSizeBytes = 480L * 1024 * 1024,
-            HasOnnx = false
+            HasOnnx = false,
+            IsMultimodal = true
         },
         new ModelInfo
         {
@@ -1157,7 +1264,8 @@ public class ModelManager : IModelManager, IDisposable
             BenchmarkScore = 0.92f,
             DownloadUrl = "Qwen/Qwen3.5-2B-Instruct-GGUF",
             ModelSizeBytes = (long)(1.28 * 1024 * 1024 * 1024),
-            HasOnnx = false
+            HasOnnx = false,
+            IsMultimodal = true
         },
         new ModelInfo
         {
@@ -1171,7 +1279,8 @@ public class ModelManager : IModelManager, IDisposable
             BenchmarkScore = 0.94f,
             DownloadUrl = "Qwen/Qwen3.5-4B-Instruct-GGUF",
             ModelSizeBytes = (long)(2.74 * 1024 * 1024 * 1024),
-            HasOnnx = false
+            HasOnnx = false,
+            IsMultimodal = true
         },
         new ModelInfo
         {
@@ -1185,7 +1294,8 @@ public class ModelManager : IModelManager, IDisposable
             BenchmarkScore = 0.91f,
             DownloadUrl = "google/gemma-4-e2b-it-gguf",
             ModelSizeBytes = (long)(3.11 * 1024 * 1024 * 1024),
-            HasOnnx = false
+            HasOnnx = false,
+            IsMultimodal = true
         }
     };
 
@@ -1279,50 +1389,32 @@ public class ModelManager : IModelManager, IDisposable
         var variants = new List<ModelVariantInfo>();
         if (!Directory.Exists(dir)) return variants;
 
-        // 1. 扫描所有 GGUF 变体文件
-        var ggufFiles = Directory.GetFiles(dir, "*.gguf", SearchOption.AllDirectories);
+        // 1. 扫描所有 GGUF 变体文件（排除伴生视觉投影器作为独立对话模型）
+        var allGgufFiles = Directory.GetFiles(dir, "*.gguf", SearchOption.AllDirectories);
+        var mmprojFile = allGgufFiles.FirstOrDefault(f => GgufMultimodalCompanionStrategy.IsMmproj(Path.GetFileName(f)));
+        var hasMmproj = mmprojFile != null;
+        var ggufFiles = allGgufFiles.Where(f => !GgufMultimodalCompanionStrategy.IsMmproj(Path.GetFileName(f))).ToArray();
+        if (ggufFiles.Length == 0 && allGgufFiles.Length > 0)
+        {
+            ggufFiles = allGgufFiles;
+        }
+
+        string? mmprojName = hasMmproj ? Path.GetFileName(mmprojFile) : null;
+        long mmprojSize = hasMmproj ? new FileInfo(mmprojFile!).Length : 0;
+
         foreach (var file in ggufFiles)
         {
             var fileName = Path.GetFileName(file);
             var fi = new FileInfo(file);
             var quant = ExtractQuantizationFromFileName(fileName);
             var varId = !string.IsNullOrEmpty(quant) ? quant : Path.GetFileNameWithoutExtension(fileName);
-
-            variants.Add(new ModelVariantInfo
+            var displayName = $"GGUF {(!string.IsNullOrEmpty(quant) ? quant : Path.GetFileNameWithoutExtension(fileName))}";
+            if (hasMmproj && !GgufMultimodalCompanionStrategy.IsMmproj(fileName))
             {
-                VariantId = varId,
-                DisplayName = $"GGUF {(!string.IsNullOrEmpty(quant) ? quant : Path.GetFileNameWithoutExtension(fileName))}",
-                FileName = fileName,
-                RelativePath = Path.GetRelativePath(dir, file),
-                FullPath = Path.GetFullPath(file),
-                Format = "gguf",
-                Quantization = quant,
-                FileSizeBytes = fi.Length,
-                IsDownloaded = true
-            });
-        }
-
-        // 2. 扫描所有 ONNX 变体文件
-        var onnxFiles = Directory.GetFiles(dir, "*.onnx", SearchOption.AllDirectories);
-        foreach (var file in onnxFiles)
-        {
-            var fileName = Path.GetFileName(file);
-            var fi = new FileInfo(file);
-            var onnxFormat = DetectOnnxFormat(dir);
-            var quant = ExtractQuantizationFromFileName(fileName);
-
-            string varId;
-            string displayName;
-            if (string.Equals(fileName, "model.onnx", StringComparison.OrdinalIgnoreCase))
-            {
-                varId = onnxFormat == "external" ? "onnx-external" : "onnx-embedded";
-                displayName = onnxFormat == "external" ? "ONNX 外部数据" : "ONNX 嵌入式";
+                displayName += " (含视觉模型)";
             }
-            else
-            {
-                varId = Path.GetFileNameWithoutExtension(fileName);
-                displayName = $"ONNX {varId}";
-            }
+
+            var isMulti = hasMmproj || GgufMultimodalCompanionStrategy.IsLikelyVisionModel(fileName);
 
             variants.Add(new ModelVariantInfo
             {
@@ -1331,11 +1423,84 @@ public class ModelManager : IModelManager, IDisposable
                 FileName = fileName,
                 RelativePath = Path.GetRelativePath(dir, file),
                 FullPath = Path.GetFullPath(file),
-                Format = "onnx",
+                Format = "gguf",
                 Quantization = quant,
                 FileSizeBytes = fi.Length,
-                IsDownloaded = true
+                IsDownloaded = true,
+                IsMultimodal = isMulti,
+                CompanionMmprojFileName = mmprojName,
+                CompanionMmprojSizeBytes = mmprojSize,
+                HasMmprojLocally = hasMmproj
             });
+        }
+
+        // 2. 扫描所有 ONNX 变体文件
+        if (string.Equals(modelType, "chat", StringComparison.OrdinalIgnoreCase))
+        {
+            var ogaConfigs = Directory.GetFiles(dir, "genai_config.json", SearchOption.AllDirectories);
+            if (ogaConfigs.Length > 0)
+            {
+                foreach (var configFile in ogaConfigs)
+                {
+                    var ogaSubDir = Path.GetDirectoryName(configFile)!;
+                    var relDir = Path.GetRelativePath(dir, ogaSubDir);
+                    var variantName = relDir == "." ? Path.GetFileName(dir) : relDir.Replace('\\', '/');
+                    var dirFiles = Directory.GetFiles(ogaSubDir, "*", SearchOption.AllDirectories);
+                    var dirSize = dirFiles.Sum(f => new FileInfo(f).Length);
+                    var quant = ExtractQuantizationFromFileName(variantName) ?? (variantName.Contains("gpu", StringComparison.OrdinalIgnoreCase) ? "DirectML" : "CPU");
+
+                    variants.Add(new ModelVariantInfo
+                    {
+                        VariantId = variantName,
+                        DisplayName = $"ONNX {variantName}",
+                        FileName = relDir == "." ? "genai_config.json" : relDir,
+                        RelativePath = relDir,
+                        FullPath = ogaSubDir,
+                        Format = "onnx",
+                        Quantization = quant,
+                        FileSizeBytes = dirSize,
+                        IsDownloaded = true
+                    });
+                }
+            }
+        }
+
+        if (variants.Count == 0 || !string.Equals(modelType, "chat", StringComparison.OrdinalIgnoreCase))
+        {
+            var onnxFiles = Directory.GetFiles(dir, "*.onnx", SearchOption.AllDirectories);
+            foreach (var file in onnxFiles)
+            {
+                var fileName = Path.GetFileName(file);
+                var fi = new FileInfo(file);
+                var onnxFormat = DetectOnnxFormat(dir);
+                var quant = ExtractQuantizationFromFileName(fileName);
+
+                string varId;
+                string displayName;
+                if (string.Equals(fileName, "model.onnx", StringComparison.OrdinalIgnoreCase))
+                {
+                    varId = onnxFormat == "external" ? "onnx-external" : "onnx-embedded";
+                    displayName = onnxFormat == "external" ? "ONNX 外部数据" : "ONNX 嵌入式";
+                }
+                else
+                {
+                    varId = Path.GetFileNameWithoutExtension(fileName);
+                    displayName = $"ONNX {varId}";
+                }
+
+                variants.Add(new ModelVariantInfo
+                {
+                    VariantId = varId,
+                    DisplayName = displayName,
+                    FileName = fileName,
+                    RelativePath = Path.GetRelativePath(dir, file),
+                    FullPath = Path.GetFullPath(file),
+                    Format = "onnx",
+                    Quantization = quant,
+                    FileSizeBytes = fi.Length,
+                    IsDownloaded = true
+                });
+            }
         }
 
         // 3. 匹配当前激活状态
@@ -1346,7 +1511,8 @@ public class ModelManager : IModelManager, IDisposable
             foreach (var v in variants)
             {
                 if (string.Equals(normConfigPath, v.FullPath, StringComparison.OrdinalIgnoreCase) ||
-                    normConfigPath.EndsWith(v.FileName, StringComparison.OrdinalIgnoreCase))
+                    normConfigPath.EndsWith(v.FileName, StringComparison.OrdinalIgnoreCase) ||
+                    normConfigPath.Contains(v.VariantId, StringComparison.OrdinalIgnoreCase))
                 {
                     v.IsActive = true;
                     matched = true;
@@ -1357,22 +1523,10 @@ public class ModelManager : IModelManager, IDisposable
 
         if (!matched && variants.Count > 0)
         {
-            if (string.Equals(modelType, "reranker", StringComparison.OrdinalIgnoreCase))
-            {
-                var preferredOnnx = variants.FirstOrDefault(v => v.Format == "onnx");
-                if (preferredOnnx != null)
-                {
-                    preferredOnnx.IsActive = true;
-                }
-                else
-                {
-                    variants[0].IsActive = true;
-                }
-            }
-            else
-            {
-                variants[0].IsActive = true;
-            }
+            var preferred = variants.FirstOrDefault(v => v.Format == "onnx" && (v.VariantId.Contains("gpu", StringComparison.OrdinalIgnoreCase) || v.VariantId.Contains("directml", StringComparison.OrdinalIgnoreCase)))
+                ?? (string.Equals(modelType, "reranker", StringComparison.OrdinalIgnoreCase) ? variants.FirstOrDefault(v => v.Format == "onnx") : null)
+                ?? variants[0];
+            preferred.IsActive = true;
         }
 
         return variants;
@@ -1451,6 +1605,12 @@ public class ModelManager : IModelManager, IDisposable
                 var canConvert = onnxFormat != "gguf" && directorySize < 2L * 1024 * 1024 * 1024;
                 var hasValidOnnx = onnxFormat != "invalid";
 
+                var allGgufInDir = Directory.GetFiles(dir, "*.gguf", SearchOption.AllDirectories);
+                var localMmprojPath = allGgufInDir.FirstOrDefault(f => GgufMultimodalCompanionStrategy.IsMmproj(Path.GetFileName(f)));
+                bool hasLocalMmproj = localMmprojPath != null;
+                string? localMmprojName = hasLocalMmproj ? Path.GetFileName(localMmprojPath) : null;
+                long localMmprojSize = hasLocalMmproj ? new FileInfo(localMmprojPath!).Length : 0;
+
                 if (_modelRegistry.TryGetValue(modelName, out var model))
                 {
                     model.IsDownloaded = hasValidOnnx;
@@ -1461,10 +1621,18 @@ public class ModelManager : IModelManager, IDisposable
                     model.CanConvertFormat = canConvert;
                     model.InstalledVariants = variants;
                     model.ActiveVariantFileName = activeVariant.FileName;
+
+                    var isMulti = model.IsMultimodal || hasLocalMmproj || GgufMultimodalCompanionStrategy.IsLikelyVisionModel(modelName);
+                    model.IsMultimodal = isMulti;
+                    model.HasMmprojLocally = hasLocalMmproj;
+                    model.LocalMmprojFileName = localMmprojName;
+                    model.LocalMmprojSizeBytes = localMmprojSize;
+                    model.ProjectorStatus = isMulti ? (hasLocalMmproj ? "ready" : "missing") : "not_applicable";
                 }
                 else
                 {
                     var dimension = DetectModelDimension(dir);
+                    var isMulti = hasLocalMmproj || GgufMultimodalCompanionStrategy.IsLikelyVisionModel(modelName);
                     _modelRegistry[modelName] = new ModelInfo
                     {
                         Name = modelName,
@@ -1479,7 +1647,12 @@ public class ModelManager : IModelManager, IDisposable
                         OnnxFormat = onnxFormat,
                         CanConvertFormat = canConvert,
                         InstalledVariants = variants,
-                        ActiveVariantFileName = activeVariant.FileName
+                        ActiveVariantFileName = activeVariant.FileName,
+                        IsMultimodal = isMulti,
+                        HasMmprojLocally = hasLocalMmproj,
+                        LocalMmprojFileName = localMmprojName,
+                        LocalMmprojSizeBytes = localMmprojSize,
+                        ProjectorStatus = isMulti ? (hasLocalMmproj ? "ready" : "missing") : "not_applicable"
                     };
                 }
             }
@@ -1492,6 +1665,7 @@ public class ModelManager : IModelManager, IDisposable
             foreach (var ggufFile in looseGgufFiles)
             {
                 var looseModelName = Path.GetFileNameWithoutExtension(ggufFile);
+                if (ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Strategies.GgufMultimodalCompanionStrategy.IsMmproj(looseModelName)) continue;
                 if (_modelRegistry.ContainsKey(looseModelName)) continue;
 
                 var fileInfo = new FileInfo(ggufFile);
@@ -1599,6 +1773,24 @@ public class ModelManager : IModelManager, IDisposable
 
         if (Directory.Exists(localPath))
         {
+            var isChat = localPath.Contains("Chat", StringComparison.OrdinalIgnoreCase);
+            if (isChat)
+            {
+                var ogaDir = OnnxGenAiPathResolver.ResolveModelDirectory(localPath);
+                if (!string.IsNullOrEmpty(ogaDir) && OnnxGenAiPathResolver.IsValidOgaDirectory(ogaDir))
+                {
+                    if (!string.IsNullOrEmpty(preferredVariantFileName) && !preferredVariantFileName.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var targetVariantDir = Path.Combine(localPath, preferredVariantFileName);
+                        if (Directory.Exists(targetVariantDir) && File.Exists(Path.Combine(targetVariantDir, "genai_config.json")))
+                        {
+                            return targetVariantDir;
+                        }
+                    }
+                    return ogaDir;
+                }
+            }
+
             if (!string.IsNullOrEmpty(preferredVariantFileName))
             {
                 var targetFile = Path.Combine(localPath, preferredVariantFileName);
@@ -2057,6 +2249,216 @@ public class ModelManager : IModelManager, IDisposable
             }
         }
         catch { }
+    }
+
+    /// <summary>
+    /// 查询模型视觉投影器（mmproj）的本地与远端就绪状态
+    /// </summary>
+    public async Task<ProjectorStatusResult> CheckProjectorStatusAsync(
+        string modelName,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_modelRegistry.TryGetValue(modelName, out var model))
+        {
+            return new ProjectorStatusResult
+            {
+                ModelName = modelName,
+                Status = "not_applicable",
+                Message = $"未找到指定模型: {modelName}"
+            };
+        }
+
+        var isMulti = model.IsMultimodal ||
+                      GgufMultimodalCompanionStrategy.IsLikelyVisionModel(modelName) ||
+                      GgufMultimodalCompanionStrategy.IsLikelyVisionModel(model.DownloadUrl ?? string.Empty);
+
+        string? localDir = model.LocalPath;
+        if (string.IsNullOrEmpty(localDir))
+        {
+            var subDir = model.ModelType switch
+            {
+                "reranker" => "Reranker",
+                "chat" => "Chat",
+                _ => "Embedding"
+            };
+            var candidate = Path.Combine(_modelsPath, subDir, modelName);
+            if (Directory.Exists(candidate)) localDir = candidate;
+        }
+
+        bool hasLocalMmproj = false;
+        string? localMmprojName = null;
+        long localMmprojSize = 0;
+
+        if (!string.IsNullOrEmpty(localDir) && Directory.Exists(localDir))
+        {
+            var mmprojFile = Directory.GetFiles(localDir, "*.gguf", SearchOption.AllDirectories)
+                .FirstOrDefault(f => GgufMultimodalCompanionStrategy.IsMmproj(Path.GetFileName(f)));
+            if (mmprojFile != null)
+            {
+                hasLocalMmproj = true;
+                localMmprojName = Path.GetFileName(mmprojFile);
+                localMmprojSize = new FileInfo(mmprojFile).Length;
+            }
+        }
+
+        // 探测远端仓库是否提供 mmproj
+        var coordinator = new ModelDownloadCoordinator(defaultAdapterFactory: () => CreateModelSourceAdapter());
+        var repo = model.DownloadUrl ?? model.Name;
+
+        ModelDownloadOptions? downloadOptions = null;
+        try
+        {
+            downloadOptions = await coordinator.GetDownloadOptionsAsync(repo, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 探测远端投影器选项失败: {ex.Message}");
+        }
+
+        var remoteMmprojs = new List<ModelVariantFileOption>();
+        OnnxFileOption? recMmproj = null;
+
+        if (downloadOptions != null && downloadOptions.MmprojOptions.Count > 0)
+        {
+            isMulti = true;
+            recMmproj = downloadOptions.RecommendedMmproj ?? downloadOptions.MmprojOptions.FirstOrDefault();
+            foreach (var opt in downloadOptions.MmprojOptions)
+            {
+                remoteMmprojs.Add(new ModelVariantFileOption
+                {
+                    Path = opt.Path,
+                    FileName = Path.GetFileName(opt.Path),
+                    FileSize = opt.Size,
+                    Format = "gguf",
+                    Quantization = opt.IsQuantized ? "GGUF" : null,
+                    IsRecommended = opt.IsRecommended,
+                    Description = opt.Description ?? opt.DisplayName,
+                    IsMultimodal = true
+                });
+            }
+        }
+
+        var hasRemoteMmproj = remoteMmprojs.Count > 0;
+        string status = !isMulti
+            ? "not_applicable"
+            : (hasLocalMmproj ? "ready" : (hasRemoteMmproj ? "missing" : "not_applicable"));
+
+        // 同步刷新本地模型注册表属性
+        model.IsMultimodal = isMulti;
+        model.HasMmprojLocally = hasLocalMmproj;
+        model.LocalMmprojFileName = localMmprojName;
+        model.LocalMmprojSizeBytes = localMmprojSize;
+        model.RemoteProjectorAvailable = hasRemoteMmproj;
+        model.RemoteProjectorFileName = recMmproj != null ? Path.GetFileName(recMmproj.Path) : null;
+        model.RemoteProjectorSizeBytes = recMmproj?.Size ?? 0;
+        model.ProjectorStatus = status;
+
+        string msg = status switch
+        {
+            "ready" => $"本地已就绪视觉投影器: {localMmprojName} ({localMmprojSize / 1024.0 / 1024.0:F1} MB)",
+            "missing" => $"检测到仓库存在配套视觉投影器 ({remoteMmprojs.Count} 个可用)，本地尚未下载，点击可单独补全",
+            _ => "当前模型不是多模态模型或远端未发布配套投影器"
+        };
+
+        return new ProjectorStatusResult
+        {
+            ModelName = modelName,
+            IsMultimodal = isMulti,
+            HasLocalMmproj = hasLocalMmproj,
+            LocalMmprojFileName = localMmprojName,
+            LocalMmprojSizeBytes = localMmprojSize,
+            HasRemoteMmproj = hasRemoteMmproj,
+            RemoteMmprojFileName = recMmproj != null ? Path.GetFileName(recMmproj.Path) : null,
+            RemoteMmprojSizeBytes = recMmproj?.Size ?? 0,
+            RemoteMmprojPath = recMmproj?.Path,
+            RemoteRepository = recMmproj?.Repository ?? repo,
+            AvailableRemoteMmprojs = remoteMmprojs,
+            Status = status,
+            Message = msg
+        };
+    }
+
+    /// <summary>
+    /// 单独下载/补全模型的视觉投影器（mmproj）
+    /// </summary>
+    public async Task<(bool Success, string? Error)> DownloadProjectorAsync(
+        string modelName,
+        string? projectorPath = null,
+        string? repository = null,
+        IProgress<DownloadProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_modelRegistry.TryGetValue(modelName, out var model))
+        {
+            return (false, $"模型不存在: {modelName}");
+        }
+
+        // 确定下载目标目录
+        var subDir = model.ModelType switch
+        {
+            "reranker" => "Reranker",
+            "chat" => "Chat",
+            _ => "Embedding"
+        };
+        var modelDir = model.LocalPath ?? Path.Combine(_modelsPath, subDir, modelName);
+        Directory.CreateDirectory(modelDir);
+
+        try
+        {
+            var targetRepo = repository ?? model.DownloadUrl ?? modelName;
+            string? targetProjectorPath = projectorPath;
+
+            // 若调用方未显式指定 projectorPath，则自动探查推荐的投影器路径
+            if (string.IsNullOrWhiteSpace(targetProjectorPath))
+            {
+                var statusResult = await CheckProjectorStatusAsync(modelName, cancellationToken);
+                if (!statusResult.HasRemoteMmproj || string.IsNullOrWhiteSpace(statusResult.RemoteMmprojPath))
+                {
+                    return (false, $"远端仓库未提供视觉投影器: {targetRepo}");
+                }
+                targetProjectorPath = statusResult.RemoteMmprojPath;
+                if (!string.IsNullOrEmpty(statusResult.RemoteRepository))
+                {
+                    targetRepo = statusResult.RemoteRepository;
+                }
+            }
+
+            Console.WriteLine($"[ModelManager] 开始单独下载视觉投影器: {modelName} -> {targetProjectorPath} (Repo: {targetRepo})");
+
+            var adapter = CreateModelSourceAdapter();
+            var coordinator = new ModelDownloadCoordinator(defaultAdapterFactory: () => CreateModelSourceAdapter());
+            var stateMachine = new DownloadStateMachine(
+                $"{modelName}_projector",
+                0,
+                progress);
+
+            await coordinator.DownloadModelAsync(
+                targetRepo,
+                modelDir,
+                stateMachine,
+                adapter,
+                targetFormat: "gguf",
+                onnxVariantPath: targetProjectorPath,
+                cancellationToken: cancellationToken,
+                repository: targetRepo
+            );
+
+            // 下载完成后重新扫描本地模型，自愈状态
+            ScanLocalModels();
+
+            Console.WriteLine($"[ModelManager] 视觉投影器下载完成: {modelName} -> {targetProjectorPath}");
+            return (true, null);
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine($"[ModelManager] 用户取消了视觉投影器下载: {modelName}");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ModelManager] 下载视觉投影器失败: {ex.Message}");
+            return (false, ex.Message);
+        }
     }
 
     public Task<bool> DeleteModelAsync(string modelName)
@@ -2857,7 +3259,8 @@ public class ModelManager : IModelManager, IDisposable
                 config.Chat.ActiveBackend = "LocalOnnxGenAi";
                 if (config.Chat.LocalOnnxGenAi == null) config.Chat.LocalOnnxGenAi = new LocalOnnxGenAiChatProfile();
                 config.Chat.LocalOnnxGenAi.ModelName = modelName;
-                config.Chat.LocalOnnxGenAi.ModelPath = resolvedPath;
+                var ogaDir = OnnxGenAiPathResolver.ResolveModelDirectory(resolvedPath) ?? resolvedPath;
+                config.Chat.LocalOnnxGenAi.ModelPath = ogaDir;
             }
             else
             {

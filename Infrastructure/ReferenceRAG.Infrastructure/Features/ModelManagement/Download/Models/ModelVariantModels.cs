@@ -105,6 +105,21 @@ public class ModelVariantFileOption
     /// 描述文本
     /// </summary>
     public string Description { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 是否为多模态视觉模型（具备配套 mmproj 视觉投影器）
+    /// </summary>
+    public bool IsMultimodal { get; set; }
+
+    /// <summary>
+    /// 伴生视觉投影器文件名或路径 (如 "mmproj-model-f16.gguf")
+    /// </summary>
+    public string? CompanionMmprojPath { get; set; }
+
+    /// <summary>
+    /// 伴生视觉投影器大小 (字节)
+    /// </summary>
+    public long CompanionMmprojSize { get; set; }
 }
 
 /// <summary>
@@ -171,6 +186,21 @@ public class ModelVariantDetail
     /// 包含的所有 ONNX 变体文件
     /// </summary>
     public List<ModelVariantFileOption> OnnxFiles { get; set; } = new();
+
+    /// <summary>
+    /// 是否包含视觉投影器 (mmproj) 文件
+    /// </summary>
+    public bool HasMmproj { get; set; }
+
+    /// <summary>
+    /// 包含的所有伴生/独立视觉投影器变体文件
+    /// </summary>
+    public List<ModelVariantFileOption> MmprojFiles { get; set; } = new();
+
+    /// <summary>
+    /// 推荐的最佳视觉投影器文件 (如有)
+    /// </summary>
+    public ModelVariantFileOption? RecommendedMmproj { get; set; }
 
     /// <summary>
     /// 仓库内文件总数

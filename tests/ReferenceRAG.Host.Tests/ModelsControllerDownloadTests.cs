@@ -266,5 +266,90 @@ public class ModelsControllerDownloadTests
         Assert.Single(detail.GgufFiles);
         Assert.Equal("Q4_K_M", detail.GgufFiles[0].Quantization);
     }
+
+    [Fact]
+    public async Task GetChatProjectorStatus_ReturnsStatusFromModelManager()
+    {
+        var controller = CreateController();
+        var modelName = "Qwen3.5-4B-Instruct-GGUF";
+        var expectedStatus = new ProjectorStatusResult
+        {
+            ModelName = modelName,
+            IsMultimodal = true,
+            HasLocalMmproj = false,
+            HasRemoteMmproj = true,
+            RemoteMmprojFileName = "mmproj-F16.gguf",
+            RemoteMmprojPath = "mmproj-F16.gguf",
+            RemoteMmprojSizeBytes = 672_000_000,
+            Status = "missing",
+            Message = "检测到仓库存在配套视觉投影器"
+        };
+
+        _mockModelManager.Setup(m => m.CheckProjectorStatusAsync(modelName, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(expectedStatus);
+
+        var result = await controller.GetChatProjectorStatus(modelName);
+
+        var okResult = Assert.IsType<OkObjectResult>(result.Result);
+        var status = Assert.IsType<ProjectorStatusResult>(okResult.Value);
+        Assert.Equal(modelName, status.ModelName);
+        Assert.True(status.IsMultimodal);
+        Assert.False(status.HasLocalMmproj);
+        Assert.True(status.HasRemoteMmproj);
+        Assert.Equal("missing", status.Status);
+    }
+
+    [Fact]
+    public async Task DownloadChatProjector_WhenModelNotFound_ReturnsNotFound()
+    {
+        var controller = CreateController();
+        var modelName = "NonExistentModel";
+
+        _mockModelManager.Setup(m => m.GetAvailableModelsAsync("chat"))
+            .ReturnsAsync(new List<ModelInfo>());
+
+        var result = await controller.DownloadChatProjector(modelName);
+
+        var notFound = Assert.IsType<NotFoundObjectResult>(result);
+        Assert.NotNull(notFound.Value);
+    }
+
+    [Fact]
+    public async Task DownloadChatProjector_WhenModelExists_StartsDownloadAndReturnsOk()
+    {
+        var controller = CreateController();
+        var modelName = "Qwen3.5-4B-Instruct-GGUF";
+
+        _mockModelManager.Setup(m => m.GetAvailableModelsAsync("chat"))
+            .ReturnsAsync(new List<ModelInfo>
+            {
+                new ModelInfo
+                {
+                    Name = modelName,
+                    DisplayName = "Qwen3.5 4B Instruct",
+                    ModelType = "chat",
+                    IsMultimodal = true,
+                    IsDownloaded = true
+                }
+            });
+
+        _mockModelManager.Setup(m => m.DownloadProjectorAsync(
+            modelName,
+            It.IsAny<string?>(),
+            It.IsAny<string?>(),
+            It.IsAny<IProgress<DownloadProgress>?>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync((true, null));
+
+        var result = await controller.DownloadChatProjector(modelName, new DownloadProjectorRequest
+        {
+            ProjectorPath = "mmproj-F16.gguf"
+        });
+
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        var json = JsonSerializer.Serialize(okResult.Value);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("视觉投影器下载任务已启动", doc.RootElement.GetProperty("message").GetString());
+    }
 }
 

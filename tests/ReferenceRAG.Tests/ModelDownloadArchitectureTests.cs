@@ -254,6 +254,195 @@ public class ModelDownloadArchitectureTests
         Assert.False(ggufStrategy.CanHandle(dualManifest, onnxContext));
     }
 
+    [Fact]
+    public void GgufMultimodalCompanionStrategy_IdentifiesMmprojFiles_AndPicksF16ByPrecisionPriority()
+    {
+        Assert.True(GgufMultimodalCompanionStrategy.IsMmproj("mmproj-model-f16.gguf"));
+        Assert.True(GgufMultimodalCompanionStrategy.IsMmproj("Qwen2.5-VL-7B-Instruct-mmproj-f16.gguf"));
+        Assert.False(GgufMultimodalCompanionStrategy.IsMmproj("Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"));
+        Assert.True(GgufMultimodalCompanionStrategy.IsLikelyVisionModel("Qwen/Qwen2.5-VL-7B-Instruct"));
+        Assert.True(GgufMultimodalCompanionStrategy.IsLikelyVisionModel("llava-v1.6-vicuna-7b"));
+
+        var candidates = new List<ModelFileItem>
+        {
+            new() { Path = "mmproj-model-q4_0.gguf", Size = 200_000_000 },
+            new() { Path = "mmproj-model-f16.gguf", Size = 670_000_000 }
+        };
+
+        var best = GgufMultimodalCompanionStrategy.PickBestMmproj("Qwen2.5-VL-7B", candidates);
+        Assert.NotNull(best);
+        Assert.Equal("mmproj-model-f16.gguf", best.FileName);
+    }
+
+    [Fact]
+    public async Task ModelDownloadCoordinator_GetDownloadOptions_BundlesMmprojWithTextGguf_AndHidesStandaloneMmproj()
+    {
+        var mockAdapter = new MockSourceAdapter();
+        mockAdapter.RegisterManifest("Qwen/Qwen2.5-VL-7B-Instruct-GGUF", new ModelManifest
+        {
+            ModelId = "Qwen/Qwen2.5-VL-7B-Instruct-GGUF",
+            Files = new()
+            {
+                new() { Path = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", Size = 4_600_000_000 },
+                new() { Path = "Qwen2.5-VL-7B-Instruct-Q5_K_M.gguf", Size = 5_200_000_000 },
+                new() { Path = "mmproj-model-f16.gguf", Size = 672_000_000 }
+            }
+        });
+
+        var coordinator = new ModelDownloadCoordinator(defaultAdapterFactory: () => mockAdapter);
+        var options = await coordinator.GetDownloadOptionsAsync("Qwen/Qwen2.5-VL-7B-Instruct-GGUF", mockAdapter);
+
+        Assert.NotNull(options);
+        Assert.True(options.HasGguf);
+        // mmproj 不作为独立量化选项呈现，而是作为伴生多模态属性捆绑
+        Assert.Equal(2, options.GgufOptions.Count);
+        var q4 = options.GgufOptions.First(o => o.DisplayName.Contains("Q4_K"));
+        Assert.True(q4.IsMultimodal);
+        Assert.Equal("mmproj-model-f16.gguf", q4.CompanionMmprojPath);
+        Assert.Equal(672_000_000, q4.CompanionMmprojSize);
+        // 总大小自动累加
+        Assert.Equal(4_600_000_000 + 672_000_000, q4.Size);
+        Assert.Contains("视觉模型", q4.DisplayName);
+    }
+
+    [Fact]
+    public async Task DirectGgufDownloadStrategy_DownloadsBothTextGgufAndCompanionMmproj()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "rag_test_gguf_vlm_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var mockAdapter = new MockSourceAdapter();
+            var manifest = new ModelManifest
+            {
+                ModelId = "Qwen/Qwen2.5-VL-7B-Instruct-GGUF",
+                Files = new()
+                {
+                    new() { Path = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", Size = 4096 },
+                    new() { Path = "mmproj-model-f16.gguf", Size = 1024 },
+                    new() { Path = "config.json", Size = 100 }
+                }
+            };
+
+            var strategy = new DirectGgufDownloadStrategy();
+            var context = new DownloadContext
+            {
+                ModelName = "Qwen2.5-VL-7B",
+                TargetDir = tempDir,
+                SourceAdapter = mockAdapter,
+                OnnxVariantPath = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
+            };
+
+            var sm = new DownloadStateMachine("Qwen2.5-VL-7B", 5220);
+            await strategy.ExecuteAsync(manifest, context, sm);
+
+            Assert.Equal(DownloadStage.Completed, sm.CurrentStage);
+            Assert.True(File.Exists(Path.Combine(tempDir, "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf")));
+            Assert.True(File.Exists(Path.Combine(tempDir, "mmproj-model-f16.gguf")));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DirectGgufDownloadStrategy_IncrementalSkip_WhenTextGgufExists_OnlyDownloadsMmproj()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "rag_test_gguf_inc_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            // 预先写入已完成的主模型文件
+            var mainModelPath = Path.Combine(tempDir, "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf");
+            File.WriteAllBytes(mainModelPath, new byte[4096]);
+
+            var mockAdapter = new MockSourceAdapter();
+            var manifest = new ModelManifest
+            {
+                ModelId = "Qwen/Qwen2.5-VL-7B-Instruct-GGUF",
+                Files = new()
+                {
+                    new() { Path = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", Size = 4096 },
+                    new() { Path = "mmproj-model-f16.gguf", Size = 1024 }
+                }
+            };
+
+            var strategy = new DirectGgufDownloadStrategy();
+            var context = new DownloadContext
+            {
+                ModelName = "Qwen2.5-VL-7B",
+                TargetDir = tempDir,
+                SourceAdapter = mockAdapter,
+                OnnxVariantPath = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
+            };
+
+            var sm = new DownloadStateMachine("Qwen2.5-VL-7B", 1024);
+            await strategy.ExecuteAsync(manifest, context, sm);
+
+            Assert.Equal(DownloadStage.Completed, sm.CurrentStage);
+            // 验证伴生 mmproj 成功被增量下载到位
+            Assert.True(File.Exists(Path.Combine(tempDir, "mmproj-model-f16.gguf")));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DirectGgufDownloadStrategy_StandaloneMmproj_DownloadsOnlyProjector()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "rag_test_gguf_standalone_mmproj_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var mockAdapter = new MockSourceAdapter();
+            var manifest = new ModelManifest
+            {
+                ModelId = "Qwen/Qwen3.5-4B-Instruct-GGUF",
+                Files = new()
+                {
+                    new() { Path = "Qwen3.5-4B-Instruct-Q4_K_M.gguf", Size = 2_740_000_000 },
+                    new() { Path = "mmproj-F16.gguf", Size = 672_000_000 }
+                }
+            };
+
+            var strategy = new DirectGgufDownloadStrategy();
+            var context = new DownloadContext
+            {
+                ModelName = "Qwen3.5-4B-Instruct-GGUF",
+                TargetDir = tempDir,
+                SourceAdapter = mockAdapter,
+                OnnxVariantPath = "mmproj-F16.gguf"
+            };
+
+            var sm = new DownloadStateMachine("Qwen3.5-4B-Instruct-GGUF", 672_000_000);
+            await strategy.ExecuteAsync(manifest, context, sm);
+
+            Assert.Equal(DownloadStage.Completed, sm.CurrentStage);
+            // 验证仅单独下载了 mmproj 文件，未下载 2.74GB 的主模型文件
+            Assert.True(File.Exists(Path.Combine(tempDir, "mmproj-F16.gguf")));
+            Assert.False(File.Exists(Path.Combine(tempDir, "Qwen3.5-4B-Instruct-Q4_K_M.gguf")));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, true);
+            }
+        }
+    }
+
     [Fact(Skip = "需要网络访问 HuggingFace API")]
     public async Task HuggingFaceSourceAdapter_GetManifest_ResolvesPublicModel()
     {

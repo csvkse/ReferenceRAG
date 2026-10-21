@@ -24,7 +24,7 @@ public static class ChatToolCallingHelper
     /// <summary>
     /// 将 AITool 集合格式化为 ChatML / Nous-Hermes / Qwen2.5 官方标准 XML &lt;tools&gt; 描述块
     /// </summary>
-    public static string FormatToolsPrompt(IList<AITool>? tools)
+    public static string FormatToolsPrompt(IList<AITool>? tools, bool supportsVision = false)
     {
         if (tools == null || tools.Count == 0) return string.Empty;
 
@@ -56,14 +56,24 @@ public static class ChatToolCallingHelper
         sb.Append("<tool_call>\n");
         sb.Append("{\"name\": <function-name>, \"arguments\": <args-json-object>}\n");
         sb.Append("</tool_call>\n\n");
-        sb.Append("# Two-Phase Tool Execution Protocol:\n");
-        sb.Append("Phase 1 (Tool Call): When a user query requires searching knowledge, reading notes, or retrieving system index status, call the appropriate tool IMMEDIATELY using <tool_call> tags. Do not explain the tools to the user unless explicitly asked.\n");
-        sb.Append("Example:\n");
-        sb.Append("User: 查询知识库状态\n");
-        sb.Append("Assistant: <tool_call>\n");
-        sb.Append("{\"name\": \"GetIndexStatus\", \"arguments\": {}}\n");
-        sb.Append("</tool_call>\n\n");
-        sb.Append("Phase 2 (Final Answer): After receiving tool results (<tool_response>), synthesize the findings and answer the user in clear, polite, natural human language (Markdown format). Even if the user directly inputted a tool command, present the information helpfully in conversational text.\n");
+
+        if (!supportsVision)
+        {
+            sb.Append("# Two-Phase Tool Execution Protocol:\n");
+            sb.Append("Phase 1 (Tool Call): When a user query requires searching knowledge, reading notes, or retrieving system index status, call the appropriate tool IMMEDIATELY using <tool_call> tags. Do not explain the tools to the user unless explicitly asked.\n");
+            sb.Append("Example:\n");
+            sb.Append("User: 查询知识库状态\n");
+            sb.Append("Assistant: <tool_call>\n");
+            sb.Append("{\"name\": \"GetIndexStatus\", \"arguments\": {}}\n");
+            sb.Append("</tool_call>\n\n");
+            sb.Append("Phase 2 (Final Answer): After receiving tool results (<tool_response>), synthesize the findings and answer the user in clear, polite, natural human language (Markdown format).\n");
+            sb.Append("CRITICAL RULES FOR PHASE 2:\n");
+            sb.Append("1. Base your answer STRICTLY on the tool results provided in <tool_response>.\n");
+            sb.Append("2. If the tool response indicates no matching content was found (\"未找到相关内容\" or \"未检索到\"), directly and politely inform the user that no relevant notes/documents were found in the knowledge base, and suggest more specific business/technical keywords.\n");
+            sb.Append("3. NEVER assume the user is just saying hello or testing command syntax.\n");
+            sb.Append("4. NEVER lecture or educate the user about command syntax, formats, or how to use \"搜索: xxx\".\n");
+            sb.Append("5. Deliver the search conclusions and document summaries directly in Markdown.\n");
+        }
 
         return sb.ToString();
     }
@@ -75,11 +85,22 @@ public static class ChatToolCallingHelper
         IList<ChatMessage> messages,
         IList<AITool>? tools = null,
         int maxContextTokens = 0,
-        int maxOutputTokens = 1024)
+        int maxOutputTokens = 4096,
+        string? modelName = null,
+        bool supportsVision = false)
     {
+        bool isPhi = !string.IsNullOrWhiteSpace(modelName) && modelName.Contains("phi", StringComparison.OrdinalIgnoreCase);
+        bool isReasoningModel = !string.IsNullOrWhiteSpace(modelName) &&
+            (modelName.Contains("qwen3.5", StringComparison.OrdinalIgnoreCase) ||
+             modelName.Contains("qwen35", StringComparison.OrdinalIgnoreCase) ||
+             modelName.Contains("qwen3_5", StringComparison.OrdinalIgnoreCase) ||
+             modelName.Contains("deepseek-r1", StringComparison.OrdinalIgnoreCase) ||
+             modelName.Contains("deepseek_r1", StringComparison.OrdinalIgnoreCase) ||
+             modelName.Contains("r1-distill", StringComparison.OrdinalIgnoreCase));
+
         // 1. 预算规划（若未指定 maxContextTokens，设定 8192 作为安全默认上限）
         int effectiveCtx = maxContextTokens > 0 ? maxContextTokens : 8192;
-        int maxPromptTokens = Math.Max(512, effectiveCtx - Math.Clamp(maxOutputTokens, 128, 2048) - 64);
+        int maxPromptTokens = Math.Max(512, effectiveCtx - Math.Clamp(maxOutputTokens, 128, 8192) - 64);
 
         // 字符预算折算：中文/英文混合保守折算（1 token ≈ 1.5 字符）
         int maxPromptChars = Math.Max(1024, (int)(maxPromptTokens * 1.5));
@@ -90,6 +111,7 @@ public static class ChatToolCallingHelper
         string systemText = string.Empty;
         var nonSystemMessages = new List<ChatMessage>();
         bool hasExplicitSystem = false;
+        bool hasImages = false;
 
         foreach (var msg in messages)
         {
@@ -101,21 +123,41 @@ public static class ChatToolCallingHelper
             else
             {
                 nonSystemMessages.Add(msg);
+                if (msg.Contents.Any(c => c is DataContent or UriContent))
+                {
+                    hasImages = true;
+                }
             }
         }
 
-        if (tools != null && tools.Count > 0)
+        // 对视觉多模态模型（如 Qwen2-VL / Qwen3.5-VL 等），官方预训练及微调模版严格使用 "You are a helpful assistant."
+        // 若使用偏离分布的中文默认系统词，会导致视觉投影器指令坍塌直接触发 EOS 截断
+        string defaultSystem = supportsVision ? "You are a helpful assistant." : "你是 ReferenceRAG 智能助手。";
+        if (hasExplicitSystem && supportsVision && (systemText == "你是 ReferenceRAG 智能助手。" || string.IsNullOrWhiteSpace(systemText)))
         {
-            var toolsPrompt = FormatToolsPrompt(tools);
-            systemText = hasExplicitSystem ? $"{systemText}\n{toolsPrompt}" : $"你是 ReferenceRAG 智能助手。{toolsPrompt}";
+            systemText = defaultSystem;
+        }
+
+        // 当包含多模态图像时，避免注入纯文本知识库检索工具 Schema（# Tools），
+        // 视觉模型的 Cross-Attention 与 M-RoPE 在同时接收 XML 工具声明与高维图像投影时会发生注意力坍塌并立即产生 EOS 截断。
+        if (tools != null && tools.Count > 0 && (!supportsVision || !hasImages))
+        {
+            var toolsPrompt = FormatToolsPrompt(tools, supportsVision);
+            systemText = hasExplicitSystem ? $"{systemText}\n{toolsPrompt}" : $"{defaultSystem}\n{toolsPrompt}";
         }
         else if (!hasExplicitSystem && string.IsNullOrWhiteSpace(systemText))
         {
-            systemText = "你是 ReferenceRAG 智能助手。";
+            systemText = defaultSystem;
         }
 
-        var systemBlock = $"<|im_start|>system\n{systemText}\n<|im_end|>\n";
-        const string assistantTrigger = "<|im_start|>assistant\n";
+        var systemBlock = isPhi
+            ? $"<|system|>\n{systemText}<|end|>\n"
+            : $"<|im_start|>system\n{systemText}<|im_end|>\n";
+        var assistantTrigger = isPhi
+            ? "<|assistant|>\n"
+            : (isReasoningModel
+                ? "<|im_start|>assistant\n<think>\n"
+                : "<|im_start|>assistant\n");
 
         // 3. 计算留给非系统消息（历史与最新输入）的剩余字符预算
         int remainingChars = maxPromptChars - systemBlock.Length - assistantTrigger.Length;
@@ -129,7 +171,7 @@ public static class ChatToolCallingHelper
         for (int i = nonSystemMessages.Count - 1; i >= 0; i--)
         {
             var msg = nonSystemMessages[i];
-            string blockText = FormatSingleMessage(msg, maxToolOutputChars, maxUserMessageChars);
+            string blockText = FormatSingleMessage(msg, maxToolOutputChars, maxUserMessageChars, isPhi, supportsVision);
 
             if (usedChars + blockText.Length <= remainingChars)
             {
@@ -177,7 +219,47 @@ public static class ChatToolCallingHelper
         return sb.ToString();
     }
 
-    private static string FormatSingleMessage(ChatMessage msg, int maxToolChars, int maxUserChars)
+    /// <summary>
+    /// 剥离历史助手回复中注入的 UI 装饰性徽章（如 '> 🔧 **已执行工具**: ...' 与 '> 🔧 **已调用工具**: ...'），
+    /// 消除小模型在多轮会话中的少样本格式模仿偏置（In-Context Format Drift），确保历史上下文协议纯净。
+    /// </summary>
+    public static string StripDecorativeBadges(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return text;
+        var cleaned = System.Text.RegularExpressions.Regex.Replace(
+            text,
+            @"^>\s*🔧\s*\*\*已(?:执行|调用)工具\*\*:[^\n]*(?:\r?\n)*",
+            "",
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+        return cleaned.TrimStart();
+    }
+
+    /// <summary>
+    /// 剥离历史助理消息中的思维链标签（<think>...</think> 与 <thought>...</thought>），
+    /// 确保历史会话送回模型 Prompt 时保持纯净，防止思维链 In-Context 少样本强化及上下文空间无谓浪费。
+    /// </summary>
+    public static string StripThoughtBlocks(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+
+        // 1. 移除成对闭合的 <think>...</think> 或 <thought>...</thought>
+        var cleaned = System.Text.RegularExpressions.Regex.Replace(
+            text,
+            @"<\s*(?:think|thought)\b[^>]*>[\s\S]*?<\s*/(?:think|thought)\s*>",
+            "",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        // 2. 移除可能残余的未闭合 <think> 标签开头至末尾
+        cleaned = System.Text.RegularExpressions.Regex.Replace(
+            cleaned,
+            @"<\s*(?:think|thought)\b[^>]*>[\s\S]*$",
+            "",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        return cleaned.Trim();
+    }
+
+    private static string FormatSingleMessage(ChatMessage msg, int maxToolChars, int maxUserChars, bool isPhi = false, bool supportsVision = false)
     {
         if (msg.Role == ChatRole.User)
         {
@@ -188,19 +270,29 @@ public static class ChatToolCallingHelper
 
             if (totalImages > 0)
             {
-                var imgNotes = new List<string>();
-                for (int i = 0; i < dataContents.Count; i++)
+                if (supportsVision)
                 {
-                    var dc = dataContents[i];
-                    imgNotes.Add($"[附带图像 #{i + 1} ({dc.MediaType ?? "image/jpeg"}), 本地文本引擎未挂载视觉投影器，已优先基于文本与知识库为您解答]");
+                    // 具备视觉多模态能力时，按 llama.cpp MTMD 规范注入媒体标记 <__media__>
+                    var markers = string.Concat(Enumerable.Repeat("<__media__>\n", totalImages));
+                    text = string.IsNullOrWhiteSpace(text) ? markers.TrimEnd() : $"{markers}{text}";
                 }
-                for (int i = 0; i < uriContents.Count; i++)
+                else
                 {
-                    var uc = uriContents[i];
-                    imgNotes.Add($"[附带图像 #{dataContents.Count + i + 1} ({uc.Uri}), 本地文本引擎未挂载视觉投影器，已优先基于文本与知识库为您解答]");
+                    // 纯文本引擎安全降级：保留图像元数据注解，提示纯文本模型已安全降级
+                    var imgNotes = new List<string>();
+                    for (int i = 0; i < dataContents.Count; i++)
+                    {
+                        var dc = dataContents[i];
+                        imgNotes.Add($"[附带图像 #{i + 1} ({dc.MediaType ?? "image/jpeg"}), 本地文本引擎未挂载视觉投影器，已优先基于文本与知识库为您解答]");
+                    }
+                    for (int i = 0; i < uriContents.Count; i++)
+                    {
+                        var uc = uriContents[i];
+                        imgNotes.Add($"[附带图像 #{dataContents.Count + i + 1} ({uc.Uri}), 本地文本引擎未挂载视觉投影器，已优先基于文本与知识库为您解答]");
+                    }
+                    var notesBlock = string.Join("\n", imgNotes);
+                    text = string.IsNullOrWhiteSpace(text) ? notesBlock : $"{notesBlock}\n{text}";
                 }
-                var notesBlock = string.Join("\n", imgNotes);
-                text = string.IsNullOrWhiteSpace(text) ? notesBlock : $"{notesBlock}\n{text}";
             }
 
             if (text.Length > maxUserChars)
@@ -210,12 +302,13 @@ public static class ChatToolCallingHelper
                 text = RepairTruncatedMarkdownAndXml(text);
             }
 
-            return $"<|im_start|>user\n{text}\n<|im_end|>\n";
+            return isPhi ? $"<|user|>\n{text}\n<|end|>\n" : $"<|im_start|>user\n{text}\n<|im_end|>\n";
         }
 
         if (msg.Role == ChatRole.Assistant)
         {
-            var text = msg.Text ?? string.Empty;
+            var text = StripDecorativeBadges(msg.Text ?? string.Empty);
+            text = StripThoughtBlocks(text);
             var toolCalls = msg.Contents.OfType<FunctionCallContent>().ToList();
             if (toolCalls.Count > 0)
             {
@@ -229,7 +322,7 @@ public static class ChatToolCallingHelper
                 text = tcSb.ToString().TrimEnd();
             }
 
-            return $"<|im_start|>assistant\n{text}\n<|im_end|>\n";
+            return isPhi ? $"<|assistant|>\n{text}\n<|end|>\n" : $"<|im_start|>assistant\n{text}\n<|im_end|>\n";
         }
 
         if (msg.Role == ChatRole.Tool)
@@ -263,7 +356,7 @@ public static class ChatToolCallingHelper
                 text = $"<tool_response>\n{text}\n</tool_response>";
             }
 
-            return $"<|im_start|>user\n{text}\n<|im_end|>\n";
+            return isPhi ? $"<|user|>\n{text}\n<|end|>\n" : $"<|im_start|>user\n{text}\n<|im_end|>\n";
         }
 
         return $"<|im_start|>user\n{msg.Text ?? string.Empty}\n<|im_end|>\n";
@@ -381,6 +474,18 @@ public static class ChatToolCallingHelper
                     return (true, name, args, remaining);
                 }
             }
+            else
+            {
+                // 容错：端侧小模型（如 Qwen2.5/3.5 0.8B/2B）输出 <tool_call> 后常直接命中 <|im_end|> 导致缺失 </tool_call>
+                string jsonBlock = text.Substring(startIdx + 11).Trim();
+                string prefix = text.Substring(0, startIdx).Trim();
+                jsonBlock = RepairTruncatedMarkdownAndXml(jsonBlock);
+
+                if (TryParseFunctionJson(jsonBlock, out var name, out var args))
+                {
+                    return (true, name, args, prefix);
+                }
+            }
         }
 
         // 2. 尝试匹配 [TOOL_CALLS] [...] 格式（Mistral / Phi 格式）
@@ -395,8 +500,8 @@ public static class ChatToolCallingHelper
             }
         }
 
-        // 3. 容错匹配：Markdown 代码块包裹或裸 JSON 对象（端侧小模型偶发丢失 <tool_call> 标签）
-        if (text.Contains("\"name\"", StringComparison.OrdinalIgnoreCase))
+        // 3. 容错匹配：Markdown 代码块包裹、裸 JSON 对象或内嵌 <tool_call> 标签（小参数模型常见）
+        if (text.Contains("\"name\"", StringComparison.OrdinalIgnoreCase) || text.Contains("<tool_call>", StringComparison.OrdinalIgnoreCase))
         {
             if (TryParseFunctionJson(text, out var name, out var args) && !string.IsNullOrWhiteSpace(name))
             {
@@ -422,7 +527,7 @@ public static class ChatToolCallingHelper
 
         try
         {
-            // 去除 markdown 代码块包裹 ```json ... ```
+            // 去除 markdown 代码块包裹 ```json ... ``` 及可能残留的 XML 标签
             jsonStr = jsonStr.Trim();
             if (jsonStr.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
             {
@@ -436,7 +541,21 @@ public static class ChatToolCallingHelper
             {
                 jsonStr = jsonStr.Substring(0, jsonStr.Length - 3);
             }
-            jsonStr = jsonStr.Trim();
+            jsonStr = jsonStr.Replace("<tool_call>", "", StringComparison.OrdinalIgnoreCase)
+                             .Replace("</tool_call>", "", StringComparison.OrdinalIgnoreCase)
+                             .Trim();
+
+            // 若包含花括号，提取最外层有效 JSON 区间
+            int firstBrace = jsonStr.IndexOf('{');
+            int lastBrace = jsonStr.LastIndexOf('}');
+            if (firstBrace >= 0 && lastBrace > firstBrace)
+            {
+                jsonStr = jsonStr.Substring(firstBrace, lastBrace - firstBrace + 1);
+            }
+            else if (firstBrace >= 0 && lastBrace < firstBrace)
+            {
+                jsonStr = jsonStr.Substring(firstBrace) + "}";
+            }
 
             // 若包裹在数组中 [{ "name": ... }]
             if (jsonStr.StartsWith("[") && jsonStr.EndsWith("]"))
@@ -592,6 +711,26 @@ public static class ChatToolCallingHelper
             }
         }
 
+        // 3. 清理泄露的裸 <tool_call> 标签残余（若模型把工具调用漏出到最终回复中，自愈规整为结构化友好文本）
+        if (cleaned.Contains("<tool_call>", StringComparison.OrdinalIgnoreCase))
+        {
+            var parsed = TryParseToolCall(cleaned);
+            if (parsed.Success && !string.IsNullOrEmpty(parsed.Name))
+            {
+                var argsSummary = parsed.Arguments != null && parsed.Arguments.Count > 0
+                    ? string.Join(", ", parsed.Arguments.Select(kv => $"{kv.Key}: \"{kv.Value}\""))
+                    : string.Empty;
+                var display = $"> 🔧 **已调用工具**: `{parsed.Name}`({argsSummary})";
+                cleaned = string.IsNullOrWhiteSpace(parsed.RemainingText)
+                    ? display
+                    : $"{display}\n\n{parsed.RemainingText}";
+            }
+            else
+            {
+                cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"<\s*/?\s*tool_call\s*>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+            }
+        }
+
         return cleaned;
     }
 
@@ -616,12 +755,30 @@ public static class ChatToolCallingHelper
 
         var trimmed = userText.Trim();
 
-        // 1. 去除常见命令前缀: '调用: ', '调用：', 'call ', '/call ', '/'
+        // 1. 去除常见命令前缀: '调用: ', '调用：', 'call ', '/call ', '/', 'tool_call: ', 'tool: '
         string cleanCommand = trimmed;
         if (cleanCommand.StartsWith("调用:", StringComparison.OrdinalIgnoreCase) ||
             cleanCommand.StartsWith("调用：", StringComparison.OrdinalIgnoreCase))
         {
             cleanCommand = cleanCommand.Substring(3).Trim();
+        }
+        else if (cleanCommand.StartsWith("tool_call:", StringComparison.OrdinalIgnoreCase) ||
+                 cleanCommand.StartsWith("tool_call：", StringComparison.OrdinalIgnoreCase))
+        {
+            cleanCommand = cleanCommand.Substring(10).Trim();
+        }
+        else if (cleanCommand.StartsWith("tool_call ", StringComparison.OrdinalIgnoreCase))
+        {
+            cleanCommand = cleanCommand.Substring(10).Trim();
+        }
+        else if (cleanCommand.StartsWith("tool:", StringComparison.OrdinalIgnoreCase) ||
+                 cleanCommand.StartsWith("tool：", StringComparison.OrdinalIgnoreCase))
+        {
+            cleanCommand = cleanCommand.Substring(5).Trim();
+        }
+        else if (cleanCommand.StartsWith("tool ", StringComparison.OrdinalIgnoreCase))
+        {
+            cleanCommand = cleanCommand.Substring(5).Trim();
         }
         else if (cleanCommand.StartsWith("/call ", StringComparison.OrdinalIgnoreCase))
         {
@@ -634,6 +791,28 @@ public static class ChatToolCallingHelper
         else if (cleanCommand.StartsWith("/"))
         {
             cleanCommand = cleanCommand.Substring(1).Trim();
+        }
+
+        // 1.1 容错结构化 XML / Markdown / JSON 标签包裹的指令
+        if (cleanCommand.StartsWith("<tool_call>", StringComparison.OrdinalIgnoreCase) ||
+            cleanCommand.StartsWith("{", StringComparison.OrdinalIgnoreCase) ||
+            cleanCommand.StartsWith("```", StringComparison.OrdinalIgnoreCase))
+        {
+            var parsed = TryParseToolCall(cleanCommand);
+            if (parsed.Success && !string.IsNullOrEmpty(parsed.Name))
+            {
+                var matched = availableFuncs.FirstOrDefault(f =>
+                    string.Equals(f.Name, parsed.Name, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(f.Name + "Async", parsed.Name, StringComparison.OrdinalIgnoreCase) ||
+                    (f.Name.EndsWith("Async") && string.Equals(f.Name[..^5], parsed.Name, StringComparison.OrdinalIgnoreCase)));
+
+                if (matched != null)
+                {
+                    functionName = matched.Name;
+                    arguments = parsed.Arguments ?? new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                    return true;
+                }
+            }
         }
 
         // 2. 检查是否为完全匹配函数名（如 'GetIndexStatus'、'GetIndexStatusAsync'、'GetFileStructure'）
@@ -650,7 +829,7 @@ public static class ChatToolCallingHelper
         }
 
         // 3. 检查中文自然语言直白状态指令: "查询知识库状态" / "获取知识库状态" / "知识库状态" / "索引状态"
-        if (cleanCommand.Contains("索引状态") || cleanCommand.Contains("知识库状态"))
+        if (cleanCommand.Contains("索引状态") || cleanCommand.Contains("知识库状态") || cleanCommand.Contains("查询状态") || cleanCommand.Contains("有多少笔记") || cleanCommand.Contains("有多少文件"))
         {
             var statusFunc = availableFuncs.FirstOrDefault(f =>
                 f.Name.Contains("GetIndexStatus", StringComparison.OrdinalIgnoreCase));
@@ -662,8 +841,9 @@ public static class ChatToolCallingHelper
             }
         }
 
-        // 4. 检查目录结构指令: "获取目录结构" / "查看文件结构" / "文件树"
-        if (cleanCommand.Contains("目录结构") || cleanCommand.Contains("文件树") || cleanCommand.Contains("文件结构"))
+        // 4. 检查目录结构指令: "获取目录结构" / "查看文件结构" / "文件树" / "包含哪些文件" / "有哪些文件"
+        if (cleanCommand.Contains("目录结构") || cleanCommand.Contains("文件树") || cleanCommand.Contains("文件结构") ||
+            cleanCommand.Contains("有哪些文件") || cleanCommand.Contains("包含哪些文件") || cleanCommand.Contains("文件列表") || cleanCommand.Contains("笔记列表"))
         {
             var structFunc = availableFuncs.FirstOrDefault(f =>
                 f.Name.Contains("GetFileStructure", StringComparison.OrdinalIgnoreCase));
@@ -675,13 +855,7 @@ public static class ChatToolCallingHelper
             }
         }
 
-        // 5. 检查搜索指令:
-        // 支持模式:
-        //   - "SearchKnowledge 搜索: 你好"
-        //   - "SearchKnowledge: 你好"
-        //   - "搜索: 你好" / "搜索：你好" / "搜索 你好"
-        //   - "检索: 你好" / "检索：你好"
-        //   - "BM25Search 搜索: 你好" / "BM25: 你好"
+        // 5. 检查搜索指令与多轮追问 (包含无冒号中文自然口语，按最长前缀优先匹配):
         var searchFunc = availableFuncs.FirstOrDefault(f =>
             f.Name.Contains("SearchKnowledge", StringComparison.OrdinalIgnoreCase) ||
             f.Name.Contains("BM25Search", StringComparison.OrdinalIgnoreCase));
@@ -695,17 +869,7 @@ public static class ChatToolCallingHelper
             if (cleanCommand.StartsWith("SearchKnowledge", StringComparison.OrdinalIgnoreCase))
             {
                 var remainder = cleanCommand.Substring(15).Trim();
-                if (remainder.StartsWith("搜索:", StringComparison.OrdinalIgnoreCase) ||
-                    remainder.StartsWith("搜索：", StringComparison.OrdinalIgnoreCase) ||
-                    remainder.StartsWith(":", StringComparison.OrdinalIgnoreCase) ||
-                    remainder.StartsWith("：", StringComparison.OrdinalIgnoreCase))
-                {
-                    query = remainder.TrimStart(':', '：', '搜', '索').Trim();
-                }
-                else
-                {
-                    query = remainder.Trim();
-                }
+                query = remainder.TrimStart(':', '：', '搜', '索', ' ').Trim();
                 targetFuncName = "SearchKnowledge";
             }
             else if (cleanCommand.StartsWith("BM25Search", StringComparison.OrdinalIgnoreCase) ||
@@ -715,30 +879,81 @@ public static class ChatToolCallingHelper
                 var remainder = cleanCommand.StartsWith("BM25Search", StringComparison.OrdinalIgnoreCase)
                     ? cleanCommand.Substring(10).Trim()
                     : cleanCommand.Substring(5).Trim();
-                query = remainder.TrimStart(':', '：', '搜', '索').Trim();
+                query = remainder.TrimStart(':', '：', '搜', '索', ' ').Trim();
                 targetFuncName = "BM25Search";
             }
-            else if (cleanCommand.StartsWith("搜索:", StringComparison.OrdinalIgnoreCase) ||
-                     cleanCommand.StartsWith("搜索：", StringComparison.OrdinalIgnoreCase) ||
-                     cleanCommand.StartsWith("检索:", StringComparison.OrdinalIgnoreCase) ||
-                     cleanCommand.StartsWith("检索：", StringComparison.OrdinalIgnoreCase) ||
-                     cleanCommand.StartsWith("查询:", StringComparison.OrdinalIgnoreCase) ||
-                     cleanCommand.StartsWith("查询：", StringComparison.OrdinalIgnoreCase))
+            else
             {
-                query = cleanCommand.Substring(3).Trim();
-            }
-            else if (cleanCommand.StartsWith("查一下:", StringComparison.OrdinalIgnoreCase) ||
-                     cleanCommand.StartsWith("查一下：", StringComparison.OrdinalIgnoreCase))
-            {
-                query = cleanCommand.Substring(4).Trim();
+                string[] searchPrefixes =
+                [
+                    "搜索知识库中:", "搜索知识库中：", "搜索知识库中",
+                    "搜索知识库关于:", "搜索知识库关于：", "搜索知识库关于",
+                    "搜索知识库:", "搜索知识库：", "搜索知识库",
+                    "检索知识库中:", "检索知识库中：", "检索知识库中",
+                    "检索知识库关于:", "检索知识库关于：", "检索知识库关于",
+                    "检索知识库:", "检索知识库：", "检索知识库",
+                    "查询知识库关于:", "查询知识库关于：", "查询知识库关于",
+                    "查询知识库:", "查询知识库：", "查询知识库",
+                    "知识库搜索:", "知识库搜索：", "知识库搜索",
+                    "知识库检索:", "知识库检索：", "知识库检索",
+                    "在知识库中搜索:", "在知识库中搜索：", "在知识库中搜索",
+                    "在知识库中查找:", "在知识库中查找：", "在知识库中查找",
+                    "从知识库中检索:", "从知识库中检索：", "从知识库中检索",
+                    "从知识库检索:", "从知识库检索：", "从知识库检索",
+                    "从知识库搜索:", "从知识库搜索：", "从知识库搜索",
+                    "再查一下关于:", "再查一下关于：", "再查一下关于",
+                    "再查一下:", "再查一下：", "再查一下",
+                    "再搜索一下关于:", "再搜索一下关于：", "再搜索一下关于",
+                    "再搜索一下:", "再搜索一下：", "再搜索一下",
+                    "再检索一下关于:", "再检索一下关于：", "再检索一下关于",
+                    "再检索一下:", "再检索一下：", "再检索一下",
+                    "再找找关于:", "再找找关于：", "再找找关于",
+                    "再找找:", "再找找：", "再找找",
+                    "再搜关于:", "再搜关于：", "再搜关于",
+                    "再搜一下:", "再搜一下：", "再搜一下",
+                    "再查关于:", "再查关于：", "再查关于",
+                    "继续搜索:", "继续搜索：", "继续搜索",
+                    "继续检索:", "继续检索：", "继续检索",
+                    "帮我查一下关于:", "帮我查一下关于：", "帮我查一下关于",
+                    "帮我查一下:", "帮我查一下：", "帮我查一下",
+                    "帮我查关于:", "帮我查关于：", "帮我查关于",
+                    "帮我查:", "帮我查：", "帮我查",
+                    "帮我搜索关于:", "帮我搜索关于：", "帮我搜索关于",
+                    "帮我搜索:", "帮我搜索：", "帮我搜索",
+                    "帮我检索关于:", "帮我检索关于：", "帮我检索关于",
+                    "帮我检索:", "帮我检索：", "帮我检索",
+                    "查一下关于:", "查一下关于：", "查一下关于",
+                    "查一下:", "查一下：", "查一下",
+                    "搜索关于:", "搜索关于：", "搜索关于",
+                    "检索关于:", "检索关于：", "检索关于",
+                    "搜索:", "搜索：", "搜索 ",
+                    "检索:", "检索：", "检索 ",
+                    "查询:", "查询：", "查询 ",
+                    "查找:", "查找：", "查找 "
+                ];
+
+                foreach (var p in searchPrefixes)
+                {
+                    if (cleanCommand.StartsWith(p, StringComparison.OrdinalIgnoreCase))
+                    {
+                        query = cleanCommand.Substring(p.Length).Trim();
+                        targetFuncName = "SearchKnowledge";
+                        break;
+                    }
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(query))
             {
-                functionName = targetFuncName;
+                // 将多行输入规范化为单行有效关键词，并去除多余空白
+                query = string.Join(" ", query.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)).Trim();
+                var matchedExactFunc = availableFuncs.FirstOrDefault(f =>
+                    string.Equals(f.Name, targetFuncName, StringComparison.OrdinalIgnoreCase));
+                functionName = matchedExactFunc != null ? matchedExactFunc.Name : targetFuncName;
                 arguments = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["query"] = query,
+                    ["keyword"] = query,
                     ["topK"] = 5
                 };
                 return true;

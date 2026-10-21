@@ -253,6 +253,25 @@ public class ChatToolCallingAndLocalClientTests
         Assert.Equal("SearchKnowledge", n3);
         Assert.NotNull(a3);
         Assert.Equal("向量数据库", a3["query"]?.ToString());
+
+        var bm25Tool = AIFunctionFactory.Create((string? keyword = null, int topK = 10, string? query = null) => "ok", "BM25Search", "关键词检索");
+        var toolsWithBm25 = new List<AITool> { searchTool, bm25Tool };
+
+        // 门禁：针对 D4-02 "BM25Search 搜索: 数据库连接超时"
+        var dBm25_1 = ChatToolCallingHelper.TryDetectDirectToolCall("BM25Search 搜索: 数据库连接超时", toolsWithBm25, out var nBm25_1, out var aBm25_1);
+        Assert.True(dBm25_1);
+        Assert.Equal("BM25Search", nBm25_1);
+        Assert.NotNull(aBm25_1);
+        Assert.Equal("数据库连接超时", aBm25_1["keyword"]?.ToString());
+        Assert.Equal("数据库连接超时", aBm25_1["query"]?.ToString());
+
+        // 门禁：针对 D4-01 "BM25: 错误码"
+        var dBm25_2 = ChatToolCallingHelper.TryDetectDirectToolCall("BM25: 错误码", toolsWithBm25, out var nBm25_2, out var aBm25_2);
+        Assert.True(dBm25_2);
+        Assert.Equal("BM25Search", nBm25_2);
+        Assert.NotNull(aBm25_2);
+        Assert.Equal("错误码", aBm25_2["keyword"]?.ToString());
+        Assert.Equal("错误码", aBm25_2["query"]?.ToString());
     }
 
     [Fact]
@@ -305,5 +324,139 @@ public class ChatToolCallingAndLocalClientTests
         Assert.Contains("知识库当前已成功构建索引", healed);
         Assert.Contains("280", healed);
         Assert.Contains("5392", healed);
+    }
+
+    [Fact]
+    public void TryParseToolCall_UnclosedToolCallTag_ParsesSuccessfully()
+    {
+        // 针对端侧小模型输出 <tool_call> 后被 <|im_end|> 截断无闭合标签的回归防范
+        var raw = "<tool_call>\n{\"name\": \"SearchKnowledge\", \"arguments\": {\"query\": \"你好\"}}";
+        var result = ChatToolCallingHelper.TryParseToolCall(raw);
+
+        Assert.True(result.Success);
+        Assert.Equal("SearchKnowledge", result.Name);
+        Assert.NotNull(result.Arguments);
+        Assert.Equal("你好", result.Arguments["query"]?.ToString());
+    }
+
+    [Fact]
+    public void TryDetectDirectToolCall_KnowledgeBasePrefixVariations_Matches()
+    {
+        var tool = AIFunctionFactory.Create(
+            [Description("搜索知识库")] (string query, int topK = 5) => "result",
+            "SearchKnowledge");
+
+        var variations = new[]
+        {
+            "搜索知识库中: 你好",
+            "搜索知识库中：你好",
+            "搜索知识库: 你好",
+            "检索知识库: 你好",
+            "在知识库中搜索: 你好",
+            "从知识库检索: 你好",
+            "知识库搜索: 你好",
+            "知识库检索: 你好"
+        };
+
+        foreach (var cmd in variations)
+        {
+            var matched = ChatToolCallingHelper.TryDetectDirectToolCall(cmd, [tool], out var fn, out var args);
+            Assert.True(matched, $"指令应被成功命中: {cmd}");
+            Assert.Equal("SearchKnowledge", fn);
+            Assert.Equal("你好", args!["query"]?.ToString());
+        }
+    }
+
+    [Fact]
+    public void TryDetectDirectToolCall_MultilineInput_ExtractsCleanQuery()
+    {
+        // 模拟用户截图 2 的真实输入指令
+        var multiline = "搜索知识库中: 你好\n相关内容\n梳理有哪些文档";
+        var tool = AIFunctionFactory.Create(
+            [Description("搜索知识库")] (string query, int topK = 5) => "result",
+            "SearchKnowledge");
+
+        var matched = ChatToolCallingHelper.TryDetectDirectToolCall(multiline, [tool], out var fn, out var args);
+        Assert.True(matched);
+        Assert.Equal("SearchKnowledge", fn);
+        Assert.Contains("你好", args!["query"]?.ToString());
+        Assert.DoesNotContain("\n", args!["query"]?.ToString());
+    }
+
+    [Fact]
+    public void SanitizeAssistantResponse_CleansDanglingToolCall_PreservesSummary()
+    {
+        var raw = "<tool_call>\n{\"name\": \"SearchKnowledge\", \"arguments\": {\"query\": \"你好\"}}\n</tool_call>";
+        var cleaned = ChatToolCallingHelper.SanitizeAssistantResponse(raw);
+
+        Assert.DoesNotContain("<tool_call>", cleaned);
+        Assert.DoesNotContain("</tool_call>", cleaned);
+        Assert.Contains("SearchKnowledge", cleaned);
+    }
+
+    [Fact]
+    public async Task ContextAwareFallbackAdapter_TransitionsStateAndStreamsTokens()
+    {
+        using var adapter = new ContextAwareFallbackAdapter("Test-Model");
+        Assert.Equal(OnnxEngineState.Uninitialized, adapter.State);
+        Assert.False(adapter.IsNativeAccelerated);
+
+        var initialized = await adapter.InitializeAsync("dummy_path", null, CancellationToken.None);
+        Assert.True(initialized);
+        Assert.Equal(OnnxEngineState.Ready, adapter.State);
+
+        var tokens = new List<string>();
+        await foreach (var token in adapter.GenerateTokensAsync("你好", 256, CancellationToken.None))
+        {
+            tokens.Add(token);
+        }
+
+        Assert.NotEmpty(tokens);
+        var full = string.Join("", tokens);
+        Assert.Contains("Test-Model", full);
+        Assert.Equal(OnnxEngineState.Ready, adapter.State);
+
+        adapter.Unload();
+        Assert.Equal(OnnxEngineState.Uninitialized, adapter.State);
+    }
+
+    [Fact]
+    public async Task NativeOgaDirectMlAdapter_NonExistentPath_TransitionsToDegraded()
+    {
+        using var adapter = new NativeOgaDirectMlAdapter();
+        Assert.Equal(OnnxEngineState.Uninitialized, adapter.State);
+        Assert.True(adapter.IsNativeAccelerated);
+
+        var initialized = await adapter.InitializeAsync("C:\\non_existent_oga_dir_xyz", null, CancellationToken.None);
+        Assert.False(initialized);
+        Assert.Equal(OnnxEngineState.Degraded, adapter.State);
+
+        var tokens = new List<string>();
+        await foreach (var token in adapter.GenerateTokensAsync("test", 128, CancellationToken.None))
+        {
+            tokens.Add(token);
+        }
+        Assert.Empty(tokens);
+    }
+
+    [Fact]
+    public async Task LocalOnnxChatClient_CustomAdapterInjection_ResolvesViaGetService()
+    {
+        var fallbackAdapter = new ContextAwareFallbackAdapter("Custom-Injected-Model");
+        using var client = new LocalOnnxChatClient(
+            modelPath: "any_path",
+            modelName: "Custom-Injected-Model",
+            engineAdapter: fallbackAdapter);
+
+        var messages = new List<ChatMessage> { new(ChatRole.User, "你好") };
+        var resp = await client.GetResponseAsync(messages);
+
+        Assert.NotNull(resp);
+        Assert.Equal(fallbackAdapter, client.EngineAdapter);
+        Assert.Equal(fallbackAdapter, client.GetService(typeof(IOnnxGenAiEngineAdapter)));
+        Assert.Equal(fallbackAdapter, client.GetService(typeof(ContextAwareFallbackAdapter)));
+
+        var caps = client.GetCapabilities();
+        Assert.Contains("Context-Aware Fallback", caps.Description);
     }
 }

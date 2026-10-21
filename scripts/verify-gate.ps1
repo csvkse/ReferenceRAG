@@ -13,6 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
+Stop-Process -Name "testhost" -Force -ErrorAction SilentlyContinue
 
 function Write-Section([string]$title) {
     Write-Host "`n========================================================" -ForegroundColor Cyan
@@ -56,12 +57,12 @@ try {
     }
     else {
         Write-Host "Running QualityGateContractTests & AuditFixRegressionTests..." -ForegroundColor Yellow
-        dotnet test tests/ReferenceRAG.Tests/ReferenceRAG.Tests.csproj --filter "FullyQualifiedName~ContractTests|FullyQualifiedName~AuditFixRegressionTests" --logger "console;verbosity=normal"
+        dotnet test tests/ReferenceRAG.Tests/ReferenceRAG.Tests.csproj --filter "FullyQualifiedName~ContractTests|FullyQualifiedName~AuditFixRegressionTests|FullyQualifiedName~ModelDownloadArchitectureTests" --logger "console;verbosity=normal"
         if ($LASTEXITCODE -ne 0) {
             throw "ReferenceRAG.Tests failed with code $LASTEXITCODE"
         }
 
-        dotnet test tests/ReferenceRAG.Host.Tests/ReferenceRAG.Host.Tests.csproj --filter "FullyQualifiedName~ContractTests|FullyQualifiedName~MafChatServiceTests" --logger "console;verbosity=normal"
+        dotnet test tests/ReferenceRAG.Host.Tests/ReferenceRAG.Host.Tests.csproj --filter "FullyQualifiedName~ContractTests|FullyQualifiedName~MafChatServiceTests|FullyQualifiedName~ThreeTierSlmOptimizationTests|FullyQualifiedName~ChatToolCalling|FullyQualifiedName~ChatThoughtAndContextUsageTests|FullyQualifiedName~ChatMultimodalAndMultiTurnToolTests|FullyQualifiedName~FrontendViewIntegrityTests|FullyQualifiedName~DesktopHostIdentityGateTests" --logger "console;verbosity=normal"
         if ($LASTEXITCODE -ne 0) {
             throw "ReferenceRAG.Host.Tests failed with code $LASTEXITCODE"
         }

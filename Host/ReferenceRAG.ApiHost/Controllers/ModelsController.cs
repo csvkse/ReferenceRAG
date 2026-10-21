@@ -1281,6 +1281,122 @@ public async Task<ActionResult<ModelDownloadOptions>> GetRerankDownloadOptions(s
     }
 
     /// <summary>
+    /// 查询聊天模型视觉投影器（mmproj）的状态（本地是否就绪、远端是否有提供、推荐投影器等）
+    /// </summary>
+    [HttpGet("chat/{modelName}/projector/status")]
+    public async Task<ActionResult<ProjectorStatusResult>> GetChatProjectorStatus(string modelName, CancellationToken cancellationToken = default)
+    {
+        var result = await _modelManager.CheckProjectorStatusAsync(modelName, cancellationToken);
+        if (_downloadProgress.TryGetValue(modelName, out var prog) && prog.Status == "downloading")
+        {
+            result.Status = "downloading";
+        }
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// 单独下载/补全聊天模型的视觉投影器（mmproj）
+    /// </summary>
+    [HttpPost("chat/{modelName}/projector/download")]
+    public async Task<ActionResult> DownloadChatProjector(string modelName, [FromBody] DownloadProjectorRequest? request = null)
+    {
+        var models = await _modelManager.GetAvailableModelsAsync("chat");
+        var model = models.FirstOrDefault(m => m.Name == modelName);
+        if (model == null)
+        {
+            return NotFound(new { error = $"聊天模型不存在: {modelName}" });
+        }
+
+        // 检查是否已在下载中
+        if (_downloadProgress.TryGetValue(modelName, out var existing) && existing.Status == "downloading")
+        {
+            return Ok(new { message = "视觉投影器正在下载中", progress = existing });
+        }
+
+        var cts = new CancellationTokenSource();
+        _downloadCts[modelName] = cts;
+
+        var progress = new DownloadProgress
+        {
+            ModelName = modelName,
+            Status = "downloading",
+            Stage = DownloadStage.ResolvingManifest,
+            StageMessage = "正在探查与下载视觉投影器...",
+            Progress = 0,
+            StartTime = DateTime.UtcNow,
+            TotalBytes = 0
+        };
+        _downloadProgress[modelName] = progress;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                _logger.LogInformation("[ModelsController] 开始单独下载视觉投影器: {ModelName} -> {ProjectorPath}", modelName, request?.ProjectorPath);
+
+                var (success, error) = await _modelManager.DownloadProjectorAsync(
+                    modelName,
+                    request?.ProjectorPath,
+                    request?.Repository,
+                    new Progress<DownloadProgress>(p =>
+                    {
+                        _downloadProgress[modelName] = p;
+                    }),
+                    cts.Token
+                );
+
+                if (_downloadProgress.TryGetValue(modelName, out var pg2))
+                {
+                    if (success)
+                    {
+                        pg2.Status = "completed";
+                        pg2.Stage = DownloadStage.Completed;
+                        pg2.StageMessage = "视觉投影器下载并配对完成";
+                        pg2.Progress = 100;
+                        pg2.EndTime = DateTime.UtcNow;
+                    }
+                    else
+                    {
+                        pg2.Status = "failed";
+                        pg2.ErrorMessage = error ?? "下载视觉投影器失败";
+                        pg2.StageMessage = pg2.ErrorMessage;
+                        pg2.EndTime = DateTime.UtcNow;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                if (_downloadProgress.TryGetValue(modelName, out var pg2))
+                {
+                    pg2.Status = "cancelled";
+                    pg2.StageMessage = "视觉投影器下载已取消";
+                    pg2.EndTime = DateTime.UtcNow;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_downloadProgress.TryGetValue(modelName, out var pg2))
+                {
+                    pg2.Status = "failed";
+                    pg2.ErrorMessage = ex.Message;
+                    pg2.StageMessage = $"下载视觉投影器异常: {ex.Message}";
+                    pg2.EndTime = DateTime.UtcNow;
+                }
+            }
+            finally
+            {
+                _downloadCts.TryRemove(modelName, out _);
+            }
+        });
+
+        return Ok(new
+        {
+            message = "视觉投影器下载任务已启动",
+            progress
+        });
+    }
+
+    /// <summary>
     /// 删除聊天模型
     /// </summary>
     [HttpDelete("chat/{modelName}")]
@@ -1422,5 +1538,21 @@ public class SwitchVariantRequest
     public string VariantFileName { get; set; } = string.Empty;
     public bool IsRerank { get; set; }
     public string? ModelType { get; set; }
+}
+
+/// <summary>
+/// 视觉投影器单独下载请求
+/// </summary>
+public class DownloadProjectorRequest
+{
+    /// <summary>
+    /// 指定投影器文件名或远端相对路径（如 mmproj-F16.gguf）
+    /// </summary>
+    public string? ProjectorPath { get; set; }
+
+    /// <summary>
+    /// 指定投影器来源仓库（若留空则自动从模型主仓库或社区候选源匹配）
+    /// </summary>
+    public string? Repository { get; set; }
 }
 

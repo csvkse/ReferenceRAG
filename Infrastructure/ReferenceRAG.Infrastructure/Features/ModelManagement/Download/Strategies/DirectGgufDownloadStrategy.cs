@@ -30,7 +30,10 @@ public class DirectGgufDownloadStrategy : IModelDownloadStrategy
         var targetDir = context.TargetDir;
         Directory.CreateDirectory(targetDir);
 
+        var textGgufFiles = manifest.GetTextGgufFiles();
+        var mmprojFiles = manifest.GetMmprojFiles();
         var ggufFiles = manifest.GetGgufFiles();
+
         if (ggufFiles.Count == 0)
         {
             throw new InvalidOperationException($"在模型 {manifest.ModelId} 中未发现 .gguf 文件");
@@ -46,7 +49,14 @@ public class DirectGgufDownloadStrategy : IModelDownloadStrategy
         }
         else
         {
-            targetGguf = SelectBestGgufFile(ggufFiles);
+            targetGguf = SelectBestGgufFile(textGgufFiles.Count > 0 ? textGgufFiles : ggufFiles);
+        }
+
+        // 解析并匹配伴生视觉投影器 (mmproj)
+        ModelFileItem? companionMmproj = null;
+        if (!targetGguf.IsMmproj && mmprojFiles.Count > 0)
+        {
+            companionMmproj = GgufMultimodalCompanionStrategy.PickBestMmproj(targetGguf.FileName, mmprojFiles);
         }
 
         var auxiliaryFiles = manifest.Files.Where(f =>
@@ -57,13 +67,43 @@ public class DirectGgufDownloadStrategy : IModelDownloadStrategy
             f.Path.EndsWith("config.json", StringComparison.OrdinalIgnoreCase)
         ).ToList();
 
-        var filesToDownload = new List<ModelFileItem> { targetGguf };
-        filesToDownload.AddRange(auxiliaryFiles);
-        filesToDownload = filesToDownload.DistinctBy(f => f.Path).ToList();
+        // 组装待下载候选文件清单
+        var candidateFiles = new List<ModelFileItem> { targetGguf };
+        if (companionMmproj != null)
+        {
+            candidateFiles.Add(companionMmproj);
+        }
+        candidateFiles.AddRange(auxiliaryFiles);
+        candidateFiles = candidateFiles.DistinctBy(f => f.Path).ToList();
+
+        // 增量自愈检查：若某个文件在本地已完整存在，则跳过传输，支持断点与增量挂载 mmproj
+        var filesToDownload = new List<ModelFileItem>();
+        foreach (var file in candidateFiles)
+        {
+            var localPath = Path.Combine(targetDir, file.FileName);
+            if (File.Exists(localPath) && new FileInfo(localPath).Length > 0 &&
+                (file.Size <= 0 || new FileInfo(localPath).Length == file.Size))
+            {
+                Console.WriteLine($"[DirectGguf] 本地已存在完整文件，跳过下载: {file.FileName}");
+                continue;
+            }
+            filesToDownload.Add(file);
+        }
+
+        if (filesToDownload.Count == 0)
+        {
+            stateMachine.SetCompleted($"GGUF 模型及组件已在本地就绪: {targetGguf.FileName}" +
+                (companionMmproj != null ? $" (已配对视觉投影器: {companionMmproj.FileName})" : ""));
+            return;
+        }
 
         var totalBytes = filesToDownload.Sum(f => f.Size);
         stateMachine.SetTotalBytes(totalBytes);
-        stateMachine.TransitionTo(DownloadStage.DownloadingFiles, $"开始下载 GGUF 模型: {targetGguf.FileName} (预计 {totalBytes / 1024.0 / 1024.0:F1} MB)");
+
+        var startMsg = companionMmproj != null
+            ? $"开始下载 GGUF 多模态模型: {targetGguf.FileName} + 视觉投影器 {companionMmproj.FileName} (待下载 {totalBytes / 1024.0 / 1024.0:F1} MB)"
+            : $"开始下载 GGUF 模型: {targetGguf.FileName} (待下载 {totalBytes / 1024.0 / 1024.0:F1} MB)";
+        stateMachine.TransitionTo(DownloadStage.DownloadingFiles, startMsg);
 
         for (int i = 0; i < filesToDownload.Count; i++)
         {
@@ -90,14 +130,26 @@ public class DirectGgufDownloadStrategy : IModelDownloadStrategy
                 cancellationToken);
         }
 
-        stateMachine.TransitionTo(DownloadStage.VerifyingFiles, "校验 GGUF 模型文件...");
+        stateMachine.TransitionTo(DownloadStage.VerifyingFiles, "校验 GGUF 模型文件与视觉组件完整性...");
         var downloadedGguf = Path.Combine(targetDir, targetGguf.FileName);
         if (!File.Exists(downloadedGguf) || new FileInfo(downloadedGguf).Length == 0)
         {
             throw new InvalidOperationException($"GGUF 文件下载不完整: {downloadedGguf}");
         }
 
-        stateMachine.SetCompleted($"GGUF 模型下载完成: {targetGguf.FileName}");
+        if (companionMmproj != null)
+        {
+            var downloadedMmproj = Path.Combine(targetDir, companionMmproj.FileName);
+            if (!File.Exists(downloadedMmproj) || new FileInfo(downloadedMmproj).Length == 0)
+            {
+                throw new InvalidOperationException($"伴生视觉投影器文件下载不完整: {downloadedMmproj}");
+            }
+        }
+
+        var completeMsg = companionMmproj != null
+            ? $"GGUF 多模态模型下载完成: {targetGguf.FileName} (已配对视觉投影器: {companionMmproj.FileName})"
+            : $"GGUF 模型下载完成: {targetGguf.FileName}";
+        stateMachine.SetCompleted(completeMsg);
     }
 
     private static ModelFileItem SelectBestGgufFile(List<ModelFileItem> files)

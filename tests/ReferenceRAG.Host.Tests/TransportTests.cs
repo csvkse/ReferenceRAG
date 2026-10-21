@@ -16,7 +16,10 @@ public class TransportTests
 {
     private static async Task<WebApplication> StartAsync()
     {
-        var builder=WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = AppContext.BaseDirectory
+        });
         builder.Services.AddInProcessServer(listen:false);
         var app=builder.Build();
         app.Use(async(context,next)=>{context.Items["ApiKeyEnabled"]=true;context.Items["ApiKeyValue"]="test-key";await next();});

@@ -2,14 +2,13 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using ReferenceRAG.Desktop;
 
 namespace ReferenceRAG.DesktopHost.Platform;
 
 /// <summary>
-/// 原生 Win32 高分屏托盘图标与菜单管理器（参考 infiniReq 实现）。
-/// 完全基于 Win32 原生消息循环与系统菜单渲染，Per-Monitor V2 DPI 感知，彻底消除高分屏下 WinForms ContextMenuStrip 与托盘图标模糊问题。
-/// 支持鼠标左键单击/双击唤醒主窗体、右键弹出高清系统菜单（含开机启动与最小化启动勾选状态）。
+/// 原生 Win32 托盘图标管理器（完全复刻 infiniReq 工业级实现）。
+/// 完全基于 Win32 消息循环，无 WinForms/WPF 依赖，具备 Native AOT 零裁剪兼容性。
+/// 支持高分屏图标加载、鼠标左键/双击唤醒主窗体、右键菜单响应。
 /// </summary>
 internal static partial class TrayIconManager
 {
@@ -21,8 +20,7 @@ internal static partial class TrayIconManager
     private const uint LeftButtonUp = 0x0202;
     private const uint LeftButtonDoubleClick = 0x0203;
     private const uint RightButtonUp = 0x0205;
-    private const uint StringMenuFlag = 0x0000;
-    private const uint CheckedMenuFlag = 0x0008;
+    private const uint StringMenuFlag = 0;
     private const uint SeparatorMenuFlag = 0x0800;
     private const uint NotifyMessageFlag = 0x0001;
     private const uint NotifyIconFlag = 0x0002;
@@ -30,30 +28,14 @@ internal static partial class TrayIconManager
     private const uint NotifyAdd = 0;
     private const uint NotifyDelete = 2;
     private const int ApplicationIconId = 32512;
-
     private const int ShowMenuId = 1001;
-    private const int AutoStartMenuId = 1002;
-    private const int StartMinimizedMenuId = 1003;
-    private const int ExitMenuId = 1004;
+    private const int ExitMenuId = 1002;
 
     private static nint _windowHandle;
     private static NotifyIconData _notifyIcon;
-    private static System.Threading.Thread? _trayThread;
 
     public static event Action? ShowRequested;
     public static event Action? ExitRequested;
-
-    public static void Start(string? iconPath, string tooltip = "ReferenceRAG")
-    {
-        if (!OperatingSystem.IsWindows()) return;
-        _trayThread = new System.Threading.Thread(() => RunMessageLoop(tooltip, iconPath))
-        {
-            IsBackground = true,
-            Name = "ReferenceRAG.TrayThread"
-        };
-        _trayThread.SetApartmentState(System.Threading.ApartmentState.STA);
-        _trayThread.Start();
-    }
 
     public static void RunMessageLoop(string tooltip, string? iconPath = null)
     {
@@ -163,11 +145,6 @@ internal static partial class TrayIconManager
         {
             PostMessage(_windowHandle, CloseMessage, nint.Zero, nint.Zero);
         }
-        try
-        {
-            _trayThread?.Join(TimeSpan.FromSeconds(2));
-        }
-        catch { }
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
@@ -193,21 +170,14 @@ internal static partial class TrayIconManager
 
             case CommandMessage:
                 var menuId = unchecked((short)(long)wordParameter);
-                switch (menuId)
+                if (menuId == ShowMenuId)
                 {
-                    case ShowMenuId:
-                        ShowRequested?.Invoke();
-                        break;
-                    case AutoStartMenuId:
-                        StartupManager.SetAutoStart(!StartupManager.GetAutoStart());
-                        break;
-                    case StartMinimizedMenuId:
-                        StartupManager.SetStartMinimized(!StartupManager.GetStartMinimized());
-                        break;
-                    case ExitMenuId:
-                        ExitRequested?.Invoke();
-                        PostQuitMessage(0);
-                        break;
+                    ShowRequested?.Invoke();
+                }
+                else if (menuId == ExitMenuId)
+                {
+                    ExitRequested?.Invoke();
+                    PostQuitMessage(0);
                 }
                 return nint.Zero;
 
@@ -223,18 +193,9 @@ internal static partial class TrayIconManager
     private static void ShowMenu(nint windowHandle)
     {
         var menu = CreatePopupMenu();
-        AppendMenu(menu, StringMenuFlag, (nint)ShowMenuId, "打开 ReferenceRAG");
+        AppendMenu(menu, StringMenuFlag, (nint)ShowMenuId, "显示主界面");
         AppendMenu(menu, SeparatorMenuFlag, nint.Zero, null);
-
-        var autoStartFlags = StringMenuFlag | (StartupManager.GetAutoStart() ? CheckedMenuFlag : 0);
-        AppendMenu(menu, autoStartFlags, (nint)AutoStartMenuId, "开机启动");
-
-        var startMinimizedFlags = StringMenuFlag | (StartupManager.GetStartMinimized() ? CheckedMenuFlag : 0);
-        AppendMenu(menu, startMinimizedFlags, (nint)StartMinimizedMenuId, "最小化启动");
-
-        AppendMenu(menu, SeparatorMenuFlag, nint.Zero, null);
-        AppendMenu(menu, StringMenuFlag, (nint)ExitMenuId, "退出");
-
+        AppendMenu(menu, StringMenuFlag, (nint)ExitMenuId, "退出 ReferenceRAG");
         GetCursorPos(out var point);
         SetForegroundWindow(windowHandle);
         TrackPopupMenu(menu, 0x0002, point.X, point.Y, 0, windowHandle, nint.Zero);

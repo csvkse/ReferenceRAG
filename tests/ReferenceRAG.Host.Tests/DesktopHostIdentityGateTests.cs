@@ -78,7 +78,7 @@ public sealed class DesktopHostIdentityGateTests
         Assert.Contains("SetProcessDpiAwarenessContext", programContent, StringComparison.Ordinal);
         Assert.Contains("ShortcutGuard.EnsureValid", programContent, StringComparison.Ordinal);
         Assert.Contains("WindowsWindowIcon.Apply", programContent, StringComparison.Ordinal);
-        Assert.Contains("TrayIconManager.Start", programContent, StringComparison.Ordinal);
+        Assert.Contains("TrayIconManager.RunMessageLoop", programContent, StringComparison.Ordinal);
         Assert.DoesNotContain("new ContextMenuStrip()", programContent, StringComparison.Ordinal);
 
         var windowIconContent = File.ReadAllText(windowIconHelperPath);
@@ -91,6 +91,34 @@ public sealed class DesktopHostIdentityGateTests
         Assert.Contains("CreatePopupMenu", trayContent, StringComparison.Ordinal);
         Assert.Contains("TrackPopupMenu", trayContent, StringComparison.Ordinal);
         Assert.Contains("LeftButtonUp", trayContent, StringComparison.Ordinal);
+        Assert.Contains("RestoreAndFocusWindow", trayContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DesktopHostWindowSizingAndCloseHook_AlignWithInfiniReqStandard()
+    {
+        var programPath = Path.Combine(RepoRoot, "Host", "ReferenceRAG.DesktopHost", "Program.cs");
+        var hookPath = Path.Combine(RepoRoot, "Host", "ReferenceRAG.DesktopHost", "Platform", "WindowCloseHook.cs");
+        var initialBoundsPath = Path.Combine(RepoRoot, "Host", "ReferenceRAG.DesktopHost", "InitialWindowBounds.cs");
+
+        Assert.True(File.Exists(programPath));
+        Assert.True(File.Exists(hookPath), "WindowCloseHook.cs must exist in DesktopHost.Platform");
+        Assert.False(File.Exists(initialBoundsPath), "InitialWindowBounds.cs must be removed to avoid dynamic downscaling");
+
+        var programContent = File.ReadAllText(programPath);
+        Assert.Contains(".SetSize(1360, 860)", programContent, StringComparison.Ordinal);
+        Assert.Contains(".SetMinSize(960, 640)", programContent, StringComparison.Ordinal);
+        Assert.Contains("WindowCloseHook.Install", programContent, StringComparison.Ordinal);
+        Assert.Contains("WindowCloseHook.RequestExplicitExit", programContent, StringComparison.Ordinal);
+        Assert.Contains("TrayIconManager.RestoreAndFocusWindow", programContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("InitialWindowBounds", programContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("RegisterWindowClosingHandler", programContent, StringComparison.Ordinal);
+
+        var hookContent = File.ReadAllText(hookPath);
+        Assert.Contains("SetWindowSubclass", hookContent, StringComparison.Ordinal);
+        Assert.Contains("RemoveWindowSubclass", hookContent, StringComparison.Ordinal);
+        Assert.Contains("WM_CLOSE", hookContent, StringComparison.Ordinal);
+        Assert.Contains("RequestExplicitExit", hookContent, StringComparison.Ordinal);
     }
 
     private static string FindRepoRoot()

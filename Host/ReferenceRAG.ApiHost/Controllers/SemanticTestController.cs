@@ -1038,7 +1038,12 @@ public class TestRecordStore
         {
             Directory.CreateDirectory(_dataPath);
             var file = Path.Combine(_dataPath, "records.json");
-            var json = System.Text.Json.JsonSerializer.Serialize(_records, _jsonOptions);
+            List<TestRecord> snapshot;
+            lock (_lock)
+            {
+                snapshot = [.. _records];
+            }
+            var json = System.Text.Json.JsonSerializer.Serialize(snapshot, _jsonOptions);
             for (int retry = 0; retry < 5; retry++)
             {
                 try

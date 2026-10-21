@@ -139,4 +139,31 @@ router.beforeEach(async (to, _from, next) => {
     // 未登录，拦截并跳转登录页
     next({ path: '/login', query: to.fullPath !== '/' ? { redirect: to.fullPath } : undefined });
 });
+router.onError((error) => {
+    console.error('[Router Error]', error);
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+        const errorMsg = error?.message || String(error);
+        document.getElementById('runtime-error')?.remove();
+        const notice = document.createElement('div');
+        notice.id = 'runtime-error';
+        notice.setAttribute('role', 'alert');
+        notice.style.cssText = 'position:fixed;top:20px;right:20px;max-width:500px;z-index:999999;background:#1f1315;border:1px solid #ff4d4f;border-radius:8px;padding:16px 20px;color:#fff;box-shadow:0 8px 32px rgba(0,0,0,0.6);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.5;';
+        notice.innerHTML = `
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+            <div style="font-weight:600;font-size:15px;color:#ff7875;display:flex;align-items:center;gap:6px">
+              <span>⚠️</span><span>页面路由加载失败</span>
+            </div>
+            <button onclick="this.closest('#runtime-error').remove()" style="background:none;border:none;color:#888;cursor:pointer;font-size:18px;line-height:1;padding:0">&times;</button>
+          </div>
+          <div style="margin-top:8px;font-size:13px;color:#ddd;word-break:break-word;font-family:monospace;background:rgba(0,0,0,0.3);padding:8px 10px;border-radius:4px">
+            ${errorMsg.replace(/</g, '&lt;').replace(/>/g, '&gt;')}
+          </div>
+          <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:10px">
+            <button onclick="window.location.reload()" style="background:#ff4d4f;border:none;color:#fff;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;font-weight:500">刷新页面</button>
+          </div>
+        `;
+        document.body.append(notice);
+    }
+});
+
 export default router;

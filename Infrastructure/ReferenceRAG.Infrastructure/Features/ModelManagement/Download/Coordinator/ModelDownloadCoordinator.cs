@@ -110,7 +110,9 @@ public class ModelDownloadCoordinator
             var manifest = await adapter.GetManifestAsync(modelId, cancellationToken);
 
             var onnxFiles = manifest.GetOnnxFiles();
-            var ggufFiles = manifest.GetGgufFiles();
+            var textGgufFiles = manifest.GetTextGgufFiles();
+            var mmprojFiles = manifest.GetMmprojFiles();
+            var companionMmproj = GgufMultimodalCompanionStrategy.PickBestMmproj(modelId, mmprojFiles);
             var dataFiles = manifest.Files.Where(f => f.IsExternalData).ToList();
 
             // 1. 扫描主仓库中直接包含的 ONNX 与 GGUF 文件
@@ -128,17 +130,42 @@ public class ModelDownloadCoordinator
                 }
             }
 
-            if (ggufFiles.Count > 0)
+            var ggufFilesToExpose = textGgufFiles.Count > 0 ? textGgufFiles : mmprojFiles;
+            if (ggufFilesToExpose.Count > 0)
             {
                 result.HasGguf = true;
-                foreach (var ggufFile in ggufFiles)
+                foreach (var ggufFile in ggufFilesToExpose)
                 {
-                    var opt = CreateGgufOption(ggufFile);
+                    var opt = CreateGgufOption(ggufFile, companionMmproj);
                     opt.Repository = modelId;
                     result.GgufOptions.Add(opt);
                     result.AllOptions.Add(opt);
                     if (opt.IsInSubfolder) result.SubfolderOptions.Add(opt);
                     else result.RootOptions.Add(opt);
+                }
+            }
+
+            if (mmprojFiles.Count > 0)
+            {
+                foreach (var mmprojFile in mmprojFiles)
+                {
+                    var isRec = companionMmproj != null && mmprojFile.Path == companionMmproj.Path;
+                    var mmprojOpt = new OnnxFileOption
+                    {
+                        Path = mmprojFile.Path,
+                        DisplayName = $"视觉投影器 ({mmprojFile.FileName})",
+                        Format = "gguf",
+                        Size = mmprojFile.Size,
+                        IsQuantized = true,
+                        IsInSubfolder = mmprojFile.Path.Contains('/'),
+                        IsRecommended = isRec,
+                        IsMultimodal = true,
+                        Repository = modelId,
+                        Description = $"独立视觉投影器 ({mmprojFile.FileName}, {mmprojFile.Size / 1024.0 / 1024.0:F1} MB)" + (isRec ? " [推荐配对]" : "")
+                    };
+                    result.MmprojOptions.Add(mmprojOpt);
+                    result.AllOptions.Add(mmprojOpt);
+                    if (isRec) result.RecommendedMmproj = mmprojOpt;
                 }
             }
 
@@ -194,21 +221,50 @@ public class ModelDownloadCoordinator
                         var communityManifest = await adapter.GetManifestAsync(candidate, linked.Token);
                         if (communityManifest != null)
                         {
+                            var commMmproj = communityManifest.GetMmprojFiles();
+                            var commCompanion = GgufMultimodalCompanionStrategy.PickBestMmproj(candidate, commMmproj);
+
                             lock (lockObj)
                             {
                                 if (!result.HasGguf && communityManifest.HasGguf)
                                 {
                                     result.HasGguf = true;
-                                    var communityGguf = communityManifest.GetGgufFiles();
-                                    foreach (var file in communityGguf)
+                                    var commTextGguf = communityManifest.GetTextGgufFiles();
+                                    var commFilesToExpose = commTextGguf.Count > 0 ? commTextGguf : commMmproj;
+
+                                    foreach (var file in commFilesToExpose)
                                     {
-                                        var opt = CreateGgufOption(file);
+                                        var opt = CreateGgufOption(file, commCompanion);
                                         opt.Repository = candidate;
                                         opt.Description += $" (来自社区免转源 {candidate})";
                                         result.GgufOptions.Add(opt);
                                         result.AllOptions.Add(opt);
                                         if (opt.IsInSubfolder) result.SubfolderOptions.Add(opt);
                                         else result.RootOptions.Add(opt);
+                                    }
+
+                                    if (result.MmprojOptions.Count == 0 && commMmproj.Count > 0)
+                                    {
+                                        foreach (var mmprojFile in commMmproj)
+                                        {
+                                            var isRec = commCompanion != null && mmprojFile.Path == commCompanion.Path;
+                                            var mmprojOpt = new OnnxFileOption
+                                            {
+                                                Path = mmprojFile.Path,
+                                                DisplayName = $"视觉投影器 ({mmprojFile.FileName})",
+                                                Format = "gguf",
+                                                Size = mmprojFile.Size,
+                                                IsQuantized = true,
+                                                IsInSubfolder = mmprojFile.Path.Contains('/'),
+                                                IsRecommended = isRec,
+                                                IsMultimodal = true,
+                                                Repository = candidate,
+                                                Description = $"独立视觉投影器 ({mmprojFile.FileName}, {mmprojFile.Size / 1024.0 / 1024.0:F1} MB) (来自社区源 {candidate})" + (isRec ? " [推荐配对]" : "")
+                                            };
+                                            result.MmprojOptions.Add(mmprojOpt);
+                                            result.AllOptions.Add(mmprojOpt);
+                                            if (isRec) result.RecommendedMmproj = mmprojOpt;
+                                        }
                                     }
                                 }
 
@@ -226,6 +282,30 @@ public class ModelDownloadCoordinator
                                         result.AllOptions.Add(opt);
                                         if (opt.IsInSubfolder) result.SubfolderOptions.Add(opt);
                                         else result.RootOptions.Add(opt);
+                                    }
+
+                                    if (result.MmprojOptions.Count == 0 && commMmproj.Count > 0)
+                                    {
+                                        foreach (var mmprojFile in commMmproj)
+                                        {
+                                            var isRec = commCompanion != null && mmprojFile.Path == commCompanion.Path;
+                                            var mmprojOpt = new OnnxFileOption
+                                            {
+                                                Path = mmprojFile.Path,
+                                                DisplayName = $"视觉投影器 ({mmprojFile.FileName})",
+                                                Format = "gguf",
+                                                Size = mmprojFile.Size,
+                                                IsQuantized = true,
+                                                IsInSubfolder = mmprojFile.Path.Contains('/'),
+                                                IsRecommended = isRec,
+                                                IsMultimodal = true,
+                                                Repository = candidate,
+                                                Description = $"独立视觉投影器 ({mmprojFile.FileName}, {mmprojFile.Size / 1024.0 / 1024.0:F1} MB) (来自社区源 {candidate})" + (isRec ? " [推荐配对]" : "")
+                                            };
+                                            result.MmprojOptions.Add(mmprojOpt);
+                                            result.AllOptions.Add(mmprojOpt);
+                                            if (isRec) result.RecommendedMmproj = mmprojOpt;
+                                        }
                                     }
                                 }
 
@@ -325,23 +405,37 @@ public class ModelDownloadCoordinator
         return opt;
     }
 
-    private static OnnxFileOption CreateGgufOption(ModelFileItem file)
+    private static OnnxFileOption CreateGgufOption(ModelFileItem file, ModelFileItem? companionMmproj = null)
     {
         var fileName = file.FileName;
         var match = System.Text.RegularExpressions.Regex.Match(fileName.ToLowerInvariant(), @"(q[0-9]_[a-z0-9_]+|f16|f32|bf16)");
         var quant = match.Success ? match.Groups[1].Value.ToUpperInvariant() : "GGUF";
 
-        return new OnnxFileOption
+        var isMultimodal = companionMmproj != null && !file.IsMmproj;
+        var opt = new OnnxFileOption
         {
             Path = file.Path,
-            DisplayName = $"GGUF {quant}",
+            DisplayName = isMultimodal ? $"GGUF {quant} (含视觉模型)" : $"GGUF {quant}",
             Format = "gguf",
-            Description = $"GGUF 量化模型 ({quant})，支持 LLamaSharp 原生加载与 GPU Offload",
-            Size = file.Size,
+            Size = file.Size + (isMultimodal ? companionMmproj!.Size : 0),
             IsQuantized = true,
             IsInSubfolder = file.Path.Contains('/'),
-            IsRecommended = quant.Contains("Q4_K") || quant.Contains("Q4_0")
+            IsRecommended = quant.Contains("Q4_K") || quant.Contains("Q4_0"),
+            IsMultimodal = isMultimodal,
+            CompanionMmprojPath = isMultimodal ? companionMmproj!.Path : null,
+            CompanionMmprojSize = isMultimodal ? companionMmproj!.Size : 0
         };
+
+        if (isMultimodal)
+        {
+            opt.Description = $"GGUF 多模态模型 ({quant}) + 视觉投影器 ({companionMmproj!.FileName}, {companionMmproj.Size / 1024.0 / 1024.0:F1} MB)，支持图像识别与 GPU 加速";
+        }
+        else
+        {
+            opt.Description = $"GGUF 量化模型 ({quant})，支持 LLamaSharp 原生加载与 GPU Offload";
+        }
+
+        return opt;
     }
 
     private static void DetermineRecommendedOption(ModelDownloadOptions options)
