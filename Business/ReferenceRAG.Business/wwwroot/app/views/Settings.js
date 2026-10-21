@@ -578,14 +578,15 @@ const component = /*@__PURE__*/ _defineComponent({
                     message: data.message || '硬件加速探针就绪'
                 };
             }
-            catch {
+            catch (err) {
                 try {
                     const fallback = await settingsApi.getCudaAvailability();
                     cudaAvailable.value = fallback.data.isAvailable;
                     cudaInfo.value = fallback.data;
-                } catch {
+                } catch (fallbackErr) {
                     cudaAvailable.value = false;
-                    cudaInfo.value = { isAvailable: false, message: '无法探测硬件加速状态' };
+                    const detail = err?.response?.data?.message || err?.message || '探测接口异常';
+                    cudaInfo.value = { isAvailable: false, message: `无法探测硬件加速状态 (${detail})` };
                 }
             }
         };

@@ -90,11 +90,30 @@ public class SettingsController : ControllerBase
     [HttpGet("hardware-acceleration/status")]
     public ActionResult<HardwareAccelerationStatusResult> GetHardwareAccelerationStatus()
     {
-        var config = _configManager.Load();
-        var customPath = config?.Embedding?.Acceleration?.CustomLibraryPath ?? config?.Embedding?.CudaLibraryPath;
-        var deviceId = config?.Embedding?.Acceleration?.DeviceId ?? config?.Embedding?.CudaDeviceId ?? 0;
-        var result = CheckHardwareAccelerationStatus(customPath, deviceId);
-        return Ok(result);
+        try
+        {
+            var config = _configManager.Load();
+            var customPath = config?.Embedding?.Acceleration?.CustomLibraryPath ?? config?.Embedding?.CudaLibraryPath;
+            var deviceId = config?.Embedding?.Acceleration?.DeviceId ?? config?.Embedding?.CudaDeviceId ?? 0;
+            var result = CheckHardwareAccelerationStatus(customPath, deviceId);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "获取硬件加速状态异常");
+            return Ok(new HardwareAccelerationStatusResult
+            {
+                ActiveBackend = "Cpu",
+                ActiveBackendReason = $"硬件探测异常: {ex.Message}，已安全降级为 CPU",
+                RecommendedBackend = "Auto",
+                Message = $"硬件探测异常: {ex.Message}，已安全降级为 CPU",
+                AvailableBackends = new List<AvailableBackendInfo>
+                {
+                    new() { Backend = "Auto", Name = "自动感知协商 (智能推荐)", Supported = true, Reason = "已降级为 CPU 运算" },
+                    new() { Backend = "Cpu", Name = "纯 CPU 运算", Supported = true, Reason = "多核 CPU 确定性推理 (无显卡依赖与低能耗)" }
+                }
+            });
+        }
     }
 
     /// <summary>
@@ -103,24 +122,59 @@ public class SettingsController : ControllerBase
     [HttpGet("cuda-availability")]
     public ActionResult<CudaAvailability> GetCudaAvailability()
     {
-        var config = _configManager.Load();
-        var customPath = config?.Embedding?.Acceleration?.CustomLibraryPath ?? config?.Embedding?.CudaLibraryPath;
-        var deviceId = config?.Embedding?.Acceleration?.DeviceId ?? config?.Embedding?.CudaDeviceId ?? 0;
-        var result = CheckCudaAvailability(customPath, deviceId);
-        return Ok(result);
+        try
+        {
+            var config = _configManager.Load();
+            var customPath = config?.Embedding?.Acceleration?.CustomLibraryPath ?? config?.Embedding?.CudaLibraryPath;
+            var deviceId = config?.Embedding?.Acceleration?.DeviceId ?? config?.Embedding?.CudaDeviceId ?? 0;
+            var result = CheckCudaAvailability(customPath, deviceId);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "获取 CUDA 可用性状态异常");
+            return Ok(new CudaAvailability
+            {
+                IsAvailable = false,
+                Strategy = "None",
+                Message = $"硬件探测异常: {ex.Message}，已安全降级为 CPU"
+            });
+        }
     }
 
     private static HardwareAccelerationStatusResult CheckHardwareAccelerationStatus(string? configuredPath = null, int deviceId = 0)
     {
-        var detector = new HardwareDetector();
-        var hwContext = detector.GetContext();
+        HardwareContext hwContext;
+        try
+        {
+            var detector = new HardwareDetector();
+            hwContext = detector.GetContext();
+        }
+        catch
+        {
+            hwContext = new HardwareContext();
+        }
         var primaryGpu = hwContext.PrimaryGpu;
 
-        var scanner = new CudaEnvironmentScanner(new Win32EnvironmentInjector());
-        var scanResult = scanner.ScanAndInject(configuredPath);
+        CudaEnvironmentScanResult scanResult;
+        try
+        {
+            var scanner = new CudaEnvironmentScanner(new Win32EnvironmentInjector());
+            scanResult = scanner.ScanAndInject(configuredPath);
+        }
+        catch
+        {
+            scanResult = new CudaEnvironmentScanResult { Found = false };
+        }
 
-        var hasCuda = OnnxExecutionProviderHelper.HasCuda;
-        var hasDirectMl = OnnxExecutionProviderHelper.HasDirectMl;
+        bool hasCuda = false;
+        bool hasDirectMl = false;
+        try
+        {
+            hasCuda = OnnxExecutionProviderHelper.HasCuda;
+            hasDirectMl = OnnxExecutionProviderHelper.HasDirectMl;
+        }
+        catch { }
 
         var availableBackends = new List<AvailableBackendInfo>
         {
