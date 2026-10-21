@@ -35,11 +35,12 @@ RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-# Install wget for health check, libgomp1 for native CPU inference, and libvulkan1 for Vulkan acceleration
+# Install wget for health check, libgomp1 for native CPU inference, libvulkan1 for Vulkan acceleration, and gosu for user privilege drop
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     libgomp1 \
     libvulkan1 \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Create data directory and non-root user
@@ -48,8 +49,10 @@ RUN mkdir -p /app/data /app/models /app/logs \
     && useradd -r -g appgroup appuser \
     && chown -R appuser:appgroup /app
 
-# Copy published application
+# Copy published application and entrypoint script
 COPY --from=build /app/publish .
+COPY support/deploy/docker/docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
 
 # Copy Docker-specific configuration
 COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
@@ -65,9 +68,7 @@ ENV DOTNET_RUNNING_IN_CONTAINER=true
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
 
-# Switch to non-root user
-USER appuser
-
 EXPOSE 5000
 
-ENTRYPOINT ["dotnet", "ReferenceRAG.WebHost.dll"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD ["dotnet", "ReferenceRAG.WebHost.dll"]

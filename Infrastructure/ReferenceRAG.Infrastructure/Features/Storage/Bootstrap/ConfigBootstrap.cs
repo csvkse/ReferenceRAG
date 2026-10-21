@@ -83,6 +83,7 @@ public static class ConfigBootstrap
             if (report.FinalState == ConfigLifecycleState.Failed)
             {
                 _logger.LogError("[ConfigBootstrap] 配置文件引导失败: {Error}", report.ErrorMessage);
+                Console.Error.WriteLine($"[ConfigBootstrap] 配置文件引导失败: {report.ErrorMessage}");
             }
 
             _lastReport = report;

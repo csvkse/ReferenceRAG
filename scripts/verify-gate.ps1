@@ -65,7 +65,7 @@ try {
             throw "ReferenceRAG.Tests failed with code $LASTEXITCODE"
         }
 
-        dotnet test tests/ReferenceRAG.Host.Tests/ReferenceRAG.Host.Tests.csproj --filter "FullyQualifiedName~ContractTests|FullyQualifiedName~MafChatServiceTests|FullyQualifiedName~ThreeTierSlmOptimizationTests|FullyQualifiedName~ChatToolCalling|FullyQualifiedName~ChatThoughtAndContextUsageTests|FullyQualifiedName~ChatMultimodalAndMultiTurnToolTests|FullyQualifiedName~FrontendViewIntegrityTests|FullyQualifiedName~DesktopHostIdentityGateTests|FullyQualifiedName~StartupWindowCoordinatorTests|FullyQualifiedName~StartupWindowSizingTests" --logger "console;verbosity=normal"
+        dotnet test tests/ReferenceRAG.Host.Tests/ReferenceRAG.Host.Tests.csproj --filter "FullyQualifiedName~ContractTests|FullyQualifiedName~MafChatServiceTests|FullyQualifiedName~ThreeTierSlmOptimizationTests|FullyQualifiedName~ChatToolCalling|FullyQualifiedName~ChatThoughtAndContextUsageTests|FullyQualifiedName~ChatMultimodalAndMultiTurnToolTests|FullyQualifiedName~FrontendViewIntegrityTests|FullyQualifiedName~DesktopHostIdentityGateTests|FullyQualifiedName~StartupWindowCoordinatorTests|FullyQualifiedName~StartupWindowSizingTests|FullyQualifiedName~ConfigBootstrap|FullyQualifiedName~ConfigPathResolver|FullyQualifiedName~NetworkBindingResolver|FullyQualifiedName~DataDirectoryLease" --logger "console;verbosity=normal"
         if ($LASTEXITCODE -ne 0) {
             throw "ReferenceRAG.Host.Tests failed with code $LASTEXITCODE"
         }

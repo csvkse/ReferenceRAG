@@ -1,13 +1,18 @@
 # syntax=docker/dockerfile:1
-# ============================================================
-# ReferenceRAG - NVIDIA GPU (CUDA 12.8 + cuDNN 9) Dockerfile
-# 说明：本镜像专为 NVIDIA 独立显卡打造，依赖 nvidia-container-toolkit
-# 运行示例：docker run --gpus all -p 5123:5000 ghcr.io/csvkse/referencerag:cuda
-# ============================================================
+# ReferenceRAG: NVIDIA CUDA 12.8 + cuDNN 9 Native Acceleration
+# Target: NVIDIA GeForce RTX 20/30/40/50 series, Tesla/Quadro/Data Center GPUs
+
+# ------------------------------------------------------------
+# Stage 1: Extract ASP.NET Core Runtime from official image
+# ------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS dotnet-runtime
+
+# ------------------------------------------------------------
+# Stage 2: Build & Publish
+# ------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-# Stage 1: Restore dependencies (cached independently of source code changes)
 COPY Directory.Build.props Directory.Packages.props ./
 COPY Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.csproj ./Infrastructure/ReferenceRAG.Infrastructure/
 COPY Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj ./Business/ReferenceRAG.Business/
@@ -16,7 +21,6 @@ COPY Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj ./Host/ReferenceRAG.W
 RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
     dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -p:GpuBackend=cuda
 
-# Stage 2: Build & Publish (prune Windows/macOS native runtimes to shrink Linux image)
 COPY Infrastructure/ ./Infrastructure/
 COPY Business/ ./Business/
 COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
@@ -33,22 +37,20 @@ RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
     /p:DebugSymbols=false \
     && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx*
 
-# Official ASP.NET Core 10.0 runtime stage for zero-download binary copy
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS dotnet-runtime
-
 # ============================================================
 # Stage 3: Runtime (NVIDIA CUDA 12.8 + cuDNN 9)
 # ============================================================
 FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04 AS runtime
 WORKDIR /app
 
-# Install native dependencies required by .NET 10 and ONNX runtime
+# Install native dependencies required by .NET 10, ONNX runtime, and gosu for root privilege drop
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     libgomp1 \
     libicu74 \
     libssl3t64 \
     ca-certificates \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy .NET 10 ASP.NET Core runtime directly from official image
@@ -61,8 +63,10 @@ RUN mkdir -p /app/data /app/models /app/logs \
     && useradd -r -g appgroup appuser \
     && chown -R appuser:appgroup /app
 
-# Copy published application
+# Copy published application and entrypoint script
 COPY --from=build /app/publish .
+COPY support/deploy/docker/docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
 COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
 
 # Environment variables
@@ -77,8 +81,7 @@ ENV CUDA_VISIBLE_DEVICES=0
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
 
-USER appuser
-
 EXPOSE 5000
 
-ENTRYPOINT ["dotnet", "ReferenceRAG.WebHost.dll"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD ["dotnet", "ReferenceRAG.WebHost.dll"]

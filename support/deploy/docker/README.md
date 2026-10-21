@@ -134,3 +134,24 @@ ReferenceRAG 针对容器化环境进行了自适应路径优化：
 - **Web 端修改即时落盘**：在前端设置页修改 API Key、知识库源目录、模型路径或端口偏好后，系统会自动保存至挂载卷中的 `data/appsettings.json`。
 - **镜像升级零丢失**：拉取新版本镜像并重新启动容器时，挂载目录中的 `data/appsettings.json` 原样保留，所有历史配置 100% 不会丢失；若新版本包含配置结构调整，`ConfigBootstrap` 会自动执行版本迁移升级。
 - **宿主机直接编辑**：如果需要离线直接调整配置，可在宿主机上直接用文本编辑器编辑 `data/appsettings.json`，重启容器即可生效。
+
+---
+
+## 六、挂载卷权限与用户映射机制 (Permissions & PUID / PGID)
+
+在 Linux NAS、Unraid、群晖等环境中，宿主机挂载的目录通常由 `root` 或 `nobody:users`（UID 99, GID 100）拥有。ReferenceRAG 镜像内置了智能权限适配机制：
+
+1. **自动权限自愈**：
+   容器启动时，内置 Entrypoint 会自动检测 `/app/data` 与 `/app/logs` 是否具有写入权限。如果权限缺失，会自动将其属主调整为容器应用用户，无需手动在宿主机繁琐执行 `chown`。
+2. **支持自定义用户/组映射 (PUID / PGID)**：
+   可通过环境变量自定义应用运行时的 UID 与 GID：
+   - **Unraid 默认用户体系**：
+     ```bash
+     -e PUID=99 -e PGID=100
+     ```
+   - **直接以 root 运行（跳过权限转换）**：
+     ```bash
+     -e PUID=0 -e PGID=0
+     ```
+3. **显卡设备组权限动态匹配 (`/dev/dri`)**：
+   挂载 `--device=/dev/dri` 时，Entrypoint 会自动探测宿主机 GPU 渲染设备属组 GID 并动态加入用户组，无需手动在 Docker 命令中拼装 `--group-add`。

@@ -12,6 +12,7 @@ using ReferenceRAG.Service.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
+using ReferenceRAG.ApiHost.Configuration;
 using ReferenceRAG.ApiHost.Transport;
 
 #region 必备环境配置
@@ -19,7 +20,13 @@ using ReferenceRAG.ApiHost.Transport;
 Directory.SetCurrentDirectory(Environment.GetEnvironmentVariable("REFERENCERAG_CONTENT_ROOT") ?? AppContext.BaseDirectory);
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.InputEncoding = System.Text.Encoding.UTF8;
-ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.EnsureInitialized();
+var bootstrapReport = ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.EnsureInitialized();
+if (bootstrapReport.FinalState == ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigLifecycleState.Failed)
+{
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.Error.WriteLine($"[警告] 配置文件初始化未就绪: {bootstrapReport.ErrorMessage}");
+    Console.ResetColor();
+}
 #endregion
 
 
@@ -29,15 +36,10 @@ var activeConfigPath = ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.Co
 builder.Configuration.AddJsonFile(activeConfigPath, optional: true, reloadOnChange: true);
 
 #region 配置服务端口
-// 从配置文件中读取端口设置
-var serviceConfig = builder.Configuration.GetSection("ReferenceRAG:Service");
-var allowNetwork = bool.TryParse(serviceConfig["allowNetworkAccess"], out var _allowNet) && _allowNet;
-var host = allowNetwork ? "0.0.0.0" : "localhost";
-var port = serviceConfig["port"] ?? "5000";
-var urls = $"http://{host}:{port}";
-builder.WebHost.UseUrls(builder.Configuration["urls"] ?? urls);
+var bindingResult = NetworkBindingResolver.Resolve(builder.Configuration);
+builder.WebHost.UseUrls(bindingResult.EffectiveUrls);
 builder.Services.AddInProcessServer(listen: true);
-Console.WriteLine($"[配置] 服务地址: {urls} (AllowNetworkAccess={allowNetwork})");
+Console.WriteLine($"[配置] 服务地址: {bindingResult.EffectiveUrls} (AllowNetworkAccess={bindingResult.AllowNetworkAccess})");
 #endregion
 
 #region 服务注入：配置服务和日志
@@ -80,6 +82,7 @@ var isService = ServiceManager.ConfigureService(args, builder);
 
 #region 依赖注入服务管理
 // Add services to the container
+var serviceConfig = builder.Configuration.GetSection("ReferenceRAG:Service");
 builder.Services.AddControllers()
     .AddApplicationPart(typeof(ReferenceRAG.Service.Controllers.AIQueryController).Assembly)
     .AddJsonOptions(options =>
@@ -162,7 +165,21 @@ app.UseStaticFiles(new StaticFileOptions { OnPrepareResponse = context => contex
 app.UseApiKeyAuthentication();
 
 // 共用端点注册、目录初始化（与 Desktop/HostBootstrapper 共用）
-app.UseRagEndpoints();
+try
+{
+    app.UseRagEndpoints();
+}
+catch (UnauthorizedAccessException ex)
+{
+    Console.ForegroundColor = ConsoleColor.Red;
+    Console.Error.WriteLine($"\n[FATAL] ReferenceRAG 启动失败（目录权限不足）: {ex.Message}");
+    Console.Error.WriteLine("\n[Docker 权限排查指引]");
+    Console.Error.WriteLine("  1. 请检查宿主机数据挂载目录权限是否可写。");
+    Console.Error.WriteLine("  2. 在宿主机执行权限修正: chown -R 1000:1000 <宿主机目录> && chmod -R 775 <宿主机目录>");
+    Console.Error.WriteLine("  3. 或在 docker run 中添加环境变量: -e PUID=0 -e PGID=0 (以 root 运行)");
+    Console.ResetColor();
+    throw;
+}
 #endregion
 
 #region 初始化搜索索引
