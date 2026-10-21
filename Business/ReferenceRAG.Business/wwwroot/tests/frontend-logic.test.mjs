@@ -1,5 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {notifyDesktopReady} from '../shared/desktop-startup.js';
+
+test('Desktop readiness waits for DOM commit and uses the native Post envelope', async () => {
+    const messages = [];
+    let commit;
+    const pendingCommit = new Promise(resolve => { commit = resolve; });
+    const ready = notifyDesktopReady(() => pendingCommit, {postMessage: text => messages.push(JSON.parse(text))});
+    assert.deepEqual(messages, []);
+    commit();
+    await ready;
+    assert.deepEqual(messages, [{id:'desktop-ready',command:'Post',version:2,data:'ready'}]);
+});
+
+test('Browser startup without a desktop bridge remains supported', async () => {
+    await assert.doesNotReject(notifyDesktopReady(() => Promise.resolve(), undefined));
+});
+
+test('Desktop ready is not sent until both animation frame callbacks execute', async () => {
+    const frames = [], messages = [];
+    const pending = notifyDesktopReady(() => Promise.resolve(),
+        {postMessage: text => messages.push(text)}, callback => frames.push(callback));
+    await Promise.resolve();
+    assert.equal(messages.length, 0);
+    frames.shift()();
+    assert.equal(messages.length, 0);
+    frames.shift()();
+    await pending;
+    assert.equal(messages.length, 1);
+});
 
 test('Search.js selectedPathFolders correctly extracts folders when source root or folders are selected', () => {
     const paths = [

@@ -13,6 +13,23 @@ namespace ReferenceRAG.Host.Tests;
 
 public class ModelsControllerDownloadTests
 {
+    [Fact]
+    public void RuntimeStatus_ReportsExistingChatIdleRetentionWithoutTrayRestriction()
+    {
+        _mockModelManager.Setup(m => m.GetCurrentChatModel()).Returns(new ModelInfo
+        {
+            Name = "local-chat", DisplayName = "Local chat", ModelType = "chat"
+        });
+        var result = CreateController().GetRuntimeStatus();
+        var status = Assert.IsType<ModelsRuntimeStatusResponse>(Assert.IsType<OkObjectResult>(result.Result).Value).Chat;
+        Assert.NotNull(status);
+        Assert.Equal("SlidingExpiration", status.RetentionStrategy);
+        var configuredTimeout = _configManager.Load().Chat?.IdleTimeoutSeconds ?? 0;
+        Assert.Equal(configuredTimeout > 0 ? configuredTimeout : 300, status.IdleTimeoutSeconds);
+        Assert.False(status.UnloadOnlyWhenMinimizedToTray);
+        Assert.False(status.IsReady);
+    }
+
     private readonly Mock<IModelManager> _mockModelManager = new();
     private readonly Mock<IEmbeddingService> _mockEmbeddingService = new();
     private readonly Mock<IVectorStore> _mockVectorStore = new();

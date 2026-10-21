@@ -11,6 +11,7 @@ namespace ReferenceRAG.DesktopHost.Platform;
 internal static partial class WindowCloseHook
 {
     private const uint WM_CLOSE = 0x0010;
+    private const uint RefreshMessage = 0x8000 + 71;
     private const int SW_HIDE = 0;
     private static readonly nuint SubclassId = 1001;
 
@@ -23,12 +24,19 @@ internal static partial class WindowCloseHook
         _hookedWindowHandle = windowHandle;
         unsafe
         {
-            SetWindowSubclass(
+            if (!SetWindowSubclass(
                 windowHandle,
                 (nint)(delegate* unmanaged[Stdcall]<nint, uint, nint, nint, nuint, nuint, nint>)&SubclassProcedure,
                 SubclassId,
-                nuint.Zero);
+                nuint.Zero))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError(), "无法安装主窗口生命周期钩子");
         }
+    }
+
+    public static void RequestRefresh(nint windowHandle)
+    {
+        if (windowHandle != 0 && windowHandle == _hookedWindowHandle)
+            PostMessage(windowHandle, RefreshMessage, 0, 0);
     }
 
     public static void RequestExplicitExit()
@@ -56,6 +64,23 @@ internal static partial class WindowCloseHook
         nuint uIdSubclass,
         nuint dwRefData)
     {
+        if (uMsg == RefreshMessage)
+        {
+            // Run on the HWND owner thread, after queued show/restore operations.
+            if (GetClientRect(hWnd, out var bounds))
+            {
+                var width = bounds.Right - bounds.Left;
+                var height = bounds.Bottom - bounds.Top;
+                if (width > 0 && height > 0)
+                {
+                    SendMessage(hWnd, 0x0005 /* WM_SIZE */, IsZoomed(hWnd) ? 2 : 0,
+                        (nint)((height << 16) | (width & 0xffff)));
+                    RedrawWindow(hWnd, 0, 0, 0x0001 | 0x0080 | 0x0100);
+                }
+            }
+            return 0;
+        }
+
         if (uMsg == WM_CLOSE && !_isExitRequested)
         {
             ShowWindow(hWnd, SW_HIDE);
@@ -90,6 +115,24 @@ internal static partial class WindowCloseHook
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool ShowWindow(nint hWnd, int nCmdShow);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect { public int Left, Top, Right, Bottom; }
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetClientRect(nint handle, out Rect rect);
+
+    [LibraryImport("user32.dll", EntryPoint = "SendMessageW")]
+    private static partial nint SendMessage(nint handle, uint message, nint wParam, nint lParam);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool IsZoomed(nint handle);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool RedrawWindow(nint handle, nint rect, nint region, uint flags);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

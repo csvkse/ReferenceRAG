@@ -96,6 +96,16 @@ internal static partial class Program
         LogStartup("Business host started");
 
         var events = new InfiniFrameEventsStore();
+        var startMinimized = args.Contains("--minimized") || args.Contains("--silent") ||
+            ReferenceRAG.Desktop.StartupManager.GetStartMinimized();
+        var startupWindow = new StartupWindowCoordinator(startMinimized,
+            StartupWindowSurface.Hide, StartupWindowSurface.Reveal, StartupWindowSurface.Prepare);
+        events.WebMessagePostData.Add("desktop-ready", (_, payload) =>
+        {
+            if (payload != "ready") return;
+            LogStartup("Frontend mounted; applying startup visibility");
+            startupWindow.SignalReady();
+        });
         var resources = typeof(ReferenceRAG.Business.Composition.BusinessComposition).Assembly;
         events.CustomScheme.Add("app", (_, url) => {
             var uri = new Uri(url); var path = Uri.UnescapeDataString(uri.AbsolutePath).TrimStart('/');
@@ -121,7 +131,13 @@ internal static partial class Program
         }
 
         LogStartup("Creating InfiniFrame window");
-        var window = windowBuilder.Build();
+        IInfiniFrameWindow window;
+        using (var silentCreation = OperatingSystem.IsWindows() && startMinimized
+            ? new StartupWindowSurface.SilentCreationScope() : null)
+        {
+            window = windowBuilder.Build();
+            silentCreation?.EnsurePrepared(window.WindowHandle);
+        }
         var windowHandle = window.WindowHandle;
         if (OperatingSystem.IsWindows() && windowHandle != 0)
         {
@@ -147,13 +163,14 @@ internal static partial class Program
             {
                 WindowsWindowIcon.Apply(windowHandle, windowIconPath);
                 WindowCloseHook.Install(windowHandle);
+                startupWindow.SetWindowHandle(windowHandle);
             }
 
             TrayIconManager.ShowRequested += () =>
             {
                 if (windowHandle != 0)
                 {
-                    TrayIconManager.RestoreAndFocusWindow(windowHandle);
+                    startupWindow.RequestShow();
                 }
             };
 
@@ -175,13 +192,14 @@ internal static partial class Program
             trayThread.SetApartmentState(ApartmentState.STA);
             trayThread.Start();
 
-            if (windowHandle != 0 && (args.Contains("--minimized") || args.Contains("--silent") ||
-                ReferenceRAG.Desktop.StartupManager.GetStartMinimized()))
-            {
-                ShowWindow(windowHandle, 0);
-            }
+            LogStartup($"Startup visibility: startMinimized={startMinimized}; waiting for frontend-ready");
         }
 
+        using var startupTimeout = new System.Threading.Timer(_ =>
+        {
+            if (startMinimized && startupWindow.SignalTimeout())
+                LogStartup("Frontend readiness timed out after 10 seconds; revealed window for diagnosis");
+        }, null, TimeSpan.FromSeconds(10), System.Threading.Timeout.InfiniteTimeSpan);
         try
         {
             window.WaitForClose();
@@ -241,10 +259,6 @@ internal static partial class Program
 
     [LibraryImport("user32.dll")]
     private static partial uint GetDpiForWindow(nint windowHandle);
-
-    [LibraryImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool ShowWindow(nint windowHandle, int command);
 
     private static void LogStartup(string message) =>
         File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "desktop-startup.log"), DateTimeOffset.Now + " " + message + Environment.NewLine);

@@ -185,6 +185,34 @@ body.light-theme {
   padding: 12px;
 }
 
+/* Model inventory: keep names readable and scroll the table instead of shrinking columns. */
+.models-page {
+  min-width: 0;
+}
+.models-page .model-name {
+  font-weight: 600;
+  line-height: 1.5;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+.models-page .n-data-table-th {
+  white-space: nowrap;
+}
+.models-page .n-data-table-td {
+  vertical-align: top;
+}
+.models-page .n-descriptions .n-tag {
+  max-width: 100%;
+  height: auto;
+  min-height: 24px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.models-page .n-card-header {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 /* Descriptions */
 [data-v-3a5e9d32] .n-descriptions {
   background: transparent;

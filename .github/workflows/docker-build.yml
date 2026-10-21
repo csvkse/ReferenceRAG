@@ -10,6 +10,7 @@ on:
     paths:
       - "support/deploy/docker/**"
       - "support/config/examples/appsettings.Docker.example.json"
+      - "support/config/appsettings.template.json"
       - "Host/ReferenceRAG.WebHost/**"
       - "Host/ReferenceRAG.ApiHost/**"
       - "Business/**"

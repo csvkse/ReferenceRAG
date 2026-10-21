@@ -39,6 +39,13 @@ public sealed class NativeOgaDirectMlAdapter : IOnnxGenAiEngineAdapter
     {
         if (_state == OnnxEngineState.Ready) return true;
 
+        if (!OperatingSystem.IsWindows())
+        {
+            _logger?.LogInformation("[NativeOgaAdapter] DirectML 硬件加速仅在 Windows 平台支持，当前平台将平滑降级");
+            _state = OnnxEngineState.Degraded;
+            return false;
+        }
+
         await _semaphore.WaitAsync(ct);
         try
         {

@@ -2,6 +2,19 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.23] - 2026-10-22
+
+### Docker 全矩阵跨平台构建修复与桌面端静默启动协调器
+- **Docker 多计算架构变体（CPU / CUDA / ROCm / Intel）构建与发布修复**：
+  - 引入 `Microsoft.ML.OnnxRuntimeGenAI.Managed` 纯托管抽象包，解耦 Linux 构建期与 Windows DirectML 原生库依赖，彻底修复 CS0234 与 CS0246 编译中断；
+  - 在全量 Dockerfile Stage 2 构建发布阶段精确注入 `appsettings.template.json`，解决 MSB3030 文件复制异常；
+  - `NativeOgaDirectMlAdapter` 增加 `OperatingSystem.IsWindows()` 跨平台运行时门禁，在非 Windows 容器环境下平滑自愈降级；
+  - 完整调研与实施技术方案沉淀归档至 `docs/docker-build-failure-root-cause-analysis-and-cross-platform-fix.md`。
+- **桌面端无闪烁静默启动与生命周期协调器优化**：
+  - 引入 `StartupWindowCoordinator` 与 `StartupWindowSurface` 协同管理托盘与后台静默启动窗口生命周期；
+  - 完善窗口关闭与最小化托盘钩子保护，杜绝托盘启动黑屏与界面瞬闪现象；
+  - 补充桌面启动冒烟测试套件并打通质量门禁验证。
+
 ## [1.0.17] - 2026-10-20
 
 ### 设置页面二级分类重构、名称统一与对话模型启动延迟加载

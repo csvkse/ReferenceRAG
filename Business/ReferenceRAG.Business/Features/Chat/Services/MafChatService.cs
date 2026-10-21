@@ -128,6 +128,9 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             GuidanceMessage: match.GuidanceMessage);
     }
 
+    /// <summary>当前本地聊天模型实际采用的空闲释放时间。</summary>
+    public int ModelIdleTimeoutSeconds => _chatModelIdleTimeoutSeconds;
+
     /// <summary>
     /// 指示本地对话模型是否已实际加载至显存/内存（程序启动时默认不加载，首次对话时按需延迟加载）
     /// </summary>

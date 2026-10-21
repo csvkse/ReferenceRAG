@@ -29,6 +29,7 @@
     <PackageVersion Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.24.4" />
     <PackageVersion Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
     <PackageVersion Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" />
+    <PackageVersion Include="Microsoft.ML.OnnxRuntimeGenAI.Managed" Version="0.14.1" />
     <PackageVersion Include="Microsoft.ML.OnnxRuntimeGenAI.DirectML" Version="0.14.1" />
     <PackageVersion Include="Intel.ML.OnnxRuntime.OpenVino" Version="1.24.1" />
     <PackageVersion Include="LLamaSharp.Backend.Vulkan.Windows" Version="0.30.0" />

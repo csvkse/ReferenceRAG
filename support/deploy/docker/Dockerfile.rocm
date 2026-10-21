@@ -21,6 +21,7 @@ COPY Infrastructure/ ./Infrastructure/
 COPY Business/ ./Business/
 COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
 COPY Host/ReferenceRAG.WebHost/ ./Host/ReferenceRAG.WebHost/
+COPY support/config/appsettings.template.json ./support/config/
 RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
     dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
     -c Release \

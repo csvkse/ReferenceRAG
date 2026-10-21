@@ -5,9 +5,12 @@
     按顺序执行前端静态 AST 符号门禁、前端单元测试、后端契约测试与核心回归测试。
 .PARAMETER Full
     执行完整的全量自动化测试（包含 ONNX/语义重排等长耗时测试）
+.PARAMETER DesktopSmoke
+    执行需要 Windows 交互桌面和 WebView2 的正常/静默启动与恢复功能测试
 #>
 param(
-    [switch]$Full
+    [switch]$Full,
+    [switch]$DesktopSmoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,7 +65,7 @@ try {
             throw "ReferenceRAG.Tests failed with code $LASTEXITCODE"
         }
 
-        dotnet test tests/ReferenceRAG.Host.Tests/ReferenceRAG.Host.Tests.csproj --filter "FullyQualifiedName~ContractTests|FullyQualifiedName~MafChatServiceTests|FullyQualifiedName~ThreeTierSlmOptimizationTests|FullyQualifiedName~ChatToolCalling|FullyQualifiedName~ChatThoughtAndContextUsageTests|FullyQualifiedName~ChatMultimodalAndMultiTurnToolTests|FullyQualifiedName~FrontendViewIntegrityTests|FullyQualifiedName~DesktopHostIdentityGateTests" --logger "console;verbosity=normal"
+        dotnet test tests/ReferenceRAG.Host.Tests/ReferenceRAG.Host.Tests.csproj --filter "FullyQualifiedName~ContractTests|FullyQualifiedName~MafChatServiceTests|FullyQualifiedName~ThreeTierSlmOptimizationTests|FullyQualifiedName~ChatToolCalling|FullyQualifiedName~ChatThoughtAndContextUsageTests|FullyQualifiedName~ChatMultimodalAndMultiTurnToolTests|FullyQualifiedName~FrontendViewIntegrityTests|FullyQualifiedName~DesktopHostIdentityGateTests|FullyQualifiedName~StartupWindowCoordinatorTests|FullyQualifiedName~StartupWindowSizingTests" --logger "console;verbosity=normal"
         if ($LASTEXITCODE -ne 0) {
             throw "ReferenceRAG.Host.Tests failed with code $LASTEXITCODE"
         }
@@ -70,6 +73,17 @@ try {
 
     if ($LASTEXITCODE -ne 0) {
         throw "Backend tests failed with code $LASTEXITCODE"
+    }
+
+    if ($DesktopSmoke) {
+        dotnet run --project tests/ReferenceRAG.Desktop.SmokeTests/ReferenceRAG.Desktop.SmokeTests.csproj --verbosity quiet
+        if ($LASTEXITCODE -ne 0) { throw "Normal desktop startup smoke test failed" }
+        dotnet run --project tests/ReferenceRAG.Desktop.SmokeTests/ReferenceRAG.Desktop.SmokeTests.csproj --no-build -- --silent
+        if ($LASTEXITCODE -ne 0) { throw "Silent desktop startup smoke test failed" }
+        dotnet run --project tests/ReferenceRAG.Desktop.SmokeTests/ReferenceRAG.Desktop.SmokeTests.csproj --no-build -- --silent --early-show
+        if ($LASTEXITCODE -ne 0) { throw "Early tray reveal smoke test failed" }
+        dotnet run --project tests/ReferenceRAG.Desktop.SmokeTests/ReferenceRAG.Desktop.SmokeTests.csproj --no-build -- --silent --no-ready
+        if ($LASTEXITCODE -ne 0) { throw "Missing frontend readiness smoke test failed" }
     }
 
     Write-Host "`n========================================================" -ForegroundColor Green

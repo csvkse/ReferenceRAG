@@ -1,5 +1,7 @@
 # ReferenceRAG 桌面端黑屏根因排查与全链路防御加固报告
 
+> 2026-10-21 证据更正：本文关于 Chromium 永久遮挡锁死等描述包含未验证推断，且所述修复与后续代码不完全一致。当前现场证据、infiniReq 对照及真实 WebView 正反验证以 [黑屏复现生命周期调查](desktop-black-screen-recurrence-lifecycle-investigation.md) 为准。
+
 ## 1. 现象与故障复现
 
 - **用户反馈**：启动/唤醒 ReferenceRAG 桌面端客户端时，窗口客户区完全呈现纯黑色（RGB `#000000`），无侧边栏、无顶部导航、无任何文字或错误弹窗，仅外层 Win32 标题栏存在。

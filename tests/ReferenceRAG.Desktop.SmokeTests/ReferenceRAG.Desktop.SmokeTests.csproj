@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../Business/ReferenceRAG.Business/wwwroot/shared/desktop-startup.js" LogicalName="desktop-startup.js" />
+    <PackageReference Include="InfiniLore.InfiniFrame" />
+    <PackageReference Include="InfiniLore.InfiniFrame.Shared" />
+    <Compile Include="../../Host/ReferenceRAG.DesktopHost/StartupWindowCoordinator.cs" Link="StartupWindowCoordinator.cs" />
+    <Compile Include="../../Host/ReferenceRAG.DesktopHost/Platform/StartupWindowSurface.cs" Link="StartupWindowSurface.cs" />
+    <Compile Include="../../Host/ReferenceRAG.DesktopHost/Platform/WindowCloseHook.cs" Link="WindowCloseHook.cs" />
+    <Compile Include="../../Host/ReferenceRAG.DesktopHost/Platform/TrayIconManager.cs" Link="TrayIconManager.cs" />
+    <Compile Include="../../Host/ReferenceRAG.DesktopHost/Features/Startup/StartupManager.cs" Link="StartupManager.cs" />
+  </ItemGroup>
+</Project>

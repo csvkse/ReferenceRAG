@@ -110,7 +110,7 @@ public sealed class DesktopHostIdentityGateTests
         Assert.Contains(".SetMinSize(960, 640)", programContent, StringComparison.Ordinal);
         Assert.Contains("WindowCloseHook.Install", programContent, StringComparison.Ordinal);
         Assert.Contains("WindowCloseHook.RequestExplicitExit", programContent, StringComparison.Ordinal);
-        Assert.Contains("TrayIconManager.RestoreAndFocusWindow", programContent, StringComparison.Ordinal);
+        Assert.Contains("StartupWindowSurface.Reveal", programContent, StringComparison.Ordinal);
         Assert.DoesNotContain("InitialWindowBounds", programContent, StringComparison.Ordinal);
         Assert.DoesNotContain("RegisterWindowClosingHandler", programContent, StringComparison.Ordinal);
 
@@ -134,7 +134,9 @@ public sealed class DesktopHostIdentityGateTests
         Assert.Contains("args.Contains(\"--minimized\")", program);
         Assert.Contains("args.Contains(\"--silent\")", program);
         Assert.Contains("StartupManager.GetStartMinimized()", program);
-        Assert.Contains("ShowWindow(windowHandle, 0)", program);
+        Assert.Contains("StartupWindowSurface.Hide", program);
+        Assert.Contains("startupWindow.SignalReady()", program);
+        Assert.Contains("startupWindow.RequestShow()", program);
     }
 
     private static string FindRepoRoot()

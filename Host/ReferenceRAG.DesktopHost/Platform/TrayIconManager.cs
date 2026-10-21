@@ -232,11 +232,12 @@ internal static partial class TrayIconManager
     {
         if (targetHwnd == nint.Zero || !OperatingSystem.IsWindows()) return;
 
-        const int SW_SHOWNORMAL = 1;
+        const int SW_SHOW = 5;
         const int SW_RESTORE = 9;
 
-        int cmd = IsIconic(targetHwnd) ? SW_RESTORE : SW_SHOWNORMAL;
+        int cmd = IsIconic(targetHwnd) ? SW_RESTORE : SW_SHOW;
         ShowWindowAsync(targetHwnd, cmd);
+        WindowCloseHook.RequestRefresh(targetHwnd);
         SetForegroundWindow(targetHwnd);
         BringWindowToTop(targetHwnd);
     }

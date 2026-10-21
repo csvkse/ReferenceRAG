@@ -172,6 +172,10 @@ public class ModelsController : ControllerBase
                 ModelFormat = activeVariant?.Format ?? "gguf",
                 Dimension = currentChatModel.Dimension,
                 MaxSequenceLength = currentChatModel.MaxSequenceLength,
+                RetentionStrategy = "SlidingExpiration",
+                IdleTimeoutSeconds = _chatService?.ModelIdleTimeoutSeconds
+                    ?? (cfg.Chat?.IdleTimeoutSeconds > 0 ? cfg.Chat.IdleTimeoutSeconds : 300),
+                UnloadOnlyWhenMinimizedToTray = false,
                 InstalledVariants = currentChatModel.InstalledVariants
             };
         }

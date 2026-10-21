@@ -40,6 +40,7 @@ test-vault/
 
 # Background shell
 .bg-shell/
+.playwright-mcp/
 
 # Session files
 /*.html
