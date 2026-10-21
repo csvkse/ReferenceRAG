@@ -155,6 +155,85 @@ menu.bat
 
 功能：构建、安装/卸载服务、启动/停止、查看状态、控制台运行、打开浏览器、查看日志。
 
+### 4. Docker 容器快速启动（推荐）
+
+ReferenceRAG 针对不同硬件平台提供 4 种官方容器镜像变体，支持全平台一键部署（详细文档见 [Docker 部署指南](support/deploy/docker/README.md)）：
+
+#### (1) 通用 CPU 镜像（默认：无独显/轻量级服务器/全平台兼容）
+```bash
+docker run -d \
+  --name reference-rag \
+  -p 5123:5000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/logs:/app/logs \
+  --restart unless-stopped \
+  ghcr.io/csvkse/referencerag:latest
+```
+
+#### (2) NVIDIA GPU 满血版（CUDA 12.8 + cuDNN 9 原生硬件加速）
+> 需要宿主机预先安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
+```bash
+docker run -d \
+  --name reference-rag-cuda \
+  --gpus all \
+  -p 5123:5000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/logs:/app/logs \
+  --restart unless-stopped \
+  ghcr.io/csvkse/referencerag:cuda
+```
+
+#### (3) AMD GPU / APU 核显版（ROCm / HIP 硬件加速）
+> 适用于 AMD Radeon 独立显卡或锐龙 APU 核显。
+```bash
+docker run -d \
+  --name reference-rag-rocm \
+  --device=/dev/kfd \
+  --device=/dev/dri \
+  --group-add video \
+  -p 5123:5000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/logs:/app/logs \
+  --restart unless-stopped \
+  ghcr.io/csvkse/referencerag:rocm
+```
+
+#### (4) Intel GPU / 核显版（Arc 独显 & 酷睿 Iris Xe / UHD 核显）
+> 适用于 Intel Arc 独立显卡或酷睿核显，利用 Level Zero / OpenVINO 加速。
+```bash
+docker run -d \
+  --name reference-rag-intel \
+  --device=/dev/dri \
+  -p 5123:5000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/logs:/app/logs \
+  --restart unless-stopped \
+  ghcr.io/csvkse/referencerag:intel
+```
+
+#### (5) Docker Compose 编排启动
+你也可以直接进入 `support/deploy/docker/` 目录使用 Docker Compose：
+```bash
+cd support/deploy/docker
+
+# 启动默认 CPU 容器
+docker compose up -d
+
+# 或启动 NVIDIA CUDA 容器
+docker compose --profile cuda up -d
+
+# 或启动 AMD ROCm 容器
+docker compose --profile rocm up -d
+
+# 或启动 Intel GPU 容器
+docker compose --profile intel up -d
+```
+启动后在浏览器打开：`http://localhost:5123` 即可进入 Web 控制台。
+
 ---
 
 ## Web 仪表盘
