@@ -279,13 +279,19 @@ public class SettingsController : ControllerBase
             "Cuda" => cudaReason,
             "OpenVino" => openVinoReason,
             "DirectML" => dmlReason,
-            _ => (primaryGpu != null && !string.IsNullOrEmpty(openVinoReason)) ? openVinoReason : "多核 CPU 确定性推理"
+            _ => primaryGpu?.Vendor switch
+            {
+                GpuVendor.Intel => !string.IsNullOrEmpty(openVinoReason) ? openVinoReason : "多核 CPU 确定性推理",
+                GpuVendor.Amd => "Linux 环境 AMD 核显/APU 采用多核 CPU 向量计算 (对话大模型仍支持 Vulkan 核显加速)",
+                GpuVendor.Nvidia => !string.IsNullOrEmpty(cudaReason) ? cudaReason : "多核 CPU 确定性推理",
+                _ => "多核 CPU 确定性推理"
+            }
         };
 
         string mainMessage;
         if (primaryGpu != null)
         {
-            var vramText = primaryGpu.TotalVramGb > 0 ? $" (显存: {primaryGpu.TotalVramGb} GB)" : " (集成核显 / 共享内存)";
+            var vramText = primaryGpu.TotalVramGb > 0 ? $" (显存: {primaryGpu.TotalVramGb} GB)" : " (集成核显 / 共享系统内存)";
             if (active != "Cpu")
             {
                 mainMessage = $"检测到图形加速硬件: {primaryGpu.Name}{vramText}，已就绪硬件加速: {active}";
