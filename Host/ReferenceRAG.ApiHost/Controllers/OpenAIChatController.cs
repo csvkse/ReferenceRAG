@@ -81,7 +81,8 @@ public class OpenAIChatController : ControllerBase
             return OpenAIError($"Total messages content exceeds maximum length of {MaxTotalChars} characters", "invalid_request_error", 400);
         }
 
-        // 3. 提取请求参数
+        // 3. 提取请求参数。缺省 model 用 "reference-rag"：该名字即知识库增强模式，
+        //    与 GET /v1/models 暴露的助手 ID 一致。
         string model = request.TryGetProperty("model", out var modelEl) && modelEl.ValueKind == JsonValueKind.String
             ? modelEl.GetString()?.Trim() ?? "reference-rag"
             : "reference-rag";
@@ -96,8 +97,10 @@ public class OpenAIChatController : ControllerBase
         }
 
         // 5. 判断是否启用 RAG 知识库检索增强 (Mode B)
-        bool isRagMode = model.Equals("reference-rag", StringComparison.OrdinalIgnoreCase) ||
-                         model.Contains("rag", StringComparison.OrdinalIgnoreCase);
+        // 仅 model 精确等于 "reference-rag" 时触发：名称含 "rag" 的普通模型
+        // （如 storage-rag-7b）会被误判为知识库增强模式，强行注入检索上下文。
+        const string RagAssistantModelId = "reference-rag";
+        bool isRagMode = string.Equals(model, RagAssistantModelId, StringComparison.OrdinalIgnoreCase);
 
         if (isRagMode)
         {

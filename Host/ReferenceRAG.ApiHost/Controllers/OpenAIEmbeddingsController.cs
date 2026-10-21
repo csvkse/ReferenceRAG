@@ -46,14 +46,35 @@ public class OpenAIEmbeddingsController : ControllerBase
 
         var sw = Stopwatch.StartNew();
 
-        string model = request.TryGetProperty("model", out var modelEl) ? modelEl.GetString() ?? "" : "";
-
-        string[] texts = inputElement.ValueKind switch
+        // model / input / encoding_mode 的取值都在 try 外，非 UTF-8 字节会让
+        // JsonElement.GetString() 抛 InvalidOperationException 逃逸成空白 500，
+        // 因此统一先转成 400。全局异常中间件仍兜住其余未预期异常。
+        string model = "";
+        if (request.TryGetProperty("model", out var modelEl) && modelEl.ValueKind == JsonValueKind.String)
         {
-            JsonValueKind.String => new[] { inputElement.GetString()! },
-            JsonValueKind.Array => ParseStringArray(inputElement),
-            _ => null
-        };
+            if (!TryGetString(modelEl, out var modelName) || modelName == null)
+                return CamelCaseJson(new { error = "model must be valid UTF-8 encoded text" }, 400);
+            model = modelName;
+        }
+
+        string[]? texts;
+        if (inputElement.ValueKind == JsonValueKind.String)
+        {
+            if (!TryGetString(inputElement, out var single) || single == null)
+                return CamelCaseJson(new { error = "input must be valid UTF-8 encoded text" }, 400);
+            texts = new[] { single };
+        }
+        else if (inputElement.ValueKind == JsonValueKind.Array)
+        {
+            var (parsed, parseError) = ParseStringArray(inputElement);
+            if (parseError != null)
+                return CamelCaseJson(new { error = parseError }, 400);
+            texts = parsed;
+        }
+        else
+        {
+            texts = null;
+        }
 
         if (texts == null || texts.Length == 0)
             return CamelCaseJson(new { error = "input must be a string or array of strings" }, 400);
@@ -73,7 +94,9 @@ public class OpenAIEmbeddingsController : ControllerBase
         var mode = EmbeddingMode.Symmetric; // 默认对称编码，保持 OpenAI 兼容
         if (request.TryGetProperty("encoding_mode", out var modeEl))
         {
-            var modeStr = modeEl.GetString()?.ToLowerInvariant();
+            var modeStr = modeEl.ValueKind == JsonValueKind.String && TryGetString(modeEl, out var rawMode)
+                ? rawMode?.ToLowerInvariant()
+                : null;
             mode = modeStr switch
             {
                 "query" => EmbeddingMode.Query,
@@ -200,17 +223,41 @@ public class OpenAIEmbeddingsController : ControllerBase
         return Content(JsonSerializer.Serialize(value, CamelCase));
     }
 
-    private static string[] ParseStringArray(JsonElement array)
+    /// <summary>
+    /// 安全读取 JSON 字符串值。
+    /// JsonElement.GetString() 在值含非 UTF-8 字节时抛 InvalidOperationException，
+    /// 会逃逸控制器变成空白 500；这里统一转成失败信号，由调用方返回 400。
+    /// </summary>
+    private static bool TryGetString(JsonElement element, out string? value)
+    {
+        try
+        {
+            value = element.GetString();
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            value = null;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 解析字符串数组，返回 error 非空表示含非字符串或非 UTF-8 元素。
+    /// </summary>
+    private static (string[]? Texts, string? Error) ParseStringArray(JsonElement array)
     {
         var list = new List<string>(array.GetArrayLength());
         foreach (var item in array.EnumerateArray())
         {
-            if (item.ValueKind == JsonValueKind.String)
-                list.Add(item.GetString()!);
-            else
-                throw new InvalidOperationException(
-                    $"input array element must be a string, got {item.ValueKind}");
+            if (item.ValueKind != JsonValueKind.String)
+                return (null, $"input array element must be a string, got {item.ValueKind}");
+
+            if (!TryGetString(item, out var text) || text == null)
+                return (null, "input array contains an item that is not valid UTF-8 encoded text");
+
+            list.Add(text);
         }
-        return list.ToArray();
+        return (list.ToArray(), null);
     }
 }

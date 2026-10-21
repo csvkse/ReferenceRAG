@@ -132,6 +132,10 @@ var app = builder.Build();
 // CORS 必须在其他中间件之前
 if (enableCors) app.UseCors();
 
+// 全局异常处理：未处理异常统一转成 JSON 错误体，避免空白 500。
+// 需在 MCP / Swagger / 静态文件 / 鉴权之前，才能覆盖它们的异常。
+app.UseGlobalExceptionHandler();
+
 // MCP 中间件（必须在 CORS 之后，其他中间件之前）
 app.UseAppMcpHelper();
 

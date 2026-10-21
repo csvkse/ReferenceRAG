@@ -51,14 +51,29 @@ public class OpenAIRerankController : ControllerBase
 
         var sw = Stopwatch.StartNew();
 
-        string query = queryElement.GetString()!;
-        string model = request.TryGetProperty("model", out var modelEl) ? modelEl.GetString() ?? "" : "";
+        // query/model 的取值放在 try 外，遇非 UTF-8 字节时 GetString() 会抛
+        // InvalidOperationException 并逃逸成空白 500，必须显式转成 400。
+        if (!TryGetString(queryElement, out var query) || query == null)
+            return CamelCaseJson(new { error = "query must be valid UTF-8 encoded text" }, 400);
+
+        string model = "";
+        if (request.TryGetProperty("model", out var modelEl) && modelEl.ValueKind == JsonValueKind.String)
+        {
+            if (!TryGetString(modelEl, out var modelName) || modelName == null)
+                return CamelCaseJson(new { error = "model must be valid UTF-8 encoded text" }, 400);
+            model = modelName;
+        }
+
         int? topN = request.TryGetProperty("top_n", out var topNEl) ? topNEl.GetInt32() : null;
         bool returnDocuments = !request.TryGetProperty("return_documents", out var returnDocsEl) || returnDocsEl.GetBoolean();
 
         // 解析文档数组
-        var documents = ParseDocuments(docsElement);
-        if (documents == null || documents.Length == 0)
+        var (parsedDocuments, parseError) = ParseDocuments(docsElement);
+        if (parseError != null)
+            return CamelCaseJson(new { error = parseError }, 400);
+
+        var documents = parsedDocuments ?? Array.Empty<string>();
+        if (documents.Length == 0)
             return CamelCaseJson(new { error = "documents array cannot be empty" }, 400);
 
         // 安全限制
@@ -132,10 +147,22 @@ public class OpenAIRerankController : ControllerBase
         if (!request.TryGetProperty("document", out var docElement) || docElement.ValueKind != JsonValueKind.String)
             return CamelCaseJson(new { error = "document is required" }, 400);
 
+        // 同样放在 try 外取值，非 UTF-8 时显式返回 400 而非空白 500。
+        if (!TryGetString(queryElement, out var query) || query == null)
+            return CamelCaseJson(new { error = "query must be valid UTF-8 encoded text" }, 400);
+
+        if (!TryGetString(docElement, out var document) || document == null)
+            return CamelCaseJson(new { error = "document must be valid UTF-8 encoded text" }, 400);
+
+        string model = "";
+        if (request.TryGetProperty("model", out var modelEl) && modelEl.ValueKind == JsonValueKind.String)
+        {
+            if (!TryGetString(modelEl, out var modelName) || modelName == null)
+                return CamelCaseJson(new { error = "model must be valid UTF-8 encoded text" }, 400);
+            model = modelName;
+        }
+
         var sw = Stopwatch.StartNew();
-        string query = queryElement.GetString()!;
-        string document = docElement.GetString()!;
-        string model = request.TryGetProperty("model", out var modelEl) ? modelEl.GetString() ?? "" : "";
 
         try
         {
@@ -176,18 +203,53 @@ public class OpenAIRerankController : ControllerBase
         return Content(JsonSerializer.Serialize(value, CamelCase));
     }
 
-    private static string[] ParseDocuments(JsonElement array)
+    /// <summary>
+    /// 安全读取 JSON 字符串值。
+    /// JsonElement.GetString() 在值含非 UTF-8 字节时抛 InvalidOperationException，
+    /// 会逃逸控制器变成空白 500；这里统一转成失败信号，由调用方返回 400。
+    /// </summary>
+    private static bool TryGetString(JsonElement element, out string? value)
+    {
+        try
+        {
+            value = element.GetString();
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            value = null;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 解析 documents 数组，支持纯字符串与 { "text": "..." } 对象两种 Cohere/Jina 形式。
+    /// 返回 error 非空表示数组内含非 UTF-8 或不受支持的元素。
+    /// </summary>
+    private static (string[]? Documents, string? Error) ParseDocuments(JsonElement array)
     {
         var list = new List<string>(array.GetArrayLength());
         foreach (var item in array.EnumerateArray())
         {
             if (item.ValueKind == JsonValueKind.String)
-                list.Add(item.GetString()!);
+            {
+                if (!TryGetString(item, out var text) || text == null)
+                    return (null, "documents contains an item that is not valid UTF-8 encoded text");
+                list.Add(text);
+            }
             else if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("text", out var textEl))
-                list.Add(textEl.GetString() ?? "");
+            {
+                if (textEl.ValueKind != JsonValueKind.String)
+                    return (null, "documents[].text must be a string");
+                if (!TryGetString(textEl, out var objText) || objText == null)
+                    return (null, "documents contains an item that is not valid UTF-8 encoded text");
+                list.Add(objText);
+            }
             else
-                _ = item.GetString() ?? ""; // 尝试作为字符串处理
+            {
+                return (null, $"documents[{list.Count}] must be a string or an object with a \"text\" property");
+            }
         }
-        return list.ToArray();
+        return (list.ToArray(), null);
     }
 }
