@@ -237,12 +237,14 @@ public class SettingsController : ControllerBase
                 }
                 else
                 {
-                    openVinoReason = $"OpenVINO 运行时已加载，但 GPU 初始化未成功: {vinoErr}";
+                    openVinoReason = $"OpenVINO 硬件加速暂未就绪 ({vinoErr})";
                 }
             }
             catch (Exception ex)
             {
-                openVinoReason = $"OpenVINO 初始化异常: {ex.Message}";
+                var innermost = ex;
+                while (innermost.InnerException != null) innermost = innermost.InnerException;
+                openVinoReason = $"OpenVINO 初始化异常: {innermost.Message}";
             }
         }
         else

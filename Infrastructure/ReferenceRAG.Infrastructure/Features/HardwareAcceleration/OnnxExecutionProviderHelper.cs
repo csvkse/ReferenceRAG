@@ -101,7 +101,9 @@ public static class OnnxExecutionProviderHelper
             }
             catch (Exception ex)
             {
-                lastEx = ex.InnerException ?? ex;
+                var innermost = ex;
+                while (innermost.InnerException != null) innermost = innermost.InnerException;
+                lastEx = innermost;
             }
         }
 

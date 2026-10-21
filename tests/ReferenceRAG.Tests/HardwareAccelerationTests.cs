@@ -348,4 +348,15 @@ public class HardwareAccelerationTests
         var vendor = HardwareDetector.ParseVendor(name, pnpId);
         Assert.Equal(expected, vendor);
     }
+
+    [Fact]
+    public void OnnxExecutionProviderHelper_TryAppendOpenVino_ShouldHandleSafelyWithoutCrashing()
+    {
+        using var options = new Microsoft.ML.OnnxRuntime.SessionOptions();
+        var success = ReferenceRAG.Core.Features.HardwareAcceleration.OnnxExecutionProviderHelper.TryAppendOpenVino(options, "GPU", out var failureReason);
+        if (!success)
+        {
+            Assert.NotNull(failureReason);
+        }
+    }
 }

@@ -55,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libicu74 \
     libssl3t64 \
     libvulkan1 \
+    mesa-vulkan-drivers \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
@@ -94,6 +95,7 @@ ENV LogsPath=/app/logs
 ENV DOTNET_RUNNING_IN_CONTAINER=true
 ENV ONEAPI_DEVICE_SELECTOR=level_zero:gpu
 ENV LIBVA_DRIVER_NAME=iHD
+ENV LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1

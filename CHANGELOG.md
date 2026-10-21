@@ -2,6 +2,19 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.28] - 2026-10-22
+
+### 修复 Linux 容器 ONNX NativeMethods 初始化异常，并补全 Mesa Vulkan 驱动
+- **修复 Linux 环境 ONNX Runtime 动态库缺失 (`ReferenceRAG.Infrastructure.csproj`)**：
+  - 针对 Intel 优化分支，将 Linux 目标包由仅含 Windows dll 的 `Intel.ML.OnnxRuntime.OpenVino` 修正为包含 Linux 原生 `libonnxruntime.so` 的 `Microsoft.ML.OnnxRuntime`；
+  - 彻底根除 `The type initializer for 'Microsoft.ML.OnnxRuntime.NativeMethods' threw an exception` 异常崩溃；
+- **补全 Intel 与 AMD 容器 Mesa Vulkan ICD 驱动 (`Dockerfile.intel` & `Dockerfile.rocm`)**：
+  - 安装 `mesa-vulkan-drivers`，为 Intel 核显/独显提供 `intel_icd.x86_64.json` (ANV)，为 AMD GPU 提供 `radeon_icd.x86_64.json` (RADV)；
+  - 显式导出 `LD_LIBRARY_PATH` 涵盖 `/app/runtimes/linux-x64/native` 与系统库路径；
+- **异常深度解包与安全回退防御 (`SettingsController` & `OnnxExecutionProviderHelper`)**：
+  - 递归解包 `TargetInvocationException` 提取内层真实原因；
+  - 新增 `OnnxExecutionProviderHelper_TryAppendOpenVino_ShouldHandleSafelyWithoutCrashing` 单元测试。
+
 ## [1.0.27] - 2026-10-22
 
 ### OpenVINO GPU 初始化权限自愈、设备精度回退与前端诊断回显优化

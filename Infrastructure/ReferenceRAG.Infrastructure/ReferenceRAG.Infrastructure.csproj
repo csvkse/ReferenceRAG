@@ -50,10 +50,10 @@
     <PackageReference Include="LLamaSharp.Backend.Cpu" />
   </ItemGroup>
 
-  <!-- 4. Intel 专属优化版: Windows 采用 DirectML+Vulkan，Linux 采用 OpenVINO+Vulkan 原生 -->
+  <!-- 4. Intel 专属优化版: Windows 采用 DirectML+Vulkan，Linux 采用 CPU/OpenVINO+Vulkan 原生 -->
   <ItemGroup Condition="'$(GpuBackend)' == 'intel' or '$(GpuBackend)' == 'openvino' or '$(GpuBackend)' == 'arc'">
     <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="Microsoft.ML.OnnxRuntime.DirectML" />
-    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="Intel.ML.OnnxRuntime.OpenVino" />
+    <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="Microsoft.ML.OnnxRuntime" />
     <PackageReference Condition="'$(IsTargetWindows)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Windows" />
     <PackageReference Condition="'$(IsTargetLinux)' == 'true'" Include="LLamaSharp.Backend.Vulkan.Linux" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" />

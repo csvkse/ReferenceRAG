@@ -64,6 +64,7 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 ENV DataPath=/app/data
 ENV LogsPath=/app/logs
 ENV DOTNET_RUNNING_IN_CONTAINER=true
+ENV LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:${LD_LIBRARY_PATH}"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
