@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 
@@ -10,6 +11,52 @@ namespace ReferenceRAG.Core.Features.HardwareAcceleration;
 /// </summary>
 public static class OnnxExecutionProviderHelper
 {
+    private static readonly ILogger _logger = Core.Helpers.StaticLogger.GetLogger("OnnxExecutionProviderHelper");
+
+    static OnnxExecutionProviderHelper()
+    {
+        try
+        {
+            // 为 Microsoft.ML.OnnxRuntime 程序集注册原生库解析器，确保在 Linux/Windows 容器或发布环境中
+            // 优先直接绑定本地 runtimes 目录下的 libonnxruntime / onnxruntime.dll，
+            // 彻底杜绝全局环境标准 CPU 库抢占导致硬件加速入口缺失 (如 OrtSessionOptionsAppendExecutionProvider_OpenVINO)
+            NativeLibrary.SetDllImportResolver(typeof(SessionOptions).Assembly, (libraryName, assembly, searchPath) =>
+            {
+                if (string.Equals(libraryName, "onnxruntime", StringComparison.OrdinalIgnoreCase))
+                {
+                    var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+                    var candidates = isWindows
+                        ? new[]
+                        {
+                            Path.Combine(AppContext.BaseDirectory, "runtimes", "win-x64", "native", "onnxruntime.dll"),
+                            Path.Combine(AppContext.BaseDirectory, "onnxruntime.dll"),
+                            Path.Combine(Directory.GetCurrentDirectory(), "onnxruntime.dll")
+                        }
+                        : new[]
+                        {
+                            Path.Combine(AppContext.BaseDirectory, "runtimes", "linux-x64", "native", "libonnxruntime.so"),
+                            Path.Combine(AppContext.BaseDirectory, "libonnxruntime.so"),
+                            Path.Combine(Directory.GetCurrentDirectory(), "runtimes", "linux-x64", "native", "libonnxruntime.so"),
+                            Path.Combine(Directory.GetCurrentDirectory(), "libonnxruntime.so")
+                        };
+
+                    foreach (var path in candidates)
+                    {
+                        if (File.Exists(path) && NativeLibrary.TryLoad(path, out var handle))
+                        {
+                            return handle;
+                        }
+                    }
+                }
+                return IntPtr.Zero;
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "配置 ONNX Runtime 原生库解析器被跳过 (可能已注册)");
+        }
+    }
+
     private static readonly MethodInfo? CudaMethod =
         typeof(SessionOptions).GetMethod("AppendExecutionProvider_CUDA", new[] { typeof(int) });
 

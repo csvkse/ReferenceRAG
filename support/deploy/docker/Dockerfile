@@ -9,8 +9,7 @@ COPY Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.cspr
 COPY Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj ./Business/ReferenceRAG.Business/
 COPY Host/ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj ./Host/ReferenceRAG.ApiHost/
 COPY Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj ./Host/ReferenceRAG.WebHost/
-RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
-    dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -p:GpuBackend=cpu
+RUN dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -p:GpuBackend=cpu
 
 # Stage 2: Build & Publish (prune Windows/macOS native runtimes to shrink Linux image)
 COPY Infrastructure/ ./Infrastructure/
@@ -18,11 +17,9 @@ COPY Business/ ./Business/
 COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
 COPY Host/ReferenceRAG.WebHost/ ./Host/ReferenceRAG.WebHost/
 COPY support/config/appsettings.template.json ./support/config/
-RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
-    dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
+RUN dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
     -c Release \
     -o /app/publish \
-    --no-restore \
     /p:GpuBackend=cpu \
     /p:UseAppHost=false \
     /p:DebugType=none \

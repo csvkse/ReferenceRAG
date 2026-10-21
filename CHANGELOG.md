@@ -5,10 +5,14 @@
 ## [1.0.29] - 2026-10-22
 
 ### Intel Linux 容器集成 OpenVINO 硬件加速执行提供程序与原生共享库
-- **分阶段提取与集成 Linux 原生 OpenVINO 共享库 (`Dockerfile.intel`)**：
-  - 新增多阶段构建 `openvino-extract`，从官方 Linux `onnxruntime-openvino==1.24.1` 轮子中精准提取编译了 OpenVINO Execution Provider 的原生共享库（`libonnxruntime.so`、`libonnxruntime_providers_openvino.so`、`libopenvino.so`、`libopenvino_intel_gpu_plugin.so` 等）；
-  - 覆盖到 `/app/runtimes/linux-x64/native/` 与 `/app/`，并在系统动态链接器配置 `/etc/ld.so.conf.d/openvino.conf` 中注册并执行 `ldconfig`；
-  - 解决 `OrtSessionOptionsAppendExecutionProvider_OpenVINO` 缺失导致的加载失败，正式打通 Intel 核显 / Arc 独显的 ONNX OpenVINO GPU 硬件加速。
+- **分阶段提取与全量集成 Linux 原生 OpenVINO 共享库 (`Dockerfile.intel`)**：
+  - 多阶段构建 `openvino-extract` 完整安装 `onnxruntime-openvino==1.24.1` 及其底层依赖包 `openvino`，完整提取 OpenVINO Execution Provider 动态库与 GPU 计算插件（`libonnxruntime.so`、`libonnxruntime_providers_openvino.so`、`libopenvino.so`、`libopenvino_intel_gpu_plugin.so`、`libtbb.so` 等）；
+  - 全量覆盖至 `/app/runtimes/linux-x64/native/` 与 `/app/`，并在系统动态链接器配置 `/etc/ld.so.conf.d/openvino.conf` 中注册并执行 `ldconfig`；
+  - 导出 `LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:/usr/lib/x86_64-linux-gnu"`，彻底打通 Intel 核显 / Arc 独显的 ONNX OpenVINO GPU 硬件加速；
+- **C# 托管层动态库绑定防护 (`OnnxExecutionProviderHelper`)**：
+  - 为 `Microsoft.ML.OnnxRuntime` 程序集注册静态 `NativeLibrary.SetDllImportResolver`，强制优先加载本应用内置的 OpenVINO 增强版 `libonnxruntime.so`，彻底杜绝全局环境标准 CPU 库抢占导致 `OrtSessionOptionsAppendExecutionProvider_OpenVINO` 入口缺失；
+- **Docker CI 构建可靠性优化 (`Dockerfile*`)**：
+  - 移除跨 CI 构建虚拟机不可靠的 BuildKit 缓存挂载与 `--no-restore`，避免层缓存命中时因缓存卷隔离引发 `NETSDK1064` 依赖包丢失报错，保障多架构镜像构建 100% 稳定交付。
 
 ## [1.0.28] - 2026-10-22
 

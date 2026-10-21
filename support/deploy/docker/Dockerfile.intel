@@ -11,7 +11,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS dotnet-runtime
 # Stage 2: Extract OpenVINO-enabled ONNX Runtime from official Linux wheel
 # ------------------------------------------------------------
 FROM python:3.12-slim AS openvino-extract
-RUN pip install --no-cache-dir --no-deps onnxruntime-openvino==1.24.1
+RUN pip install --no-cache-dir onnxruntime-openvino==1.24.1
 
 # ------------------------------------------------------------
 # Stage 3: Build & Publish
@@ -24,19 +24,16 @@ COPY Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.cspr
 COPY Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj ./Business/ReferenceRAG.Business/
 COPY Host/ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj ./Host/ReferenceRAG.ApiHost/
 COPY Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj ./Host/ReferenceRAG.WebHost/
-RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
-    dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -p:GpuBackend=openvino
+RUN dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -p:GpuBackend=openvino
 
 COPY Infrastructure/ ./Infrastructure/
 COPY Business/ ./Business/
 COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
 COPY Host/ReferenceRAG.WebHost/ ./Host/ReferenceRAG.WebHost/
 COPY support/config/appsettings.template.json ./support/config/
-RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
-    dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
+RUN dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
     -c Release \
     -o /app/publish \
-    --no-restore \
     /p:GpuBackend=openvino \
     /p:UseAppHost=false \
     /p:DebugType=none \
@@ -94,9 +91,11 @@ COPY support/deploy/docker/docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
 COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
 
-# Overlay OpenVINO-enabled ONNX Runtime shared libraries
+# Overlay OpenVINO-enabled ONNX Runtime and OpenVINO shared libraries
 COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/onnxruntime/capi/ /app/runtimes/linux-x64/native/
 COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so* /app/
+COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/openvino/libs/ /app/runtimes/linux-x64/native/
+COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/openvino/libs/ /app/
 
 RUN echo "/app/runtimes/linux-x64/native" > /etc/ld.so.conf.d/openvino.conf \
     && echo "/app" >> /etc/ld.so.conf.d/openvino.conf \
@@ -109,7 +108,7 @@ ENV LogsPath=/app/logs
 ENV DOTNET_RUNNING_IN_CONTAINER=true
 ENV ONEAPI_DEVICE_SELECTOR=level_zero:gpu
 ENV LIBVA_DRIVER_NAME=iHD
-ENV LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:/usr/lib/x86_64-linux-gnu"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
