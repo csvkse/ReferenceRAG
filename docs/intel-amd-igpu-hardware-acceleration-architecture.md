@@ -46,6 +46,13 @@ ReferenceRAG 拥有两套独立的计算引擎：
    - 基于 GGUF 模型，跨平台通过 Vulkan 或多核 CPU 向量指令集运行。
    - 在 Docker 容器中，如果宿主机未配置 Vulkan ICD 映射，ReferenceRAG 的 **“自动回退保护”** 会主动触发，将大模型计算平滑降级至 CPU AVX2 / AVX-512，避免任何崩溃（SegFault），同时向量检索依然享受核显硬件加速。
 
+### 2.5 选择“自动 (Auto)”后为何仍显示“就绪 CPU”？
+当在设置页面中选择“自动感知协商 (Auto)”时，系统会按 `CUDA -> OpenVINO -> DirectML -> CPU` 的顺序探查并初始化最高优先级硬件。如果选择 Auto 后依然回退到 CPU，是因为底层 OpenVINO 初始化未通过，主要包括两个关键因素：
+1. **Docker 容器 `/dev/dri/renderD128` 节点权限不足 (EACCES)**：
+   在 Unraid 或 NAS 默认以 `PUID=99 / PGID=100`（非 root 用户）运行容器时，宿主机挂载进来的 `/dev/dri/renderD128` 设备文件默认权限为 `0660` 且属组为宿主机的 render/video 组。容器进程降权至 99:100 后，因无法读写 GPU 设备节点导致 Level Zero / OpenVINO 初始化抛出权限被拒异常，进而触发自动回退保护降级为 CPU。
+2. **OpenVINO 设备描述符兼容性**：
+   部分 OpenVINO 运行时要求精确指定设备精度（如 `"GPU_FP16"` 或 `"GPU_FP32"`），单传 `"GPU"` 时可能触发驱动未就绪异常。
+
 ---
 
 ## 3. 本次代码改进与自愈方案
@@ -59,12 +66,28 @@ ReferenceRAG 拥有两套独立的计算引擎：
 ### 3.2 接入 OpenVINO 后端回显与精准文案 (`SettingsController.cs`)
 - 在硬件后端列表中加入 `Intel OpenVINO (Arc独显 / 酷睿核显)`；
 - 精准文案区分核显与独显：
-  - 核显：`检测到图形加速硬件: Intel Graphics (核显 / Arc 独显) (集成核显 / 共享内存)，推荐加速方案: OpenVino`；
-  - 纯 CPU：`系统未检测到物理加速显卡，已就绪 CPU 高精度运算`。
+  - 核显：`检测到图形加速硬件: Intel Graphics (核显 / Arc 独显) (集成核显 / 共享内存)`；
+  - 若回退 CPU，标题与诊断详情直接输出底层原因（如权限不足或设备未就绪）。
+
+### 3.3 设备权限自愈与多目标精度协商 (`docker-entrypoint.sh` & `OnnxExecutionProviderHelper`)
+- 在 `docker-entrypoint.sh` 中增加 `chmod -R a+rwX /dev/dri`，保证无论 Unraid 的 99:100 还是其他非 root 用户均能直接读写 GPU 渲染节点；
+- `OnnxExecutionProviderHelper.TryAppendOpenVino` 增加对 `GPU`、`GPU_FP16`、`GPU_FP32`、`AUTO:GPU,CPU` 等精度的阶梯式探测与自愈。
 
 ---
 
-## 4. Docker 部署 Intel 核显最佳实践
+## 4. Docker 部署 Intel 核显最佳实践与排查
+
+### 4.1 临时快速修复（无需等待镜像更新）
+若当前容器正在运行且显示“就绪 CPU”，可在宿主机直接对设备授权即可热生效：
+```bash
+# 在宿主机终端执行，为核显渲染节点开放读写权限：
+chmod -R a+rw /dev/dri
+# 或在容器内直接授权：
+docker exec -it -u 0 reference-rag chmod -R a+rw /dev/dri
+```
+刷新设置页面即可立即看到 OpenVINO GPU 就绪。
+
+### 4.2 标准运行命令
 
 在 Unraid / 群晖 / 任何 Linux 宿主机上运行 Intel 核显加速时，推荐命令如下：
 

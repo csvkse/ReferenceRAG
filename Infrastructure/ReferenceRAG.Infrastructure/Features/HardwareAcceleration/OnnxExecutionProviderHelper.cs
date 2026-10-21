@@ -73,16 +73,40 @@ public static class OnnxExecutionProviderHelper
     /// </summary>
     public static bool TryAppendOpenVino(SessionOptions options, string deviceType = "GPU")
     {
-        if (OpenVinoMethod == null) return false;
-        try
+        return TryAppendOpenVino(options, deviceType, out _);
+    }
+
+    /// <summary>
+    /// 尝试向 SessionOptions 追加 OpenVINO 执行提供者并返回诊断原因
+    /// </summary>
+    public static bool TryAppendOpenVino(SessionOptions options, string deviceType, out string? failureReason)
+    {
+        failureReason = null;
+        if (OpenVinoMethod == null)
         {
-            OpenVinoMethod.Invoke(options, new object[] { deviceType });
-            return true;
-        }
-        catch
-        {
+            failureReason = "当前构建未包含 OpenVINO 模块";
             return false;
         }
+
+        // 兼容不同的 OpenVINO 设备标识与精度字符串 (如 GPU, GPU_FP16, GPU_FP32, AUTO:GPU,CPU)
+        var targets = new[] { deviceType, "GPU", "GPU_FP16", "GPU_FP32", "AUTO:GPU,CPU", "AUTO", "" };
+        Exception? lastEx = null;
+
+        foreach (var target in targets.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                OpenVinoMethod.Invoke(options, new object[] { target });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                lastEx = ex.InnerException ?? ex;
+            }
+        }
+
+        failureReason = lastEx?.Message ?? "未检测到支持的 Intel GPU 设备";
+        return false;
     }
 
     /// <summary>

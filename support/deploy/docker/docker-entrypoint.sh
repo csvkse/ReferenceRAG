@@ -59,6 +59,7 @@ if [ "$(id -u)" = "0" ]; then
 
     # Automatically grant DRI access if /dev/dri exists (Intel / AMD GPU)
     if [ -d /dev/dri ]; then
+        chmod -R a+rwX /dev/dri 2>/dev/null || true
         for dev in /dev/dri/*; do
             if [ -e "$dev" ]; then
                 DEV_GID=$(stat -c '%g' "$dev" 2>/dev/null || true)

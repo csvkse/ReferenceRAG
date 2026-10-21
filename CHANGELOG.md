@@ -2,6 +2,17 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.27] - 2026-10-22
+
+### OpenVINO GPU 初始化权限自愈、设备精度回退与前端诊断回显优化
+- **Docker 容器 `/dev/dri` 设备节点全量自愈授权 (`docker-entrypoint.sh`)**：
+  - 在 root 阶段无条件执行 `chmod -R a+rwX /dev/dri`，彻底杜绝降权至非 root 用户（如 Unraid `PUID=99 / PGID=100`）时因 `renderD128` 节点权限不足导致 OpenVINO 初始化失败的问题；
+- **OpenVINO 多目标设备与精度自动协商探测 (`OnnxExecutionProviderHelper`)**：
+  - `TryAppendOpenVino` 支持对 `GPU`、`GPU_FP16`、`GPU_FP32`、`AUTO:GPU,CPU` 等目标设备描述符的梯度自动协商探测与错误捕获，并在探测失败时输出确切诊断原因；
+- **设置控制面板精准回显与选项补全 (`SettingsController` & `Settings.js`)**：
+  - `SettingsController` 引入 `ActiveBackendReason` 并在回退 CPU 时在标题清晰注明具体原因；
+  - `Settings.js` 下拉菜单补全 `Intel OpenVINO` 选项，修正核显动态显存显示为 `(集成核显 / 共享系统内存)`，并在状态面板内渲染回退诊断详情。
+
 ## [1.0.26] - 2026-10-22
 
 ### Intel / AMD 核显（集成显卡）硬件加速识别与 OpenVINO 状态回显支持

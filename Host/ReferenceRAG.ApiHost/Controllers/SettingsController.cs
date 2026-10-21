@@ -230,14 +230,14 @@ public class SettingsController : ControllerBase
             try
             {
                 using var testOptions = new Microsoft.ML.OnnxRuntime.SessionOptions();
-                if (OnnxExecutionProviderHelper.TryAppendOpenVino(testOptions, "GPU"))
+                if (OnnxExecutionProviderHelper.TryAppendOpenVino(testOptions, "GPU", out var vinoErr))
                 {
                     openVinoSupported = true;
                     openVinoReason = "已就绪 (Intel GPU / 酷睿核显 OpenVINO 原生硬件加速)";
                 }
                 else
                 {
-                    openVinoReason = "OpenVINO 运行时就绪，但未检测到支持的 Intel GPU 设备";
+                    openVinoReason = $"OpenVINO 运行时已加载，但 GPU 初始化未成功: {vinoErr}";
                 }
             }
             catch (Exception ex)
@@ -272,11 +272,26 @@ public class SettingsController : ControllerBase
             : (openVinoSupported ? "OpenVino"
             : (dmlSupported ? "DirectML" : "Cpu"));
 
+        string activeReason = active switch
+        {
+            "Cuda" => cudaReason,
+            "OpenVino" => openVinoReason,
+            "DirectML" => dmlReason,
+            _ => (primaryGpu != null && !string.IsNullOrEmpty(openVinoReason)) ? openVinoReason : "多核 CPU 确定性推理"
+        };
+
         string mainMessage;
         if (primaryGpu != null)
         {
             var vramText = primaryGpu.TotalVramGb > 0 ? $" (显存: {primaryGpu.TotalVramGb} GB)" : " (集成核显 / 共享内存)";
-            mainMessage = $"检测到图形加速硬件: {primaryGpu.Name}{vramText}，推荐加速方案: {recommended}";
+            if (active != "Cpu")
+            {
+                mainMessage = $"检测到图形加速硬件: {primaryGpu.Name}{vramText}，已就绪硬件加速: {active}";
+            }
+            else
+            {
+                mainMessage = $"检测到图形加速硬件: {primaryGpu.Name}{vramText}，硬件加速提供程序暂未就绪 ({activeReason})，已安全回退至 CPU";
+            }
         }
         else if (openVinoSupported)
         {
@@ -293,6 +308,7 @@ public class SettingsController : ControllerBase
             PrimaryGpu = primaryGpu,
             RecommendedBackend = recommended,
             ActiveBackend = active,
+            ActiveBackendReason = activeReason,
             HasNvidiaGpu = hwContext.HasNvidiaGpu,
             HasDirectX12 = hwContext.HasDirectX12,
             AvailableBackends = availableBackends,
@@ -669,6 +685,11 @@ public class HardwareAccelerationStatusResult
     /// 当前生效激活的后端标识
     /// </summary>
     public string ActiveBackend { get; set; } = "Cpu";
+
+    /// <summary>
+    /// 当前后端就绪或回退状态诊断原因
+    /// </summary>
+    public string? ActiveBackendReason { get; set; }
 
     /// <summary>
     /// 是否存在 NVIDIA 显卡
