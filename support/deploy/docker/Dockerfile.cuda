@@ -57,8 +57,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
 RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
 
-# Create directories and non-root user
+# Create directories, compatibility symlink, and non-root user
 RUN mkdir -p /app/data /app/models /app/logs \
+    && ln -sf /app/logs /app/Logs \
     && groupadd -r appgroup \
     && useradd -r -g appgroup appuser \
     && chown -R appuser:appgroup /app

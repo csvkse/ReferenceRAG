@@ -6,9 +6,14 @@ PUID=${PUID:-1000}
 PGID=${PGID:-1000}
 
 if [ "$(id -u)" = "0" ]; then
+    # Ensure required runtime directories exist and create compatibility symlinks
+    mkdir -p /app/data /app/models /app/logs
+    ln -sf /app/logs /app/Logs 2>/dev/null || true
+    ln -sf /app/models /app/Models 2>/dev/null || true
+    ln -sf /app/data /app/Data 2>/dev/null || true
+
     # If explicitly requested to run as root
     if [ "$PUID" = "0" ] || [ "$RUN_AS_ROOT" = "true" ]; then
-        mkdir -p /app/data /app/models /app/logs
         exec "$@"
     fi
 
@@ -32,21 +37,24 @@ if [ "$(id -u)" = "0" ]; then
         usermod -u "$PUID" appuser 2>/dev/null || true
     fi
 
-    # Ensure required runtime directories exist
-    mkdir -p /app/data /app/models /app/logs
+    # Fix ownership and permissions for data and logs
+    chown -R "$PUID:$PGID" /app/data /app/logs 2>/dev/null || true
+    chmod -R 775 /app/data /app/logs 2>/dev/null || true
 
-    # Ensure appuser owns /app/data and /app/logs if not already writable
-    for dir in /app/data /app/logs; do
-        if [ -d "$dir" ] && [ ! -w "$dir" ]; then
-            chown -R "$PUID:$PGID" "$dir" 2>/dev/null || true
-            chmod -R u+rwX "$dir" 2>/dev/null || true
+    # Fallback: If target user still cannot write (e.g. NFS / SMB / CIFS mount), grant open permissions
+    if command -v gosu >/dev/null 2>&1; then
+        if ! gosu "$PUID:$PGID" test -w /app/data 2>/dev/null; then
+            chmod -R 777 /app/data /app/logs 2>/dev/null || true
         fi
-    done
+    fi
 
     # For models directory, avoid recursive chown on large model weights; ensure base dir is writable
-    if [ -d /app/models ] && [ ! -w /app/models ]; then
-        chown "$PUID:$PGID" /app/models 2>/dev/null || true
-        chmod u+rwX /app/models 2>/dev/null || true
+    chown "$PUID:$PGID" /app/models 2>/dev/null || true
+    chmod 775 /app/models 2>/dev/null || true
+    if command -v gosu >/dev/null 2>&1; then
+        if ! gosu "$PUID:$PGID" test -w /app/models 2>/dev/null; then
+            chmod 777 /app/models 2>/dev/null || true
+        fi
     fi
 
     # Automatically grant DRI access if /dev/dri exists (Intel / AMD GPU)

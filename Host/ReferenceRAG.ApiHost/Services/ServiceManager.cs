@@ -198,10 +198,48 @@ public static class ServiceManager
         var workDir = builder.Configuration["Work:Directory"];
         workDir = string.IsNullOrWhiteSpace(workDir) ? AppContext.BaseDirectory : workDir;
 
-        var logPath = Path.Combine(workDir, "Logs");
-        if (!Directory.Exists(logPath))
+        var configuredLogsPath = builder.Configuration["LogsPath"]
+            ?? Environment.GetEnvironmentVariable("REFERENCERAG_LOGS_PATH")
+            ?? Environment.GetEnvironmentVariable("LogsPath")
+            ?? builder.Configuration["ReferenceRAG:logsPath"];
+
+        string logPath;
+        if (!string.IsNullOrWhiteSpace(configuredLogsPath))
         {
-            Directory.CreateDirectory(logPath);
+            logPath = Path.IsPathRooted(configuredLogsPath)
+                ? Path.GetFullPath(configuredLogsPath)
+                : Path.GetFullPath(Path.Combine(workDir, configuredLogsPath));
+        }
+        else
+        {
+            var lowerLogs = Path.Combine(workDir, "logs");
+            var upperLogs = Path.Combine(workDir, "Logs");
+            if (Directory.Exists(lowerLogs))
+            {
+                logPath = lowerLogs;
+            }
+            else if (Directory.Exists(upperLogs))
+            {
+                logPath = upperLogs;
+            }
+            else
+            {
+                logPath = OperatingSystem.IsWindows() ? upperLogs : lowerLogs;
+            }
+        }
+
+        try
+        {
+            if (!Directory.Exists(logPath))
+            {
+                Directory.CreateDirectory(logPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Error.WriteLine($"[警告] 无法创建日志目录 '{logPath}' ({ex.Message})，文件日志记录将被跳过。");
+            Console.ResetColor();
         }
 
         // 日志级别可配置，优先级：
@@ -215,17 +253,28 @@ public static class ServiceManager
         if (!Enum.TryParse<LogEventLevel>(levelName, ignoreCase: true, out var minimumLevel))
             minimumLevel = LogEventLevel.Information;
 
-        Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Is(minimumLevel)
-            .WriteTo.File(
-                shared: true,
-                path: @$"{logPath}\app_.log",
-                rollingInterval: RollingInterval.Day,
-                retainedFileCountLimit: 7,
-                // SourceContext=产生日志的模块名，排障时用于定位来源
-                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss} [{Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}"
-            )
-            .CreateLogger();
+        var loggerConfig = new LoggerConfiguration()
+            .MinimumLevel.Is(minimumLevel);
+
+        if (Directory.Exists(logPath))
+        {
+            try
+            {
+                loggerConfig = loggerConfig.WriteTo.File(
+                    shared: true,
+                    path: Path.Combine(logPath, "app_.log"),
+                    rollingInterval: RollingInterval.Day,
+                    retainedFileCountLimit: 7,
+                    outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss} [{Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}"
+                );
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[警告] 无法启用文件日志输出: {ex.Message}");
+            }
+        }
+
+        Log.Logger = loggerConfig.CreateLogger();
 
         builder.Host.UseSerilog();
         Log.Information("工作区目录: {WorkDir}", workDir);

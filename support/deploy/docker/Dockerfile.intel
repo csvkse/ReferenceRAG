@@ -72,8 +72,9 @@ RUN mkdir -p /usr/share/keyrings \
 COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
 RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
 
-# Create directories and non-root user (ensure video & render groups exist for DRI access)
+# Create directories, compatibility symlink, and non-root user (ensure video & render groups exist for DRI access)
 RUN mkdir -p /app/data /app/models /app/logs \
+    && ln -sf /app/logs /app/Logs \
     && groupadd -r appgroup \
     && (getent group video || groupadd -r video) \
     && (getent group render || groupadd -r render) \

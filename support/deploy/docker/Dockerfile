@@ -43,8 +43,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Create data directory and non-root user
+# Create data directory, compatibility symlink, and non-root user
 RUN mkdir -p /app/data /app/models /app/logs \
+    && ln -sf /app/logs /app/Logs \
     && groupadd -r appgroup \
     && useradd -r -g appgroup appuser \
     && chown -R appuser:appgroup /app

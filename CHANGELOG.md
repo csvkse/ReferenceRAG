@@ -2,6 +2,19 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.25] - 2026-10-22
+
+### Docker 挂载目录权限完全自愈与日志目录大小写兼容修复
+- **修复 Entrypoint 在 root 下跳过权限修正的隐性陷阱**：
+  - 彻底重构 `docker-entrypoint.sh`，废除 root 身份下 `[ ! -w ]` 恒为 true 导致 `chown -R` 被跳过的缺陷，无条件执行 `chown -R "$PUID:$PGID"` 与 `chmod -R 775`；
+  - 增加真实目标用户写权限探测，对 NFS/SMB/CIFS 挂载点自动启用 777 兜底，确保在 Unraid（`PUID=99 / PGID=100`）及各 NAS 下正常写入配置文件；
+- **修复日志目录大小写冲突与无权创建异常**：
+  - 解决 `ServiceManager.ConfigureLogging` 拼接大写 `/app/Logs` 与宿主机挂载小写 `/app/logs` 不匹配的问题，优先读取 `LogsPath` 环境变量并复用小写 `logs`；
+  - 增加日志目录创建容错保护，当文件日志不可写时降级至控制台输出，不再阻断主程序启动；
+  - 在所有 Dockerfile 与 Entrypoint 中自动建立 `ln -sf /app/logs /app/Logs` 软链接兼容层；
+- **质量门禁与测试套件扩充**：
+  - 新增 `LoggingPathResolutionTests` 单元测试，纳入 `scripts/verify-gate.ps1`，全量 138 项测试 100% 通过。
+
 ## [1.0.24] - 2026-10-22
 
 ### Docker 挂载卷权限自愈、网络回环绑定修复与主配置持久化优化
