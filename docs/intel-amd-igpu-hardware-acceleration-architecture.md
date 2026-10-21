@@ -79,6 +79,11 @@ ReferenceRAG 拥有两套独立的计算引擎：
   - 若回退 CPU，标题与诊断详情直接输出底层原因（如权限不足或设备未就绪）。
 - `OnnxExecutionProviderHelper.TryAppendOpenVino` 增加对 `GPU`、`GPU_FP16`、`GPU_FP32`、`AUTO:GPU,CPU` 等精度的阶梯式探测与自愈，并展开内层异常提示。
 
+### 3.5 多阶段构建集成 OpenVINO 专属执行提供者 (`Dockerfile.intel`)
+- 标准微软 `Microsoft.ML.OnnxRuntime` 预编译包默认仅内置 CPU 执行提供者，不导出 `OrtSessionOptionsAppendExecutionProvider_OpenVINO` 符号，导致 Linux 容器下尝试挂载 OpenVINO 时抛出 `Unable to find an entry point named 'OrtSessionOptionsAppendExecutionProvider_OpenVINO'`；
+- 在 `Dockerfile.intel` 中引入 `openvino-extract` 独立构建阶段，从英特尔官方 Linux 产物提取编译了 OpenVINO EP 的原生库文件（`libonnxruntime.so`、`libonnxruntime_providers_openvino.so`、`libopenvino.so`、`libopenvino_intel_gpu_plugin.so` 等），覆盖发布目录并执行 `ldconfig` 注册；
+- 彻底打通 Linux 容器环境的 Intel 核显 / 独显 ONNX 向量与重排计算。
+
 ---
 
 ## 4. 常见疑问解答 (FAQ)

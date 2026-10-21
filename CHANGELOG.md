@@ -2,6 +2,14 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.29] - 2026-10-22
+
+### Intel Linux 容器集成 OpenVINO 硬件加速执行提供程序与原生共享库
+- **分阶段提取与集成 Linux 原生 OpenVINO 共享库 (`Dockerfile.intel`)**：
+  - 新增多阶段构建 `openvino-extract`，从官方 Linux `onnxruntime-openvino==1.24.1` 轮子中精准提取编译了 OpenVINO Execution Provider 的原生共享库（`libonnxruntime.so`、`libonnxruntime_providers_openvino.so`、`libopenvino.so`、`libopenvino_intel_gpu_plugin.so` 等）；
+  - 覆盖到 `/app/runtimes/linux-x64/native/` 与 `/app/`，并在系统动态链接器配置 `/etc/ld.so.conf.d/openvino.conf` 中注册并执行 `ldconfig`；
+  - 解决 `OrtSessionOptionsAppendExecutionProvider_OpenVINO` 缺失导致的加载失败，正式打通 Intel 核显 / Arc 独显的 ONNX OpenVINO GPU 硬件加速。
+
 ## [1.0.28] - 2026-10-22
 
 ### 修复 Linux 容器 ONNX NativeMethods 初始化异常，并补全 Mesa Vulkan 驱动

@@ -8,7 +8,13 @@
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS dotnet-runtime
 
 # ------------------------------------------------------------
-# Stage 2: Build & Publish
+# Stage 2: Extract OpenVINO-enabled ONNX Runtime from official Linux wheel
+# ------------------------------------------------------------
+FROM python:3.12-slim AS openvino-extract
+RUN pip install --no-cache-dir --no-deps onnxruntime-openvino==1.24.1
+
+# ------------------------------------------------------------
+# Stage 3: Build & Publish
 # ------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
@@ -38,7 +44,7 @@ RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
     && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx*
 
 # ============================================================
-# Stage 3: Runtime (Intel Compute Runtime / Level Zero & OpenCL)
+# Stage 4: Runtime (Intel Compute Runtime / Level Zero & OpenCL)
 # ============================================================
 FROM ubuntu:24.04 AS runtime
 WORKDIR /app
@@ -87,6 +93,14 @@ COPY --from=build /app/publish .
 COPY support/deploy/docker/docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
 COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
+
+# Overlay OpenVINO-enabled ONNX Runtime shared libraries
+COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/onnxruntime/capi/ /app/runtimes/linux-x64/native/
+COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so* /app/
+
+RUN echo "/app/runtimes/linux-x64/native" > /etc/ld.so.conf.d/openvino.conf \
+    && echo "/app" >> /etc/ld.so.conf.d/openvino.conf \
+    && ldconfig
 
 ENV ASPNETCORE_URLS=http://+:5000
 ENV ASPNETCORE_ENVIRONMENT=Production
