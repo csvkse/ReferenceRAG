@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using ReferenceRAG.Desktop;
 
 namespace ReferenceRAG.DesktopHost.Platform;
 
@@ -22,6 +23,7 @@ internal static partial class TrayIconManager
     private const uint RightButtonUp = 0x0205;
     private const uint StringMenuFlag = 0;
     private const uint SeparatorMenuFlag = 0x0800;
+    private const uint CheckedMenuFlag = 0x0008;
     private const uint NotifyMessageFlag = 0x0001;
     private const uint NotifyIconFlag = 0x0002;
     private const uint NotifyTipFlag = 0x0004;
@@ -30,6 +32,8 @@ internal static partial class TrayIconManager
     private const int ApplicationIconId = 32512;
     private const int ShowMenuId = 1001;
     private const int ExitMenuId = 1002;
+    private const int AutoStartMenuId = 1003;
+    private const int StartMinimizedMenuId = 1004;
 
     private static nint _windowHandle;
     private static NotifyIconData _notifyIcon;
@@ -179,6 +183,20 @@ internal static partial class TrayIconManager
                     ExitRequested?.Invoke();
                     PostQuitMessage(0);
                 }
+                else if (menuId is AutoStartMenuId or StartMinimizedMenuId)
+                {
+                    try
+                    {
+                        if (menuId == AutoStartMenuId)
+                            StartupManager.SetAutoStart(!StartupManager.GetAutoStart());
+                        else
+                            StartupManager.SetStartMinimized(!StartupManager.GetStartMinimized());
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Windows.Forms.MessageBox.Show(ex.Message, "无法保存启动设置");
+                    }
+                }
                 return nint.Zero;
 
             case CloseMessage:
@@ -194,6 +212,11 @@ internal static partial class TrayIconManager
     {
         var menu = CreatePopupMenu();
         AppendMenu(menu, StringMenuFlag, (nint)ShowMenuId, "显示主界面");
+        AppendMenu(menu, SeparatorMenuFlag, nint.Zero, null);
+        AppendMenu(menu, StringMenuFlag | (StartupManager.GetStartMinimized() ? CheckedMenuFlag : 0),
+            (nint)StartMinimizedMenuId, "最小化启动");
+        AppendMenu(menu, StringMenuFlag | (StartupManager.GetAutoStart() ? CheckedMenuFlag : 0),
+            (nint)AutoStartMenuId, "开机启动");
         AppendMenu(menu, SeparatorMenuFlag, nint.Zero, null);
         AppendMenu(menu, StringMenuFlag, (nint)ExitMenuId, "退出 ReferenceRAG");
         GetCursorPos(out var point);

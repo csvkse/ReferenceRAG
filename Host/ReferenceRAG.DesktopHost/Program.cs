@@ -174,6 +174,12 @@ internal static partial class Program
             };
             trayThread.SetApartmentState(ApartmentState.STA);
             trayThread.Start();
+
+            if (windowHandle != 0 && (args.Contains("--minimized") || args.Contains("--silent") ||
+                ReferenceRAG.Desktop.StartupManager.GetStartMinimized()))
+            {
+                ShowWindow(windowHandle, 0);
+            }
         }
 
         try
@@ -235,6 +241,10 @@ internal static partial class Program
 
     [LibraryImport("user32.dll")]
     private static partial uint GetDpiForWindow(nint windowHandle);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ShowWindow(nint windowHandle, int command);
 
     private static void LogStartup(string message) =>
         File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "desktop-startup.log"), DateTimeOffset.Now + " " + message + Environment.NewLine);

@@ -121,6 +121,22 @@ public sealed class DesktopHostIdentityGateTests
         Assert.Contains("RequestExplicitExit", hookContent, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void DesktopHost_RetainsTrayStartupOptionsAndMinimizedLaunch()
+    {
+        var tray = File.ReadAllText(Path.Combine(RepoRoot, "Host", "ReferenceRAG.DesktopHost", "Platform", "TrayIconManager.cs"));
+        var program = File.ReadAllText(Path.Combine(RepoRoot, "Host", "ReferenceRAG.DesktopHost", "Program.cs"));
+        Assert.Contains("\"开机启动\"", tray);
+        Assert.Contains("\"最小化启动\"", tray);
+        Assert.Contains("StartupManager.SetAutoStart(!StartupManager.GetAutoStart())", tray);
+        Assert.Contains("StartupManager.SetStartMinimized(!StartupManager.GetStartMinimized())", tray);
+        Assert.Contains("CheckedMenuFlag", tray);
+        Assert.Contains("args.Contains(\"--minimized\")", program);
+        Assert.Contains("args.Contains(\"--silent\")", program);
+        Assert.Contains("StartupManager.GetStartMinimized()", program);
+        Assert.Contains("ShowWindow(windowHandle, 0)", program);
+    }
+
     private static string FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
