@@ -14,6 +14,25 @@ public static class ConfigBootstrap
     private static readonly ILogger _logger = StaticLogger.GetLogger("ConfigBootstrap");
     private static bool _initialized = false;
     private static ConfigBootstrapReport? _lastReport = null;
+    private static string? _activeConfigPath = null;
+
+    /// <summary>
+    /// 获取当前生效的主配置文件绝对物理路径
+    /// </summary>
+    public static string ActiveConfigPath => _activeConfigPath ?? ConfigPathResolver.ResolveConfigPath();
+
+    /// <summary>
+    /// 重置引导状态（主要用于测试）
+    /// </summary>
+    public static void Reset()
+    {
+        lock (_syncLock)
+        {
+            _initialized = false;
+            _lastReport = null;
+            _activeConfigPath = null;
+        }
+    }
 
     /// <summary>
     /// 获取上一次引导执行报告
@@ -67,6 +86,15 @@ public static class ConfigBootstrap
             }
 
             _lastReport = report;
+            if (adapter is LocalConfigEnvironmentAdapter localAdapter &&
+                string.Equals(Path.GetFullPath(localAdapter.BaseDirectory), Path.GetFullPath(Directory.GetCurrentDirectory()), StringComparison.OrdinalIgnoreCase))
+            {
+                _activeConfigPath = adapter.ConfigPath;
+            }
+            else
+            {
+                _activeConfigPath = null;
+            }
             _initialized = (report.FinalState == ConfigLifecycleState.Ready);
             return report;
         }

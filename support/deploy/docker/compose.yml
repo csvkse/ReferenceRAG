@@ -9,9 +9,7 @@ services:
     ports:
       - "5123:5000"
     volumes:
-      # 持久化配置（防止容器重建丢失用户设置）
-      - ../../config/local/docker/appsettings.Production.json:/app/appsettings.json
-      # 持久化数据
+      # 持久化数据与配置（appsettings.json 自动持久化保存在 data 目录中，升级不丢失）
       - ../../data:/app/data
       - ../../artifacts/logs/docker:/app/logs
       # 持久化模型
@@ -42,7 +40,7 @@ services:
     ports:
       - "5123:5000"
     volumes:
-      - ../../config/local/docker/appsettings.Production.json:/app/appsettings.json
+      # 持久化数据与配置（appsettings.json 自动持久化保存在 data 目录中，升级不丢失）
       - ../../data:/app/data
       - ../../artifacts/logs/docker:/app/logs
       - ../../models:/app/models
@@ -81,7 +79,7 @@ services:
       - video
       - render
     volumes:
-      - ../../config/local/docker/appsettings.Production.json:/app/appsettings.json
+      # 持久化数据与配置（appsettings.json 自动持久化保存在 data 目录中，升级不丢失）
       - ../../data:/app/data
       - ../../artifacts/logs/docker:/app/logs
       - ../../models:/app/models
@@ -110,7 +108,7 @@ services:
       - video
       - render
     volumes:
-      - ../../config/local/docker/appsettings.Production.json:/app/appsettings.json
+      # 持久化数据与配置（appsettings.json 自动持久化保存在 data 目录中，升级不丢失）
       - ../../data:/app/data
       - ../../artifacts/logs/docker:/app/logs
       - ../../models:/app/models

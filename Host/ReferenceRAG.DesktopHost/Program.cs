@@ -68,6 +68,9 @@ internal static partial class Program
         Directory.SetCurrentDirectory(Environment.GetEnvironmentVariable("REFERENCERAG_CONTENT_ROOT") ?? AppContext.BaseDirectory);
         ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.EnsureInitialized();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = Directory.GetCurrentDirectory() });
+
+        var activeConfigPath = ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.ActiveConfigPath;
+        builder.Configuration.AddJsonFile(activeConfigPath, optional: true, reloadOnChange: true);
         ServiceManager.ConfigureLogging(builder);
 
         var configuredHttp = builder.Configuration.GetValue<bool?>("ReferenceRAG:Service:enableHttpService")

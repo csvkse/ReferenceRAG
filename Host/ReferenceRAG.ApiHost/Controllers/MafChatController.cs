@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using ReferenceRAG.Business.Features.Chat.Services;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Infrastructure.Features.Storage.Bootstrap;
 using ReferenceRAG.Service.Services;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -53,7 +54,7 @@ public class MafChatController : ControllerBase
         }
         else if (environment != null && !string.IsNullOrWhiteSpace(environment.ContentRootPath))
         {
-            var configPath = Path.Combine(environment.ContentRootPath, "appsettings.json");
+            var configPath = ConfigPathResolver.ResolveConfigPath(environment.ContentRootPath);
             _configManager = new ConfigManager(customConfigPath: configPath);
         }
         else

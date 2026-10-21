@@ -83,7 +83,7 @@ public class ConfigManagerTests : IDisposable
         cm.Save(config);
 
         using var document = System.Text.Json.JsonDocument.Parse(
-            File.ReadAllText(Path.Combine(_testDir, "appsettings.json")));
+            File.ReadAllText(Path.Combine(_testDir, "data", "appsettings.json")));
         var embedding = document.RootElement
             .GetProperty("ReferenceRAG")
             .GetProperty("embedding");

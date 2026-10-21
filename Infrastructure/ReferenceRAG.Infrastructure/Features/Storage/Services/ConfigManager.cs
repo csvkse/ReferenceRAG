@@ -51,10 +51,10 @@ public class ConfigManager
 
     private string GetAppSettingsPath()
     {
-        return _customConfigPath ?? Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+        return _customConfigPath ?? ConfigPathResolver.ResolveConfigPath();
     }
 
-    public static string GetConfigPath() => Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+    public static string GetConfigPath() => ConfigPathResolver.ResolveConfigPath();
 
     /// <summary>
     /// 加载配置 - 仅从 appsettings.json 的 ReferenceRAG 节读取
@@ -112,6 +112,12 @@ public class ConfigManager
 
             try
             {
+                var dir = Path.GetDirectoryName(appSettingsPath);
+                if (!string.IsNullOrWhiteSpace(dir) && !Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
                 JsonObject root;
                 if (File.Exists(appSettingsPath))
                 {
@@ -283,10 +289,19 @@ public class ConfigManager
             }
         }
 
-        var dataPath = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_DATA_PATH");
+        var dataPath = Environment.GetEnvironmentVariable("REFERENCERAG_DATA_PATH")
+                       ?? Environment.GetEnvironmentVariable("OBSIDIAN_RAG_DATA_PATH")
+                       ?? Environment.GetEnvironmentVariable("DataPath");
         if (!string.IsNullOrEmpty(dataPath))
         {
             config.DataPath = dataPath;
+        }
+
+        var modelsPath = Environment.GetEnvironmentVariable("REFERENCERAG_MODELS_PATH")
+                         ?? Environment.GetEnvironmentVariable("ModelsPath");
+        if (!string.IsNullOrEmpty(modelsPath))
+        {
+            config.ModelsRootPath = modelsPath;
         }
 
         var modelPath = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_MODEL_PATH");

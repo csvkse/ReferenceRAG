@@ -19,8 +19,8 @@ public class MafChatControllerConfigTests : IDisposable
     public MafChatControllerConfigTests()
     {
         _tempDir = Path.Combine(Path.GetTempPath(), "MafChatControllerTests_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_tempDir);
-        _appSettingsPath = Path.Combine(_tempDir, "appsettings.json");
+        Directory.CreateDirectory(Path.Combine(_tempDir, "data"));
+        _appSettingsPath = Path.Combine(_tempDir, "data", "appsettings.json");
     }
 
     public void Dispose()

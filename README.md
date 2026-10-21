@@ -215,6 +215,8 @@ docker run -d \
   ghcr.io/csvkse/referencerag:intel
 ```
 
+> **配置持久化提示**：容器内部配置文件默认位于 `/app/data/appsettings.json`。只需挂载 `-v $(pwd)/data:/app/data`，首次启动容器会自动生成配置文件；通过 Web 端修改的配置或拉取新镜像升级时均自动持久化保存在挂载目录中，无需挂载单独的 `appsettings.json` 文件（避免了挂载不存在文件时被 Docker 创建为空目录的异常）。
+
 #### (5) Docker Compose 编排启动
 你也可以直接进入 `support/deploy/docker/` 目录使用 Docker Compose：
 ```bash

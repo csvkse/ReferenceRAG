@@ -25,6 +25,9 @@ ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.EnsureIni
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = Directory.GetCurrentDirectory(), WebRootPath = Path.Combine(AppContext.BaseDirectory,"wwwroot") });
 
+var activeConfigPath = ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.ActiveConfigPath;
+builder.Configuration.AddJsonFile(activeConfigPath, optional: true, reloadOnChange: true);
+
 #region 配置服务端口
 // 从配置文件中读取端口设置
 var serviceConfig = builder.Configuration.GetSection("ReferenceRAG:Service");

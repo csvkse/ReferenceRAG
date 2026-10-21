@@ -119,3 +119,18 @@ docker compose down
   ```bash
   curl http://localhost:5123/api/models/runtime-status
   ```
+
+---
+
+## 五、配置文件持久化与安全升级 (Configuration & Safe Upgrade)
+
+### 1. 为什么无需挂载单独的 `appsettings.json` 文件？
+在传统 Docker 部署中，如果尝试直接挂载单文件（如 `-v /host/path/appsettings.json:/app/appsettings.json`），一旦宿主机该文件尚未创建，Docker 会自动在宿主机创建名为 `appsettings.json` 的**空目录**并挂载进容器，导致 .NET 启动读取 JSON 失败或崩溃。
+
+### 2. 自动持久化与平滑升级机制 (`data/appsettings.json`)
+ReferenceRAG 针对容器化环境进行了自适应路径优化：
+- **默认定位**：在容器环境下，运行时主配置文件的默认位置自动重定向至 `/app/data/appsettings.json`。
+- **冷启动自愈释放**：宿主机只需挂载数据目录 `-v /host/path/data:/app/data`。首次冷启动时，`ConfigBootstrap` 发现数据卷中尚未存在配置文件，会自动从镜像内置模板复制生成标准的 `appsettings.json` 到挂载卷中。
+- **Web 端修改即时落盘**：在前端设置页修改 API Key、知识库源目录、模型路径或端口偏好后，系统会自动保存至挂载卷中的 `data/appsettings.json`。
+- **镜像升级零丢失**：拉取新版本镜像并重新启动容器时，挂载目录中的 `data/appsettings.json` 原样保留，所有历史配置 100% 不会丢失；若新版本包含配置结构调整，`ConfigBootstrap` 会自动执行版本迁移升级。
+- **宿主机直接编辑**：如果需要离线直接调整配置，可在宿主机上直接用文本编辑器编辑 `data/appsettings.json`，重启容器即可生效。

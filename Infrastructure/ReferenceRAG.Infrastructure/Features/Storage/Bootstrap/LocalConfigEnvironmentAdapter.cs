@@ -24,7 +24,7 @@ public class LocalConfigEnvironmentAdapter : IConfigEnvironmentAdapter
             : Path.GetFullPath(baseDirectory);
 
         _configPath = string.IsNullOrWhiteSpace(customConfigPath)
-            ? Path.Combine(_baseDirectory, "appsettings.json")
+            ? ConfigPathResolver.ResolveConfigPath(_baseDirectory)
             : Path.GetFullPath(customConfigPath);
 
         if (!string.IsNullOrWhiteSpace(customTemplatePath))
@@ -33,16 +33,22 @@ public class LocalConfigEnvironmentAdapter : IConfigEnvironmentAdapter
         }
         else
         {
-            // 默认优先查找同目录下的 appsettings.template.json，其次查找 support/config/appsettings.template.json
+            // 模板查找顺序：根目录 appsettings.json -> support/config/appsettings.template.json -> appsettings.template.json
+            var rootConfig = Path.Combine(_baseDirectory, "appsettings.json");
+            var supportTemplate = Path.Combine(_baseDirectory, "support", "config", "appsettings.template.json");
             var localTemplate = Path.Combine(_baseDirectory, "appsettings.template.json");
-            if (File.Exists(localTemplate))
+
+            if (File.Exists(rootConfig) && !string.Equals(Path.GetFullPath(rootConfig), Path.GetFullPath(_configPath), StringComparison.OrdinalIgnoreCase))
             {
-                _templatePath = localTemplate;
+                _templatePath = rootConfig;
+            }
+            else if (File.Exists(supportTemplate))
+            {
+                _templatePath = supportTemplate;
             }
             else
             {
-                var fallbackTemplate = Path.Combine(_baseDirectory, "support", "config", "appsettings.template.json");
-                _templatePath = File.Exists(fallbackTemplate) ? fallbackTemplate : localTemplate;
+                _templatePath = localTemplate;
             }
         }
     }
