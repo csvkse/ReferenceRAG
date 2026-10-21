@@ -113,7 +113,8 @@ public class GpuOffloadCalculator : IGpuOffloadCalculator
         }
 
         // 2. 系统中未检测到支持硬件加速的显卡
-        if (!hwContext.HasNvidiaGpu && !hwContext.HasDirectX12)
+        var hasGpu = hwContext.HasNvidiaGpu || hwContext.HasDirectX12 || (hwContext.PrimaryGpu != null && hwContext.PrimaryGpu.Vendor != GpuVendor.Unknown);
+        if (!hasGpu)
         {
             return new GpuOffloadPlan
             {
@@ -122,7 +123,7 @@ public class GpuOffloadCalculator : IGpuOffloadCalculator
                 ModelSizeBytes = modelSize,
                 EstimatedVramNeededBytes = 0,
                 UsableVramBytes = 0,
-                Rationale = "未检测到支持的独立显卡，自动回退纯 CPU 运行模式"
+                Rationale = "未检测到支持的独立显卡或图形加速硬件，自动回退纯 CPU 运行模式"
             };
         }
 
@@ -146,6 +147,14 @@ public class GpuOffloadCalculator : IGpuOffloadCalculator
 
         // 5. 动态评估显存与层数
         var totalVram = hwContext.PrimaryGpu?.TotalVramBytes ?? 0;
+        var isIntegratedGpu = totalVram == 0 && hwContext.PrimaryGpu?.Vendor is GpuVendor.Intel or GpuVendor.Amd;
+
+        // 对于 Intel / AMD 核显 (共享系统内存，无独立物理显存)，按动态共享内存规划（预估 4GB 供核显 Vulkan 调度）
+        if (isIntegratedGpu)
+        {
+            totalVram = 4UL * 1024 * 1024 * 1024;
+        }
+
         var usableVram = totalVram > SystemVramReservedBytes ? totalVram - SystemVramReservedBytes : 0;
 
         // 估算上下文 KV 缓存显存需求（按每 1024 token 约 50MB 预估）
@@ -164,7 +173,9 @@ public class GpuOffloadCalculator : IGpuOffloadCalculator
                 ModelSizeBytes = modelSize,
                 EstimatedVramNeededBytes = fullOffloadNeeded,
                 UsableVramBytes = usableVram,
-                Rationale = $"GPU 显存充裕 (可用 {FormatBytes(usableVram)} >= 需求 {FormatBytes(fullOffloadNeeded)})，模型全部层 ({totalLayers}/{totalLayers}) 卸载至 GPU"
+                Rationale = isIntegratedGpu
+                    ? $"集成核显共享内存充裕 (可用 {FormatBytes(usableVram)} >= 需求 {FormatBytes(fullOffloadNeeded)})，模型全部层 ({totalLayers}/{totalLayers}) 卸载至核显 Vulkan 加速"
+                    : $"GPU 显存充裕 (可用 {FormatBytes(usableVram)} >= 需求 {FormatBytes(fullOffloadNeeded)})，模型全部层 ({totalLayers}/{totalLayers}) 卸载至 GPU"
             };
 
             _logger?.LogInformation("[GpuOffloadCalculator] 动态规划结果: {Rationale}", plan.Rationale);

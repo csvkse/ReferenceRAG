@@ -33,10 +33,27 @@ public class LlamaTelemetryStrategy : IModelTelemetryStrategy
         var modelName = !string.IsNullOrEmpty(llama?.ModelName) ? llama.ModelName : options.ModelName;
 
         var gpuLayers = llama?.GpuLayers ?? (options.UseCuda ? -1 : 0);
-        var isGpuMode = gpuLayers != 0 && hardwareContext.HasNvidiaGpu;
+        var isGpuMode = gpuLayers != 0 && (hardwareContext.HasNvidiaGpu || hardwareContext.PrimaryGpu != null);
 
         var totalVramGb = hardwareContext.PrimaryGpu?.TotalVramGb;
-        var gpuName = hardwareContext.PrimaryGpu?.Name ?? "NVIDIA GPU";
+        var gpuName = hardwareContext.PrimaryGpu?.Name ?? (hardwareContext.HasNvidiaGpu ? "NVIDIA GPU" : "GPU");
+
+        string executionDevice;
+        if (isGpuMode)
+        {
+            if (hardwareContext.HasNvidiaGpu)
+                executionDevice = $"NVIDIA CUDA 12 ({gpuName})";
+            else if (hardwareContext.PrimaryGpu?.Vendor == GpuVendor.Intel)
+                executionDevice = $"Intel Vulkan GPU ({gpuName})";
+            else if (hardwareContext.PrimaryGpu?.Vendor == GpuVendor.Amd)
+                executionDevice = $"AMD Vulkan GPU ({gpuName})";
+            else
+                executionDevice = $"Vulkan GPU ({gpuName})";
+        }
+        else
+        {
+            executionDevice = "CPU (llama.cpp 原生加速)";
+        }
 
         var hardware = new ModelHardwareTelemetry
         {
@@ -47,9 +64,7 @@ public class LlamaTelemetryStrategy : IModelTelemetryStrategy
             IsCudaAvailable = hardwareContext.IsCuda12Available,
             GpuLayers = gpuLayers,
             IsFullOffload = gpuLayers == -1 || (gpuLayers >= 28),
-            ExecutionDevice = isGpuMode
-                ? $"NVIDIA CUDA 12 ({gpuName})"
-                : "CPU (llama.cpp 原生加速)",
+            ExecutionDevice = executionDevice,
             OffloadDescription = isGpuMode
                 ? (gpuLayers == -1 ? "全量卸载到 GPU" : $"GPU 加速 (卸载 {gpuLayers} 层)")
                 : "纯 CPU 计算 (0 层 GPU Offload)"

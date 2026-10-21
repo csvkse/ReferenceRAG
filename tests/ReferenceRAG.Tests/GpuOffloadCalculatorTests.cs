@@ -276,4 +276,51 @@ public class GpuOffloadCalculatorTests
             }
         }
     }
+
+    [Fact]
+    public void CalculateOffload_WhenIntelIntegratedGpu_WithZeroVram_AllocatesSharedMemoryAndOffloadsToVulkan()
+    {
+        var mockDetector = new Mock<IHardwareDetector>();
+        var igpu = new GpuDeviceInfo
+        {
+            Name = "Intel(R) UHD Graphics 770",
+            Vendor = GpuVendor.Intel,
+            TotalVramBytes = 0UL, // 核显共享系统内存，无独立板载显存
+            IsPrimary = true
+        };
+        var context = new HardwareContext
+        {
+            GpuDevices = new List<GpuDeviceInfo> { igpu },
+            PrimaryGpu = igpu,
+            HasNvidiaGpu = false,
+            HasDirectX12 = false, // Linux 无 DirectX12
+            HasPortableCuda = false,
+            IsCuda12Available = false
+        };
+
+        // 500MB 的 bge-m3 或类似小型 GGUF 模型
+        var tempModel = Path.Combine(Path.GetTempPath(), "test_igpu_model_" + Guid.NewGuid().ToString("N") + ".gguf");
+        using (var fs = new FileStream(tempModel, FileMode.Create, FileAccess.Write))
+        {
+            fs.SetLength(500L * 1024 * 1024);
+        }
+
+        try
+        {
+            var calc = new GpuOffloadCalculator(mockDetector.Object);
+            var plan = calc.CalculateOffload(tempModel, context: context, useGpu: true);
+
+            // 核显应分配共享内存并支持全量卸载至核显 Vulkan
+            Assert.Equal(-1, plan.GpuLayers);
+            Assert.False(plan.IsCpuOnly);
+            Assert.Contains("核显 Vulkan 加速", plan.Rationale);
+        }
+        finally
+        {
+            if (File.Exists(tempModel))
+            {
+                try { File.Delete(tempModel); } catch { }
+            }
+        }
+    }
 }

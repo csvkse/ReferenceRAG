@@ -4,9 +4,13 @@
 
 ## [1.0.29] - 2026-10-22
 
-### Intel Linux 容器集成 OpenVINO 硬件加速执行提供程序与原生共享库
+### Intel Linux 容器集成 OpenVINO 硬件加速与 GGUF 核显 Vulkan 动态卸载
+- **GGUF 模型支持 Intel / AMD 核显 Vulkan GPU 卸载 (`GpuOffloadCalculator` & `LlamaTelemetryStrategy`)**：
+  - 解除此前层数规划器仅限 NVIDIA 独显的限制，识别 Intel / AMD 核显及所有支持图形加速的硬件；
+  - 针对共享系统内存的核显设备，自动分配动态共享显存规划额度（预估 4GB），使 GGUF 嵌入及重排模型可直接全量或部分卸载至核显 Vulkan 执行；
+  - 状态监控采集器支持明确标识并区分 `Intel Vulkan GPU`、`AMD Vulkan GPU` 与 `NVIDIA CUDA 12`；
 - **分阶段提取与全量集成 Linux 原生 OpenVINO 共享库 (`Dockerfile.intel`)**：
-  - 多阶段构建 `openvino-extract` 完整安装 `onnxruntime-openvino==1.24.1` 及其底层依赖包 `openvino`，完整提取 OpenVINO Execution Provider 动态库与 GPU 计算插件（`libonnxruntime.so`、`libonnxruntime_providers_openvino.so`、`libopenvino.so`、`libopenvino_intel_gpu_plugin.so`、`libtbb.so` 等）；
+  - 多阶段构建 `openvino-extract` 精准提取官方 `onnxruntime-openvino==1.24.1` 轮子内自包含的 OpenVINO 动态库与插件（`libonnxruntime.so`、`libonnxruntime_providers_openvino.so`、`libopenvino.so` 等）；
   - 全量覆盖至 `/app/runtimes/linux-x64/native/` 与 `/app/`，并在系统动态链接器配置 `/etc/ld.so.conf.d/openvino.conf` 中注册并执行 `ldconfig`；
   - 导出 `LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:/usr/lib/x86_64-linux-gnu"`，彻底打通 Intel 核显 / Arc 独显的 ONNX OpenVINO GPU 硬件加速；
 - **C# 托管层动态库绑定防护 (`OnnxExecutionProviderHelper`)**：

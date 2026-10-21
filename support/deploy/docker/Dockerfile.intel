@@ -91,11 +91,9 @@ COPY support/deploy/docker/docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
 COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
 
-# Overlay OpenVINO-enabled ONNX Runtime and OpenVINO shared libraries
+# Overlay OpenVINO-enabled ONNX Runtime shared libraries
 COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/onnxruntime/capi/ /app/runtimes/linux-x64/native/
 COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so* /app/
-COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/openvino/libs/ /app/runtimes/linux-x64/native/
-COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/openvino/libs/ /app/
 
 RUN echo "/app/runtimes/linux-x64/native" > /etc/ld.so.conf.d/openvino.conf \
     && echo "/app" >> /etc/ld.so.conf.d/openvino.conf \
