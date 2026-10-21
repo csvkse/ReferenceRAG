@@ -356,23 +356,89 @@ public class SourcesController : ControllerBase
             return BadRequest(new { error = $"源目录不存在或无法访问: {source.Path}" });
         }
 
-        var files = Directory.GetFiles(normalizedPath, "*.*", SearchOption.AllDirectories)
-            .Where(f => source.FilePatterns.Any(p => MatchesPattern(f, p)))
-            .Where(f => !source.ExcludeDirs.Any(d => f.Contains(d)))
+        var enumOptions = new EnumerationOptions
+        {
+            IgnoreInaccessible = true,
+            RecurseSubdirectories = true,
+            MatchCasing = MatchCasing.CaseInsensitive
+        };
+
+        var allDiskFiles = new List<string>();
+        try
+        {
+            allDiskFiles = Directory.EnumerateFiles(normalizedPath, "*", enumOptions).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "扫描目录失败: {Path}", normalizedPath);
+        }
+
+        var patterns = (source.FilePatterns?.Count > 0) ? source.FilePatterns : new List<string> { "*.md", "*.txt" };
+        var excludeDirs = source.ExcludeDirs ?? new List<string>();
+
+        var matchedFiles = allDiskFiles
+            .Where(f => patterns.Any(p => MatchesPattern(f, p)))
+            .Where(f => !excludeDirs.Any(d => f.Contains(d, StringComparison.OrdinalIgnoreCase)))
             .ToList();
+
+        var diskExtensions = allDiskFiles
+            .Select(f => Path.GetExtension(f).ToLowerInvariant())
+            .Where(ext => !string.IsNullOrEmpty(ext))
+            .GroupBy(ext => ext)
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        var matchedExtensions = matchedFiles
+            .Select(f => Path.GetExtension(f).ToLowerInvariant())
+            .Where(ext => !string.IsNullOrEmpty(ext))
+            .GroupBy(ext => ext)
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        long totalSize = 0;
+        var fileItems = new List<FileItem>();
+        foreach (var f in matchedFiles.Take(100))
+        {
+            long size = 0;
+            DateTime mod = DateTime.MinValue;
+            try
+            {
+                var fi = new System.IO.FileInfo(f);
+                size = fi.Length;
+                mod = fi.LastWriteTime;
+            }
+            catch { }
+            totalSize += size;
+            fileItems.Add(new FileItem
+            {
+                Path = Path.GetRelativePath(normalizedPath, f).Replace('\\', '/'),
+                Size = size,
+                Modified = mod
+            });
+        }
+
+        string msg;
+        if (allDiskFiles.Count == 0)
+        {
+            msg = "磁盘目录为空或服务没有读取权限 (请检查 Docker 目录映射与 Linux 权限)";
+        }
+        else if (matchedFiles.Count == 0)
+        {
+            var diskExtSummary = string.Join(", ", diskExtensions.Select(kv => $"{kv.Key} ({kv.Value}个)"));
+            msg = $"磁盘探查到 {allDiskFiles.Count} 个文件，但无文件匹配当前规则 [{string.Join(", ", patterns)}]！发现的文件扩展名: {diskExtSummary}。请编辑源规则以包含这些扩展名。";
+        }
+        else
+        {
+            msg = $"成功匹配到 {matchedFiles.Count} 个文件 (磁盘总文件数: {allDiskFiles.Count})";
+        }
 
         var result = new ScanResult
         {
-            TotalFiles = files.Count,
-            TotalSize = files.Sum(f => new System.IO.FileInfo(f).Length),
-            Extensions = files.GroupBy(f => Path.GetExtension(f).ToLower())
-                .ToDictionary(g => g.Key, g => g.Count()),
-            Files = files.Take(100).Select(f => new FileItem
-            {
-                Path = Path.GetRelativePath(normalizedPath, f),
-                Size = new System.IO.FileInfo(f).Length,
-                Modified = System.IO.File.GetLastWriteTime(f)
-            }).ToList()
+            TotalFiles = matchedFiles.Count,
+            TotalSize = totalSize,
+            Extensions = matchedExtensions,
+            Files = fileItems,
+            TotalDiskFiles = allDiskFiles.Count,
+            DiskExtensions = diskExtensions,
+            Message = msg
         };
 
         return Ok(result);
@@ -542,11 +608,26 @@ public class SourcesController : ControllerBase
 
     private static bool MatchesPattern(string filePath, string pattern)
     {
-        if (pattern.StartsWith("*."))
+        if (string.IsNullOrWhiteSpace(pattern)) return false;
+        var p = pattern.Trim();
+        if (p == "*" || p == "*.*") return true;
+
+        var fileName = Path.GetFileName(filePath);
+        if (p.StartsWith("*."))
         {
-            return filePath.EndsWith(pattern[1..], StringComparison.OrdinalIgnoreCase);
+            var ext = p[1..];
+            return fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase);
         }
-        return filePath.Contains(pattern, StringComparison.OrdinalIgnoreCase);
+        if (p.StartsWith('.'))
+        {
+            return fileName.EndsWith(p, StringComparison.OrdinalIgnoreCase);
+        }
+        if (p.Contains('*') || p.Contains('?'))
+        {
+            return System.IO.Enumeration.FileSystemName.MatchesSimpleExpression(p, fileName, ignoreCase: true);
+        }
+        return fileName.Equals(p, StringComparison.OrdinalIgnoreCase) ||
+               filePath.Contains(p, StringComparison.OrdinalIgnoreCase);
     }
 }
 
@@ -614,6 +695,9 @@ public class ScanResult
     public long TotalSize { get; set; }
     public Dictionary<string, int> Extensions { get; set; } = new();
     public List<FileItem> Files { get; set; } = new();
+    public int TotalDiskFiles { get; set; }
+    public Dictionary<string, int> DiskExtensions { get; set; } = new();
+    public string Message { get; set; } = "";
 }
 
 /// <summary>

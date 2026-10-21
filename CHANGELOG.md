@@ -2,6 +2,19 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.32] - 2026-10-22
+
+### 文件夹浏览文件透视、数据源物理磁盘深度探查与通配符索引引擎重构
+- **目录浏览接口支持文件透视与多维度统计 (`FileSystemController` & `FolderPickerModal`)**：
+  - `FileSystemController.Browse` (`GET /api/filesystem/browse`) 新增 `folderOnly` 控制参数（默认同时枚举文件与子目录），并返回目录数 (`TotalDirectories`)、文件数 (`TotalFiles`) 与文件总大小 (`TotalFilesSizeBytes`)；
+  - Web 文件夹选择器 (`FolderPickerModal.js`) 顶部新增“显示文件”开关（默认开启），在浏览任意目录时直观呈现文件列表（支持区分 `📁 文件夹` 与 `📄 文件`，展示格式化文件大小与修改时间），并在底部状态栏实时汇总当前目录包含的文件夹与文件数量，彻底打消对文件夹接口可读性的疑虑；
+- **修复规则匹配引擎缺陷与 Linux 容器多级权限阻断 (`IncrementalIndexStrategy`, `StartupSyncService`, `SourcesController`)**：
+  - **通配符规则匹配重构**：修复此前规则解析器遇到 `*.*`、`*`、`.ext` 或带空格规则（如 `" *.c, *.txt "`）时无法正确命中的 Bug；升级采用 .NET 现代高性能匹配 `FileSystemName.MatchesSimpleExpression`，严密支持全通配符、带点后缀及复杂正则模式；
+  - **跨平台安全枚举防护**：淘汰容易因 Linux 容器子目录权限受限抛出 `UnauthorizedAccessException` 导致整个扫描中断的 `Directory.GetFiles(..., SearchOption.AllDirectories)`，全面切换为非阻塞且忽略无权访问子路径的 `Directory.EnumerateFiles(..., new EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = true, MatchCasing = MatchCasing.CaseInsensitive })`；
+- **知识库源物理磁盘与规则匹配一键诊断探查器 (`SourcesController` & `Sources.js`)**：
+  - `SourcesController.Scan` (`GET /api/sources/{name}/scan`) 全面增强，同步诊断并返回物理磁盘实际存在的文件总数 (`TotalDiskFiles`)、物理磁盘扩展名分布统计 (`DiskExtensions`) 与规则过滤后的匹配文件列表 (`TotalFiles`)；
+  - 数据源管理页面（`Sources.js`）每行操作栏新增【探查】按钮，点击一键调出诊断弹窗，直观呈现磁盘底层实际存在哪些文件、后缀分布与规则命中情况，并在未匹配到文件时给出明确的操作排查指引。
+
 ## [1.0.31] - 2026-10-22
 
 ### 数据源文件规则自适应、未索引状态引导与硬件探针全面加固

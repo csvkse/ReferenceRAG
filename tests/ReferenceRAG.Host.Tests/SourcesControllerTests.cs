@@ -205,4 +205,61 @@ public class SourcesControllerTests : IDisposable
         Assert.Contains("*.md", source.FilePatterns);
         Assert.Contains("*.txt", source.FilePatterns);
     }
+
+    [Fact]
+    public void Scan_ReturnsPhysicalDiskDiagnostics_And_HandlesWildcardRules()
+    {
+        var sourceDir = Path.Combine(_tempDir, "ScanDiagDir");
+        Directory.CreateDirectory(sourceDir);
+        File.WriteAllText(Path.Combine(sourceDir, "doc1.txt"), "hello txt");
+        File.WriteAllText(Path.Combine(sourceDir, "doc2.md"), "hello md");
+        File.WriteAllText(Path.Combine(sourceDir, "code.c"), "int main(){}");
+
+        var initialConfig = new ObsidianRagConfig
+        {
+            Sources = new List<SourceFolder>
+            {
+                new()
+                {
+                    Name = "DiagSource",
+                    Path = sourceDir,
+                    Enabled = true,
+                    FilePatterns = new List<string> { "*.md" }
+                }
+            }
+        };
+
+        var (controller, configManager) = CreateController(initialConfig);
+
+        // 1. 规则为 *.md 时：磁盘 3 个文件，匹配 1 个，识别出所有磁盘扩展名
+        var scan1 = controller.Scan("DiagSource");
+        var ok1 = Assert.IsType<OkObjectResult>(scan1.Result);
+        var res1 = Assert.IsType<ScanResult>(ok1.Value);
+        Assert.Equal(3, res1.TotalDiskFiles);
+        Assert.Equal(1, res1.TotalFiles);
+        Assert.Contains(".c", res1.DiskExtensions.Keys);
+        Assert.Contains(".txt", res1.DiskExtensions.Keys);
+        Assert.Contains(".md", res1.DiskExtensions.Keys);
+
+        // 2. 规则为 *.* 通配符时：全部 3 个文件均被正确匹配
+        var source = configManager.Load().Sources.First(s => s.Name == "DiagSource");
+        source.FilePatterns = new List<string> { "*.*" };
+        configManager.Save(configManager.Load());
+
+        var scan2 = controller.Scan("DiagSource");
+        var ok2 = Assert.IsType<OkObjectResult>(scan2.Result);
+        var res2 = Assert.IsType<ScanResult>(ok2.Value);
+        Assert.Equal(3, res2.TotalDiskFiles);
+        Assert.Equal(3, res2.TotalFiles);
+
+        // 3. 规则为带空格的多个规则时 (如 " *.c ", " .txt ")：正确去除空格并匹配
+        source.FilePatterns = new List<string> { " *.c ", " .txt " };
+        configManager.Save(configManager.Load());
+
+        var scan3 = controller.Scan("DiagSource");
+        var ok3 = Assert.IsType<OkObjectResult>(scan3.Result);
+        var res3 = Assert.IsType<ScanResult>(ok3.Value);
+        Assert.Equal(3, res3.TotalDiskFiles);
+        Assert.Equal(2, res3.TotalFiles);
+    }
 }

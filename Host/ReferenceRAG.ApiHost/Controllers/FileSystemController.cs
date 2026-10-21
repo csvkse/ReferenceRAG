@@ -19,7 +19,7 @@ public sealed class FileSystemController : ControllerBase
 
     [HttpGet("browse")]
     [HttpGet]
-    public IActionResult Browse([FromQuery] string? path = null, [FromQuery] bool folderOnly = true)
+    public IActionResult Browse([FromQuery] string? path = null, [FromQuery] bool folderOnly = false)
     {
         string normalized;
         try
@@ -62,7 +62,10 @@ public sealed class FileSystemController : ControllerBase
                     Name: "磁盘",
                     IsRoot: true,
                     IsVirtualRoot: true,
-                    Entries: drives
+                    Entries: drives,
+                    TotalDirectories: drives.Count,
+                    TotalFiles: 0,
+                    TotalFilesSizeBytes: 0
                 ));
             }
             catch (Exception ex)
@@ -78,6 +81,9 @@ public sealed class FileSystemController : ControllerBase
         }
 
         var entries = new List<FileSystemEntry>();
+        int dirCount = 0;
+        int fileCount = 0;
+        long totalFilesSizeBytes = 0;
 
         try
         {
@@ -86,6 +92,7 @@ public sealed class FileSystemController : ControllerBase
             // 列出子目录
             foreach (var dir in dirInfo.EnumerateDirectories())
             {
+                dirCount++;
                 try
                 {
                     entries.Add(new FileSystemEntry(
@@ -106,10 +113,19 @@ public sealed class FileSystemController : ControllerBase
                 }
             }
 
-            // 如果不仅限文件夹，列出文件
-            if (!folderOnly)
+            // 列出文件或统计文件数
+            foreach (var file in dirInfo.EnumerateFiles())
             {
-                foreach (var file in dirInfo.EnumerateFiles())
+                fileCount++;
+                long fileSize = 0;
+                try
+                {
+                    fileSize = file.Length;
+                    totalFilesSizeBytes += fileSize;
+                }
+                catch { }
+
+                if (!folderOnly)
                 {
                     try
                     {
@@ -117,7 +133,7 @@ public sealed class FileSystemController : ControllerBase
                             Name: file.Name,
                             Path: file.FullName.Replace('\\', '/'),
                             IsDirectory: false,
-                            Size: file.Length,
+                            Size: fileSize,
                             Modified: file.LastWriteTimeUtc
                         ));
                     }
@@ -151,7 +167,10 @@ public sealed class FileSystemController : ControllerBase
             Name: FileBrowserPath.Name(normalized),
             IsRoot: FileBrowserPath.IsRoot(normalized),
             IsVirtualRoot: false,
-            Entries: sortedEntries
+            Entries: sortedEntries,
+            TotalDirectories: dirCount,
+            TotalFiles: fileCount,
+            TotalFilesSizeBytes: totalFilesSizeBytes
         ));
     }
 
@@ -210,7 +229,10 @@ public sealed record FileSystemBrowseResponse(
     string Name,
     bool IsRoot,
     bool IsVirtualRoot,
-    List<FileSystemEntry> Entries
+    List<FileSystemEntry> Entries,
+    int TotalDirectories = 0,
+    int TotalFiles = 0,
+    long TotalFilesSizeBytes = 0
 );
 
 public sealed record CreateDirectoryRequest(

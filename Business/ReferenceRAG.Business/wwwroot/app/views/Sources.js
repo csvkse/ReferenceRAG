@@ -132,7 +132,7 @@ const component = /*@__PURE__*/ _defineComponent({
             {
                 title: '操作',
                 key: 'actions',
-                width: 480,
+                width: 540,
                 render: (row) => h(NSpace, { size: 'small' }, {
                     default: () => [
                         h(NButton, {
@@ -140,6 +140,13 @@ const component = /*@__PURE__*/ _defineComponent({
                             onClick: () => handleEdit(row)
                         }, {
                             default: () => '编辑'
+                        }),
+                        h(NButton, {
+                            size: 'small',
+                            type: 'info',
+                            onClick: () => handleInspectSource(row)
+                        }, {
+                            default: () => '探查'
                         }),
                         h(NButton, {
                             size: 'small',
@@ -311,6 +318,51 @@ const component = /*@__PURE__*/ _defineComponent({
             }
             catch (error) {
                 message.error(error.response?.data?.error || error.message || '操作失败');
+            }
+        };
+        const handleInspectSource = async (source) => {
+            const loadingMsg = message.loading(`正在探查数据源 "${source.name}" 的物理文件...`, { duration: 0 });
+            try {
+                const response = await sourcesApi.scan(source.name);
+                loadingMsg.destroy();
+                const res = response.data;
+                const extSummary = Object.entries(res.extensions || {})
+                    .map(([ext, count]) => `${ext} (${count}个)`)
+                    .join(', ') || '无';
+                const diskExtSummary = Object.entries(res.diskExtensions || {})
+                    .map(([ext, count]) => `${ext} (${count}个)`)
+                    .join(', ') || '无';
+
+                const fileItems = (res.files || []).slice(0, 30).map(f =>
+                    h('div', { style: 'font-size: 12px; display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px dashed rgba(128,128,128,0.15);' }, [
+                        h('span', { style: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px;' }, `📄 ${f.path}`),
+                        h('span', { style: 'color: #888; margin-left: 8px;' }, `${(f.size / 1024).toFixed(1)} KB`)
+                    ])
+                );
+
+                dialog.info({
+                    title: `物理探查报告 - ${source.name}`,
+                    style: { width: '620px', maxWidth: '92vw' },
+                    content: () => h('div', { style: 'display: flex; flex-direction: column; gap: 10px; margin-top: 8px;' }, [
+                        h('div', { style: 'background: rgba(128,128,128,0.06); padding: 8px 12px; border-radius: 6px; font-size: 13px;' }, [
+                            h('div', `📂 物理路径: ${source.path}`),
+                            h('div', `🎯 匹配规则: ${Array.isArray(source.filePatterns) ? source.filePatterns.join(', ') : (source.filePatterns || '*.md, *.txt')}`),
+                            h('div', { style: 'margin-top: 4px; font-weight: bold; color: ' + (res.totalFiles > 0 ? '#18a058' : '#d03050') }, `📊 ${res.message || (res.totalFiles + ' 个文件匹配')}`)
+                        ]),
+                        h('div', { style: 'font-size: 12px;' }, [
+                            h('div', `磁盘总文件数: ${res.totalDiskFiles ?? res.totalFiles} 个 (包含的所有后缀: ${diskExtSummary})`),
+                            h('div', `规则匹配文件数: ${res.totalFiles} 个 (匹配的后缀: ${extSummary})`)
+                        ]),
+                        res.files && res.files.length > 0 ? h('div', [
+                            h('div', { style: 'font-size: 12px; font-weight: bold; margin-bottom: 4px;' }, `匹配文件预览 (前 ${fileItems.length} 个):`),
+                            h('div', { style: 'max-height: 200px; overflow-y: auto; background: rgba(128,128,128,0.04); padding: 6px 10px; border-radius: 4px;' }, fileItems)
+                        ]) : null
+                    ]),
+                    positiveText: '关闭'
+                });
+            } catch (err) {
+                loadingMsg.destroy();
+                message.error(err.response?.data?.error || err.message || '探查失败');
             }
         };
         const handleEdit = (source) => {
@@ -598,7 +650,7 @@ const component = /*@__PURE__*/ _defineComponent({
             loadVectorIndex(true);
             loadChunkingConfig();
         });
-        const __returned__ = { isDesktop, selectDirectory, showFolderPicker, handleFolderSelected, message, dialog, formRef, loading, creating, sources, editingSource, editingName, loadingIndex, rebuilding, cleaning, deletingAll, quickIndexing, vectorOnlyIndexing, sourceQuickIndexing, sourceVectorOnlyIndexing, sourceRechunking, rechunkingAll, isGlobalQuickIndexing, isGlobalRechunking, isGlobalVectorOnlyIndexing, isGlobalRebuilding, indexSummary, chunkingConfig, loadChunkingConfig, newSource, formRules, columns, indexColumns, loadSources, loadVectorIndex, handleCreateSource, resetForm, handleToggle, handleEdit, handleReindex, handleRechunkSource, handleRechunkAll, handleDelete, handleQuickIndexAll, handleQuickIndexSource, handleVectorOnlyIndexAll, handleVectorOnlyIndexSource, handleRebuildAll, handleCleanup, handleDeleteAllIndex, handleDeleteModelIndex, get FolderPickerModal() { return FolderPickerModal; }, get NButton() { return NButton; }, get NSpace() { return NSpace; }, get NTag() { return NTag; }, get NPopconfirm() { return NPopconfirm; }, get NInput() { return NInput; }, get NInputGroup() { return NInputGroup; } };
+        const __returned__ = { isDesktop, selectDirectory, showFolderPicker, handleFolderSelected, message, dialog, formRef, loading, creating, sources, editingSource, editingName, loadingIndex, rebuilding, cleaning, deletingAll, quickIndexing, vectorOnlyIndexing, sourceQuickIndexing, sourceVectorOnlyIndexing, sourceRechunking, rechunkingAll, isGlobalQuickIndexing, isGlobalRechunking, isGlobalVectorOnlyIndexing, isGlobalRebuilding, indexSummary, chunkingConfig, loadChunkingConfig, newSource, formRules, columns, indexColumns, loadSources, loadVectorIndex, handleCreateSource, resetForm, handleToggle, handleEdit, handleInspectSource, handleReindex, handleRechunkSource, handleRechunkAll, handleDelete, handleQuickIndexAll, handleQuickIndexSource, handleVectorOnlyIndexAll, handleVectorOnlyIndexSource, handleRebuildAll, handleCleanup, handleDeleteAllIndex, handleDeleteModelIndex, get FolderPickerModal() { return FolderPickerModal; }, get NButton() { return NButton; }, get NSpace() { return NSpace; }, get NTag() { return NTag; }, get NPopconfirm() { return NPopconfirm; }, get NInput() { return NInput; }, get NInputGroup() { return NInputGroup; } };
         return __returned__;
     }
 });

@@ -128,4 +128,47 @@ public sealed class FileSystemControllerTests
             }
         }
     }
+
+    [Fact]
+    public void FileSystemController_Browse_WithFiles_ReturnsCorrectStatsAndEntries()
+    {
+        var controller = new FileSystemController(NullLogger<FileSystemController>.Instance);
+        var tempParent = Path.Combine(Path.GetTempPath(), "ReferenceRAG_Browse_Stats_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempParent);
+        Directory.CreateDirectory(Path.Combine(tempParent, "Sub1"));
+        Directory.CreateDirectory(Path.Combine(tempParent, "Sub2"));
+        File.WriteAllText(Path.Combine(tempParent, "file1.txt"), "hello");
+        File.WriteAllText(Path.Combine(tempParent, "file2.md"), "world");
+
+        try
+        {
+            // folderOnly = false: 返回目录和文件，并包含统计
+            var resultAll = controller.Browse(tempParent, folderOnly: false) as OkObjectResult;
+            Assert.NotNull(resultAll);
+            var respAll = resultAll.Value as FileSystemBrowseResponse;
+            Assert.NotNull(respAll);
+            Assert.Equal(2, respAll.TotalDirectories);
+            Assert.Equal(2, respAll.TotalFiles);
+            Assert.Equal(4, respAll.Entries.Count);
+            Assert.Contains(respAll.Entries, e => e.IsDirectory && e.Name == "Sub1");
+            Assert.Contains(respAll.Entries, e => !e.IsDirectory && e.Name == "file1.txt");
+
+            // folderOnly = true: Entries 仅包含目录，但统计包含文件
+            var resultFolders = controller.Browse(tempParent, folderOnly: true) as OkObjectResult;
+            Assert.NotNull(resultFolders);
+            var respFolders = resultFolders.Value as FileSystemBrowseResponse;
+            Assert.NotNull(respFolders);
+            Assert.Equal(2, respFolders.TotalDirectories);
+            Assert.Equal(2, respFolders.TotalFiles);
+            Assert.Equal(2, respFolders.Entries.Count);
+            Assert.All(respFolders.Entries, e => Assert.True(e.IsDirectory));
+        }
+        finally
+        {
+            if (Directory.Exists(tempParent))
+            {
+                Directory.Delete(tempParent, true);
+            }
+        }
+    }
 }

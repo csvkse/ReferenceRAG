@@ -50,9 +50,18 @@ public class IncrementalIndexStrategy : IIndexExecutionStrategy
                 var scanDir = Directory.Exists(normalizedSourcePath) ? normalizedSourcePath : source.Path;
                 try
                 {
-                    var files = Directory.GetFiles(scanDir, "*.*", SearchOption.AllDirectories)
-                        .Where(f => source.FilePatterns.Any(p => MatchesPattern(f, p)))
-                        .Where(f => !source.ExcludeDirs.Any(d => f.Contains(d)));
+                    var enumOptions = new EnumerationOptions
+                    {
+                        IgnoreInaccessible = true,
+                        RecurseSubdirectories = true,
+                        MatchCasing = MatchCasing.CaseInsensitive
+                    };
+                    var patterns = (source.FilePatterns?.Count > 0) ? source.FilePatterns : new List<string> { "*.md", "*.txt" };
+                    var excludeDirs = source.ExcludeDirs ?? new List<string>();
+
+                    var files = Directory.EnumerateFiles(scanDir, "*", enumOptions)
+                        .Where(f => patterns.Any(p => MatchesPattern(f, p)))
+                        .Where(f => !excludeDirs.Any(d => f.Contains(d, StringComparison.OrdinalIgnoreCase)));
                     allFiles.AddRange(files);
                 }
                 catch (Exception ex)
@@ -271,8 +280,25 @@ public class IncrementalIndexStrategy : IIndexExecutionStrategy
 
     private static bool MatchesPattern(string filePath, string pattern)
     {
-        if (pattern.StartsWith("*."))
-            return filePath.EndsWith(pattern[1..], StringComparison.OrdinalIgnoreCase);
-        return filePath.Contains(pattern, StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(pattern)) return false;
+        var p = pattern.Trim();
+        if (p == "*" || p == "*.*") return true;
+
+        var fileName = Path.GetFileName(filePath);
+        if (p.StartsWith("*."))
+        {
+            var ext = p[1..];
+            return fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase);
+        }
+        if (p.StartsWith('.'))
+        {
+            return fileName.EndsWith(p, StringComparison.OrdinalIgnoreCase);
+        }
+        if (p.Contains('*') || p.Contains('?'))
+        {
+            return System.IO.Enumeration.FileSystemName.MatchesSimpleExpression(p, fileName, ignoreCase: true);
+        }
+        return fileName.Equals(p, StringComparison.OrdinalIgnoreCase) ||
+               filePath.Contains(p, StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -1,5 +1,5 @@
 import { defineComponent as _defineComponent, ref, computed, watch, onMounted } from 'vue';
-import { NModal, NCard, NSpace, NButton, NIcon, NInput, NAlert, NSpin, NText, NEmpty, NTag, useMessage } from 'naive-ui';
+import { NModal, NCard, NSpace, NButton, NIcon, NInput, NAlert, NSpin, NText, NEmpty, NTag, NCheckbox, useMessage } from 'naive-ui';
 import { RefreshOutline } from '@vicons/ionicons5';
 import { fileSystemApi } from '/app/api/index.js';
 
@@ -42,18 +42,25 @@ const component = /*@__PURE__*/ _defineComponent({
         const showNewFolderInput = ref(false);
         const newFolderName = ref('');
         const creatingFolder = ref(false);
+        const showFiles = ref(true);
+        const totalDirectories = ref(0);
+        const totalFiles = ref(0);
+        const totalFilesSizeBytes = ref(0);
 
         const loadDirectory = async (target = currentPath.value) => {
             loading.value = true;
             error.value = '';
             try {
-                const response = await fileSystemApi.browse(target, true);
+                const response = await fileSystemApi.browse(target, !showFiles.value);
                 const data = response.data;
                 if (data && Array.isArray(data.entries)) {
                     entries.value = data.entries;
                     currentPath.value = data.path;
                     virtualRoot.value = data.isVirtualRoot === true;
                     breadcrumbs.value = buildFileBreadcrumbs(data.path);
+                    totalDirectories.value = data.totalDirectories ?? data.entries.filter(e => e.isDirectory).length;
+                    totalFiles.value = data.totalFiles ?? data.entries.filter(e => !e.isDirectory).length;
+                    totalFilesSizeBytes.value = data.totalFilesSizeBytes ?? 0;
                     return;
                 }
                 error.value = '目录列表数据格式无效';
@@ -137,6 +144,14 @@ const component = /*@__PURE__*/ _defineComponent({
             return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
         };
 
+        const formatBytes = (bytes) => {
+            if (!bytes || bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        };
+
         watch(() => props.show, (newVal) => {
             if (newVal) {
                 showNewFolderInput.value = false;
@@ -165,6 +180,10 @@ const component = /*@__PURE__*/ _defineComponent({
             showNewFolderInput,
             newFolderName,
             creatingFolder,
+            showFiles,
+            totalDirectories,
+            totalFiles,
+            totalFilesSizeBytes,
             loadDirectory,
             goPath,
             goUp,
@@ -175,6 +194,7 @@ const component = /*@__PURE__*/ _defineComponent({
             cancelCreateFolder,
             handleCreateFolder,
             formatTime,
+            formatBytes,
             get RefreshOutline() { return RefreshOutline; },
             get NModal() { return NModal; },
             get NCard() { return NCard; },
@@ -186,12 +206,13 @@ const component = /*@__PURE__*/ _defineComponent({
             get NSpin() { return NSpin; },
             get NText() { return NText; },
             get NEmpty() { return NEmpty; },
-            get NTag() { return NTag; }
+            get NTag() { return NTag; },
+            get NCheckbox() { return NCheckbox; }
         };
         return __returned__;
     }
 });
 
-component.template = "\n  <n-modal\n    :show=\"show\"\n    preset=\"card\"\n    :title=\"title\"\n    :style=\"{ width: '750px', maxWidth: '92vw' }\"\n    :segmented=\"{ content: 'soft', footer: 'soft' }\"\n    :mask-closable=\"false\"\n    @update:show=\"close\"\n  >\n    <template #header-extra>\n      <n-space align=\"center\" :size=\"8\">\n        <n-button size=\"tiny\" secondary @click=\"loadDirectory(currentPath)\">\n          <template #icon><n-icon :component=\"RefreshOutline\" /></template>\n          刷新\n        </n-button>\n      </n-space>\n    </template>\n\n    <n-space vertical :size=\"12\">\n      <div style=\"display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; background: rgba(128,128,128,0.08); padding: 8px 12px; border-radius: 6px;\">\n        <n-space align=\"center\" :size=\"6\" style=\"flex: 1; min-width: 200px; overflow-x: auto;\">\n          <n-button size=\"tiny\" :disabled=\"!breadcrumbs.length || breadcrumbs.length <= 1\" @click=\"goUp\">\n            ⬆ 上一级\n          </n-button>\n          <div style=\"display: flex; align-items: center; gap: 4px; overflow-x: auto; white-space: nowrap; max-width: 520px;\">\n            <template v-for=\"(crumb, idx) in breadcrumbs\" :key=\"crumb.path\">\n              <span v-if=\"idx > 0\" style=\"color: #888; font-size: 12px;\">/</span>\n              <n-button text size=\"tiny\" type=\"primary\" @click=\"goPath(crumb.path)\">\n                {{ crumb.name }}\n              </n-button>\n            </template>\n          </div>\n        </n-space>\n\n        <n-space align=\"center\" :size=\"6\">\n          <n-button v-if=\"!showNewFolderInput\" size=\"tiny\" secondary type=\"info\" :disabled=\"virtualRoot\" @click=\"showNewFolderInput = true\">\n            + 新建文件夹\n          </n-button>\n        </n-space>\n      </div>\n\n      <div v-if=\"showNewFolderInput\" style=\"display: flex; align-items: center; gap: 8px; background: rgba(32,128,240,0.08); padding: 8px 12px; border-radius: 6px;\">\n        <span style=\"font-size: 12px; white-space: nowrap;\">文件夹名称:</span>\n        <n-input v-model:value=\"newFolderName\" size=\"small\" placeholder=\"输入新文件夹名称\" @keyup.enter=\"handleCreateFolder\" style=\"flex: 1;\" />\n        <n-button size=\"small\" type=\"primary\" :loading=\"creatingFolder\" @click=\"handleCreateFolder\">确定</n-button>\n        <n-button size=\"small\" @click=\"cancelCreateFolder\">取消</n-button>\n      </div>\n\n      <n-alert v-if=\"error\" type=\"error\" :show-icon=\"true\" closable @close=\"error = ''\">\n        {{ error }}\n      </n-alert>\n\n      <n-spin :show=\"loading\">\n        <div style=\"max-height: 360px; min-height: 200px; overflow-y: auto; border: 1px solid rgba(128,128,128,0.2); border-radius: 6px;\">\n          <table style=\"width: 100%; border-collapse: collapse; font-size: 13px;\">\n            <thead>\n              <tr style=\"border-bottom: 1px solid rgba(128,128,128,0.2); background: rgba(128,128,128,0.05); text-align: left;\">\n                <th style=\"padding: 8px 12px;\">名称</th>\n                <th style=\"padding: 8px 12px; width: 160px;\">修改时间</th>\n                <th style=\"padding: 8px 12px; width: 80px; text-align: right;\">操作</th>\n              </tr>\n            </thead>\n            <tbody>\n              <tr v-if=\"!entries.length && !loading\">\n                <td colspan=\"3\" style=\"text-align: center; padding: 32px; color: #888;\">\n                  {{ virtualRoot ? '未检测到可用磁盘' : '此目录下没有子文件夹' }}\n                </td>\n              </tr>\n              <tr\n                v-for=\"entry in entries\"\n                :key=\"entry.path\"\n                style=\"border-bottom: 1px solid rgba(128,128,128,0.1); cursor: pointer; transition: background 0.2s;\"\n                @click=\"openEntry(entry)\"\n              >\n                <td style=\"padding: 8px 12px; display: flex; align-items: center; gap: 8px;\">\n                  <span>📁</span>\n                  <span style=\"font-weight: 500;\">{{ entry.name }}</span>\n                </td>\n                <td style=\"padding: 8px 12px; color: #888; font-size: 12px;\">\n                  {{ formatTime(entry.modified) }}\n                </td>\n                <td style=\"padding: 8px 12px; text-align: right;\">\n                  <n-button size=\"tiny\" secondary type=\"success\" @click.stop=\"selectEntry(entry)\">\n                    选择\n                  </n-button>\n                </td>\n              </tr>\n            </tbody>\n          </table>\n        </div>\n      </n-spin>\n    </n-space>\n\n    <template #footer>\n      <div style=\"display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 12px;\">\n        <n-text depth=\"3\" style=\"font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 450px;\" :title=\"currentPath\">\n          当前路径：{{ currentPath || '/' }}\n        </n-text>\n        <n-space :size=\"8\">\n          <n-button @click=\"close\">取消</n-button>\n          <n-button type=\"primary\" :disabled=\"loading || virtualRoot || !currentPath || currentPath === '/'\" @click=\"confirmCurrent\">\n            选择当前文件夹\n          </n-button>\n        </n-space>\n      </div>\n    </template>\n  </n-modal>\n";
+component.template = "\n  <n-modal\n    :show=\"show\"\n    preset=\"card\"\n    :title=\"title\"\n    :style=\"{ width: '780px', maxWidth: '94vw' }\"\n    :segmented=\"{ content: 'soft', footer: 'soft' }\"\n    :mask-closable=\"false\"\n    @update:show=\"close\"\n  >\n    <template #header-extra>\n      <n-space align=\"center\" :size=\"12\">\n        <n-checkbox v-model:checked=\"showFiles\" size=\"small\" @update:checked=\"() => loadDirectory(currentPath)\">\n          显示文件\n        </n-checkbox>\n        <n-button size=\"tiny\" secondary @click=\"loadDirectory(currentPath)\">\n          <template #icon><n-icon :component=\"RefreshOutline\" /></template>\n          刷新\n        </n-button>\n      </n-space>\n    </template>\n\n    <n-space vertical :size=\"12\">\n      <div style=\"display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; background: rgba(128,128,128,0.08); padding: 8px 12px; border-radius: 6px;\">\n        <n-space align=\"center\" :size=\"6\" style=\"flex: 1; min-width: 200px; overflow-x: auto;\">\n          <n-button size=\"tiny\" :disabled=\"!breadcrumbs.length || breadcrumbs.length <= 1\" @click=\"goUp\">\n            ⬆ 上一级\n          </n-button>\n          <div style=\"display: flex; align-items: center; gap: 4px; overflow-x: auto; white-space: nowrap; max-width: 520px;\">\n            <template v-for=\"(crumb, idx) in breadcrumbs\" :key=\"crumb.path\">\n              <span v-if=\"idx > 0\" style=\"color: #888; font-size: 12px;\">/</span>\n              <n-button text size=\"tiny\" type=\"primary\" @click=\"goPath(crumb.path)\">\n                {{ crumb.name }}\n              </n-button>\n            </template>\n          </div>\n        </n-space>\n\n        <n-space align=\"center\" :size=\"6\">\n          <n-button v-if=\"!showNewFolderInput\" size=\"tiny\" secondary type=\"info\" :disabled=\"virtualRoot\" @click=\"showNewFolderInput = true\">\n            + 新建文件夹\n          </n-button>\n        </n-space>\n      </div>\n\n      <div v-if=\"showNewFolderInput\" style=\"display: flex; align-items: center; gap: 8px; background: rgba(32,128,240,0.08); padding: 8px 12px; border-radius: 6px;\">\n        <span style=\"font-size: 12px; white-space: nowrap;\">文件夹名称:</span>\n        <n-input v-model:value=\"newFolderName\" size=\"small\" placeholder=\"输入新文件夹名称\" @keyup.enter=\"handleCreateFolder\" style=\"flex: 1;\" />\n        <n-button size=\"small\" type=\"primary\" :loading=\"creatingFolder\" @click=\"handleCreateFolder\">确定</n-button>\n        <n-button size=\"small\" @click=\"cancelCreateFolder\">取消</n-button>\n      </div>\n\n      <n-alert v-if=\"error\" type=\"error\" :show-icon=\"true\" closable @close=\"error = ''\">\n        {{ error }}\n      </n-alert>\n\n      <n-spin :show=\"loading\">\n        <div style=\"max-height: 380px; min-height: 200px; overflow-y: auto; border: 1px solid rgba(128,128,128,0.2); border-radius: 6px;\">\n          <table style=\"width: 100%; border-collapse: collapse; font-size: 13px;\">\n            <thead>\n              <tr style=\"border-bottom: 1px solid rgba(128,128,128,0.2); background: rgba(128,128,128,0.05); text-align: left;\">\n                <th style=\"padding: 8px 12px;\">名称</th>\n                <th style=\"padding: 8px 12px; width: 90px;\">大小</th>\n                <th style=\"padding: 8px 12px; width: 150px;\">修改时间</th>\n                <th style=\"padding: 8px 12px; width: 75px; text-align: right;\">操作</th>\n              </tr>\n            </thead>\n            <tbody>\n              <tr v-if=\"!entries.length && !loading\">\n                <td colspan=\"4\" style=\"text-align: center; padding: 32px; color: #888;\">\n                  {{ virtualRoot ? '未检测到可用磁盘' : '此目录为空（无文件和子目录）' }}\n                </td>\n              </tr>\n              <tr\n                v-for=\"entry in entries\"\n                :key=\"entry.path\"\n                :style=\"{\n                  borderBottom: '1px solid rgba(128,128,128,0.1)',\n                  cursor: entry.isDirectory ? 'pointer' : 'default',\n                  transition: 'background 0.2s',\n                  background: entry.isDirectory ? 'transparent' : 'rgba(128,128,128,0.02)'\n                }\"\n                @click=\"openEntry(entry)\"\n              >\n                <td style=\"padding: 8px 12px; display: flex; align-items: center; gap: 8px;\">\n                  <span>{{ entry.isDirectory ? '📁' : '📄' }}</span>\n                  <span :style=\"{ fontWeight: entry.isDirectory ? '500' : 'normal', color: entry.isDirectory ? 'inherit' : 'rgba(128,128,128,0.85)' }\">{{ entry.name }}</span>\n                </td>\n                <td style=\"padding: 8px 12px; color: #888; font-size: 12px;\">\n                  {{ entry.isDirectory ? '-' : formatBytes(entry.size) }}\n                </td>\n                <td style=\"padding: 8px 12px; color: #888; font-size: 12px;\">\n                  {{ formatTime(entry.modified) }}\n                </td>\n                <td style=\"padding: 8px 12px; text-align: right;\">\n                  <n-button v-if=\"entry.isDirectory\" size=\"tiny\" secondary type=\"success\" @click.stop=\"selectEntry(entry)\">\n                    选择\n                  </n-button>\n                  <n-tag v-else size=\"tiny\" :bordered=\"false\" depth=\"3\">文件</n-tag>\n                </td>\n              </tr>\n            </tbody>\n          </table>\n        </div>\n      </n-spin>\n    </n-space>\n\n    <template #footer>\n      <div style=\"display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 12px;\">\n        <n-text depth=\"3\" style=\"font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 450px;\" :title=\"currentPath\">\n          当前路径：{{ currentPath || '/' }} <span v-if=\"!virtualRoot\">({{ totalDirectories }} 文件夹，{{ totalFiles }} 文件<span v-if=\"totalFilesSizeBytes > 0\">，共 {{ formatBytes(totalFilesSizeBytes) }}</span>)</span>\n        </n-text>\n        <n-space :size=\"8\">\n          <n-button @click=\"close\">取消</n-button>\n          <n-button type=\"primary\" :disabled=\"loading || virtualRoot || !currentPath || currentPath === '/'\" @click=\"confirmCurrent\">\n            选择当前文件夹\n          </n-button>\n        </n-space>\n      </div>\n    </template>\n  </n-modal>\n";
 
 export default component;
