@@ -2,6 +2,24 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.30] - 2026-10-22
+
+### Web 模式文件夹选择器与 OpenVINO 硬件加速原生入口根治修复
+- **Web 模式交互式文件夹选择器 (`FolderPickerModal` & `FileSystemController`)**：
+  - 参考 `WebToolForLinux` 设计，优化 Web/Docker 容器部署模式下的知识库目录录入体验，彻底取代纯手动打字输入路径；
+  - 后端提供安全受控的目录浏览与新建目录接口 (`GET /api/filesystem/browse`、`POST /api/filesystem/mkdir`)，支持软链接防越界、跨平台合法字符校验与根驱动器隔离；
+  - 前端以模态框无缝呈现面包屑导航、快捷挂载点选择（如 `/app/data`、`/mnt`、`/media`、`/`）、子文件夹动态穿透与即时新建文件夹，选择后智能截取末级目录名自动填充知识库名称；
+  - 桌面客户端（Desktop）继续保持调用 Windows 宿主原生文件夹选择对话框，架构解耦双模自适应；
+- **根治 OpenVINO `EntryPointNotFoundException` 符号缺失与原生库竞争 (`Dockerfile.intel`)**：
+  - **根本诱因剖析**：`Microsoft.ML.OnnxRuntime` NuGet 包在发布期生成的 CPU 版 `libonnxruntime.so` 残留于 `runtimes/linux-x64/native/` 目录；而 `onnxruntime-openvino` 轮子内的共享库为版本化 soname 文件（`libonnxruntime.so.1.24.1`），覆盖复制时未替换未版本化的同名 CPU 库，导致 .NET P/Invoke 默认加载了 CPU 库并抛出找不到 `OrtSessionOptionsAppendExecutionProvider_OpenVINO` 入口；
+  - **全量依赖提取与构建期断言**：在 `openvino-extract` 阶段全量抓取 site-packages 及其全部依赖（`libtbb.so`、`libopenvino.so`、`libonnxruntime_providers_openvino.so` 等），建立严格符号链接 `libonnxruntime.so -> libonnxruntime.so.1.*`；
+  - 引入构建期 Python `ctypes.CDLL` 导出符号硬断言，若缺失 `OrtSessionOptionsAppendExecutionProvider_OpenVINO` 立即阻断镜像构建；
+  - 在 `dotnet publish` 与运行时容器初始化阶段彻底删除 NuGet CPU-only 库残余，确保容器内仅存在 OpenVINO 硬件加速版；
+- **C# 托管层动态解析器早期介入与符号强校验 (`OnnxExecutionProviderHelper` & `Program.cs`)**：
+  - 在 `Program.cs` 入口第一行显式调用 `InitializeNativeResolver()`，确保在任何 ONNX Runtime 静态构造器或依赖注入服务之前注册 `NativeLibrary.SetDllImportResolver`；
+  - 原生解析器在加载 `libonnxruntime.so` 候选路径时，主动调用 `NativeLibrary.TryGetExport` 校验是否存在 `OrtSessionOptionsAppendExecutionProvider_OpenVINO`；若候选为未包含 OpenVINO 符号的普通库则自动跳过并寻找真正的硬件加速库；
+  - 在 Linux 容器环境下主动预热加载 OpenVINO 基础依赖组件（`libtbb`、`libopenvino`、`libonnxruntime_providers_openvino`），彻底杜绝动态链接器链式解析缺失。
+
 ## [1.0.29] - 2026-10-22
 
 ### Intel Linux 容器集成 OpenVINO 硬件加速与 GGUF 核显 Vulkan 动态卸载

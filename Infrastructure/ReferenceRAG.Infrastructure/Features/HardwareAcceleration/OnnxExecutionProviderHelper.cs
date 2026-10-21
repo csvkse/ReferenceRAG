@@ -12,48 +12,176 @@ namespace ReferenceRAG.Core.Features.HardwareAcceleration;
 public static class OnnxExecutionProviderHelper
 {
     private static readonly ILogger _logger = Core.Helpers.StaticLogger.GetLogger("OnnxExecutionProviderHelper");
+    private static bool _resolverInitialized = false;
+    private static readonly object _resolverLock = new();
+
+    /// <summary>
+    /// 诊断信息：记录最后一次解析或绑定的原生库路径
+    /// </summary>
+    public static string? LastLoadedOnnxPath { get; private set; }
+
+    /// <summary>
+    /// 诊断信息：最后一次绑定的原生库是否检测到 OpenVINO 导出函数
+    /// </summary>
+    public static bool LastLoadedHasOpenVinoExport { get; private set; }
 
     static OnnxExecutionProviderHelper()
     {
-        try
-        {
-            // 为 Microsoft.ML.OnnxRuntime 程序集注册原生库解析器，确保在 Linux/Windows 容器或发布环境中
-            // 优先直接绑定本地 runtimes 目录下的 libonnxruntime / onnxruntime.dll，
-            // 彻底杜绝全局环境标准 CPU 库抢占导致硬件加速入口缺失 (如 OrtSessionOptionsAppendExecutionProvider_OpenVINO)
-            NativeLibrary.SetDllImportResolver(typeof(SessionOptions).Assembly, (libraryName, assembly, searchPath) =>
-            {
-                if (string.Equals(libraryName, "onnxruntime", StringComparison.OrdinalIgnoreCase))
-                {
-                    var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-                    var candidates = isWindows
-                        ? new[]
-                        {
-                            Path.Combine(AppContext.BaseDirectory, "runtimes", "win-x64", "native", "onnxruntime.dll"),
-                            Path.Combine(AppContext.BaseDirectory, "onnxruntime.dll"),
-                            Path.Combine(Directory.GetCurrentDirectory(), "onnxruntime.dll")
-                        }
-                        : new[]
-                        {
-                            Path.Combine(AppContext.BaseDirectory, "runtimes", "linux-x64", "native", "libonnxruntime.so"),
-                            Path.Combine(AppContext.BaseDirectory, "libonnxruntime.so"),
-                            Path.Combine(Directory.GetCurrentDirectory(), "runtimes", "linux-x64", "native", "libonnxruntime.so"),
-                            Path.Combine(Directory.GetCurrentDirectory(), "libonnxruntime.so")
-                        };
+        InitializeNativeResolver();
+    }
 
-                    foreach (var path in candidates)
+    /// <summary>
+    /// 主动初始化原生库解析器。可在应用程序启动之初显式调用，确保先于任何 ONNX Runtime 类型初始化
+    /// </summary>
+    public static void InitializeNativeResolver()
+    {
+        if (_resolverInitialized) return;
+        lock (_resolverLock)
+        {
+            if (_resolverInitialized) return;
+            try
+            {
+                // 为 Microsoft.ML.OnnxRuntime 程序集注册原生库解析器，确保在 Linux/Windows 容器或发布环境中
+                // 优先直接绑定本地 runtimes 目录下的 libonnxruntime / onnxruntime.dll，
+                // 彻底杜绝全局环境标准 CPU 库抢占导致硬件加速入口缺失 (如 OrtSessionOptionsAppendExecutionProvider_OpenVINO)
+                NativeLibrary.SetDllImportResolver(typeof(SessionOptions).Assembly, ResolveOnnxNativeLibrary);
+                _logger.LogInformation("ONNX Runtime 原生库解析器已成功注册");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "配置 ONNX Runtime 原生库解析器被跳过 (可能已注册)");
+            }
+            finally
+            {
+                _resolverInitialized = true;
+            }
+        }
+    }
+
+    private static IntPtr ResolveOnnxNativeLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
+    {
+        if (!string.Equals(libraryName, "onnxruntime", StringComparison.OrdinalIgnoreCase))
+        {
+            return IntPtr.Zero;
+        }
+
+        var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        var baseDir = AppContext.BaseDirectory;
+        var currentDir = Directory.GetCurrentDirectory();
+
+        var candidatePaths = new List<string>();
+
+        if (isWindows)
+        {
+            candidatePaths.Add(Path.Combine(baseDir, "runtimes", "win-x64", "native", "onnxruntime.dll"));
+            candidatePaths.Add(Path.Combine(baseDir, "onnxruntime.dll"));
+            candidatePaths.Add(Path.Combine(currentDir, "onnxruntime.dll"));
+        }
+        else
+        {
+            // Linux: 优先检查 runtimes/linux-x64/native 目录
+            var nativeDir = Path.Combine(baseDir, "runtimes", "linux-x64", "native");
+            if (Directory.Exists(nativeDir))
+            {
+                // 先预热加载 OpenVINO 依赖组件，避免链式符号未解析
+                PreloadLinuxOpenVinoDependencies(nativeDir);
+
+                candidatePaths.Add(Path.Combine(nativeDir, "libonnxruntime.so"));
+                candidatePaths.Add(Path.Combine(nativeDir, "libonnxruntime.so.1"));
+                try
+                {
+                    candidatePaths.AddRange(Directory.GetFiles(nativeDir, "libonnxruntime.so.*"));
+                }
+                catch { }
+            }
+
+            // 根目录候选
+            candidatePaths.Add(Path.Combine(baseDir, "libonnxruntime.so"));
+            candidatePaths.Add(Path.Combine(baseDir, "libonnxruntime.so.1"));
+            try
+            {
+                candidatePaths.AddRange(Directory.GetFiles(baseDir, "libonnxruntime.so.*"));
+            }
+            catch { }
+
+            candidatePaths.Add(Path.Combine(currentDir, "runtimes", "linux-x64", "native", "libonnxruntime.so"));
+            candidatePaths.Add(Path.Combine(currentDir, "libonnxruntime.so"));
+        }
+
+        IntPtr firstWorkingHandle = IntPtr.Zero;
+        string? firstWorkingPath = null;
+
+        foreach (var path in candidatePaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (File.Exists(path) && NativeLibrary.TryLoad(path, out var handle))
+            {
+                // 检查是否包含 OpenVINO 入口
+                var hasVinoExport = NativeLibrary.TryGetExport(handle, "OrtSessionOptionsAppendExecutionProvider_OpenVINO", out _);
+
+                if (HasOpenVino)
+                {
+                    if (hasVinoExport)
                     {
-                        if (File.Exists(path) && NativeLibrary.TryLoad(path, out var handle))
+                        LastLoadedOnnxPath = path;
+                        LastLoadedHasOpenVinoExport = true;
+                        _logger.LogInformation("ONNX 原生库解析器成功绑定 OpenVINO 硬件加速库: {Path}", path);
+                        return handle;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("候选 ONNX 原生库未导出 OpenVINO 入口 (可能是 CPU 标准库): {Path}", path);
+                        if (firstWorkingHandle == IntPtr.Zero)
                         {
-                            return handle;
+                            firstWorkingHandle = handle;
+                            firstWorkingPath = path;
                         }
                     }
                 }
-                return IntPtr.Zero;
-            });
+                else
+                {
+                    LastLoadedOnnxPath = path;
+                    LastLoadedHasOpenVinoExport = hasVinoExport;
+                    return handle;
+                }
+            }
         }
-        catch (Exception ex)
+
+        if (firstWorkingHandle != IntPtr.Zero)
         {
-            _logger.LogDebug(ex, "配置 ONNX Runtime 原生库解析器被跳过 (可能已注册)");
+            LastLoadedOnnxPath = firstWorkingPath;
+            LastLoadedHasOpenVinoExport = false;
+            _logger.LogWarning("未找到包含 OpenVINO 入口的原生库，回退至首个可用原生库: {Path}", firstWorkingPath);
+            return firstWorkingHandle;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private static void PreloadLinuxOpenVinoDependencies(string dir)
+    {
+        var depFiles = new[]
+        {
+            "libtbb.so.12",
+            "libtbb.so",
+            "libopenvino.so",
+            "libopenvino_c.so",
+            "libopenvino_intel_gpu_plugin.so",
+            "libopenvino_intel_cpu_plugin.so",
+            "libonnxruntime_providers_shared.so",
+            "libonnxruntime_providers_openvino.so"
+        };
+
+        foreach (var dep in depFiles)
+        {
+            var p = Path.Combine(dir, dep);
+            if (File.Exists(p))
+            {
+                try
+                {
+                    NativeLibrary.TryLoad(p, out _);
+                }
+                catch { }
+            }
         }
     }
 
@@ -154,7 +282,15 @@ public static class OnnxExecutionProviderHelper
             }
         }
 
-        failureReason = lastEx?.Message ?? "未检测到支持的 Intel GPU 设备";
+        if (lastEx is EntryPointNotFoundException)
+        {
+            var loaded = LastLoadedOnnxPath ?? "默认系统路径";
+            failureReason = $"OpenVINO 原生入口未就绪 (当前加载: {loaded}, 缺少 OrtSessionOptionsAppendExecutionProvider_OpenVINO)";
+        }
+        else
+        {
+            failureReason = lastEx?.Message ?? "未检测到支持的 Intel GPU 设备";
+        }
         return false;
     }
 

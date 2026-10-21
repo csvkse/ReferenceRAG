@@ -230,4 +230,9 @@ export const chatApi = {
     getConfig: () => api.get('/chat/config'),
     saveConfig: (data) => api.post('/chat/config', data)
 };
+// FileSystem
+export const fileSystemApi = {
+    browse: (path = '', folderOnly = true) => api.get('/FileSystem/browse', { params: { path, folderOnly } }),
+    mkdir: (path) => api.post('/FileSystem/mkdir', { path })
+};
 export default api;

@@ -38,7 +38,7 @@ public class LoggingPathResolutionTests : IDisposable
         var customLogDir = Path.Combine(_tempDir, "custom-logs");
         Directory.CreateDirectory(customLogDir);
 
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = _tempDir });
         builder.Configuration["Work:Directory"] = _tempDir;
         builder.Configuration["LogsPath"] = customLogDir;
 
@@ -53,7 +53,7 @@ public class LoggingPathResolutionTests : IDisposable
         var lowerLogsDir = Path.Combine(_tempDir, "logs");
         Directory.CreateDirectory(lowerLogsDir);
 
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = _tempDir });
         builder.Configuration["Work:Directory"] = _tempDir;
 
         ServiceManager.ConfigureLogging(builder);

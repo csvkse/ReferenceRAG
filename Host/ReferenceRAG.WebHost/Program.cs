@@ -20,6 +20,7 @@ using ReferenceRAG.ApiHost.Transport;
 Directory.SetCurrentDirectory(Environment.GetEnvironmentVariable("REFERENCERAG_CONTENT_ROOT") ?? AppContext.BaseDirectory);
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.InputEncoding = System.Text.Encoding.UTF8;
+ReferenceRAG.Core.Features.HardwareAcceleration.OnnxExecutionProviderHelper.InitializeNativeResolver();
 var bootstrapReport = ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.EnsureInitialized();
 if (bootstrapReport.FinalState == ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigLifecycleState.Failed)
 {

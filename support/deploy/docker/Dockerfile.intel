@@ -11,7 +11,20 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS dotnet-runtime
 # Stage 2: Extract OpenVINO-enabled ONNX Runtime from official Linux wheel
 # ------------------------------------------------------------
 FROM python:3.12-slim AS openvino-extract
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir onnxruntime-openvino==1.24.1
+RUN mkdir -p /extracted && \
+    find /usr/local/lib/python3.12/site-packages -name "*.so*" -exec cp -d {} /extracted/ \; && \
+    cd /extracted && \
+    for f in libonnxruntime.so.*; do \
+        if [ -f "$f" ]; then \
+            ln -sf "$f" libonnxruntime.so; \
+            ln -sf "$f" libonnxruntime.so.1; \
+            break; \
+        fi; \
+    done && \
+    ls -la /extracted && \
+    LD_LIBRARY_PATH=/extracted python3 -c "import ctypes; lib = ctypes.CDLL('/extracted/libonnxruntime.so'); print('libonnxruntime loaded successfully:', lib); assert hasattr(lib, 'OrtSessionOptionsAppendExecutionProvider_OpenVINO'), 'Missing OrtSessionOptionsAppendExecutionProvider_OpenVINO symbol in extracted libonnxruntime.so'"
 
 # ------------------------------------------------------------
 # Stage 3: Build & Publish
@@ -38,7 +51,8 @@ RUN dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
     /p:UseAppHost=false \
     /p:DebugType=none \
     /p:DebugSymbols=false \
-    && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx*
+    && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx* \
+    && rm -f /app/publish/runtimes/linux-x64/native/libonnxruntime*
 
 # ============================================================
 # Stage 4: Runtime (Intel Compute Runtime / Level Zero & OpenCL)
@@ -91,9 +105,29 @@ COPY support/deploy/docker/docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
 COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
 
+# Clean any residual CPU-only ONNX Runtime libraries before overlaying OpenVINO binaries
+RUN rm -f /app/runtimes/linux-x64/native/libonnxruntime* /app/libonnxruntime*
+
 # Overlay OpenVINO-enabled ONNX Runtime shared libraries
-COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/onnxruntime/capi/ /app/runtimes/linux-x64/native/
-COPY --from=openvino-extract /usr/local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so* /app/
+COPY --from=openvino-extract /extracted/ /app/runtimes/linux-x64/native/
+COPY --from=openvino-extract /extracted/ /app/
+
+RUN cd /app/runtimes/linux-x64/native && \
+    for f in libonnxruntime.so.*; do \
+        if [ -f "$f" ]; then \
+            ln -sf "$f" libonnxruntime.so; \
+            ln -sf "$f" libonnxruntime.so.1; \
+            break; \
+        fi; \
+    done && \
+    cd /app && \
+    for f in runtimes/linux-x64/native/libonnxruntime.so.*; do \
+        if [ -f "$f" ]; then \
+            ln -sf "$f" libonnxruntime.so; \
+            ln -sf "$f" libonnxruntime.so.1; \
+            break; \
+        fi; \
+    done
 
 RUN echo "/app/runtimes/linux-x64/native" > /etc/ld.so.conf.d/openvino.conf \
     && echo "/app" >> /etc/ld.so.conf.d/openvino.conf \
