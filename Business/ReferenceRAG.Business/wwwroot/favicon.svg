@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <!-- Page Dark Theme Background (#1a1a1a / #18181c) -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#202026" />
+      <stop offset="100%" stop-color="#141418" />
+    </linearGradient>
+    <!-- Page Primary Theme Color (#63e2b7 -> #18a058) -->
+    <linearGradient id="rGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7FE7C4" />
+      <stop offset="45%" stop-color="#63E2B7" />
+      <stop offset="100%" stop-color="#18A058" />
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded Squircle Base -->
+  <rect x="12" y="12" width="232" height="232" rx="52" ry="52" fill="url(#bgGrad)" stroke="#63E2B7" stroke-opacity="0.35" stroke-width="6" />
+
+  <!-- Bold Geometric 'R' Monogram -->
+  <path fill="url(#rGrad)" fill-rule="evenodd" d="
+    M 68 52
+    H 142
+    C 175 52, 196 70, 196 98
+    C 196 120, 182 136, 160 142
+    L 198 204
+    H 160
+    L 126 146
+    H 102
+    V 204
+    H 68
+    Z
+    M 102 82
+    V 118
+    H 138
+    C 152 118, 162 110, 162 99
+    C 162 88, 152 82, 138 82
+    Z
+  " />
+</svg>
