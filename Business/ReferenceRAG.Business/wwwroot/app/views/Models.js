@@ -1225,14 +1225,19 @@ const component = /*@__PURE__*/ _defineComponent({
             if (!fileOption || !repoId) return;
 
             if (!selectedModel.value) {
-                const existing = models.value.find(m => m.name === repoId || m.name === fileOption.fileName);
+                const currentTab = activeModelTab.value;
+                const pool = currentTab === 'chat'
+                    ? (chatModels.value || [])
+                    : (currentTab === 'rerank' ? (rerankModels.value || []) : (models.value || []));
+                const existing = pool.find(m => m.name === repoId || m.name === fileOption.fileName);
                 if (existing) {
                     selectedModel.value = existing;
                 } else {
+                    const resolvedType = currentTab === 'chat' ? 'chat' : (currentTab === 'rerank' ? 'reranker' : 'embedding');
                     selectedModel.value = {
                         name: repoId,
                         displayName: fileOption.fileName,
-                        modelType: 'embedding',
+                        modelType: resolvedType,
                         isDownloaded: false
                     };
                 }
@@ -1693,6 +1698,21 @@ const component = /*@__PURE__*/ _defineComponent({
                         }
                         if (response.data.status === 'completed') {
                             message.success(`模型 ${getModelDisplayName(modelName)} 下载完成`);
+                            // 广播模型变更通知，确保 Settings 与 Chat 视图热同步
+                            try {
+                                if (typeof BroadcastChannel !== 'undefined') {
+                                    const channel = new BroadcastChannel('referencerag_model_sync');
+                                    channel.postMessage({
+                                        type: 'MODEL_DOWNLOADED',
+                                        modelType: isChat ? 'chat' : (isRerank ? 'reranker' : 'embedding'),
+                                        modelName
+                                    });
+                                    channel.close();
+                                }
+                                localStorage.setItem('referencerag_model_updated', Date.now().toString());
+                            } catch (e) {
+                                // ignore
+                            }
                             // 刷新对应的模型列表
                             if (isChat) {
                                 await loadChatModels();
