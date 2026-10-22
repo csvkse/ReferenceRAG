@@ -2,6 +2,29 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.42] - 2026-10-22
+
+### 对话思考过程渲染截断异常根因修复与 AST 前置分离渲染架构治理
+- **Markdown 渲染前置思维链解耦架构 (`safe-markdown.js`)**：
+  - **根本原因根治 (HTML5 Tree Construction "Special Category" Rule)**：
+    彻底废除将自定义 `<think>` / `<thought>` 标签作为原始 HTML 直接灌入 Marked 的缺陷做法（历史方案会导致 Marked 将 `<think>` 包裹在 `<p>` 中，浏览器遵循 WHATWG HTML 标准 13.2.6.4.7 遇到处于 Special 类别内部的自定义结束标签时静默抛弃 `</think>`，进而引发后续标题与段落全被误挂为 `<think>` 子节点并在置换时惨遭抹除）；
+  - **前置抽离引擎 (`extractThoughts`)**：
+    在文本送入 Markdown 解析器之前，率先将全部成对的思考块提取为结构化 `thoughtSteps` 数组，并生成 100% 纯净、合法的 Markdown 正文 `cleanBody`；Marked 仅针对干净正文执行 AST 渲染，彻底阻断任何 HTML5 规范级的标签吞噬隐患；
+  - **DOM 优雅平铺组装**：
+    将聚合提炼后的 `<details class="chat-thought-container">` 作为顶级同级节点（Sibling）安全置于 DOM 树首部，既完全继承单阶段与多阶段 Agent 推理融合展现，又实现正文各级标题、列表、引用与代码块 100% 完整保真呈现。
+- **思考块自愈规则边界穿透漏洞修复 (`balanceTags`)**：
+  - **严格受控触发门禁**：仅在开标签数大于闭标签数（`thinkOpen > thinkClose`）时才允许进入未闭合自愈启发逻辑；若开闭标签完全平衡，严禁注入多余的 `</think>`；
+  - **负向断言防穿透保护**：在边界正则中严格施加 `(?:(?!<\/(?:think|thought)>)[\s\S])*?` 负向预查，严禁匹配跨越已闭合的真实思维链标签；
+  - **正交排除自然语言列表符号**：从启发式断言词中坚决剔除 `(?:[#>\-*]|\d+\.)\s`，防止思考链内部的条目、数字分析或正文列表被误判为思考结束边界而遭遇腰斩截断。
+- **自动化防回归质量门禁建立 (`frontend-logic.test.mjs`)**：
+  - **用户成都真实长文本回归门禁**：通过自动化测试断言包含引言、5 个大节、多级列表与水平线的思考模型长输出，100% 完整保留正文，绝无内容截断丢失；
+  - **思考链内部列表与标号正交性门禁**：断言思考链内部包含有序/无序列表与数字编号时，思考内容完整保留在卡片内部，后续正文不受丝毫截断影响；
+  - **流式思考进行态识别门禁**：断言模型流式思考尚未输出正文时，`isStreaming=true` 且 `cleanBody` 为空，避免触发“无响应内容”占位符误报；
+  - 全套 19 项前端与核心逻辑测试全部通过。
+- **技术调研与规范沉淀 (`docs/chat-thought-rendering-truncation-investigation-and-fix.md`)**：
+  - 深度剖析 WHATWG HTML5 规范 13.2.6.4.7 特殊元素解析忽略规则与 Marked 行内解析行为；
+  - 对比分析业界 Open-WebUI、LibreChat、LobeChat 及 DeepSeek 官方方案优缺点，梳理出 AST 前置分离最佳实践。
+
 ## [1.0.41] - 2026-10-22
 
 ### 诊断中枢工具链实战手册与标准排错处置流程 (SOP Runbook) 落地
