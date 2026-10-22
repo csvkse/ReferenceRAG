@@ -1070,6 +1070,14 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             yield break;
         }
 
+        // 状态机全生命周期初始化（借鉴 MAF 工作流与状态机模式 State Machine Pattern）
+        var turnContext = new ChatTurnContext
+        {
+            SessionId = sessionId,
+            UserMessage = userMessage
+        };
+        var fsm = new ToolCallingExecutionStateMachine(turnContext);
+
         session.LastAccessUtc = _timeProvider.GetUtcNow();
         List<ChatMessage> history;
         lock (session.Messages)
@@ -1078,32 +1086,115 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             TrimHistory(session.Messages);
             history = [.. session.Messages];
         }
+
+        // 1. 前置意图路由阶段 (Routing State)
+        fsm.TransitionTo(ChatTurnState.Routing, "评估前置意图路由先验分流");
+        var decision = await CompositeIntentRouter.Default.RouteAsync(userMessage, _tools, ct);
+        turnContext.RoutingDecision = decision;
+
+        // 2. 策略模式：意图自适应工具动态下发 (Strategy Pattern: Tool Selection)
+        var toolStrategy = new IntentAdaptiveToolSelectionStrategy();
+        var selectedTools = toolStrategy.SelectTools(userMessage, _tools, decision, GetCapabilities());
+
         var options = new ChatOptions
         {
-            Tools = [.. _tools],
+            Tools = [.. selectedTools],
             MaxOutputTokens = 4096
         };
         var responseText = new StringBuilder();
-
         var streamedBadge = false;
-        await foreach (var update in client.GetStreamingResponseAsync(history, options, ct))
+
+        // 3. 确定性直接工具分发（若前置意图路由直接决断，如搜索前缀、GetIndexStatus 等）
+        if (decision is { Handled: true, FunctionName: not null } &&
+            _tools.OfType<AIFunction>().FirstOrDefault(f => f.Name.Equals(decision.FunctionName, StringComparison.OrdinalIgnoreCase)) is { } targetFunc)
         {
-            if (!streamedBadge && _currentRequestExecutedTools.Value is { Count: > 0 } execTools)
+            fsm.TransitionTo(ChatTurnState.DirectToolExecuting, $"前置确定性命中工具 {decision.FunctionName}");
+            fsm.TransitionTo(ChatTurnState.ToolExecuting, $"服务端直接执行分发工具 {decision.FunctionName}");
+            turnContext.ExecutedTools.Add(decision.FunctionName);
+            RecordExecutedTool(decision.FunctionName);
+
+            var directBadge = $"> 🔧 **已执行工具**: `{decision.FunctionName}`\n\n";
+            responseText.Append(directBadge);
+            yield return new SseEvent("text", Delta: directBadge);
+            streamedBadge = true;
+
+            string toolResult;
+            try
             {
-                var badge = $"> 🔧 **已执行工具**: {string.Join(", ", execTools.Select(t => $"`{t}`"))}\n\n";
-                responseText.Append(badge);
-                yield return new SseEvent("text", Delta: badge);
-                streamedBadge = true;
+                var args = decision.Arguments ?? new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                var invokeResult = await targetFunc.InvokeAsync(new AIFunctionArguments(args), ct);
+                toolResult = invokeResult?.ToString() ?? "无返回结果";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "直接分发工具 {ToolName} 执行异常", decision.FunctionName);
+                toolResult = $"工具执行异常: {ex.Message}";
             }
 
-            if (!string.IsNullOrEmpty(update.Text))
+            // 构造工具结果上下文，转入 Phase 2 总结生成（强负向防说教，杜绝递归调用）
+            fsm.TransitionTo(ChatTurnState.Phase2Synthesizing, "工具执行完毕转入 Phase 2 总结生成");
+            var phase2History = new List<ChatMessage>(history)
             {
-                responseText.Append(update.Text);
-                yield return new SseEvent("text", Delta: update.Text);
+                new(ChatRole.Assistant, directBadge.TrimEnd()),
+                new(ChatRole.Tool, toolResult)
+            };
+
+            var phase2Options = new ChatOptions
+            {
+                Tools = [], // 总结阶段不再挂载工具，专注生成纯粹总结
+                MaxOutputTokens = 4096
+            };
+
+            await foreach (var update in client.GetStreamingResponseAsync(phase2History, phase2Options, ct))
+            {
+                if (!string.IsNullOrEmpty(update.Text))
+                {
+                    responseText.Append(update.Text);
+                    yield return new SseEvent("text", Delta: update.Text);
+                }
+            }
+        }
+        else
+        {
+            // 正常大模型自主推理与工具决策 (Phase 1 Inferencing)
+            fsm.TransitionTo(ChatTurnState.Phase1Inferencing, "大模型自主推理与工具决策");
+
+            await foreach (var update in client.GetStreamingResponseAsync(history, options, ct))
+            {
+                if (!streamedBadge && _currentRequestExecutedTools.Value is { Count: > 0 } execTools)
+                {
+                    fsm.TransitionTo(ChatTurnState.ToolExecuting, "模型产生工具调用并执行");
+                    fsm.TransitionTo(ChatTurnState.Phase2Synthesizing, "工具执行完毕转入总结");
+
+                    foreach (var t in execTools)
+                    {
+                        if (!turnContext.ExecutedTools.Contains(t))
+                            turnContext.ExecutedTools.Add(t);
+                    }
+
+                    var badge = $"> 🔧 **已执行工具**: {string.Join(", ", execTools.Select(t => $"`{t}`"))}\n\n";
+                    responseText.Append(badge);
+                    yield return new SseEvent("text", Delta: badge);
+                    streamedBadge = true;
+                }
+
+                if (!string.IsNullOrEmpty(update.Text))
+                {
+                    responseText.Append(update.Text);
+                    yield return new SseEvent("text", Delta: update.Text);
+                }
             }
         }
 
+        // 4. 输出清洗与规范化 (Output Sanitizing)
         var rawText = responseText.ToString();
+        turnContext.RawOutput = rawText;
+
+        if (fsm.CurrentState == ChatTurnState.Phase1Inferencing || fsm.CurrentState == ChatTurnState.Phase2Synthesizing)
+        {
+            fsm.TransitionTo(ChatTurnState.OutputSanitizing, "执行响应清洗与标签自愈");
+        }
+
         var sanitized = ChatToolCallingHelper.SanitizeAssistantResponse(rawText);
 
         if (_currentRequestExecutedTools.Value is { Count: > 0 } finishedTools)
@@ -1118,10 +1209,18 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                 sanitized = badge + sanitized;
             }
         }
-        else if (string.IsNullOrWhiteSpace(sanitized))
+
+        // 5. 自愈保底判定 (Self-Healing Fallback)
+        if (string.IsNullOrWhiteSpace(sanitized))
         {
-            sanitized = "抱歉，当前模型未能生成有效回答，请重试或调整提问。";
+            sanitized = fsm.TriggerSelfHealing("检测到输出为空或模型截断");
         }
+        else if (fsm.CurrentState == ChatTurnState.OutputSanitizing)
+        {
+            fsm.TransitionTo(ChatTurnState.Completed, "本轮对话成功结束");
+        }
+
+        turnContext.SanitizedOutput = sanitized;
 
         if (!string.IsNullOrEmpty(sanitized))
         {
@@ -1138,8 +1237,18 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             }
         }
 
+        // 6. 附带全生命周期遥测指标的上下文用量通知 (Telemetry in context event)
         var finalUsage = GetSessionContextUsage(sessionId);
-        yield return new SseEvent("context", Delta: JsonSerializer.Serialize(finalUsage));
+        var telemetryPayload = new
+        {
+            finalUsage.UsedTokens,
+            finalUsage.MaxContextTokens,
+            finalUsage.Percent,
+            StateDurations = turnContext.StateDurationMs,
+            StateTransitions = turnContext.StateTransitions.Select(s => s.ToString()).ToList(),
+            ExecutedTools = turnContext.ExecutedTools
+        };
+        yield return new SseEvent("context", Delta: JsonSerializer.Serialize(telemetryPayload));
 
         yield return new SseEvent("done");
     }
