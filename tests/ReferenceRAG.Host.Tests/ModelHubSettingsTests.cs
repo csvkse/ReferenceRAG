@@ -96,15 +96,25 @@ public class ModelHubSettingsTests : IDisposable
     [Fact]
     public void Load_WhenConfigEmpty_FallsBackToEnvironmentVariables()
     {
-        Environment.SetEnvironmentVariable("HF_TOKEN", "hf_env_token_override");
-        Environment.SetEnvironmentVariable("HF_ENDPOINT", "https://env-endpoint.local");
+        var tempConfigPath = Path.Combine(Path.GetTempPath(), $"modelhub_test_{Guid.NewGuid():N}.json");
+        try
+        {
+            Environment.SetEnvironmentVariable("HF_TOKEN", "hf_env_token_override");
+            Environment.SetEnvironmentVariable("HF_ENDPOINT", "https://env-endpoint.local");
 
-        var configManager = new ConfigManager();
-        var config = configManager.Load();
+            var configManager = new ConfigManager(customConfigPath: tempConfigPath);
+            var config = configManager.Load();
 
-        Assert.NotNull(config.ModelHub);
-        Assert.Equal("hf_env_token_override", config.ModelHub.HfToken);
-        Assert.Equal("https://env-endpoint.local", config.ModelHub.HfEndpoint);
+            Assert.NotNull(config.ModelHub);
+            Assert.Equal("hf_env_token_override", config.ModelHub.HfToken);
+            Assert.Equal("https://env-endpoint.local", config.ModelHub.HfEndpoint);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HF_TOKEN", null);
+            Environment.SetEnvironmentVariable("HF_ENDPOINT", null);
+            try { if (File.Exists(tempConfigPath)) File.Delete(tempConfigPath); } catch { }
+        }
     }
 
     [Fact]

@@ -3314,9 +3314,23 @@ public class ModelManager : IModelManager, IDisposable
     /// </summary>
     public List<ModelInfo> GetDownloadedChatModels()
     {
-        return _modelRegistry.Values
+        var models = _modelRegistry.Values
             .Where(m => m.ModelType == "chat" && m.IsDownloaded)
             .ToList();
+
+        if (models.Count == 0 && Directory.Exists(_modelsPath))
+        {
+            var chatDir = Path.Combine(_modelsPath, "Chat");
+            if (Directory.Exists(chatDir) && Directory.EnumerateFiles(chatDir, "*.gguf", SearchOption.AllDirectories).Any())
+            {
+                ScanLocalModels();
+                models = _modelRegistry.Values
+                    .Where(m => m.ModelType == "chat" && m.IsDownloaded)
+                    .ToList();
+            }
+        }
+
+        return models;
     }
 
     public void Dispose()

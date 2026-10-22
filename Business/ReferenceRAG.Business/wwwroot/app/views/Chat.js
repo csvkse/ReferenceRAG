@@ -503,13 +503,40 @@ const component = /*@__PURE__*/ _defineComponent({
                 message.error(e.message || '初始化会话失败，请检查服务连接及 Chat 配置');
             }
         };
+        let modelSyncChannel = null;
+        try {
+            if (typeof BroadcastChannel !== 'undefined') {
+                modelSyncChannel = new BroadcastChannel('referencerag_model_sync');
+                modelSyncChannel.onmessage = (e) => {
+                    if (e.data?.type === 'MODEL_DOWNLOADED' || e.data?.type === 'MODEL_UPDATED') {
+                        loadChatModelStatus();
+                        fetchCapabilities();
+                    }
+                };
+            }
+        } catch {}
+
+        const handleStorageChange = (e) => {
+            if (e.key === 'referencerag_model_updated' || e.key === 'modelsPathChanged') {
+                loadChatModelStatus();
+                fetchCapabilities();
+            }
+        };
+
         onMounted(async () => {
+            window.addEventListener('storage', handleStorageChange);
             await Promise.all([initSession(), loadChatModelStatus(), fetchCapabilities()]);
         });
         onActivated(async () => {
             await scrollToBottom();
             loadChatModelStatus();
             fetchCapabilities();
+        });
+        onUnmounted(() => {
+            window.removeEventListener('storage', handleStorageChange);
+            if (modelSyncChannel) {
+                try { modelSyncChannel.close(); } catch {}
+            }
         });
         const __returned__ = {
             chatBackend, currentChatModel, currentChatDisplayName, chatVariant, isGpuMode, chatModelOptions, switchingModel, loadChatModelStatus, handleModelChange, cancel, message, authStore, sessionId, messages, input, streaming, scrollbarRef, toolDescriptions, initialized, rawSet, editVisible, editText, editIndex,

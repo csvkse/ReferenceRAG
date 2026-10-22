@@ -936,9 +936,38 @@ public class TestRecordStore
 
     public TestRecordStore()
     {
-        _dataPath = Path.Combine(Environment.CurrentDirectory, "data", "test-records");
+        _dataPath = Path.Combine(AppContext.BaseDirectory, "data", "test-records");
         Directory.CreateDirectory(_dataPath);
-        LoadRecordsAsync().GetAwaiter().GetResult();
+        LoadRecordsSync();
+    }
+
+    private void LoadRecordsSync()
+    {
+        _fileLock.Wait();
+        try
+        {
+            var file = Path.Combine(_dataPath, "records.json");
+            if (File.Exists(file))
+            {
+                var json = File.ReadAllText(file);
+                var records = System.Text.Json.JsonSerializer.Deserialize<List<TestRecord>>(json, _jsonOptions);
+                if (records != null)
+                {
+                    lock (_lock)
+                    {
+                        _records.AddRange(records);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore init read error
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
     }
 
     public async Task SaveAsync(TestRecord record)
@@ -1048,10 +1077,11 @@ public class TestRecordStore
             {
                 try
                 {
+                    Directory.CreateDirectory(_dataPath);
                     await File.WriteAllTextAsync(file, json);
                     break;
                 }
-                catch (IOException) when (retry < 4)
+                catch (Exception ex) when ((ex is IOException || ex is DirectoryNotFoundException) && retry < 4)
                 {
                     await Task.Delay(50 * (retry + 1));
                 }

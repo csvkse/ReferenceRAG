@@ -2,6 +2,27 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.40] - 2026-10-22
+
+### 本地 GGUF 聊天模型下载后未感知与 Vue 3 Keep-Alive 跨组件状态失步根因修复与协同治理
+- **Vue 3 `<keep-alive>` 路由缓存组件生命周期失步根因修复 (`Settings.js`, `Models.js`, `Chat.js`)**：
+  - **组件失活唤醒治理 (`onActivated`)**：在 `MainLayout.js` 的 `<keep-alive :max="20">` 机制下，`Settings.js` 缺失 `onActivated` 钩子，导致从「设置」跳转到「模型管理」下载完 GGUF 聊天模型后再返回「设置」时，组件不会重新执行 `onMounted`，内部 `downloadedChatModels = []` 保持旧态白屏冻结；现已挂载 `onActivated`，确保路由切回时全量自动静默同步已下载模型与硬件探针状态；
+  - **Tab 级与配置竞争防抖对齐**：修复 `onTabChange` 切换至 `chat` 标签页以及配置覆盖时的竞态隐患，封装 `ensureValidChatModelSelection`，无论配置拉取与模型扫描谁先完成，均确保已下载模型存在时自动纠正、自愈绑定首个有效模型并更新实时模型性能画像；
+  - **跨标签页与同屏广播实时同步 (`referencerag_model_sync`)**：引入 `BroadcastChannel` 配合 `window.storage` 双通道事件机制，模型管理页面一旦下载完成或变体更新，即刻向全体视图（`Settings`、`Chat`）广播 `MODEL_DOWNLOADED` / `MODEL_UPDATED` 信号，无需手动刷新页面即可零感知热感知就绪；
+  - **社区变体下载模型分类作用域混淆修复 (`Models.js`)**：修复 `selectVariantFileForDownload` 硬编码 `modelType: 'embedding'` 的隐患，使其基于当前激活的 `activeModelTab` 动态确定模型类别（`chat` / `reranker` / `embedding`），杜绝将对话大模型错误下载到 `/models/Embedding/` 目录的严重归类错误。
+- **后端模型管理器物理目录兜底自愈机制 (`ModelManager.cs`)**：
+  - 在 `GetDownloadedChatModels()` 中增加物理磁盘自愈探测：若内存中登记的聊天模型为 0，但物理磁盘 `Chat/` 目录下存在真实的 `.gguf` 格式权重，自动触发 `ScanLocalModels()` 重新扫描，杜绝冷启动或外部挂载注入时状态不同步的问题。
+- **交互易用性提升**：
+  - 当本地确实未下载任何 GGUF 聊天模型时，警告横条内新增「前往「模型管理」下载」直达快捷按钮（`goToModelManagement('chat')`），极大缩短用户操作链路。
+- **并发存储与环境隔离质量门禁重构 (`SemanticTestController.cs` & `ModelHubSettingsTests.cs`)**：
+  - 根除 `TestRecordStore` 中由于 `Environment.CurrentDirectory` 并发漂移及同步等待异步锁引发的潜在死锁与路径漂移风险，采用 `AppContext.BaseDirectory` 稳定持久化与纯同步初始化；
+  - 为 `ReferenceRAG.Host.Tests` 挂载 `xunit.runner.json` 串行执行配置与 `customConfigPath` 独立测试环境，杜绝跨测试用例的静态环境污染。
+- **自动化防回归质量门禁建立 (`ChatModelDetectionAndKeepAliveTests.cs`)**：
+  - **物理扫描与自愈断言**：测试物理磁盘存在 GGUF 模型时 `GetDownloadedChatModels` 100% 正确识别、报告模型类型为 `chat` 并提取变体；
+  - **前端 Keep-Alive 与广播契约门禁**：通过静态断言与代码级自动化测试，严格门禁 `Settings.js` 必须包含 `onActivated`、`onUnmounted`、`referencerag_model_sync`、`ensureValidChatModelSelection` 以及 `goToModelManagement`；
+  - **社区变体作用域门禁**：测试断言 `Models.js` 在处理变体下载时必须动态感知 `activeModelTab`，禁止硬编码 embedding；
+  - 全套 858 项测试全部通过，0 失败。
+
 ## [1.0.39] - 2026-10-22
 
 ### Intel Alder Lake-N (N100) 核显 OpenVINO 硬件探测 ExitCode 127 根因修复与动态库隔离治理
