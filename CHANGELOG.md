@@ -2,6 +2,25 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.38] - 2026-10-22
+
+### Intel 核显硬件加速探测崩溃与 Docker 健康检查重启根因修复与沙箱架构重构
+- **Docker 容器 90 秒频繁重启根因彻底消除 (`ApiKeyMiddleware.cs` & `SystemController.cs`)**：
+  - **白名单放行健康探针**：在 `ApiKeyMiddleware` 中无条件放行 `/api/system/health`，同时支持 HTTP `GET` 与 Docker `HEALTHCHECK` 使用的 HTTP `HEAD`（`wget --spider`）；
+  - **控制器端点标记匿名**：在 `SystemController.HealthCheck()` 上显式声明 `[AllowAnonymous]` 与 `[HttpHead("health")]`，杜绝未授权拦截导致 Docker 判定 Unhealthy 频繁杀容器。
+- **进程级隔离硬件探测沙箱上线 (`HardwareAccelerationProbeWorker` & `HardwareAccelerationProbeService`)**：
+  - **原生崩溃物理隔离**：硬件能力探测移至独立的 CLI 子进程（`dotnet ReferenceRAG.WebHost.dll --probe-hardware`），彻底规避第三方原生 C++ 驱动/动态库在异构 Linux 环境下触发段错误（`SIGSEGV`/`SIGABRT`）连带崩溃 Kestrel 主 Web 服务的隐患；
+  - **状态机熔断器 (Circuit Breaker)**：探测子进程若异常退出或超时，自动切换至 `Degraded` 状态并开启 3 分钟冷却保护，毫秒级快速返回安全的 CPU 纯算力兜底，防止反复派生崩溃子进程；
+  - **本地内存高速缓存**：探测成功后结果在内存中缓存 5 分钟（支持 `?refresh=true` 穿透），避免设置页刷新频繁触发底层 GPU 探查开销。
+- **Intel 镜像驱动多重回退兼容性增强 (`Dockerfile.intel`)**：
+  - **解绑 Level Zero 单一约束**：优化环境变量为 `ONEAPI_DEVICE_SELECTOR="level_zero:gpu;opencl:gpu"`，确保在 Alder Lake-N（如 N100）等仅稳定支持 NEO OpenCL 的宿主内核下自动平滑回退，不再抛出异常；
+  - **OpenVINO 探测图优化保护**：在探测会话中主动配置 `GraphOptimizationLevel.ORT_DISABLE_ALL`，防止图转换器与 OpenVINO 后端配置解析冲突。
+- **硬件遥测接口匿名访问支持**：
+  - `/api/Settings/hardware-acceleration/status` 与 `/api/Settings/cuda-availability` 纳入白名单并挂载 `[AllowAnonymous]`，前端无论是否已登录均可流畅感知硬件加速状态。
+- **架构文档与自动化门禁套件**：
+  - 编写并落盘 `docs/intel-gpu-openvino-probe-crash-and-healthcheck-architecture.md`；
+  - 新增 `HardwareAccelerationProbeServiceTests.cs` 并扩展 `ApiKeyMiddlewareWhitelistTests.cs`，19 项相关自动化测试全部通过。
+
 ## [1.0.37] - 2026-10-22
 
 ### TemporaryDiagnostics 最新 Release 自动化同步机制上线与 CI 流水线集成 (方案 B)

@@ -57,6 +57,15 @@ public class ApiKeyMiddleware
         "/assets/"
     };
 
+    // 显式白名单：公开探针与遥测 API 路径（健康检查与匿名硬件加速感知接口）
+    private static readonly HashSet<string> WhitelistedPublicApiRoutes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "/api/system/health",
+        "/api/Settings/hardware-acceleration/status",
+        "/api/Settings/cuda-availability",
+        "/api/auth/check"
+    };
+
     // 显式白名单：根目录静态文件
     private static readonly HashSet<string> WhitelistedStaticFiles = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -74,6 +83,13 @@ public class ApiKeyMiddleware
     public async Task InvokeAsync(HttpContext context)
     {
         var (enabled, expectedApiKey) = GetApiKeyConfig(context);
+
+        // 0. 特殊显式健康检查端点: /api/system/health - Docker/K8s 容器健康检查端点，无条件放行（支持 GET 与 HEAD）
+        if (context.Request.Path.Equals("/api/system/health", StringComparison.OrdinalIgnoreCase))
+        {
+            await _next(context);
+            return;
+        }
 
         // 1. 特殊显式端点: /api/auth/check - 始终响应当前鉴权需求状态，无条件放行
         if (context.Request.Path.StartsWithSegments("/api/auth/check"))
@@ -155,7 +171,15 @@ public class ApiKeyMiddleware
             return true;
         }
 
-        // 1. CORS 预检请求（浏览器不携带自定义请求头，不可阻断）
+        // 1. 显式公开探针与只读遥测 API 路径（无论路由是否已绑定端点元数据）
+        var pathStr = context.Request.Path.Value ?? "";
+        var normalizedApiPath = pathStr.TrimEnd('/');
+        if (WhitelistedPublicApiRoutes.Contains(normalizedApiPath))
+        {
+            return true;
+        }
+
+        // 2. CORS 预检请求（浏览器不携带自定义请求头，不可阻断）
         if (HttpMethods.IsOptions(context.Request.Method))
         {
             return true;
@@ -168,8 +192,7 @@ public class ApiKeyMiddleware
             return true;
         }
 
-        // 3. 静态资源前缀（/app/、/core/、/shared/、/styles/、/vendor/、/assets/）
-        var pathStr = context.Request.Path.Value ?? "";
+        // 4. 静态资源前缀（/app/、/core/、/shared/、/styles/、/vendor/、/assets/）
         foreach (var prefix in WhitelistedStaticPrefixes)
         {
             if (pathStr.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

@@ -21,6 +21,15 @@ using ReferenceRAG.ApiHost.Transport;
 Directory.SetCurrentDirectory(Environment.GetEnvironmentVariable("REFERENCERAG_CONTENT_ROOT") ?? AppContext.BaseDirectory);
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.InputEncoding = System.Text.Encoding.UTF8;
+
+// CLI 硬件探针模式：独立子进程执行硬件探测并打印 JSON 结果，完全规避原生 C++ 驱动崩溃对 Web 主进程的致命影响
+if (args.Length > 0 && (args[0] == "--probe-hardware" || args[0] == "-probe-hardware"))
+{
+    var exitCode = ReferenceRAG.Core.Features.HardwareAcceleration.Probing.HardwareAccelerationProbeWorker.RunCli(args);
+    Environment.Exit(exitCode);
+    return;
+}
+
 ReferenceRAG.Core.Features.HardwareAcceleration.OnnxExecutionProviderHelper.InitializeNativeResolver();
 var bootstrapReport = ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigBootstrap.EnsureInitialized();
 if (bootstrapReport.FinalState == ReferenceRAG.Infrastructure.Features.Storage.Bootstrap.ConfigLifecycleState.Failed)

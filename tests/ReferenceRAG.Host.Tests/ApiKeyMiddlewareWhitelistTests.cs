@@ -71,6 +71,11 @@ public class ApiKeyMiddlewareWhitelistTests
         app.MapGet("/vendor/axios.js", () => Results.Text("console.log('axios')", "application/javascript"));
         app.MapGet("/__diag/status", () => Results.Ok(new { diag = true }));
 
+        // 显式公开探针端点（健康探针与硬件加速状态感知）
+        app.MapMethods("/api/system/health", new[] { "GET", "HEAD" }, () => Results.Ok(new { status = "healthy" }));
+        app.MapGet("/api/Settings/hardware-acceleration/status", () => Results.Ok(new { activeBackend = "Cpu" }));
+        app.MapGet("/api/Settings/cuda-availability", () => Results.Ok(new { isAvailable = false }));
+
         await app.StartAsync();
         return app;
     }
@@ -124,6 +129,19 @@ public class ApiKeyMiddlewareWhitelistTests
 
         Assert.Equal(200, status);
         Assert.Contains("anonymous-success", body);
+    }
+
+    [Theory]
+    [InlineData("GET", "/api/system/health")]
+    [InlineData("HEAD", "/api/system/health")]
+    [InlineData("GET", "/api/Settings/hardware-acceleration/status")]
+    [InlineData("GET", "/api/Settings/cuda-availability")]
+    public async Task TelemetryAndHealthEndpoints_AllowedWithoutKey(string method, string path)
+    {
+        await using var app = await CreateTestAppAsync(enableAuth: true);
+        var (status, _, _) = await DispatchAsync(app, method, path);
+
+        Assert.Equal(200, status);
     }
 
     [Fact]

@@ -33,6 +33,14 @@ internal static partial class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // CLI 硬件探针模式：独立子进程执行硬件探测并打印 JSON 结果，完全规避原生 C++ 驱动崩溃对桌面/Web主进程的致命影响
+        if (args.Length > 0 && (args[0] == "--probe-hardware" || args[0] == "-probe-hardware"))
+        {
+            var exitCode = ReferenceRAG.Core.Features.HardwareAcceleration.Probing.HardwareAccelerationProbeWorker.RunCli(args);
+            Environment.Exit(exitCode);
+            return;
+        }
+
         if (OperatingSystem.IsWindows())
         {
             try

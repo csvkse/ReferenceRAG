@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.ServiceProcess;
 
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 using ReferenceRAG.Core.Interfaces;
@@ -170,7 +171,9 @@ public class SystemController : ControllerBase
     /// <summary>
     /// 健康检查
     /// </summary>
+    [AllowAnonymous]
     [HttpGet("health")]
+    [HttpHead("health")]
     public async Task<ActionResult> HealthCheck()
     {
         try

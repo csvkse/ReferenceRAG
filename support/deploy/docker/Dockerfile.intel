@@ -141,7 +141,7 @@ ENV LogsPath=/app/logs
 ENV DOTNET_RUNNING_IN_CONTAINER=true
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-ENV ONEAPI_DEVICE_SELECTOR=level_zero:gpu
+ENV ONEAPI_DEVICE_SELECTOR="level_zero:gpu;opencl:gpu"
 ENV LIBVA_DRIVER_NAME=iHD
 ENV LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:/usr/lib/x86_64-linux-gnu"
 
