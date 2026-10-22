@@ -5,6 +5,9 @@
 ## [1.0.32] - 2026-10-22
 
 ### 文件夹浏览文件透视、数据源物理磁盘深度探查与通配符索引引擎重构
+- **Docker 容器全架构镜像注入 `C.UTF-8` 语言环境与容错枚举 (`Dockerfile*` & `FileSystemController`)**：
+  - 在所有 Docker 运行镜像（`Dockerfile`、`Dockerfile.intel`、`Dockerfile.cuda`、`Dockerfile.rocm`）中显式导出 `ENV LANG=C.UTF-8` 与 `ENV LC_ALL=C.UTF-8`，彻底解决基于 Ubuntu 基础镜像运行 .NET 时因缺失 UTF-8 本地化环境导致中文/非 ASCII 文件名（如 `*.txt`）无法被正确枚举和解析的问题；
+  - `FileSystemController` 枚举文件与子目录时升级使用带 `IgnoreInaccessible = true` 的现代 `EnumerationOptions`，并捕获单个受限条目输出告警，彻底避免因单个特殊权限文件阻断整个目录列表；
 - **目录浏览接口支持文件透视与多维度统计 (`FileSystemController` & `FolderPickerModal`)**：
   - `FileSystemController.Browse` (`GET /api/filesystem/browse`) 新增 `folderOnly` 控制参数（默认同时枚举文件与子目录），并返回目录数 (`TotalDirectories`)、文件数 (`TotalFiles`) 与文件总大小 (`TotalFilesSizeBytes`)；
   - Web 文件夹选择器 (`FolderPickerModal.js`) 顶部新增“显示文件”开关（默认开启），在浏览任意目录时直观呈现文件列表（支持区分 `📁 文件夹` 与 `📄 文件`，展示格式化文件大小与修改时间），并在底部状态栏实时汇总当前目录包含的文件夹与文件数量，彻底打消对文件夹接口可读性的疑虑；

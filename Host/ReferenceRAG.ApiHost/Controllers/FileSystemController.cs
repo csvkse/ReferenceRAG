@@ -88,9 +88,15 @@ public sealed class FileSystemController : ControllerBase
         try
         {
             var dirInfo = new DirectoryInfo(normalized);
+            var enumOptions = new EnumerationOptions
+            {
+                IgnoreInaccessible = true,
+                RecurseSubdirectories = false,
+                MatchCasing = MatchCasing.CaseInsensitive
+            };
 
             // 列出子目录
-            foreach (var dir in dirInfo.EnumerateDirectories())
+            foreach (var dir in dirInfo.EnumerateDirectories("*", enumOptions))
             {
                 dirCount++;
                 try
@@ -114,7 +120,7 @@ public sealed class FileSystemController : ControllerBase
             }
 
             // 列出文件或统计文件数
-            foreach (var file in dirInfo.EnumerateFiles())
+            foreach (var file in dirInfo.EnumerateFiles("*", enumOptions))
             {
                 fileCount++;
                 long fileSize = 0;
@@ -140,8 +146,9 @@ public sealed class FileSystemController : ControllerBase
                     catch (UnauthorizedAccessException)
                     {
                     }
-                    catch (Exception)
+                    catch (Exception ex)
                     {
+                        _logger.LogWarning(ex, "跳过无法读取的文件条目: {Name}", file.Name);
                     }
                 }
             }
