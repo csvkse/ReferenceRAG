@@ -166,9 +166,7 @@ public static class OnnxExecutionProviderHelper
             "libopenvino.so",
             "libopenvino_c.so",
             "libopenvino_intel_gpu_plugin.so",
-            "libopenvino_intel_cpu_plugin.so",
-            "libonnxruntime_providers_shared.so",
-            "libonnxruntime_providers_openvino.so"
+            "libopenvino_intel_cpu_plugin.so"
         };
 
         foreach (var dep in depFiles)
