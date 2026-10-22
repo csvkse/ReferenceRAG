@@ -68,6 +68,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Sync Latest TemporaryDiagnostics Packages
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File support/tools/scripts/sync-temporary-diagnostics.ps1 -Token "${{ secrets.GITHUB_TOKEN }}"
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:

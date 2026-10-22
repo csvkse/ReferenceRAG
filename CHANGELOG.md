@@ -2,6 +2,22 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.37] - 2026-10-22
+
+### TemporaryDiagnostics 最新 Release 自动化同步机制上线与 CI 流水线集成 (方案 B)
+- **双轨自动化包同步工具落地 (`sync-temporary-diagnostics.ps1` & `sync-temporary-diagnostics.sh`)**：
+  - 自动查询 GitHub API 最新 Release（`csvkse/TemporaryDiagnostics/releases/latest`），检索并下载最新的 `.nupkg` 资产至 `./packages` 目录；
+  - 自动化清理旧版废弃包，并通过正向环视正则精准更新 `Directory.Packages.props` 中声明的包版本；
+  - **严格幂等性控制**：若远程版本与本地已声明版本一致且包体完整，自动跳过网络传输，校验耗时 < 0.5s；
+  - **离线与断网容灾降级（Offline Fallback）**：遭遇 API 异常、网络不可达或限流时自动安全回退至本地已有包，确保弱网或离线环境下构建绝不中断。
+- **全平台 CI/CD 流水线深度接入 (`docker-build.yml` & `desktop-release.yml`)**：
+  - 在 Docker 全架构镜像（CPU、CUDA、ROCm、Intel）构建及桌面分包构建流水线中无缝注入同步步骤；
+  - 自动携带 GitHub Actions 原生 `${{ secrets.GITHUB_TOKEN }}` 发起授权调用，彻底消除匿名请求 Rate Limit（403）风险。
+- **诊断基础设施依赖版本升级**：
+  - 成功将 ReferenceRAG 项目内部预置的 `TemporaryDiagnostics` 升级至最新发布的 `v1.0.3`（包含 `AspNetCore`、`Core` 与 `Infrastructure` 全套依赖），并通过全量生命周期单元测试。
+- **技术架构规范文档落盘**：
+  - 撰写并提交 `docs/temporary-diagnostics-auto-sync-architecture.md`，详细记录同步状态流转与安全防爆机制。
+
 ## [1.0.36] - 2026-10-22
 
 ### 接口安全网关强化：默认全量认证、显式白名单机制与凭据防泄露体系
