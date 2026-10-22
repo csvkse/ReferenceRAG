@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using ReferenceRAG.ApiHost.Configuration;
+using ReferenceRAG.ApiHost.Diagnostics;
 using ReferenceRAG.ApiHost.Transport;
 
 #region 必备环境配置
@@ -107,6 +108,9 @@ builder.Services.AddRagCoreServices(
     builder.Configuration,
     signalRDetailedErrors: builder.Environment.IsDevelopment());
 
+// 受控临时诊断中间件：通过环境变量 DIAG_KEY 控制是否启动
+builder.Services.AddConditionalTemporaryDiagnostics(builder.Configuration);
+
 
 
 // 配置 CORS
@@ -145,6 +149,9 @@ app.UseGlobalExceptionHandler();
 
 // MCP 中间件（必须在 CORS 之后，其他中间件之前）
 app.UseAppMcpHelper();
+
+// 临时诊断中间件（由环境变量 DIAG_KEY 控制）
+app.UseConditionalTemporaryDiagnostics();
 
 // Swagger 由设置页的「启用 Swagger」控制（ReferenceRAG:Service:enableSwagger），
 // 兼容既有的顶层 SwaggerEnabled 与 SWAGGER_ENABLED 环境变量。

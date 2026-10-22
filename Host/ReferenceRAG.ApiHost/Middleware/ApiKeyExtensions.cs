@@ -1,16 +1,16 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
-
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using ReferenceRAG.ApiHost.Authentication;
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Service.Middleware;
 
-
-
-
 /// <summary>
 /// API Key 中间件扩展方法
+/// 采用“配置文件优先级最高，其次是环境变量”策略仲裁解析访问密钥
 /// </summary>
 public static class ApiKeyExtensions
 {
@@ -18,31 +18,23 @@ public static class ApiKeyExtensions
 
     public static IApplicationBuilder UseApiKeyAuthentication(this IApplicationBuilder app)
     {
-        // 从 ConfigManager 读取配置（优先级高于 appsettings.json）
-        var configManager = app.ApplicationServices.GetRequiredService<ConfigManager>();
-        var config = configManager.Load();
-        var apiKey = config.Service?.ApiKey;
+        var configManager = app.ApplicationServices.GetService<ConfigManager>();
+        var configuration = app.ApplicationServices.GetService<IConfiguration>();
 
-        // 判断是否启用认证：ApiKey 不为空则启用
-        var enabled = !string.IsNullOrEmpty(apiKey);
-        _logger.LogInformation($"[ApiKey enabled]：{enabled}");
-        // 同时支持从 appsettings.json 读取（向后兼容）
-        var appConfig = app.ApplicationServices.GetRequiredService<IConfiguration>();
-        if (!enabled)
+        var resolver = app.ApplicationServices.GetService<IAuthenticationKeyResolver>()
+            ?? new AuthenticationKeyResolutionCoordinator(configManager: configManager, configuration: configuration);
+
+        var result = resolver.ResolveKey();
+
+        if (result.IsEnabled)
         {
-            enabled = appConfig.GetValue<bool>("ApiKey:Enabled", false);
-            apiKey = appConfig.GetValue<string>("ApiKey:Key", "");
-        }
-        _logger.LogInformation($"[ApiKey enabled]：{enabled}");
-        if (enabled)
-        {
-            Console.WriteLine($"[ApiKey] API Key 认证已启用，所有接口需要认证");
-            _logger.LogInformation($"[ApiKey] API Key 认证已启用，所有接口需要认证");
+            Console.WriteLine($"[ApiKey] API Key 认证已启用 ({result.Details})，受保护接口需要认证");
+            _logger.LogInformation($"[ApiKey] API Key 认证已启用 ({result.Details})，受保护接口需要认证");
         }
         else
         {
-            Console.WriteLine($"[ApiKey] API Key 认证未启用（未配置 ApiKey）");
-            _logger.LogInformation($"[ApiKey] API Key 认证未启用（未配置 ApiKey）");
+            Console.WriteLine($"[ApiKey] API Key 认证未启用（未在配置文件或环境变量中配置 ApiKey）");
+            _logger.LogInformation($"[ApiKey] API Key 认证未启用（未在配置文件或环境变量中配置 ApiKey）");
         }
 
         app.UseMiddleware<ApiKeyMiddleware>();

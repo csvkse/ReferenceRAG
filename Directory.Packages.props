@@ -52,6 +52,10 @@
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
     <PackageVersion Include="McpHelper.Core" Version="1.0.9" />
     <PackageVersion Include="System.Management" Version="10.0.12" />
+    <PackageVersion Include="TemporaryDiagnostics.AspNetCore" Version="1.0.0" />
+    <PackageVersion Include="TemporaryDiagnostics.Core" Version="1.0.0" />
+    <PackageVersion Include="TemporaryDiagnostics.Infrastructure" Version="1.0.0" />
+    <PackageVersion Include="Scalar.AspNetCore" Version="2.17.3" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.12" />
     <PackageVersion Include="Serilog.Extensions.Hosting" Version="10.0.0" />

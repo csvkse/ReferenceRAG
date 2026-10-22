@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.ApiHost.Authentication;
 using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Service.Middleware;
@@ -9,6 +10,7 @@ namespace ReferenceRAG.Service.Middleware;
 /// <summary>
 /// API Key authentication middleware - supports /api/*, /v1/*, and SignalR /indexHub
 /// Supports X-API-Key header, Authorization: Bearer <key>, and dynamic configuration reload.
+/// 严格遵循“配置文件优先级最高，其次是环境变量”策略。
 /// </summary>
 public class ApiKeyMiddleware
 {
@@ -80,31 +82,22 @@ public class ApiKeyMiddleware
 
     private static (bool Enabled, string? Key) GetApiKeyConfig(HttpContext context)
     {
-        // 1. Dynamic check via ConfigManager
-        var configManager = context.RequestServices.GetService<ConfigManager>();
-        if (configManager != null)
+        // 1. 优先通过 IAuthenticationKeyResolver 仲裁解析（严格满足：配置文件 > 环境变量）
+        var resolver = context.RequestServices.GetService<IAuthenticationKeyResolver>();
+        if (resolver == null)
         {
-            var config = configManager.Load();
-            var apiKey = config.Service?.ApiKey;
-            if (!string.IsNullOrEmpty(apiKey))
-            {
-                return (true, apiKey);
-            }
+            var configManager = context.RequestServices.GetService<ConfigManager>();
+            var appConfig = context.RequestServices.GetService<IConfiguration>();
+            resolver = new AuthenticationKeyResolutionCoordinator(configManager: configManager, configuration: appConfig);
         }
 
-        // 2. Check via IConfiguration
-        var appConfig = context.RequestServices.GetService<IConfiguration>();
-        if (appConfig != null)
+        var result = resolver.ResolveKey();
+        if (result.IsEnabled && !string.IsNullOrEmpty(result.ApiKey))
         {
-            var enabled = appConfig.GetValue<bool>("ApiKey:Enabled", false);
-            var key = appConfig.GetValue<string>("ApiKey:Key", "");
-            if (enabled && !string.IsNullOrEmpty(key))
-            {
-                return (true, key);
-            }
+            return (true, result.ApiKey);
         }
 
-        // 3. Fallback to HttpContext.Items if present
+        // 2. 回退检查 HttpContext.Items 覆盖（用于特定单元测试场景）
         if (context.Items["ApiKeyEnabled"] is bool itemsEnabled && itemsEnabled)
         {
             var itemsKey = context.Items["ApiKeyValue"] as string;

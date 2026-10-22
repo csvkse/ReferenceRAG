@@ -8,6 +8,7 @@
     <PackageReference Include="Microsoft.OpenApi" />
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="McpHelper.Core" />
+    <PackageReference Include="TemporaryDiagnostics.AspNetCore" />
     <PackageReference Include="System.Management" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
