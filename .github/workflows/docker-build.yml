@@ -101,6 +101,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Sync Latest TemporaryDiagnostics Packages
+        shell: bash
+        run: |
+          chmod +x support/tools/scripts/sync-temporary-diagnostics.sh
+          support/tools/scripts/sync-temporary-diagnostics.sh --token "${{ secrets.GITHUB_TOKEN }}"
+
       - name: Set lower case repository name
         run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "${GITHUB_ENV}"
 
