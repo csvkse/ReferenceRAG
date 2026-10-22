@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.IO;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 
@@ -113,6 +114,12 @@ public class MetricsCollector : IDisposable
     private readonly Timer _flushTimer; // 定时持久化计时器
     private readonly string _tokenLogPath; // Token 日志文件路径
 
+    // CPU 采样相关字段 (非阻塞差分采样)
+    private readonly object _cpuLock = new();
+    private DateTime _lastCpuSampleTime = DateTime.UtcNow;
+    private TimeSpan _lastCpuTotalProcessorTime = Process.GetCurrentProcess().TotalProcessorTime;
+    private double _lastCpuUsagePercent = 0.0;
+
     public MetricsCollector(IVectorStore vectorStore, int maxHistogramSamples = 1000)
     {
         _vectorStore = vectorStore;
@@ -150,23 +157,40 @@ public class MetricsCollector : IDisposable
     }
 
     /// <summary>
-    /// 采集系统指标
+    /// 采集系统指标（同步无阻塞）
     /// </summary>
-    public async Task<SystemMetrics> CollectSystemMetricsAsync()
+    public SystemMetrics CollectSystemMetrics()
     {
         var process = Process.GetCurrentProcess();
+        var cpuUsage = GetCpuUsage();
+        var memoryUsedBytes = process.WorkingSet64;
+        var memoryTotalBytes = GetTotalMemoryBytes(memoryUsedBytes);
+        var (diskTotalBytes, diskFreeBytes, diskUsedBytes) = GetStorageMetrics();
+        var uptime = DateTime.UtcNow - process.StartTime.ToUniversalTime();
 
-        var metrics = new SystemMetrics
+        return new SystemMetrics
         {
             Timestamp = DateTime.UtcNow,
-            CpuUsagePercent = await GetCpuUsageAsync(),
-            MemoryUsageMB = process.WorkingSet64 / 1024 / 1024,
+            CpuUsagePercent = cpuUsage,
+            MemoryUsageMB = memoryUsedBytes / 1024 / 1024,
+            MemoryUsedBytes = memoryUsedBytes,
+            MemoryTotalBytes = memoryTotalBytes,
+            DiskUsedBytes = diskUsedBytes,
+            DiskTotalBytes = diskTotalBytes,
+            DiskFreeBytes = diskFreeBytes,
             ThreadCount = process.Threads.Count,
             HandleCount = process.HandleCount,
-            Uptime = DateTime.UtcNow - process.StartTime.ToUniversalTime()
+            Uptime = uptime,
+            UptimeSeconds = (long)Math.Max(0, uptime.TotalSeconds)
         };
+    }
 
-        return metrics;
+    /// <summary>
+    /// 采集系统指标（异步兼容方法）
+    /// </summary>
+    public Task<SystemMetrics> CollectSystemMetricsAsync()
+    {
+        return Task.FromResult(CollectSystemMetrics());
     }
 
     /// <summary>
@@ -460,24 +484,217 @@ public class MetricsCollector : IDisposable
     #endregion
 
     /// <summary>
-    /// 获取 CPU 使用率
+    /// 获取 CPU 使用率（基于滑动窗口差分计算，无阻塞毫秒延迟）
     /// </summary>
-    private async Task<double> GetCpuUsageAsync()
+    public double GetCpuUsage()
     {
-        var process = Process.GetCurrentProcess();
-        var startTime = DateTime.UtcNow;
-        var startCpuUsage = process.TotalProcessorTime;
+        var now = DateTime.UtcNow;
+        var elapsed = now - _lastCpuSampleTime;
 
-        await Task.Delay(500);
+        // 若距离上次采样不足 250ms，直接复用缓存值，避免微小时间差导致的抖动与无谓锁竞争
+        if (elapsed.TotalMilliseconds < 250)
+        {
+            return _lastCpuUsagePercent;
+        }
 
-        var endTime = DateTime.UtcNow;
-        var endCpuUsage = process.TotalProcessorTime;
+        lock (_cpuLock)
+        {
+            now = DateTime.UtcNow;
+            elapsed = now - _lastCpuSampleTime;
+            if (elapsed.TotalMilliseconds < 250)
+            {
+                return _lastCpuUsagePercent;
+            }
 
-        var cpuUsedMs = (endCpuUsage - startCpuUsage).TotalMilliseconds;
-        var totalMsPassed = (endTime - startTime).TotalMilliseconds;
-        var cpuUsageTotal = cpuUsedMs / (Environment.ProcessorCount * totalMsPassed);
+            try
+            {
+                var process = Process.GetCurrentProcess();
+                var currentTotalTime = process.TotalProcessorTime;
+                var cpuUsedMs = (currentTotalTime - _lastCpuTotalProcessorTime).TotalMilliseconds;
+                var totalMsPassed = elapsed.TotalMilliseconds;
 
-        return cpuUsageTotal * 100;
+                if (totalMsPassed > 0)
+                {
+                    var cpuUsage = (cpuUsedMs / (Environment.ProcessorCount * totalMsPassed)) * 100.0;
+                    _lastCpuUsagePercent = Math.Clamp(Math.Round(cpuUsage, 1), 0.0, 100.0);
+                    _lastCpuTotalProcessorTime = currentTotalTime;
+                    _lastCpuSampleTime = now;
+                }
+            }
+            catch
+            {
+                // 忽略瞬态进程探测异常，复用上一次采样值
+            }
+
+            return _lastCpuUsagePercent;
+        }
+    }
+
+    /// <summary>
+    /// 获取 CPU 使用率（异步兼容包装）
+    /// </summary>
+    private Task<double> GetCpuUsageAsync()
+    {
+        return Task.FromResult(GetCpuUsage());
+    }
+
+    /// <summary>
+    /// 获取系统可用总内存（容器感知与物理机兼容）
+    /// </summary>
+    public static long GetTotalMemoryBytes(long currentWorkingSetBytes = 0)
+    {
+        long totalMemoryBytes = 0;
+
+        // 1. .NET 8/9/10 BCL 容器原生感知接口（自动识别 cgroups v1 与 v2 内存上限）
+        try
+        {
+            var gcInfo = GC.GetGCMemoryInfo();
+            totalMemoryBytes = gcInfo.TotalAvailableMemoryBytes;
+        }
+        catch
+        {
+            // 忽略 GC 接口异常
+        }
+
+        // 2. Linux 平台兜底：读取 /proc/meminfo 的 MemTotal
+        if (totalMemoryBytes <= 0 && OperatingSystem.IsLinux() && File.Exists("/proc/meminfo"))
+        {
+            try
+            {
+                foreach (var line in File.ReadLines("/proc/meminfo"))
+                {
+                    if (line.StartsWith("MemTotal:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 2 && long.TryParse(parts[1], out var kb))
+                        {
+                            totalMemoryBytes = kb * 1024L;
+                            break;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // 忽略文件读取异常
+            }
+        }
+
+        // 3. 兜底策略：若仍无法探测，以当前工作集或 1GB 为下限保护
+        if (totalMemoryBytes <= 0)
+        {
+            totalMemoryBytes = Math.Max(currentWorkingSetBytes, 1024L * 1024L * 1024L);
+        }
+
+        return totalMemoryBytes;
+    }
+
+    /// <summary>
+    /// 解析数据存储所在磁盘或挂载点的容量指标
+    /// </summary>
+    public static (long totalBytes, long freeBytes, long usedBytes) GetStorageMetrics(string? targetPath = null)
+    {
+        try
+        {
+            var resolvedPath = ResolveTargetPath(targetPath);
+            DriveInfo? bestMatch = null;
+            int bestMatchLength = -1;
+
+            DriveInfo[] drives;
+            try
+            {
+                drives = DriveInfo.GetDrives();
+            }
+            catch
+            {
+                drives = Array.Empty<DriveInfo>();
+            }
+
+            foreach (var drive in drives)
+            {
+                try
+                {
+                    if (!drive.IsReady) continue;
+                    var root = drive.RootDirectory.FullName;
+
+                    var normalizedRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    var normalizedPath = resolvedPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+                    if (string.IsNullOrEmpty(normalizedRoot))
+                    {
+                        if (bestMatchLength < 1)
+                        {
+                            bestMatch = drive;
+                            bestMatchLength = 1;
+                        }
+                    }
+                    else if (normalizedPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (normalizedRoot.Length > bestMatchLength)
+                        {
+                            bestMatch = drive;
+                            bestMatchLength = normalizedRoot.Length;
+                        }
+                    }
+                }
+                catch
+                {
+                    // 忽略无权限或已卸载的驱动器
+                }
+            }
+
+            if (bestMatch != null)
+            {
+                var total = bestMatch.TotalSize;
+                var free = bestMatch.AvailableFreeSpace;
+                var used = Math.Max(0L, total - free);
+                return (total, free, used);
+            }
+
+            // 兜底：通过 Path.GetPathRoot 构造 DriveInfo
+            var pathRoot = Path.GetPathRoot(resolvedPath);
+            if (!string.IsNullOrEmpty(pathRoot))
+            {
+                var fallbackDrive = new DriveInfo(pathRoot);
+                if (fallbackDrive.IsReady)
+                {
+                    var total = fallbackDrive.TotalSize;
+                    var free = fallbackDrive.AvailableFreeSpace;
+                    var used = Math.Max(0L, total - free);
+                    return (total, free, used);
+                }
+            }
+        }
+        catch
+        {
+            // 忽略磁盘探测异常，返回零值保底
+        }
+
+        return (0, 0, 0);
+    }
+
+    private static string ResolveTargetPath(string? targetPath)
+    {
+        if (!string.IsNullOrWhiteSpace(targetPath))
+        {
+            return Path.GetFullPath(targetPath);
+        }
+
+        // 依次从环境变量解析配置路径或数据目录
+        var explicitConfigPath = Environment.GetEnvironmentVariable("REFERENCERAG_CONFIG_PATH");
+        if (!string.IsNullOrWhiteSpace(explicitConfigPath))
+        {
+            var dir = Path.GetDirectoryName(Path.GetFullPath(explicitConfigPath));
+            if (!string.IsNullOrEmpty(dir)) return dir;
+        }
+
+        var baseDir = Environment.GetEnvironmentVariable("REFERENCERAG_CONTENT_ROOT") ?? Directory.GetCurrentDirectory();
+        var dataDir = Environment.GetEnvironmentVariable("REFERENCERAG_DATA_PATH")
+                      ?? Environment.GetEnvironmentVariable("DataPath")
+                      ?? Environment.GetEnvironmentVariable("OBSIDIAN_RAG_DATA_PATH")
+                      ?? Path.Combine(baseDir, "data");
+
+        return Path.IsPathRooted(dataDir) ? Path.GetFullPath(dataDir) : Path.GetFullPath(Path.Combine(baseDir, dataDir));
     }
 
     /// <summary>
@@ -497,10 +714,22 @@ public class SystemMetrics
 {
     public DateTime Timestamp { get; set; }
     public double CpuUsagePercent { get; set; }
+
+    // 内存指标
     public long MemoryUsageMB { get; set; }
+    public long MemoryUsedBytes { get; set; }
+    public long MemoryTotalBytes { get; set; }
+
+    // 磁盘指标
+    public long DiskUsedBytes { get; set; }
+    public long DiskTotalBytes { get; set; }
+    public long DiskFreeBytes { get; set; }
+
+    // 运行时与进程指标
     public int ThreadCount { get; set; }
     public int HandleCount { get; set; }
     public TimeSpan Uptime { get; set; }
+    public long UptimeSeconds { get; set; }
 }
 
 /// <summary>

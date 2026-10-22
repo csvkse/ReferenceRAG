@@ -51,8 +51,35 @@ public class MetricsCollectorTests
         var metrics = await collector.CollectSystemMetricsAsync();
 
         Assert.True(metrics.MemoryUsageMB > 0);
+        Assert.True(metrics.MemoryUsedBytes > 0);
+        Assert.True(metrics.MemoryTotalBytes > 0);
+        Assert.True(metrics.MemoryTotalBytes >= metrics.MemoryUsedBytes);
+        Assert.True(metrics.DiskTotalBytes > 0);
+        Assert.True(metrics.DiskUsedBytes >= 0);
+        Assert.True(metrics.DiskFreeBytes >= 0);
+        Assert.True(metrics.DiskTotalBytes >= metrics.DiskUsedBytes);
         Assert.True(metrics.ThreadCount > 0);
         Assert.True(metrics.Uptime.TotalSeconds >= 0);
+        Assert.True(metrics.UptimeSeconds >= 0);
+        Assert.InRange(metrics.CpuUsagePercent, 0.0, 100.0);
+    }
+
+    [Fact]
+    public void CollectSystemMetrics_ExecutesWithoutBlockingDelay()
+    {
+        var mockVectorStore = new Mock<IVectorStore>();
+        var collector = new MetricsCollector(mockVectorStore.Object);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 5; i++)
+        {
+            var metrics = collector.CollectSystemMetrics();
+            Assert.NotNull(metrics);
+        }
+        sw.Stop();
+
+        // 5 consecutive metric reads should complete in <200ms (previously took 2500ms!)
+        Assert.True(sw.ElapsedMilliseconds < 200, $"Expected <200ms but took {sw.ElapsedMilliseconds}ms");
     }
 
     [Fact]

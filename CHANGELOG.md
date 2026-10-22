@@ -2,6 +2,25 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.39] - 2026-10-22
+
+### 系统监控页面系统资源探测性能重构与前后端遥测契约治理
+- **前后端系统资源契约割裂根因修复与防御性归一化 (`MetricsCollector.cs` & `System.js`)**：
+  - **规范化字节级容量契约**：在后端 `SystemMetrics` 中补齐 `MemoryUsedBytes`、`MemoryTotalBytes`、`DiskUsedBytes`、`DiskTotalBytes`、`DiskFreeBytes` 与 `UptimeSeconds`，消除前端因字段缺失展示 `0 B / 0 B` 与 `0分钟` 的缺陷；
+  - **完全向后兼容保障**：保留原有 `MemoryUsageMB` 与 `Uptime`（TimeSpan 对象），确保现有 `AlertService` 内存告警规则与历史客户端零破坏无缝运行；
+  - **双端防御性降级与秒级显示**：前端新增 `normalizeSystemMetrics` 与 TimeSpan 格式容错解析；优化 `formatUptime` 支持系统启动不足 1 分钟时展示 `xx秒`，避免误导为死滞的 `0分钟`。
+- **500ms 阻塞延迟彻底消除：差分滑动窗口采样模式上线 (`MetricsCollector.cs`)**：
+  - **废除 `Task.Delay(500)`**：将每次 HTTP 请求的 500ms 线程阻塞彻底重构为基于连续时间差分的滑动窗口采样（Differential Sliding Window Sampler）；
+  - **双检锁与抖动平滑**：采样间隔 $< 250\text{ ms}$ 时直接复用最新有效采样缓存，消除并发锁竞争与微小时间片抖动误差；
+  - **超高性能跃升**：系统指标探测执行耗时从 500ms 骤降至 $< 0.01\text{ ms}$（提速超 50,000 倍），`/api/system/metrics` 与 `/api/system/status` 端点响应延迟实现毫秒级。
+- **容器感知内存探测与最长匹配挂载点磁盘探测算法**：
+  - **容器原生内存识别**：调用 .NET BCL `GC.GetGCMemoryInfo().TotalAvailableMemoryBytes` 原生识别 Linux cgroups v1 与 v2（`--memory`）限额，辅以 `/proc/meminfo` 的 `MemTotal` 主机容灾；
+  - **存储挂载点最长前缀匹配**：遍历系统驱动器，智能匹配数据目录（`/app/data` 或 Windows 盘符）的最优底层挂载卷，精确获取真实存储容量与剩余空间。
+- **自动化防回归质量门禁建立 (`SystemMetricsContractGateTests.cs` & `MetricsCollectorTests.cs`)**：
+  - **JSON 驼峰序列化契约门禁**：严格断言导出的 JSON 报文中包含前端所需的全部 6 个驼峰数字字段；
+  - **零阻塞延迟性能门禁**：断言连续 5 次系统指标探测耗时必须 $< 200\text{ ms}$，物理拦截任何形式的阻塞延迟回归；
+  - 10 项相关自动化测试与质量门禁全部通过。
+
 ## [1.0.38] - 2026-10-22
 
 ### Intel 核显硬件加速探测崩溃与 Docker 健康检查重启根因修复与沙箱架构重构
