@@ -2,6 +2,31 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.43] - 2026-10-22
+
+### 基于 MAF (Microsoft Agent Framework) 架构范式重构 Agent 协同体系与性能优化
+- **适配器模式：云端/本地大模型思维链流式双向适配器 (`OpenAiToolCallSanitizingHandler.cs`)**：
+  - **云端思维链丢弃缺陷根治**：解决官方 `openai-dotnet` `ChatClient` 无法感知第三方兼容服务（SiliconFlow、Ollama、vLLM、OpenRouter）输出的 `delta.reasoning_content`（如 DeepSeek-R1、Qwen-R1）导致流式思考被静默吞噬的问题；
+  - **网络层动态拦截与语法平滑注入 (`ToolCallSanitizingStream`)**：在 HTTP SSE 流层透明拦截 `reasoning_content`，无缝转化为标准 `<think>\n...` 注入到 `delta.content`，并在思考结束转入正文或完成时自动注入 `\n</think>\n\n`；
+  - **非流式与流式双协议自愈 (`AdaptNonStreamingReasoning`)**：即使云端模型以普通 JSON 响应返回 `reasoning_content`，同样前置组装闭合思考标签，使远端大模型与本地 GGUF 推理无缝共享前端折叠思考卡片与 AST 渲染。
+- **策略模式：意图自适应工具动态过滤与提示词瘦身机制 (`IToolSelectionStrategy.cs`)**：
+  - **解耦工具注册与提示词装载**：改变以往每次对话均无差别注入 6 个系统工具 Schema 导致占用 600~1200 tokens 上下文的缺陷；
+  - **基于用户意图动态裁剪工具集 (`IntentAdaptiveToolSelectionStrategy`)**：
+    - 纯闲聊/问候场景：100% 剥离全部工具定义，提示词开销锐减，在 CPU/轻薄本/核显边缘设备上首字输出延迟 (TTFT) 降低 40%~60%，彻底消除小参数模型“胡乱调用工具”的幻觉；
+    - 知识库问答场景：精准收敛仅挂载 `SearchKnowledge` 与 `ReadNote` 检索工具；
+    - 系统诊断/目录探测场景：仅挂载 `GetIndexStatus` 与 `GetFileStructure`；
+    - 确定性命中规则 (`RoutingDecision.Handled == true`)：直接由服务端调度执行工具，完全跳过 Phase 1 大模型生成，零 LLM 耗时即刻进入第二阶段汇总；
+    - 保留全量回退策略 (`AllToolsSelectionStrategy`)，保障通用复杂多跳场景下的向后兼容性。
+- **状态机模式：端到端生命周期治理与毫秒级可观测性遥测 (`ToolCallingExecutionStateMachine.cs`, `MafChatService.cs`)**：
+  - **确定性状态流转与校验**：严格受控状态跃迁（`Idle -> Routing -> DirectToolExecuting / Phase1Inferencing -> ToolExecuting -> Phase2Synthesizing -> OutputSanitizing -> Completed / SelfHealingFallback`），杜绝越权或悬挂调用；
+  - **全链路毫秒级状态遥测 (`StateDurationMs`)**：在 SSE 响应首部 `context` 事件中实时上报 `stateDurations` 与 `stateTransitions`，为端到端性能调优、慢查询定界与工具执行耗时提供透明量化指标。
+- **自动化防回归质量门禁建立 (`AgentOptimizationAndMafPatternsTests.cs`)**：
+  - 新增 8 项针对思维链流式适配、意图自适应工具过滤、状态机生命周期与直接路由跳过机制的单元测试，全数一次性绿灯通过；
+  - 前端 19 项安全渲染与组件生命周期测试全数通过。
+- **架构演进深度调研与方案沉淀 (`docs/agent-architecture-optimization-and-maf-patterns-investigation.md`)**：
+  - 详细复盘参考项目 `MAF_WebAgentDemo` 的 `Microsoft.Agents.AI`、`ReasoningContentAgent`、`DynamicToolFilterAgent` 核心实现；
+  - 深度对比 LangGraph、Semantic Kernel、Microsoft Agent Framework 与业界主流落地架构，详述适配器、策略与状态机三大设计模式在 ReferenceRAG 中的实施与收益。
+
 ## [1.0.42] - 2026-10-22
 
 ### 对话思考过程渲染截断异常根因修复与 AST 前置分离渲染架构治理
