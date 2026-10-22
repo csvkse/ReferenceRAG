@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
@@ -7,6 +8,7 @@ using ReferenceRAG.Core.Features.HardwareAcceleration.Detection;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Injection;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Scanning;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Models;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Probing;
 using ReferenceRAG.Core.Features.HardwareAcceleration;
 using ReferenceRAG.Service.Services;
 
@@ -25,6 +27,7 @@ public class SettingsController : ControllerBase
     private readonly IRerankService? _rerankService;
     private readonly MafChatService? _chatService;
     private readonly ILogger<SettingsController> _logger;
+    private readonly IHardwareAccelerationProbeService _probeService;
 
     public SettingsController(
         ConfigManager configManager,
@@ -32,7 +35,8 @@ public class SettingsController : ControllerBase
         ILogger<SettingsController> logger,
         IEmbeddingService? embeddingService = null,
         IRerankService? rerankService = null,
-        MafChatService? chatService = null)
+        MafChatService? chatService = null,
+        IHardwareAccelerationProbeService? probeService = null)
     {
         _configManager = configManager;
         _modelManager = modelManager;
@@ -40,6 +44,7 @@ public class SettingsController : ControllerBase
         _embeddingService = embeddingService;
         _rerankService = rerankService;
         _chatService = chatService;
+        _probeService = probeService ?? new HardwareAccelerationProbeService();
     }
 
     /// <summary>
@@ -106,17 +111,18 @@ public class SettingsController : ControllerBase
     }
 
     /// <summary>
-    /// 获取全平台硬件加速状态（探测 GPU 列表、推荐方案与支持的后端）
+    /// 获取全平台硬件加速状态（探测 GPU 列表、推荐方案与支持的后端，支持沙箱隔离与熔断降级）
     /// </summary>
+    [AllowAnonymous]
     [HttpGet("hardware-acceleration/status")]
-    public ActionResult<HardwareAccelerationStatusResult> GetHardwareAccelerationStatus()
+    public ActionResult<HardwareAccelerationStatusResult> GetHardwareAccelerationStatus([FromQuery] bool refresh = false)
     {
         try
         {
             var config = _configManager.Load();
             var customPath = config?.Embedding?.Acceleration?.CustomLibraryPath ?? config?.Embedding?.CudaLibraryPath;
             var deviceId = config?.Embedding?.Acceleration?.DeviceId ?? config?.Embedding?.CudaDeviceId ?? 0;
-            var result = CheckHardwareAccelerationStatus(customPath, deviceId);
+            var result = _probeService.GetStatus(customPath, deviceId, forceRefresh: refresh);
             return Ok(result);
         }
         catch (Exception ex)
@@ -140,6 +146,7 @@ public class SettingsController : ControllerBase
     /// <summary>
     /// 获取 CUDA/GPU 可用性状态（向后兼容接口）
     /// </summary>
+    [AllowAnonymous]
     [HttpGet("cuda-availability")]
     public ActionResult<CudaAvailability> GetCudaAvailability()
     {
@@ -148,7 +155,7 @@ public class SettingsController : ControllerBase
             var config = _configManager.Load();
             var customPath = config?.Embedding?.Acceleration?.CustomLibraryPath ?? config?.Embedding?.CudaLibraryPath;
             var deviceId = config?.Embedding?.Acceleration?.DeviceId ?? config?.Embedding?.CudaDeviceId ?? 0;
-            var result = CheckCudaAvailability(customPath, deviceId);
+            var result = _probeService.GetCudaAvailability(customPath, deviceId);
             return Ok(result);
         }
         catch (Exception ex)
@@ -165,245 +172,14 @@ public class SettingsController : ControllerBase
 
     private static HardwareAccelerationStatusResult CheckHardwareAccelerationStatus(string? configuredPath = null, int deviceId = 0)
     {
-        HardwareContext hwContext;
-        try
-        {
-            var detector = new HardwareDetector();
-            hwContext = detector.GetContext();
-        }
-        catch
-        {
-            hwContext = new HardwareContext();
-        }
-        var primaryGpu = hwContext.PrimaryGpu;
-
-        CudaEnvironmentScanResult scanResult;
-        try
-        {
-            var scanner = new CudaEnvironmentScanner(new Win32EnvironmentInjector());
-            scanResult = scanner.ScanAndInject(configuredPath);
-        }
-        catch
-        {
-            scanResult = new CudaEnvironmentScanResult { Found = false };
-        }
-
-        bool hasCuda = false;
-        bool hasDirectMl = false;
-        try
-        {
-            hasCuda = OnnxExecutionProviderHelper.HasCuda;
-            hasDirectMl = OnnxExecutionProviderHelper.HasDirectMl;
-        }
-        catch { }
-
-        var availableBackends = new List<AvailableBackendInfo>
-        {
-            new()
-            {
-                Backend = "Auto",
-                Name = "自动感知协商 (智能推荐)",
-                Supported = true,
-                Reason = "自适应探查最佳可用算力，发生故障时自动平滑降级"
-            }
-        };
-
-        // CUDA
-        bool cudaSupported = false;
-        string cudaReason;
-        if (!hwContext.HasNvidiaGpu)
-        {
-            cudaReason = "未检测到支持的 NVIDIA GPU";
-        }
-        else if (!scanResult.Found && !hwContext.HasPortableCuda)
-        {
-            cudaReason = $"检测到 {primaryGpu?.Name}，但系统未找到匹配的 CUDA 12 动态库 (cublasLt64_12.dll)";
-        }
-        else if (!hasCuda)
-        {
-            cudaReason = "当前构建未包含 CUDA 原生执行模块 (可选用 NVIDIA 专属满血版)";
-        }
-        else
-        {
-            try
-            {
-                using var testOptions = new Microsoft.ML.OnnxRuntime.SessionOptions();
-                if (OnnxExecutionProviderHelper.TryAppendCuda(testOptions, deviceId))
-                {
-                    cudaSupported = true;
-                    cudaReason = $"已就绪 (检测到 {primaryGpu?.Name ?? "NVIDIA GPU"}，已挂载 CUDA 12)";
-                }
-                else
-                {
-                    cudaReason = "CUDA 提供者加载失败，请检查驱动版本 (>=528.33)";
-                }
-            }
-            catch (Exception ex)
-            {
-                cudaReason = $"CUDA 初始化异常: {ex.Message}";
-            }
-        }
-
-        availableBackends.Add(new AvailableBackendInfo
-        {
-            Backend = "Cuda",
-            Name = "NVIDIA CUDA (满血版)",
-            Supported = cudaSupported,
-            Reason = cudaReason
-        });
-
-        // DirectML
-        bool dmlSupported = false;
-        string dmlReason;
-        if (!hwContext.HasDirectX12)
-        {
-            dmlReason = "仅支持 Windows 10/11 DirectX 12 环境";
-        }
-        else if (primaryGpu == null)
-        {
-            dmlReason = "未检测到支持的图形加速卡";
-        }
-        else
-        {
-            try
-            {
-                using var testOptions = new Microsoft.ML.OnnxRuntime.SessionOptions();
-                if (OnnxExecutionProviderHelper.TryAppendDirectMl(testOptions, deviceId))
-                {
-                    dmlSupported = true;
-                    dmlReason = $"已就绪 (基于 DirectX 12 跨平台通用算力: {primaryGpu.Name})";
-                }
-                else if (hasDirectMl)
-                {
-                    dmlSupported = true;
-                    dmlReason = "已就绪 (DirectML 原生模块已集成)";
-                }
-                else
-                {
-                    dmlReason = "当前构建未包含 DirectML 执行提供者 (可选用通用版构建)";
-                }
-            }
-            catch (Exception ex)
-            {
-                dmlReason = $"DirectML 初始化异常: {ex.Message}";
-            }
-        }
-
-        availableBackends.Add(new AvailableBackendInfo
-        {
-            Backend = "DirectML",
-            Name = "通用 DirectML (AMD/Intel/通用版)",
-            Supported = dmlSupported,
-            Reason = dmlReason
-        });
-
-        // OpenVINO (Intel Arc 独显 / 酷睿 Iris Xe & UHD 核显)
-        bool openVinoSupported = false;
-        string openVinoReason;
-        if (OnnxExecutionProviderHelper.HasOpenVino)
-        {
-            try
-            {
-                using var testOptions = new Microsoft.ML.OnnxRuntime.SessionOptions();
-                if (OnnxExecutionProviderHelper.TryAppendOpenVino(testOptions, "GPU", out var vinoErr))
-                {
-                    openVinoSupported = true;
-                    openVinoReason = "已就绪 (Intel GPU / 酷睿核显 OpenVINO 原生硬件加速)";
-                }
-                else
-                {
-                    openVinoReason = $"OpenVINO 硬件加速暂未就绪 ({vinoErr})";
-                }
-            }
-            catch (Exception ex)
-            {
-                var innermost = ex;
-                while (innermost.InnerException != null) innermost = innermost.InnerException;
-                openVinoReason = $"OpenVINO 初始化异常: {innermost.Message}";
-            }
-        }
-        else
-        {
-            openVinoReason = "当前构建未包含 OpenVINO 模块 (可选用 Intel 专属版镜像)";
-        }
-
-        availableBackends.Add(new AvailableBackendInfo
-        {
-            Backend = "OpenVino",
-            Name = "Intel OpenVINO (Arc独显 / 酷睿核显)",
-            Supported = openVinoSupported,
-            Reason = openVinoReason
-        });
-
-        // CPU
-        availableBackends.Add(new AvailableBackendInfo
-        {
-            Backend = "Cpu",
-            Name = "纯 CPU 运算",
-            Supported = true,
-            Reason = "多核 CPU 确定性推理 (无显卡依赖与低能耗)"
-        });
-
-        string recommended = "Auto";
-        string active = cudaSupported ? "Cuda"
-            : (openVinoSupported ? "OpenVino"
-            : (dmlSupported ? "DirectML" : "Cpu"));
-
-        string activeReason = active switch
-        {
-            "Cuda" => cudaReason,
-            "OpenVino" => openVinoReason,
-            "DirectML" => dmlReason,
-            _ => primaryGpu?.Vendor switch
-            {
-                GpuVendor.Intel => !string.IsNullOrEmpty(openVinoReason) ? openVinoReason : "多核 CPU 确定性推理",
-                GpuVendor.Amd => "Linux 环境 AMD 核显/APU 采用多核 CPU 向量计算 (对话大模型仍支持 Vulkan 核显加速)",
-                GpuVendor.Nvidia => !string.IsNullOrEmpty(cudaReason) ? cudaReason : "多核 CPU 确定性推理",
-                _ => "多核 CPU 确定性推理"
-            }
-        };
-
-        string mainMessage;
-        if (primaryGpu != null)
-        {
-            var vramText = primaryGpu.TotalVramGb > 0 ? $" (显存: {primaryGpu.TotalVramGb} GB)" : " (集成核显 / 共享系统内存)";
-            if (active != "Cpu")
-            {
-                mainMessage = $"检测到图形加速硬件: {primaryGpu.Name}{vramText}，已就绪硬件加速: {active}";
-            }
-            else
-            {
-                mainMessage = $"检测到图形加速硬件: {primaryGpu.Name}{vramText}，硬件加速提供程序暂未就绪 ({activeReason})，已安全回退至 CPU";
-            }
-        }
-        else if (openVinoSupported)
-        {
-            mainMessage = "检测到 Intel 硬件加速算力 (已就绪 OpenVINO GPU/核显加速)，推荐加速方案: OpenVino";
-        }
-        else
-        {
-            mainMessage = "系统未检测到物理加速显卡，已就绪 CPU 高精度运算";
-        }
-
-        return new HardwareAccelerationStatusResult
-        {
-            DetectedGpus = hwContext.GpuDevices.ToList(),
-            PrimaryGpu = primaryGpu,
-            RecommendedBackend = recommended,
-            ActiveBackend = active,
-            ActiveBackendReason = activeReason,
-            HasNvidiaGpu = hwContext.HasNvidiaGpu,
-            HasDirectX12 = hwContext.HasDirectX12,
-            AvailableBackends = availableBackends,
-            Message = mainMessage
-        };
+        return HardwareAccelerationProbeWorker.ExecuteProbe(configuredPath, deviceId);
     }
 
     private static CudaAvailability CheckCudaAvailability(string? configuredPath = null, int deviceId = 0)
     {
-        var status = CheckHardwareAccelerationStatus(configuredPath, deviceId);
-        var cudaBackend = status.AvailableBackends.FirstOrDefault(b => b.Backend == "Cuda");
-        var isAvailable = cudaBackend?.Supported ?? false;
+        var status = HardwareAccelerationProbeWorker.ExecuteProbe(configuredPath, deviceId);
+        var cudaBackend = status.AvailableBackends.Find(b => string.Equals(b.Backend, "Cuda", StringComparison.OrdinalIgnoreCase));
+        var isAvailable = cudaBackend?.Supported == true;
         return new CudaAvailability
         {
             IsAvailable = isAvailable,
@@ -718,42 +494,6 @@ public class UpdateModelsPathRequest
 }
 
 /// <summary>
-/// CUDA/GPU 可用性状态
-/// </summary>
-public class CudaAvailability
-{
-    /// <summary>
-    /// CUDA 是否可用
-    /// </summary>
-    public bool IsAvailable { get; set; }
-
-    /// <summary>
-    /// 状态消息
-    /// </summary>
-    public string Message { get; set; } = "";
-
-    /// <summary>
-    /// 检测到的显卡设备名称
-    /// </summary>
-    public string? GpuName { get; set; }
-
-    /// <summary>
-    /// 加速策略名称
-    /// </summary>
-    public string? Strategy { get; set; }
-
-    /// <summary>
-    /// 探测到的 CUDA DLL 所在主路径
-    /// </summary>
-    public string? DetectedPath { get; set; }
-
-    /// <summary>
-    /// 是否存在本地便携式运行库
-    /// </summary>
-    public bool HasPortableCuda { get; set; }
-}
-
-/// <summary>
 /// 设置保存响应模型
 /// </summary>
 public class SettingsSaveResult
@@ -772,82 +512,5 @@ public class SettingsSaveResult
     /// 嵌入模型或维度变更时为 true，建议重建向量索引
     /// </summary>
     public bool IndexRequiresRebuild { get; set; }
-}
-
-/// <summary>
-/// 全平台硬件加速状态模型
-/// </summary>
-public class HardwareAccelerationStatusResult
-{
-    /// <summary>
-    /// 探测到的所有显卡设备列表
-    /// </summary>
-    public List<GpuDeviceInfo> DetectedGpus { get; set; } = new();
-
-    /// <summary>
-    /// 当前主显卡设备信息
-    /// </summary>
-    public GpuDeviceInfo? PrimaryGpu { get; set; }
-
-    /// <summary>
-    /// 推荐使用的后端标识（Auto, Cuda, DirectML, Cpu）
-    /// </summary>
-    public string RecommendedBackend { get; set; } = "Auto";
-
-    /// <summary>
-    /// 当前生效激活的后端标识
-    /// </summary>
-    public string ActiveBackend { get; set; } = "Cpu";
-
-    /// <summary>
-    /// 当前后端就绪或回退状态诊断原因
-    /// </summary>
-    public string? ActiveBackendReason { get; set; }
-
-    /// <summary>
-    /// 是否存在 NVIDIA 显卡
-    /// </summary>
-    public bool HasNvidiaGpu { get; set; }
-
-    /// <summary>
-    /// 是否支持 DirectX 12 (Windows 10/11)
-    /// </summary>
-    public bool HasDirectX12 { get; set; }
-
-    /// <summary>
-    /// 可用硬件加速后端清单
-    /// </summary>
-    public List<AvailableBackendInfo> AvailableBackends { get; set; } = new();
-
-    /// <summary>
-    /// 综合诊断消息
-    /// </summary>
-    public string Message { get; set; } = "";
-}
-
-/// <summary>
-/// 硬件后端详情
-/// </summary>
-public class AvailableBackendInfo
-{
-    /// <summary>
-    /// 后端标识: Auto, Cuda, DirectML, Vulkan, Rocm, OpenVino, Cpu
-    /// </summary>
-    public string Backend { get; set; } = "";
-
-    /// <summary>
-    /// 显示名称
-    /// </summary>
-    public string Name { get; set; } = "";
-
-    /// <summary>
-    /// 当前系统与构建环境是否支持
-    /// </summary>
-    public bool Supported { get; set; }
-
-    /// <summary>
-    /// 状态说明或未就绪原因
-    /// </summary>
-    public string? Reason { get; set; }
 }
 

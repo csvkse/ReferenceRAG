@@ -34,6 +34,9 @@ public static class HardwareAccelerationServiceExtensions
         // 注册对话模型自适应性能规划器 (对标嵌入模型的自适应硬件卸载与批处理)
         services.AddSingleton<IChatPerformancePlanner, ChatPerformancePlanner>();
 
+        // 注册沙箱隔离硬件探测中枢服务
+        services.AddSingleton<Probing.IHardwareAccelerationProbeService, Probing.HardwareAccelerationProbeService>();
+
         return services;
     }
 }
