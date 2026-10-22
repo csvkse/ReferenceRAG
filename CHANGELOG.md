@@ -5,10 +5,13 @@
 ## [1.0.33] - 2026-10-22
 
 ### TemporaryDiagnostics 受控诊断中枢接入、NuGet 包源机制与程序访问密钥多级优先级仲裁
-- **受控临时诊断中间件集成 (`TemporaryDiagnosticsAdapter` & `DiagnosticsLifecycleStateMachine`)**：
+- **受控临时诊断中间件集成与统一优先级机制 (`TemporaryDiagnosticsAdapter` & `DiagnosticsLifecycleStateMachine`)**：
   - 成功接入 `TemporaryDiagnostics` 企业级诊断中间件，支持嵌入式 Web 仪表盘、xterm.js + PTY 原生交互终端（Web Shell）、基于 Fast IL Emit 的动态服务探查与执行，以及原生 Model Context Protocol (MCP) 端点；
-  - **环境变量严格受控**：仅在 Docker 容器或宿主机传入环境变量 `DIAG_KEY`（或 `TEMPORARY_DIAGNOSTICS_KEY`）且密钥长度 >= 8 位时才动态激活诊断管道；若未传入环境变量，处于 `Unconfigured` 状态，不注册任何路由端点、不申请常驻内存、不暴露 WebSockets，攻击面与运行开销彻底为 0；
-  - 若传入的诊断密钥长度不足 8 位，状态机自动迁移至 `InvalidEntropy` 安全防御态并输出告警，拒绝启动诊断服务；
+  - **诊断密钥 `DIAG_KEY` 支持配置文件配置，且严格遵循【配置文件最高，环境变量次之】**：
+    - 支持在 `appsettings.json` 或 `obsidian_rag_config.json` 中配置 `Diagnostics.Key` 或 `Service.DiagKey`（以及可选的 `RoutePrefix` / `DiagRoutePrefix`）；
+    - 若配置文件配置了有效密钥，优先以配置文件为准；若配置文件未配置，回退读取 Docker 环境变量 `DIAG_KEY` / `TEMPORARY_DIAGNOSTICS_KEY`；
+    - 若两处均未配置，处于 `Unconfigured` 状态，不注册任何路由端点、不申请常驻内存、不暴露 WebSockets，攻击面与运行开销彻底为 0；
+    - 若传入或配置的诊断密钥长度不足 8 位，状态机自动迁移至 `InvalidEntropy` 安全防御态并输出告警，拒绝启动诊断服务；
 - **程序业务访问密钥多级仲裁策略 (`AuthenticationKeyResolutionCoordinator` & `ApiKeyMiddleware`)**：
   - 支持通过 Docker 环境变量（`REFERENCERAG_API_KEY`、`API_KEY`）传入程序访问密钥；
   - **严格优先级保障【配置文件最高，环境变量次之】**：重构密钥解析器为策略责任链模式，优先检索配置文件中的 `Service.ApiKey`，仅在配置文件为空或未配置时回退到环境变量，彻底杜绝默认 ASP.NET Core 环境变量无意覆盖配置文件的风险；

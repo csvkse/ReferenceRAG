@@ -89,6 +89,17 @@ flowchart TD
 - **第三优先级（None）**：
   未配置任何 Key，认证状态保持为关闭（`Disabled`）。
 
+#### (3) 诊断密钥（DIAG_KEY）同样支持配置文件配置，且严格遵循【配置文件优先】
+同样地，对于受控临时诊断中间件的访问密钥 `DIAG_KEY` 与路由前缀 `RoutePrefix`，系统提供全对称的多级优先级仲裁支持：
+- **第一优先级（ConfigFile 配置文件）**：
+  主动查询 `ConfigManager.Load()?.Diagnostics?.Key`、`ConfigManager.Load()?.Service?.DiagKey` 以及 `appsettings.json` 中的 `Diagnostics:Key` 或 `ReferenceRAG:Service:DiagKey`。只要在配置文件中设置了非空诊断密钥，**配置文件密钥无条件生效**；
+- **第二优先级（EnvironmentVariable Docker 环境变量）**：
+  仅当配置文件中未填写或为空时，回退检查环境变量：`DIAG_KEY` -> `TEMPORARY_DIAGNOSTICS_KEY` -> `DIAGNOSTIC_ACCESS_KEY`；
+- **第三优先级（None 未配置）**：
+  若配置文件与环境变量均未提供，诊断中间件处于 `Unconfigured` 状态，完全不启动，攻击面与内存常驻为 0；
+- **路由前缀（RoutePrefix）优先级**：
+  同样严格满足：配置文件 (`Diagnostics:RoutePrefix` / `Service:DiagRoutePrefix`) > 环境变量 (`DIAG_ROUTE_PREFIX`) > 默认值 (`/__diag`)。
+
 ---
 
 ### 3. 头脑风暴：性能、安全边界与逻辑欠缺分析

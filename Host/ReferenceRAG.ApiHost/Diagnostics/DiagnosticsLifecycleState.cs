@@ -1,3 +1,5 @@
+using ReferenceRAG.ApiHost.Authentication;
+
 namespace ReferenceRAG.ApiHost.Diagnostics;
 
 /// <summary>
@@ -6,12 +8,12 @@ namespace ReferenceRAG.ApiHost.Diagnostics;
 public enum DiagnosticsLifecycleState
 {
     /// <summary>
-    /// 未配置（环境变量 DIAG_KEY 未传入或为空，诊断中间件完全不启动，零内存/零路由开销）
+    /// 未配置（配置文件与环境变量中均未配置有效 DIAG_KEY，诊断中间件完全不启动，零内存/零路由开销）
     /// </summary>
     Unconfigured = 0,
 
     /// <summary>
-    /// 密钥熵值或格式无效（传入了 DIAG_KEY 但长度不足 8 位，处于安全防御阻断态）
+    /// 密钥熵值或格式无效（配置了 DIAG_KEY 但长度不足 8 位，处于安全防御阻断态）
     /// </summary>
     InvalidEntropy = 1,
 
@@ -33,5 +35,6 @@ public sealed record DiagnosticsLifecycleReport(
     DiagnosticsLifecycleState State,
     bool IsEnabled,
     string? RoutePrefix,
-    string StatusMessage
+    string StatusMessage,
+    KeyResolutionSource Source = KeyResolutionSource.None
 );

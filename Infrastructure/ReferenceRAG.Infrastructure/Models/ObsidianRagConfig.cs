@@ -46,6 +46,11 @@ public class ObsidianRagConfig
     public ServiceConfig Service { get; set; } = new();
 
     /// <summary>
+    /// 受控临时诊断配置
+    /// </summary>
+    public DiagnosticsConfig Diagnostics { get; set; } = new();
+
+    /// <summary>
     /// 重排模型配置
     /// </summary>
     public RerankConfig Rerank { get; set; } = new();
@@ -625,6 +630,32 @@ public class ServiceConfig
     /// API Key 用于认证（为空则不启用认证）
     /// </summary>
     public string? ApiKey { get; set; }
+
+    /// <summary>
+    /// 受控临时诊断密钥 DIAG_KEY（为空则不启用诊断中间件，长度需 >= 8 位。配置文件优先级最高，其次是环境变量）
+    /// </summary>
+    public string? DiagKey { get; set; }
+
+    /// <summary>
+    /// 临时诊断路由前缀（默认为 /__diag）
+    /// </summary>
+    public string? DiagRoutePrefix { get; set; }
+}
+
+/// <summary>
+/// 受控临时诊断配置
+/// </summary>
+public class DiagnosticsConfig
+{
+    /// <summary>
+    /// 诊断访问密钥（为空则不启动，需 >= 8 位。配置文件优先级高于环境变量）
+    /// </summary>
+    public string? Key { get; set; }
+
+    /// <summary>
+    /// 诊断路由前缀（默认为 /__diag）
+    /// </summary>
+    public string RoutePrefix { get; set; } = "/__diag";
 }
 
 /// <summary>
