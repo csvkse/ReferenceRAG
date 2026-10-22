@@ -2,7 +2,7 @@ import { defineComponent as _defineComponent } from 'vue';
 import { ref, computed, h, inject, onMounted, onUnmounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { NIcon } from 'naive-ui';
-import { BookOutline, MoonOutline, SunnyOutline, LogOutOutline, HomeOutline, SearchOutline, FolderOutline, SettingsOutline, SpeedometerOutline, CodeSlashOutline, CubeOutline, PulseOutline, HelpCircleOutline, LayersOutline, ConstructOutline, TerminalOutline, InformationCircleOutline, GitNetworkOutline, ChatbubblesOutline } from '@vicons/ionicons5';
+import { BookOutline, MoonOutline, SunnyOutline, LogOutOutline, HomeOutline, SearchOutline, FolderOutline, SettingsOutline, SpeedometerOutline, CodeSlashOutline, CubeOutline, PulseOutline, HelpCircleOutline, LayersOutline, ConstructOutline, TerminalOutline, InformationCircleOutline, GitNetworkOutline, ChatbubblesOutline, DocumentTextOutline } from '@vicons/ionicons5';
 import { useIndexStore } from '/app/stores/index.js';
 import { useAuthStore } from '/app/stores/auth.js';
 const component = /*@__PURE__*/ _defineComponent({
@@ -105,6 +105,11 @@ const component = /*@__PURE__*/ _defineComponent({
                         label: 'API 文档',
                         key: 'ApiHelp',
                         icon: renderIcon(CodeSlashOutline)
+                    },
+                    {
+                        label: '日志查看',
+                        key: 'Logs',
+                        icon: renderIcon(DocumentTextOutline)
                     }
                 ]
             },

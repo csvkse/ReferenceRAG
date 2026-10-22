@@ -27,6 +27,7 @@ public class SystemController : ControllerBase
     private readonly IVectorStore _vectorStore;
     private readonly ILogger<SystemController> _logger;
     private readonly IHostApplicationLifetime _appLifetime;
+    private readonly ReferenceRAG.ApiHost.Features.Logging.Services.IOperationLogStore? _operationLogStore;
     private static int RandomValue { get; set; } = new Random().Next(1000,9999);
 
     public SystemController(
@@ -34,13 +35,15 @@ public class SystemController : ControllerBase
         AlertService alertService,
         IVectorStore vectorStore,
         ILogger<SystemController> logger,
-        IHostApplicationLifetime appLifetime)
+        IHostApplicationLifetime appLifetime,
+        ReferenceRAG.ApiHost.Features.Logging.Services.IOperationLogStore? operationLogStore = null)
     {
         _metricsCollector = metricsCollector;
         _alertService = alertService;
         _vectorStore = vectorStore;
         _logger = logger;
         _appLifetime = appLifetime;
+        _operationLogStore = operationLogStore;
     }
 
     /// <summary>
@@ -201,6 +204,15 @@ public class SystemController : ControllerBase
     public ActionResult RestartService()
     {
         _logger.LogInformation("收到重启服务 API 请求");
+        _ = _operationLogStore?.RecordAsync(new ReferenceRAG.ApiHost.Features.Logging.Models.OperationLogEntry
+        {
+            Action = "RestartService",
+            TargetType = "System",
+            TargetName = "ReferenceRAG",
+            Detail = "通过系统管理 API 触发服务重启",
+            ClientIp = HttpContext.Connection.RemoteIpAddress?.ToString(),
+            Success = true
+        });
 
         try
         {

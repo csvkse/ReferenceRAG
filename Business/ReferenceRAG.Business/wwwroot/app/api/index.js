@@ -235,4 +235,12 @@ export const fileSystemApi = {
     browse: (path = '', folderOnly = true) => api.get('/FileSystem/browse', { params: { path, folderOnly } }),
     mkdir: (path) => api.post('/FileSystem/mkdir', { path })
 };
+// Logs
+export const logsApi = {
+    getFiles: () => api.get('/Logs/Files'),
+    getFileContent: (name, tail = 300) => api.get(`/Logs/Files/${encodeURIComponent(name)}`, { params: { tail } }),
+    getDownloadUrl: (name) => `${API_URL}/Logs/Files/${encodeURIComponent(name)}/download`,
+    getOperations: (params) => api.get('/Logs/Operations', { params }),
+    recordOperation: (data) => api.post('/Logs/Operations', data)
+};
 export default api;

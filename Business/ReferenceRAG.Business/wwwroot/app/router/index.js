@@ -52,6 +52,12 @@ const routes = [
                 meta: { title: 'API 文档' }
             },
             {
+                path: 'logs',
+                name: 'Logs',
+                component: () => import('/app/views/Logs.js'),
+                meta: { title: '日志查看' }
+            },
+            {
                 path: 'models',
                 name: 'Models',
                 component: () => import('/app/views/Models.js'),
