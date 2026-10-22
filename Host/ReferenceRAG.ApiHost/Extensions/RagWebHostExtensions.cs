@@ -8,6 +8,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
+using ReferenceRAG.ApiHost.Authentication;
 using ReferenceRAG.Core.Extensions;
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
@@ -58,17 +59,18 @@ public static class RagWebHostExtensions
         // MAF 流式聊天服务（内存会话）
 
         #region MCP Server 配置
-        // 获取服务配置
-        var serviceApiKey = configuration.GetSection("ReferenceRAG:Service:ApiKey").Get<string>();
-        var mcApiKeys = string.IsNullOrWhiteSpace(serviceApiKey)
-            ? []
-            : new List<string> { serviceApiKey };
+        // 通过密钥协调器统一解析访问密钥（配置文件优先 > 环境变量）
+        var mcpKeyResolver = new AuthenticationKeyResolutionCoordinator(configuration: configuration);
+        var mcpResolved = mcpKeyResolver.ResolveKey();
+        var mcApiKeys = (mcpResolved.IsEnabled && !string.IsNullOrWhiteSpace(mcpResolved.ApiKey))
+            ? new List<string> { mcpResolved.ApiKey }
+            : new List<string>();
 
         var appMiddlewareOptions = new AppMiddlewareOptions
         {
             Authentication = new AuthenticationOptions  // 添加 MCP 认证配置
             {
-                Enabled = true,
+                Enabled = mcApiKeys.Count > 0,
                 Type = AuthenticationType.ApiKey,
                 ApiKey = new ApiKeyOptions
                 {
@@ -88,12 +90,6 @@ public static class RagWebHostExtensions
                 { }
             }
         };
-
-        if (mcApiKeys.Count == 0)
-        {
-            appMiddlewareOptions.Authentication.Enabled = false;
-        }
-
 
         // 注册完整的中间件套件
         services.AddAppMcpHelper(appMiddlewareOptions);

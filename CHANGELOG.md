@@ -2,6 +2,24 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.36] - 2026-10-22
+
+### 接口安全网关强化：默认全量认证、显式白名单机制与凭据防泄露体系
+- **默认拒绝与显式白名单认证模型升级 (`ApiKeyMiddleware.cs`)**：
+  - 将 API Key 鉴权从前缀选择性拦截重构为**默认强制认证（Default-Deny）**：当配置密钥时，非显式白名单公开接口默认均须提供有效凭据；未配置密钥时保持免密兼容模式；
+  - **原生特性级支持 `[AllowAnonymous]`**：中间件前置探测端点元数据 `IAllowAnonymous`，标记该特性的控制器或 Action 直接放行；
+  - **规范化公开白名单边界**：显式放行 `/api/auth/check` 认证状态探测端点、CORS `OPTIONS` 预检请求、前端 SPA 页面视图路由（`GET`）、前端静态资源及独立的 `/__diag/*` 诊断通道。
+- **全面消除 SignalR、MCP 与 Swagger 鉴权盲区**：
+  - **修复 SignalR 盲区**：修正中间件监控路径为实际端点 `/hubs/index`，前端客户端同步接入 `accessTokenFactory`，杜绝未授权监听私有文件变更与索引进度；
+  - **修复 MCP 中间件顺序与密钥不同步**：将 `UseAppMcpHelper()` 移入 `ApiKeyMiddleware` 保护管辖之后，并在服务注入阶段通过 `IAuthenticationKeyResolver` 解析多级优先级密钥；
+  - **Swagger 访问保护与 Cookie 桥接**：非白名单的 `/swagger` 与 `/swagger/v1/swagger.json` 纳入认证，支持浏览器带参访问（`?apiKey=...`）并自动下发 Session Cookie（`reference_rag_api_key`）无缝维持后续资源加载。
+- **敏感配置脱敏与防覆盖保护 (`SettingsController.cs`)**：
+  - `GET /api/settings` 在返回前对配置对象执行深拷贝与敏感凭据脱敏（`OpenAiApi.ApiKey`、`Service.ApiKey`、`Service.DiagKey` 等掩码化，绝不污染运行内存）；
+  - `POST /api/settings` 识别提交数据中的掩码标记（`****`），未改密保存时自动保留磁盘中的原始真实密钥，防止意外写盘破坏。
+- **架构文档与自动化测试落地**：
+  - 编写并提交架构规范文档 `docs/api-security-and-whitelist-authentication-architecture.md`；
+  - 新增 `ApiKeyMiddlewareWhitelistTests.cs` 12 项端到端及控制器门禁测试，全部通过验证。
+
 ## [1.0.35] - 2026-10-22
 
 ### 网页品牌图标集成、非 NVIDIA 平台 CUDA 状态静默屏蔽与硬件探测自愈缓存
