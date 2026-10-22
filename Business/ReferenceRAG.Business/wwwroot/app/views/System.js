@@ -150,14 +150,52 @@ const component = /*@__PURE__*/ _defineComponent({
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         };
         const formatUptime = (seconds) => {
-            const days = Math.floor(seconds / 86400);
-            const hours = Math.floor((seconds % 86400) / 3600);
-            const mins = Math.floor((seconds % 3600) / 60);
+            const s = Math.max(0, Math.floor(seconds || 0));
+            const days = Math.floor(s / 86400);
+            const hours = Math.floor((s % 86400) / 3600);
+            const mins = Math.floor((s % 3600) / 60);
+            const secs = s % 60;
             if (days > 0)
                 return `${days}天 ${hours}小时`;
             if (hours > 0)
                 return `${hours}小时 ${mins}分钟`;
-            return `${mins}分钟`;
+            if (mins > 0)
+                return `${mins}分钟`;
+            return `${secs}秒`;
+        };
+        const parseTimeSpanToSeconds = (ts) => {
+            if (typeof ts === 'number') return ts;
+            if (!ts || typeof ts !== 'string') return 0;
+            try {
+                const dotParts = ts.split('.');
+                let days = 0;
+                let timeStr = ts;
+                if (dotParts.length > 1 && !dotParts[0].includes(':')) {
+                    days = parseInt(dotParts[0], 10) || 0;
+                    timeStr = dotParts.slice(1).join('.');
+                }
+                const parts = timeStr.split(':');
+                if (parts.length >= 3) {
+                    const hours = parseInt(parts[0], 10) || 0;
+                    const mins = parseInt(parts[1], 10) || 0;
+                    const secs = parseFloat(parts[2]) || 0;
+                    return Math.floor(days * 86400 + hours * 3600 + mins * 60 + secs);
+                }
+            } catch (e) {
+                console.warn('Failed to parse TimeSpan uptime:', e);
+            }
+            return 0;
+        };
+        const normalizeSystemMetrics = (raw) => {
+            if (!raw) return raw;
+            const data = { ...raw };
+            if (data.memoryUsedBytes === undefined && data.memoryUsageMB !== undefined) {
+                data.memoryUsedBytes = data.memoryUsageMB * 1024 * 1024;
+            }
+            if (data.uptimeSeconds === undefined && data.uptime) {
+                data.uptimeSeconds = parseTimeSpanToSeconds(data.uptime);
+            }
+            return data;
         };
         const formatTime = (timestamp) => {
             if (!timestamp)
@@ -169,7 +207,10 @@ const component = /*@__PURE__*/ _defineComponent({
             try {
                 const response = await systemApi.getStatus();
                 systemStatus.value = response.data;
-                indexMetrics.value = response.data.index;
+                indexMetrics.value = response.data?.index;
+                if (response.data?.system && !systemMetrics.value) {
+                    systemMetrics.value = normalizeSystemMetrics(response.data.system);
+                }
             }
             catch (error) {
                 console.error('Failed to load status:', error);
@@ -195,7 +236,7 @@ const component = /*@__PURE__*/ _defineComponent({
             systemMetricsLoading.value = true;
             try {
                 const response = await systemApi.getMetrics();
-                systemMetrics.value = response.data;
+                systemMetrics.value = normalizeSystemMetrics(response.data);
             }
             catch (error) {
                 console.error('Failed to load system metrics:', error);
