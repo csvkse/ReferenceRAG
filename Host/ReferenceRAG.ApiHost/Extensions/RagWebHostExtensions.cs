@@ -45,6 +45,8 @@ public static class RagWebHostExtensions
         services.AddSingleton<IndexEventPublisher>();
         services.AddSingleton<ReferenceRAG.Business.Features.Indexing.Contracts.IIndexEventPublisher>(sp => sp.GetRequiredService<IndexEventPublisher>());
         services.AddSingleton<TestRecordStore>();
+        services.AddSingleton<ReferenceRAG.ApiHost.Features.Logging.Services.ILogFileService, ReferenceRAG.ApiHost.Features.Logging.Services.LogFileService>();
+        services.AddSingleton<ReferenceRAG.ApiHost.Features.Logging.Services.IOperationLogStore, ReferenceRAG.ApiHost.Features.Logging.Services.OperationLogStore>();
         services.AddSignalR(options =>
         {
             options.EnableDetailedErrors = signalRDetailedErrors;
@@ -130,7 +132,7 @@ public static class RagWebHostExtensions
         var webRootPath = app.Environment.WebRootPath;
         if (!string.IsNullOrEmpty(webRootPath) && File.Exists(Path.Combine(webRootPath, "index.html")))
         {
-            foreach (var route in new[] { "/", "/login", "/dashboard", "/search", "/sources", "/settings", "/performance", "/api-help", "/models", "/system", "/bm25-index", "/guide", "/graph", "/chat" })
+            foreach (var route in new[] { "/", "/login", "/dashboard", "/search", "/sources", "/settings", "/performance", "/api-help", "/models", "/system", "/bm25-index", "/guide", "/graph", "/chat", "/logs" })
                 app.MapGet(route, () => Results.File(Path.Combine(webRootPath, "index.html"), "text/html"));
         }
         else

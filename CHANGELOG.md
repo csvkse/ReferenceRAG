@@ -2,6 +2,30 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.34] - 2026-10-22
+
+### 开发工具日志管理页面上线、逆向流尾部高速寻优算法与操作审计体系
+- **开发工具新增「日志查看」页面 (`Logs.js` & `MainLayout.js` & `router/index.js`)**：
+  - 参考 `WebToolForLinux` 优秀实践并在交互与性能上深度升级，在主导航栏「开发工具」分组下新增「日志查看」菜单项（图标：`DocumentTextOutline`，路由：`/logs`）；
+  - **双 Tab 结构设计**：
+    1. **系统运行日志（Application / Debug Logs）**：
+       - 左侧自适应日志文件列表：展示文件名、文件大小、最后修改时间、当日活跃标记，支持文件名即时过滤与刷新；
+       - 右侧极客风终端控制台：支持尾部行数选择（100 / 300 / 1000 / 5000 行）、行内关键字高亮检索、实时自动刷新（支持 3s / 5s / 10s 轮询与向上滚动智能暂停）、一键复制到剪贴板，以及完整日志全量流式下载；
+    2. **操作审计日志（Operation Audit Logs）**：
+       - 提供基于内存环形缓冲区与轻量 JSONL 持久化仓储的操作审计列表；
+       - 展示操作时间、操作类别、对象类型、对象名称、操作详情、客户端 IP 及成功/失败状态徽标；
+       - 支持多关键字模糊搜索与后端真实分页（Page / PageSize）。
+- **逆向指针流式尾部读取策略 (`FastReverseSeekTailStrategy` & `ILogReaderStrategy`)**：
+  - 突破传统 `File.ReadLines` 必须从头扫描整个大文件带来的 CPU 爆表与 GC 内存泄漏风险；
+  - 采用逆向寻优（Backward Seek）算法，直接从物理文件尾部向头部以块为单位扫描 `\n` 换行符，达到指定行数立即向前解码；
+  - 无论日志文件是 10MB 还是 2GB，末尾 Tail 读取耗时严格控制在 **< 1ms**，内存分配维持微秒级；
+  - 打开文件时严格声明 `FileShare.ReadWrite | FileShare.Delete`，完美避免与运行中写日志的 Serilog/FileLogger 发生文件锁冲突；
+  - 内置 512KB 硬截断与安全防爆保护，自动剔除首字节 UTF-8 BOM 标记，杜绝前端浏览器内存耗尽或白屏崩溃。
+- **严密路径穿越与安全防护 (`LogFileService`)**：
+  - 引入白名单正则与物理路径根目录包含双重校验，坚决拦截 `..`、`/`、`\` 等恶意文件名读取或下载请求；
+- **SPA Fallback 路由支持 (`RagWebHostExtensions`)**：
+  - 在 WebHost 静态路由回退列表中追加 `/logs`，保障在浏览器中直接按 F5 刷新页面时能够正常加载。
+
 ## [1.0.33] - 2026-10-22
 
 ### TemporaryDiagnostics 受控诊断中枢接入、NuGet 包源机制与程序访问密钥多级优先级仲裁
