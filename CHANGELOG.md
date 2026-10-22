@@ -4,6 +4,18 @@
 
 ## [1.0.39] - 2026-10-22
 
+### Intel Alder Lake-N (N100) 核显 OpenVINO 硬件探测 ExitCode 127 根因修复与动态库隔离治理
+- **ONNX Runtime Provider 插件桥接生命周期隔离修复 (`OnnxExecutionProviderHelper.cs`)**：
+  - **动态链接器未定义符号（ExitCode 127）根因排除**：深入实机诊断（通过 TemporaryDiagnostics MCP 执行 CLI），捕获到 `dotnet: symbol lookup error: /app/runtimes/linux-x64/native/libonnxruntime_providers_openvino.so: undefined symbol: Provider_GetHost`；
+  - **解除错误预热 dlopen 依赖**：彻底移除 `PreloadLinuxOpenVinoDependencies` 中对 `libonnxruntime_providers_openvino.so` 与 `libonnxruntime_providers_shared.so` 的独立静态 dlopen 加载，避免在主运行时 `libonnxruntime.so` 初始化之前提前触发插件 C++ 静态构造函数中的 `Provider_GetHost` 寻址失败；
+  - **托管框架与原生 Provider 契约对齐**：仅保留底层计算与驱动库（TBB 与 OpenVINO 核心/GPU 插件）预热，执行提供者插件交由 ONNX Runtime 内部桥接器在 `AppendExecutionProvider_OpenVINO` 阶段自主动态挂载。
+- **真机实测与图形界面验证**：
+  - 在配备 Intel Alder Lake-N 核显（vendor: 0x8086, device: 0x46d1, Intel N100）的真实容器环境及内置 Chrome 浏览器中全流程验证；
+  - 设置页面前端硬件就绪状态从 `ExitCode=127 降级为 CPU` 完美恢复为：`OpenVino (已就绪 (Intel GPU / 酷睿核显 OpenVINO 原生硬件加速))`，检测设备准确识别为 `Intel Graphics (核显 / Arc 独显) (集成核显 / 共享系统内存)`。
+- **自动化防回归质量门禁建立 (`HardwareAccelerationTests.cs`)**：
+  - 新增 `OnnxExecutionProviderHelper_PreloadLinuxDependencies_DoesNotLoadProviderPluginsDirectly` 代码级契约门禁，严格物理拦截任何将 ORT Provider 插件（`libonnxruntime_providers_*.so`）混入独立 dlopen 列表的回归倾向；
+  - 24 项硬件加速相关自动化测试全部通过。
+
 ### 系统监控页面系统资源探测性能重构与前后端遥测契约治理
 - **前后端系统资源契约割裂根因修复与防御性归一化 (`MetricsCollector.cs` & `System.js`)**：
   - **规范化字节级容量契约**：在后端 `SystemMetrics` 中补齐 `MemoryUsedBytes`、`MemoryTotalBytes`、`DiskUsedBytes`、`DiskTotalBytes`、`DiskFreeBytes` 与 `UptimeSeconds`，消除前端因字段缺失展示 `0 B / 0 B` 与 `0分钟` 的缺陷；

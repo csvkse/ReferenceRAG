@@ -359,4 +359,21 @@ public class HardwareAccelerationTests
             Assert.NotNull(failureReason);
         }
     }
+
+    [Fact]
+    public void OnnxExecutionProviderHelper_PreloadLinuxDependencies_DoesNotLoadProviderPluginsDirectly()
+    {
+        // 确保不会将 libonnxruntime_providers_*.so 加入到直接 dlopen 的预加载依赖项中，
+        // 避免因 Provider_GetHost 桥接符号未初始化引发动态链接器 symbol lookup error (ExitCode 127)
+        var sourcePath = Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+            "Infrastructure", "ReferenceRAG.Infrastructure", "Features", "HardwareAcceleration", "OnnxExecutionProviderHelper.cs");
+
+        if (File.Exists(sourcePath))
+        {
+            var content = File.ReadAllText(sourcePath);
+            Assert.DoesNotContain("\"libonnxruntime_providers_openvino.so\"", content);
+            Assert.DoesNotContain("\"libonnxruntime_providers_shared.so\"", content);
+        }
+    }
 }
