@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
@@ -47,12 +48,32 @@ public class SettingsController : ControllerBase
     [HttpGet]
     public ActionResult<ObsidianRagConfig> Get()
     {
-        var config = _configManager.Load();
+        var rawConfig = _configManager.Load();
+        // 深拷贝配置对象，避免脱敏处理污染 ConfigManager 内存中的真实运行配置
+        var serialized = JsonSerializer.Serialize(rawConfig);
+        var config = JsonSerializer.Deserialize<ObsidianRagConfig>(serialized) ?? rawConfig;
 
-        // 统一脱敏标记：设置 ApiKeyConfigured，供前端安全感知
+        // 统一脱敏标记：设置 ApiKeyConfigured，供前端安全感知；对敏感凭据统一执行掩码脱敏
         if (config.Chat?.OpenAiApi != null)
         {
             config.Chat.OpenAiApi.ApiKeyConfigured = !string.IsNullOrWhiteSpace(config.Chat.OpenAiApi.ApiKey);
+            config.Chat.OpenAiApi.ApiKey = MaskKey(config.Chat.OpenAiApi.ApiKey);
+        }
+
+        if (config.Service != null)
+        {
+            config.Service.ApiKey = MaskKey(config.Service.ApiKey);
+            config.Service.DiagKey = MaskKey(config.Service.DiagKey);
+        }
+
+        if (config.Embedding != null && !string.IsNullOrWhiteSpace(config.Embedding.ApiKey))
+        {
+            config.Embedding.ApiKey = MaskKey(config.Embedding.ApiKey);
+        }
+
+        if (config.Rerank != null && !string.IsNullOrWhiteSpace(config.Rerank.ApiKey))
+        {
+            config.Rerank.ApiKey = MaskKey(config.Rerank.ApiKey);
         }
 
         // 获取模型根目录（优先使用顶层配置）
@@ -432,17 +453,40 @@ public class SettingsController : ControllerBase
         // 关键保护：数据源由 Sources 模块独立管理，设置保存不能覆盖可能已并发修改的 Sources 列表
         config.Sources = current.Sources;
 
-        // 关键保护：前端脱敏留空时，若旧配置已有有效 API Key，则继承旧 Key 防止意外被覆盖为清空
+        // 关键保护：前端脱敏留空或包含掩码标记（****）时，若旧配置已有有效 API Key，则继承旧 Key 防止意外被覆盖为清空
         if (config.Chat?.OpenAiApi != null)
         {
             if (string.Equals(config.Chat.OpenAiApi.ApiKey, "__CLEAR__", StringComparison.OrdinalIgnoreCase))
             {
                 config.Chat.OpenAiApi.ApiKey = string.Empty;
             }
-            else if (string.IsNullOrWhiteSpace(config.Chat.OpenAiApi.ApiKey) && !string.IsNullOrWhiteSpace(current.Chat?.OpenAiApi?.ApiKey))
+            else if ((string.IsNullOrWhiteSpace(config.Chat.OpenAiApi.ApiKey) || config.Chat.OpenAiApi.ApiKey.Contains("****")) && !string.IsNullOrWhiteSpace(current.Chat?.OpenAiApi?.ApiKey))
             {
                 config.Chat.OpenAiApi.ApiKey = current.Chat.OpenAiApi.ApiKey;
             }
+        }
+
+        if (config.Service != null && current.Service != null)
+        {
+            if (config.Service.ApiKey?.Contains("****") == true)
+            {
+                config.Service.ApiKey = current.Service.ApiKey;
+            }
+
+            if (config.Service.DiagKey?.Contains("****") == true)
+            {
+                config.Service.DiagKey = current.Service.DiagKey;
+            }
+        }
+
+        if (config.Embedding != null && current.Embedding != null && config.Embedding.ApiKey?.Contains("****") == true)
+        {
+            config.Embedding.ApiKey = current.Embedding.ApiKey;
+        }
+
+        if (config.Rerank != null && current.Rerank != null && config.Rerank.ApiKey?.Contains("****") == true)
+        {
+            config.Rerank.ApiKey = current.Rerank.ApiKey;
         }
 
         _configManager.Save(config);
@@ -638,6 +682,13 @@ public class SettingsController : ControllerBase
             _logger.LogError(ex, "验证 HF Token 异常");
             return Ok(new { valid = false, message = $"验证异常: {ex.Message}" });
         }
+    }
+
+    private static string MaskKey(string? key)
+    {
+        if (string.IsNullOrEmpty(key)) return "";
+        if (key.Length <= 4) return "****";
+        return $"{key[..2]}****{key[^2..]}";
     }
 }
 

@@ -93,9 +93,11 @@ internal static partial class Program
         // 全局异常处理必须早于其它中间件：未处理异常统一转成 JSON 错误体，
         // 避免 Kestrel 返回 Content-Length: 0 的空白 500（客户端无法定位原因）。
         app.UseGlobalExceptionHandler();
-        app.UseAppMcpHelper(); app.UseSwagger();
-        if (enableApi) app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "ReferenceRAG API v1"));
+        app.UseRouting();
         app.UseApiKeyAuthentication();
+        app.UseAppMcpHelper();
+        app.UseSwagger();
+        if (enableApi) app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "ReferenceRAG API v1"));
         app.UseRagEndpoints();
         LogStartup("Initializing search");
         Task.Run(async () => { await app.InitializeSearchAsync(); await app.StartAsync(); }).GetAwaiter().GetResult();

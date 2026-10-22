@@ -147,10 +147,20 @@ if (enableCors) app.UseCors();
 // 需在 MCP / Swagger / 静态文件 / 鉴权之前，才能覆盖它们的异常。
 app.UseGlobalExceptionHandler();
 
-// MCP 中间件（必须在 CORS 之后，其他中间件之前）
+// 静态文件服务（Vue 前端）：优先伺服物理静态资源
+app.UseDefaultFiles();
+app.UseStaticFiles(new StaticFileOptions { OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache" });
+
+// 启用路由中间件（使 context.GetEndpoint() 生效，供后续鉴权探测 [AllowAnonymous] 等特性元数据）
+app.UseRouting();
+
+// 统一 API Key 鉴权中间件（默认阻断，仅显式白名单与 [AllowAnonymous] 放行；管辖 MCP、Swagger、所有业务 API 与 SignalR Hub）
+app.UseApiKeyAuthentication();
+
+// MCP 中间件（在 API Key 保护下）
 app.UseAppMcpHelper();
 
-// 临时诊断中间件（由环境变量 DIAG_KEY 控制）
+// 临时诊断中间件（由环境变量 DIAG_KEY 控制，独立通道，白名单放行）
 app.UseConditionalTemporaryDiagnostics();
 
 // Swagger 由设置页的「启用 Swagger」控制（ReferenceRAG:Service:enableSwagger），
@@ -165,12 +175,6 @@ if (swaggerEnabled)
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "Obsidian RAG API v1");
     });
 }
-
-// 静态文件服务（Vue 前端）
-app.UseDefaultFiles();
-app.UseStaticFiles(new StaticFileOptions { OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache" });
-
-app.UseApiKeyAuthentication();
 
 // 共用端点注册、目录初始化（与 Desktop/HostBootstrapper 共用）
 try
