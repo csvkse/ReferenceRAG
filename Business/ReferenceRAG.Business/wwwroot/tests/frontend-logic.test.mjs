@@ -446,3 +446,80 @@ test('safe-markdown.js balanceTags and thought extraction: prevents cumulative t
     assert.equal(directParentText, '阶段 1 文本', 'Parent think step must only contain its own direct text, ignoring child think');
     assert.equal(directChildText, '阶段 2 文本', 'Child think step must only contain its own direct text');
 });
+
+test('safe-markdown.js extractThoughts and renderMarkdown quality gate: preserves 100% of answer content without HTML5 nesting/truncation', async () => {
+    const { balanceTags, extractThoughts } = await import('../shared/safe-markdown.js');
+
+    // 1. 回归门禁：已闭合的思考块 + 包含标题与多级列表的正文（用户真实成都问答场景）
+    // 严禁将正文内容误吞进思考块，严禁因后文存在列表项而在正文中插入非法多余的 </think>
+    const chengduResponse = `<think>
+**Exploring Chengdu**
+
+The user is asking for an introduction to Chengdu. I’ll provide an overview.
+</think>
+
+成都是一座兼具历史底蕴与生活气息的城市，很多人第一次来，觉得“慢、好吃、有故事”。
+
+下面从几个维度简要介绍一下：
+
+---
+
+## 1. 地理位置与气候
+- 成都位于四川盆地西部，盆地边缘，地势平坦，农业条件很好。
+- 气候温和湿润，四季分明，夏天不闷热，冬天不冷，适合生活。
+
+---
+
+## 2. 历史与城市格局
+- “天府之国”“锦官城”“锦官道”等名字，都跟成都的商贸地位有关。
+- 历史上是重要的经济、文化、军事重镇，留下不少古迹和传说。
+
+---
+
+## 5. 旅游亮点
+适合喜欢文化、历史、自然风光的旅行者：
+
+- **青城山 + 都江堰**：道教名山与水利工程，山水清幽，适合静心。
+- **武侯祠 + 杜甫草堂**：三国文化与文学名人的历史遗迹。`;
+
+    const balanced = balanceTags(chengduResponse);
+    const thinkCloseMatches = balanced.match(/<\/think>/gi) || [];
+    assert.equal(thinkCloseMatches.length, 1, 'Balanced tags must have exactly 1 </think> for single closed thought');
+
+    const extracted = extractThoughts(chengduResponse);
+    assert.equal(extracted.thoughtSteps.length, 1, 'Should extract exactly 1 thought stage');
+    assert.equal(extracted.isStreaming, false, 'Should be marked as completed (not streaming)');
+    assert(extracted.thoughtSteps[0].includes('Exploring Chengdu'), 'Thought content must be accurately extracted');
+    assert(extracted.cleanBody.startsWith('成都是一座兼具历史底蕴与生活气息的城市'), 'Clean body must begin with intro paragraph');
+    assert(extracted.cleanBody.includes('## 1. 地理位置与气候'), 'Clean body must contain Section 1');
+    assert(extracted.cleanBody.includes('## 2. 历史与城市格局'), 'Clean body must contain Section 2');
+    assert(extracted.cleanBody.includes('## 5. 旅游亮点'), 'Clean body must contain Section 5');
+    assert(extracted.cleanBody.includes('青城山 + 都江堰'), 'Clean body must contain Section 5 list item');
+
+    // 2. 思考链内部包含有序/无序列表与数字编号时，绝不误截断
+    const thoughtWithInternalLists = `<think>
+思维链步骤如下：
+1. 分析用户意图
+2. 检索知识库候选文档
+- 候选 A 得分 0.95
+- 候选 B 得分 0.88
+</think>
+
+这是最终的答案，包含要点：
+- 结果一
+- 结果二`;
+
+    const resInternalLists = extractThoughts(thoughtWithInternalLists);
+    assert.equal(resInternalLists.thoughtSteps.length, 1);
+    assert(resInternalLists.thoughtSteps[0].includes('1. 分析用户意图'), 'Internal numbers inside thought must stay inside thought');
+    assert(resInternalLists.thoughtSteps[0].includes('- 候选 A 得分 0.95'), 'Internal bullet points inside thought must stay inside thought');
+    assert(resInternalLists.cleanBody.startsWith('这是最终的答案'), 'Answer must start after thought');
+    assert(resInternalLists.cleanBody.includes('- 结果一'), 'Answer bullet points must be preserved in cleanBody');
+
+    // 3. 流式生成进行中的思考（未闭合）检测
+    const streamingThought = '<think>\n正在深度思考并分析知识库召回结果...';
+    const resStreaming = extractThoughts(streamingThought);
+    assert.equal(resStreaming.thoughtSteps.length, 1);
+    assert.equal(resStreaming.isStreaming, true, 'Streaming thought must be flagged as isStreaming=true');
+    assert.equal(resStreaming.cleanBody, '', 'Clean body must be empty while streaming thought');
+});
