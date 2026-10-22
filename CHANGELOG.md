@@ -2,6 +2,18 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.41] - 2026-10-22
+
+### 诊断中枢工具链实战手册与标准排错处置流程 (SOP Runbook) 落地
+- **排错方案与标准化处置流程手册 (`docs/chat-model-and-keepalive-troubleshooting-sop-and-runbook.md`)**：
+  - 沉淀大模型状态五层流转拓扑（物理存储 $\rightarrow$ 后端注册 $\rightarrow$ 静态托管预压缩 $\rightarrow$ 前端 Keep-Alive 内存 $\rightarrow$ 跨标签广播）；
+  - 建立标准排查七步法（物理文件校验、接口探测、预压缩缓存清理、KeepAlive 唤醒追踪、配置竞态消除、跨页广播核验、环境隔离门禁）；
+  - 梳理 5 大核心故障模式图谱与应急速查指令卡片。
+- **三位一体诊断工具链指南 (`docs/diagnostic-and-troubleshooting-toolchain-guide.md`)**：
+  - 梳理业务接口调研（API Investigation）与统一鉴权白名单机制；
+  - 规范内置浏览器（Chrome DevTools MCP）无障碍可访问语义树快照与 KeepAlive 自动化回归测试；
+  - 详解 TemporaryDiagnostics MCP 网关受控命令行执行（`execute_diagnostic_command`）、分片 Base64 无损热补丁注入与 DI 服务内省技术。
+
 ## [1.0.40] - 2026-10-22
 
 ### 本地 GGUF 聊天模型下载后未感知与 Vue 3 Keep-Alive 跨组件状态失步根因修复与协同治理
