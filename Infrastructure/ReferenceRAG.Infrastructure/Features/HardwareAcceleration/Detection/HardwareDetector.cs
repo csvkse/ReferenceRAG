@@ -13,8 +13,8 @@ namespace ReferenceRAG.Core.Features.HardwareAcceleration.Detection;
 public class HardwareDetector : IHardwareDetector
 {
     private readonly ILogger<HardwareDetector>? _logger;
-    private readonly object _lock = new();
-    private HardwareContext? _cachedContext;
+    private static readonly object _staticLock = new();
+    private static HardwareContext? _cachedContext;
 
     public HardwareDetector(ILogger<HardwareDetector>? logger = null)
     {
@@ -28,7 +28,7 @@ public class HardwareDetector : IHardwareDetector
             return _cachedContext;
         }
 
-        lock (_lock)
+        lock (_staticLock)
         {
             if (!forceRefresh && _cachedContext != null)
             {

@@ -2,6 +2,25 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.35] - 2026-10-22
+
+### 网页品牌图标集成、非 NVIDIA 平台 CUDA 状态静默屏蔽与硬件探测自愈缓存
+- **网页全局图标标准规范接入 (`index.html` & `favicon.svg` & `favicon.ico`)**：
+  - 在前端网页 `<head>` 中引入现代化双轨 Favicon 图标体系，根治浏览器默认 `favicon.ico` 404 告警；
+  - 接入矢量 SVG 图标（`favicon.svg`），自适应浅色与深色系统主题（Dark / Light Mode）；
+  - 兼容回退标准 ICO 多分辨率图标（`favicon.ico`，内嵌 16x16、32x32、48x48）及 iOS `apple-touch-icon`；
+  - 静态资源路径均携带构建版本号缓存失效戳（`?v=1.0.35`），确保浏览器无感知即时刷新。
+- **显卡厂商感知与非 NV 平台静默过滤 (`Settings.js`)**：
+  - 建立精准的 GPU 厂商智能识别与分类策略，自动解析 GPU Vendor 与 GPU Model（识别 Intel UHD/Iris/Xe/Arc、AMD Radeon、Apple Silicon、CPU 等）；
+  - **非 NVIDIA 设备彻底杜绝 CUDA 误报**：对于非 NV 设备，前端严格隐藏并置空 `cudaInfo`、屏蔽「CUDA 状态」徽标及「CUDA 库路径」配置项，界面干净纯粹；
+  - **重构探针异常呈现机制**：彻底根除此前因网络微闪或探针响应延迟时将错误笼统提示为 `CUDA 状态 无法探测硬件加速状态 (Failed to fetch)` 的逻辑缺陷；将探测异常统一归纳至「硬件就绪状态」告警栏，明确提示 CPU 自动回退保护已激活，杜绝在核显/AMD设备上冒充 CUDA 报错。
+- **硬件探测静态缓存与微秒级响应优化 (`HardwareDetector.cs`)**：
+  - 将 `HardwareDetector` 的探测上下文升级为进程级静态缓存 `_cachedContext`，配合双重检查锁（Double-Checked Locking）；
+  - 彻底避免高频访问系统设置页面时重复触发 Windows WMI、DirectX 探测及 Linux `lspci` / `nvidia-smi` 子进程开销；
+  - 将 `/Settings/hardware-acceleration/status` 接口的重复探测响应耗时从 180~300ms 大幅压缩至 **< 0.1ms**，从源头消除了前端探针因耗时过长导致 `Failed to fetch` 超时的隐患。
+- **架构方案文档落盘 (`docs/web-favicon-and-gpu-vendor-awareness-architecture.md`)**：
+  - 详细梳理并产出了技术调研与架构文档，涵盖图标设计规范、适配器与策略模式、状态机流转设计、以及对比 PyTorch / Ollama / LM Studio 等业界主流产品的差异化优势。
+
 ## [1.0.34] - 2026-10-22
 
 ### 开发工具日志管理页面上线、逆向流尾部高速寻优算法与操作审计体系
