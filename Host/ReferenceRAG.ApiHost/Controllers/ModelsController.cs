@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Business.Features.Chat.Services;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Detection;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Models;
 using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
@@ -22,6 +24,7 @@ public class ModelsController : ControllerBase
     private readonly IRerankService? _rerankService;
     private readonly IModelTelemetryService? _telemetryService;
     private readonly MafChatService? _chatService;
+    private readonly IHardwareDetector _hardwareDetector;
     private readonly IVectorStore _vectorStore;
     private readonly ILogger<ModelsController> _logger;
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DownloadProgress> _downloadProgress = new();
@@ -36,7 +39,8 @@ public class ModelsController : ControllerBase
         ILogger<ModelsController> logger,
         IRerankService? rerankService = null,
         IModelTelemetryService? telemetryService = null,
-        MafChatService? chatService = null)
+        MafChatService? chatService = null,
+        IHardwareDetector? hardwareDetector = null)
     {
         _configManager = configManager;
         _modelManager = modelManager;
@@ -46,6 +50,7 @@ public class ModelsController : ControllerBase
         _rerankService = rerankService;
         _telemetryService = telemetryService;
         _chatService = chatService;
+        _hardwareDetector = hardwareDetector ?? new HardwareDetector();
     }
 
     /// <summary>
@@ -156,6 +161,28 @@ public class ModelsController : ControllerBase
         {
             var activeVariant = currentChatModel.InstalledVariants.FirstOrDefault(v => v.IsActive) ?? currentChatModel.InstalledVariants.FirstOrDefault();
             var isChatLoaded = _chatService?.IsModelLoaded ?? false;
+            var isGpu = cfg.Chat?.LocalGguf?.GpuLayers != 0;
+            var hwContext = _hardwareDetector.GetContext();
+            var primaryGpu = hwContext.PrimaryGpu ?? hwContext.GpuDevices?.FirstOrDefault();
+
+            string execDevice = "CPU";
+            if (isGpu)
+            {
+                if (hwContext.HasNvidiaGpu)
+                    execDevice = $"NVIDIA CUDA 12 ({primaryGpu?.Name ?? "GPU"})";
+                else if (primaryGpu?.Vendor == GpuVendor.Intel)
+                    execDevice = $"Intel Vulkan GPU ({primaryGpu.Name})";
+                else if (primaryGpu?.Vendor == GpuVendor.Amd)
+                    execDevice = $"AMD Vulkan GPU ({primaryGpu.Name})";
+                else
+                    execDevice = $"Vulkan GPU ({primaryGpu?.Name ?? "GPU"})";
+            }
+
+            var gpuLayers = cfg.Chat?.LocalGguf?.GpuLayers ?? 0;
+            string? offloadDesc = isGpu
+                ? (gpuLayers == -1 ? "全量卸载到 GPU" : $"GPU 加速 (卸载 {gpuLayers} 层)")
+                : "纯 CPU 计算 (0 层 GPU Offload)";
+
             chatStatus = new SingleModelStatusResponse
             {
                 ModelName = currentChatModel.Name,
@@ -166,8 +193,10 @@ public class ModelsController : ControllerBase
                 StateName = isChatLoaded ? "Ready" : "Unloaded",
                 StateDescription = isChatLoaded ? "已就绪" : "未加载 (首次提问时按需加载)",
                 IsReady = isChatLoaded,
-                IsGpuMode = cfg.Chat?.LocalGguf?.GpuLayers != 0,
-                ExecutionDevice = (cfg.Chat?.LocalGguf?.GpuLayers != 0) ? "GPU" : "CPU",
+                IsGpuMode = isGpu,
+                ExecutionDevice = execDevice,
+                TotalVramGb = primaryGpu?.TotalVramGb,
+                OffloadDescription = offloadDesc,
                 Quantization = activeVariant?.Quantization,
                 ModelFormat = activeVariant?.Format ?? "gguf",
                 Dimension = currentChatModel.Dimension,

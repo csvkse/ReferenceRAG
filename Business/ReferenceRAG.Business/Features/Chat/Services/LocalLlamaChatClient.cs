@@ -47,6 +47,22 @@ public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProv
     private readonly GgufVisionMatchingStrategy _visionMatcher = new();
     private readonly string? _mmprojPath;
 
+    private float _temperature = 0.7f;
+    private float _topP = 0.9f;
+    private float _repeatPenalty = 1.1f;
+    private float _frequencyPenalty = 0.2f;
+    private float _presencePenalty = 0.1f;
+    private int _penaltyCount = 128;
+    private bool _enableCircuitBreaker = true;
+
+    public float Temperature { get => _temperature; set => _temperature = value; }
+    public float TopP { get => _topP; set => _topP = value; }
+    public float RepeatPenalty { get => _repeatPenalty; set => _repeatPenalty = value; }
+    public float FrequencyPenalty { get => _frequencyPenalty; set => _frequencyPenalty = value; }
+    public float PresencePenalty { get => _presencePenalty; set => _presencePenalty = value; }
+    public int PenaltyCount { get => _penaltyCount; set => _penaltyCount = value; }
+    public bool EnableRepetitionCircuitBreaker { get => _enableCircuitBreaker; set => _enableCircuitBreaker = value; }
+
     public ChatModelCapabilities GetCapabilities()
     {
         var match = _visionMatcher.Match(_modelName, _mmprojPath ?? _modelPath);
@@ -71,7 +87,14 @@ public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProv
         int batchSize = 2048,
         int uBatchSize = 512,
         string? mmprojPath = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        float temperature = 0.7f,
+        float topP = 0.9f,
+        float repeatPenalty = 1.1f,
+        float frequencyPenalty = 0.2f,
+        float presencePenalty = 0.1f,
+        int penaltyCount = 128,
+        bool enableCircuitBreaker = true)
     {
         _modelPath = modelPath;
         _modelName = string.IsNullOrWhiteSpace(modelName) ? "Local-GGUF" : modelName;
@@ -81,6 +104,13 @@ public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProv
         _uBatchSize = uBatchSize > 0 ? uBatchSize : 512;
         _mmprojPath = mmprojPath;
         _logger = logger;
+        _temperature = temperature;
+        _topP = topP;
+        _repeatPenalty = repeatPenalty;
+        _frequencyPenalty = frequencyPenalty;
+        _presencePenalty = presencePenalty;
+        _penaltyCount = penaltyCount > 0 ? penaltyCount : 128;
+        _enableCircuitBreaker = enableCircuitBreaker;
     }
 
     private async Task EnsureInitializedAsync(CancellationToken ct)
@@ -286,6 +316,20 @@ public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProv
                 yield break;
             }
 
+            // 若包含工具且用户提出工具查询，模拟工具清单调用
+            if (options?.Tools != null && options.Tools.Count > 0 &&
+                (userText.Contains("工具") || userText.Contains("能做什么") || userText.Contains("功能")))
+            {
+                var callId = $"call_{Guid.NewGuid():N}";
+                yield return new ChatResponseUpdate
+                {
+                    Role = ChatRole.Assistant,
+                    Contents = [new FunctionCallContent(callId, "GetAvailableTools", new Dictionary<string, object?>())],
+                    ModelId = _modelName
+                };
+                yield break;
+            }
+
             // 若包含工具且用户提出搜索提问，模拟工具调用
             if (options?.Tools != null && options.Tools.Count > 0 &&
                 (userText.Contains("知识库") || userText.Contains("搜索") || userText.Contains("查找") || userText.Contains("笔记")))
@@ -338,10 +382,32 @@ public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProv
             _modelName,
             supportsVision: caps.SupportsVision && (imageBytesList.Count > 0 || _mtmdWeights != null));
 
+        float effectiveTemp = options?.Temperature ?? _temperature;
+        float effectiveTopP = options?.TopP ?? _topP;
+        float effectiveRepeatPenalty = _repeatPenalty;
+        float effectiveFreqPenalty = options?.FrequencyPenalty ?? _frequencyPenalty;
+        float effectivePresPenalty = options?.PresencePenalty ?? _presencePenalty;
+        int effectivePenaltyCount = _penaltyCount;
+        bool effectiveEnableCircuitBreaker = _enableCircuitBreaker;
+
+        if (options?.AdditionalProperties != null)
+        {
+            if (options.AdditionalProperties.TryGetValue("RepeatPenalty", out var rpObj) && rpObj is float rp)
+                effectiveRepeatPenalty = rp;
+            if (options.AdditionalProperties.TryGetValue("PenaltyCount", out var pcObj) && pcObj is int pc)
+                effectivePenaltyCount = pc;
+            if (options.AdditionalProperties.TryGetValue("EnableRepetitionCircuitBreaker", out var ecbObj) && ecbObj is bool ecb)
+                effectiveEnableCircuitBreaker = ecb;
+        }
+
         var pipeline = new DefaultSamplingPipeline
         {
-            Temperature = options?.Temperature ?? 0.7f,
-            TopP = options?.TopP ?? 0.9f
+            Temperature = effectiveTemp,
+            TopP = effectiveTopP,
+            RepeatPenalty = effectiveRepeatPenalty,
+            FrequencyPenalty = effectiveFreqPenalty,
+            PresencePenalty = effectivePresPenalty,
+            PenaltyCount = effectivePenaltyCount
         };
         var inferenceParams = new InferenceParams
         {
@@ -410,6 +476,7 @@ public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProv
                 overflowErrorMessage = "\n\n> ⚠️ **【上下文容量提示】** 本轮对话及知识库检索正文的长度达到了当前本地模型上下文的上限（NoKvSlot）。已自动重置槽位，建议精简输入或开启新会话。";
             }
 
+            RepetitionCircuitBreaker? circuitBreaker = effectiveEnableCircuitBreaker ? new RepetitionCircuitBreaker() : null;
             if (tokenStream != null && overflowErrorMessage == null)
             {
                 if (prompt.EndsWith("<think>\n", StringComparison.OrdinalIgnoreCase))
@@ -463,6 +530,21 @@ public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProv
                                     prefix = prefix.TrimEnd() + "\n</think>\n\n";
                                 }
 
+                                if (circuitBreaker != null && !circuitBreaker.ProcessToken(prefix, out var safePrefix))
+                                {
+                                    _logger?.LogWarning("[LocalLlamaChat] 思考前缀触发流式重复熔断: {Reason}", circuitBreaker.BreakReason);
+                                    if (!string.IsNullOrEmpty(safePrefix))
+                                    {
+                                        yield return new ChatResponseUpdate
+                                        {
+                                            Role = ChatRole.Assistant,
+                                            Contents = [new TextContent(safePrefix)],
+                                            ModelId = _modelName
+                                        };
+                                    }
+                                    break;
+                                }
+
                                 yield return new ChatResponseUpdate
                                 {
                                     Role = ChatRole.Assistant,
@@ -485,6 +567,21 @@ public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProv
 
                             var textToEmit = buffer.ToString();
                             buffer.Clear();
+
+                            if (circuitBreaker != null && !circuitBreaker.ProcessToken(textToEmit, out var safeChunk))
+                            {
+                                _logger?.LogWarning("[LocalLlamaChat] 流式生成触发自回归重复退化熔断: {Reason}", circuitBreaker.BreakReason);
+                                if (!string.IsNullOrEmpty(safeChunk))
+                                {
+                                    yield return new ChatResponseUpdate
+                                    {
+                                        Role = ChatRole.Assistant,
+                                        Contents = [new TextContent(safeChunk)],
+                                        ModelId = _modelName
+                                    };
+                                }
+                                break;
+                            }
 
                             yield return new ChatResponseUpdate
                             {
@@ -524,7 +621,7 @@ public sealed class LocalLlamaChatClient : IChatClient, IChatModelCapabilityProv
                 }
             }
 
-            if (buffer.Length > 0)
+            if (buffer.Length > 0 && (circuitBreaker == null || !circuitBreaker.IsBroken))
             {
                 var remaining = buffer.ToString();
                 var (success, name, args, _) = ChatToolCallingHelper.TryParseToolCall(remaining);

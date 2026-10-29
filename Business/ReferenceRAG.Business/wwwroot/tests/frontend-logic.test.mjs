@@ -523,3 +523,211 @@ The user is asking for an introduction to Chengdu. I’ll provide an overview.
     assert.equal(resStreaming.isStreaming, true, 'Streaming thought must be flagged as isStreaming=true');
     assert.equal(resStreaming.cleanBody, '', 'Clean body must be empty while streaming thought');
 });
+
+test('Settings.js chat model tab includes enableIntentRouting toggle with sensible defaults', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const filePath = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Settings.js');
+    const content = fs.readFileSync(filePath, 'utf8');
+
+    // 1. 验证默认配置中默认开启意图识别与路由
+    assert(content.includes('enableIntentRouting: true'), 'defaultConfig.chat must have enableIntentRouting: true');
+
+    // 2. 验证 loadConfig 中包含缺省保底兜底处理
+    assert(content.includes('config.value.chat.enableIntentRouting = true'), 'loadConfig must fallback to true if undefined');
+
+    // 3. 验证 Settings 模板中包含开关与交互说明
+    assert(content.includes('config.chat.enableIntentRouting'), 'Template must bind to config.chat.enableIntentRouting');
+    assert(content.includes('label=\\"意图识别与路由\\"') || content.includes('label="意图识别与路由"'), 'Template must have form item labeled 意图识别与路由');
+});
+
+test('Settings.js chat model tab includes repetition penalty, frequency/presence penalties, and stream circuit breaker', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const filePath = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Settings.js');
+    const content = fs.readFileSync(filePath, 'utf8');
+
+    // 1. 默认配置参数
+    assert(content.includes('repeatPenalty: 1.1'), 'defaultConfig.chat must have repeatPenalty: 1.1');
+    assert(content.includes('frequencyPenalty: 0.2'), 'defaultConfig.chat must have frequencyPenalty: 0.2');
+    assert(content.includes('presencePenalty: 0.1'), 'defaultConfig.chat must have presencePenalty: 0.1');
+    assert(content.includes('enableRepetitionCircuitBreaker: true'), 'defaultConfig.chat must have enableRepetitionCircuitBreaker: true');
+
+    // 2. loadConfig 缺省保底
+    assert(content.includes('config.value.chat.repeatPenalty = 1.1'), 'loadConfig must default repeatPenalty to 1.1');
+    assert(content.includes('config.value.chat.enableRepetitionCircuitBreaker = true'), 'loadConfig must default enableRepetitionCircuitBreaker to true');
+
+    // 3. 模板绑定与交互
+    assert(content.includes('config.chat.repeatPenalty'), 'Template must bind to config.chat.repeatPenalty');
+    assert(content.includes('config.chat.frequencyPenalty'), 'Template must bind to config.chat.frequencyPenalty');
+    assert(content.includes('config.chat.presencePenalty'), 'Template must bind to config.chat.presencePenalty');
+    assert(content.includes('config.chat.enableRepetitionCircuitBreaker'), 'Template must bind to config.chat.enableRepetitionCircuitBreaker');
+});
+
+test('conversation-scroll.js: scroll buffer calculations, user intent pause, and streaming resume state machine', async () => {
+    const {
+        isNearConversationBottom,
+        clampConversationScrollTop,
+        isConversationFollowPauseIntent,
+        shouldResumeConversationFollow,
+        shouldFollowConversationStream,
+        shouldApplyConversationStreamScroll
+    } = await import('../shared/conversation-scroll.js');
+
+    // 1. isNearConversationBottom 边界测算
+    assert.equal(isNearConversationBottom({ scrollHeight: 1000, scrollTop: 700, clientHeight: 300 }), true, 'Exact bottom is near bottom');
+    assert.equal(isNearConversationBottom({ scrollHeight: 1000, scrollTop: 650, clientHeight: 300, threshold: 96 }), true, 'Within 96px buffer is near bottom');
+    assert.equal(isNearConversationBottom({ scrollHeight: 1000, scrollTop: 600, clientHeight: 300, threshold: 96 }), false, 'Outside 96px buffer is not near bottom');
+
+    // 2. clampConversationScrollTop 安全截断
+    assert.equal(clampConversationScrollTop({ scrollTop: -10, scrollHeight: 1000, clientHeight: 300 }), 0, 'Negative scrollTop clamped to 0');
+    assert.equal(clampConversationScrollTop({ scrollTop: 800, scrollHeight: 1000, clientHeight: 300 }), 700, 'Overflow scrollTop clamped to max (scrollHeight - clientHeight)');
+    assert.equal(clampConversationScrollTop({ scrollTop: 500, scrollHeight: 1000, clientHeight: 300 }), 500, 'Valid scrollTop preserved');
+
+    // 3. isConversationFollowPauseIntent 用户中断意图探测 (严防流式强制拽底锁死滚动条)
+    assert.equal(isConversationFollowPauseIntent({ type: 'wheel', deltaY: -20 }), true, 'Wheel up must pause follow');
+    assert.equal(isConversationFollowPauseIntent({ type: 'wheel', deltaY: 20 }), false, 'Wheel down should not pause follow');
+    assert.equal(isConversationFollowPauseIntent({ type: 'touchstart' }), true, 'Touch start must pause follow');
+    assert.equal(isConversationFollowPauseIntent({ type: 'pointerdown', onScrollbar: true }), true, 'Clicking scrollbar rail must pause follow');
+    assert.equal(isConversationFollowPauseIntent({ type: 'pointerdown', onScrollbar: false }), false, 'Clicking message text should not pause follow');
+
+    // 4. shouldResumeConversationFollow 流式恢复意图识别
+    // 场景 A: 用户在暂停期间向下滚动，并且回到了底部 96px 区域 -> 必须自动恢复跟随！
+    assert.equal(shouldResumeConversationFollow({
+        sending: true,
+        resumeRequested: true,
+        scrollHeight: 1000,
+        scrollTop: 650,
+        clientHeight: 300,
+        threshold: 96
+    }), true, 'Scrolling down back into bottom buffer during streaming must resume follow');
+
+    // 场景 B: 正在流式生成，但用户在向上滚动离开底部 -> 严禁恢复，继续保持暂停
+    assert.equal(shouldResumeConversationFollow({
+        sending: true,
+        resumeRequested: false,
+        scrollHeight: 1000,
+        scrollTop: 650,
+        clientHeight: 300,
+        threshold: 96
+    }), false, 'Scrolling up must keep pause state');
+
+    // 场景 C: 用户向下移动但依然离底部很远 (如查看第 2 屏) -> 严禁恢复打断阅读
+    assert.equal(shouldResumeConversationFollow({
+        sending: true,
+        resumeRequested: true,
+        scrollHeight: 2000,
+        scrollTop: 800,
+        clientHeight: 300,
+        threshold: 96
+    }), false, 'Scrolling down while far from bottom must not snap to bottom');
+
+    // 5. shouldFollowConversationStream 判定规则
+    assert.equal(shouldFollowConversationStream({ followPaused: true }), false, 'Paused follow must strictly forbid auto-scroll');
+    assert.equal(shouldFollowConversationStream({ followRequested: true, followPaused: false }), true, 'Explicitly requested follow allowed');
+    assert.equal(shouldFollowConversationStream({
+        followRequested: false,
+        followPaused: false,
+        scrollHeight: 1000,
+        scrollTop: 680,
+        clientHeight: 300
+    }), true, 'Natural bottom position allowed to follow');
+
+    // 6. shouldApplyConversationStreamScroll 版本防竞态保护
+    assert.equal(shouldApplyConversationStreamScroll({ scheduledRevision: 2, currentRevision: 2, followAllowed: true }), true);
+    assert.equal(shouldApplyConversationStreamScroll({ scheduledRevision: 1, currentRevision: 2, followAllowed: true }), false, 'Stale revision must be dropped');
+    assert.equal(shouldApplyConversationStreamScroll({ scheduledRevision: 2, currentRevision: 2, followAllowed: false }), false, 'Disallowed follow must be dropped');
+});
+
+test('Chat.js integrates conversation-scroll state machine, RAF batching, and floating resume button', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const chatPath = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Chat.js');
+    const content = fs.readFileSync(chatPath, 'utf8');
+
+    // 1. 验证导入通用滚动状态机模块
+    assert(content.includes('/shared/conversation-scroll.js'), 'Chat.js must import conversation-scroll.js');
+    assert(content.includes('isConversationFollowPauseIntent'), 'Chat.js must use isConversationFollowPauseIntent');
+    assert(content.includes('shouldResumeConversationFollow'), 'Chat.js must use shouldResumeConversationFollow');
+
+    // 2. 验证流式循环中已废除阻塞式 await scrollToBottom()，改为 RAF scheduleStreamScroll()
+    assert(content.includes('scheduleStreamScroll()'), 'Chat.js must batch stream scrolling with scheduleStreamScroll');
+    assert(content.includes('requestAnimationFrame'), 'Chat.js must use requestAnimationFrame for DOM scroll positioning');
+
+    // 3. 验证模板中 n-scrollbar 绑定手势监听与滚动事件
+    assert(content.includes('@scroll=\\"onCanvasScroll\\"'), 'Template must bind @scroll to onCanvasScroll');
+    assert(content.includes('@wheel.passive=\\"onCanvasWheel\\"'), 'Template must bind @wheel to onCanvasWheel');
+    assert(content.includes('@touchstart.passive=\\"onCanvasTouchStart\\"'), 'Template must bind @touchstart to onCanvasTouchStart');
+    assert(content.includes('@pointerdown=\\"onCanvasPointerDown\\"'), 'Template must bind @pointerdown to onCanvasPointerDown');
+
+    // 4. 验证悬浮「回到底部」浮动操作按钮支持一键恢复
+    assert(content.includes('resumeAndScrollToBottom'), 'Template must support resumeAndScrollToBottom');
+    assert(content.includes('ArrowDownOutline'), 'Must use ArrowDownOutline for floating button icon');
+});
+
+test('resolveScrollContainer defensively resolves Naive UI NScrollbar and prevents querySelector TypeError', async () => {
+    const { resolveScrollContainer } = await import('../shared/conversation-scroll.js');
+
+    // 1. 验证 null / undefined 入参安全返回 null
+    assert.equal(resolveScrollContainer(null), null);
+    assert.equal(resolveScrollContainer(undefined), null);
+
+    // 2. 核心回归测试：模拟组件挂载中或代理异常阶段 $el 为空对象 {}
+    // 原代码 `scrollbarRef.value.$el?.querySelector(...)` 在此情况下会抛出：
+    // TypeError: scrollbarRef.value.$el?.querySelector is not a function
+    const mockUnmountedInstance = {
+        containerRef: null,
+        $el: {}
+    };
+    assert.doesNotThrow(() => {
+        const res = resolveScrollContainer(mockUnmountedInstance);
+        assert.equal(res, null);
+    }, 'Must not throw when $el is a plain object without querySelector');
+
+    // 3. 模拟 Vue Text/Comment Node 或 Fragment（无 querySelector 方法）
+    const mockCommentNodeInstance = {
+        containerRef: null,
+        $el: { nodeType: 8, textContent: 'v-if' }
+    };
+    assert.doesNotThrow(() => {
+        const res = resolveScrollContainer(mockCommentNodeInstance);
+        assert.equal(res, null);
+    }, 'Must not throw when $el is a non-Element node');
+
+    // 4. 验证优先解析 Naive UI NScrollbar 暴露的 containerRef (支持 Vue ref 或 DOM 元素)
+    const mockDomContainer = { scrollTop: 120, scrollHeight: 500, clientHeight: 200 };
+    const mockInstanceWithRef = {
+        containerRef: { value: mockDomContainer },
+        $el: {}
+    };
+    assert.equal(resolveScrollContainer(mockInstanceWithRef), mockDomContainer);
+
+    const mockInstanceWithDirectContainer = {
+        containerRef: mockDomContainer,
+        $el: {}
+    };
+    assert.equal(resolveScrollContainer(mockInstanceWithDirectContainer), mockDomContainer);
+
+    // 5. 验证退回从 $el.querySelector 查找 .n-scrollbar-container
+    const mockInnerContainer = { scrollTop: 250, scrollHeight: 600, clientHeight: 300 };
+    const mockElWithQuery = {
+        containerRef: null,
+        $el: {
+            querySelector: (selector) => {
+                if (selector === '.n-scrollbar-container') return mockInnerContainer;
+                return null;
+            }
+        }
+    };
+    assert.equal(resolveScrollContainer(mockElWithQuery), mockInnerContainer);
+
+    // 6. 验证 Chat.js 源码已消除不安全的 $el?.querySelector 直接调用
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const chatPath = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Chat.js');
+    const chatContent = fs.readFileSync(chatPath, 'utf8');
+
+    assert(!chatContent.includes('$el?.querySelector'), 'Chat.js must not contain raw un-guarded $el?.querySelector call');
+    assert(chatContent.includes('resolveScrollContainer'), 'Chat.js must use resolveScrollContainer helper');
+});
+

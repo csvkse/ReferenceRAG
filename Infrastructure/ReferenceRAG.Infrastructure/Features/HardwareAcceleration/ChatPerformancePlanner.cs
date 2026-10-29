@@ -186,9 +186,17 @@ public class ChatPerformancePlanner : IChatPerformancePlanner
         var modelScale = ClassifyModelScale(modelSizeBytes, safeModelName);
 
         // 3. 硬件与显存检测
-        var primaryGpu = hwContext.PrimaryGpu;
+        var primaryGpu = hwContext.PrimaryGpu ?? hwContext.GpuDevices?.FirstOrDefault();
         var totalVram = primaryGpu?.TotalVramBytes ?? 0;
-        var hasGpuSupport = request.UseGpu && totalVram > 0 && (hwContext.HasNvidiaGpu || hwContext.HasDirectX12);
+        var isIntegratedGpu = totalVram == 0 && (primaryGpu?.Vendor is GpuVendor.Intel or GpuVendor.Amd);
+
+        // 对于 Intel / AMD 核显 (共享系统内存，无独立物理显存)，按动态共享内存规划（预估 4GB 供核显 Vulkan 调度）
+        if (isIntegratedGpu)
+        {
+            totalVram = 4UL * 1024 * 1024 * 1024;
+        }
+
+        var hasGpuSupport = request.UseGpu && totalVram > 0 && (hwContext.HasNvidiaGpu || hwContext.HasDirectX12 || isIntegratedGpu);
         var usableVram = totalVram > SystemVramReservedBytes ? totalVram - SystemVramReservedBytes : 0;
 
         ulong defaultWeightBytes = modelScale switch
@@ -346,8 +354,12 @@ public class ChatPerformancePlanner : IChatPerformancePlanner
                 BatchSize = 1024,
                 UBatchSize = 256,
                 EstimatedVramBytes = usableVram,
-                Rationale = $"GPU 显存紧张 (可用 {FormatBytes(usableVram)} < 需求 {FormatBytes(weightVramNeeded)})：自适应部分卸载 ({offloadLayers}/{totalLayers} 层)，上下文箝位为 {constrainedCtx} 以防显存击穿",
-                Warning = "当前物理显存无法全量装入模型权重，已自动执行部分层卸载保护"
+                Rationale = isIntegratedGpu
+                    ? $"集成核显共享内存偏紧 (可用 {FormatBytes(usableVram)} < 需求 {FormatBytes(weightVramNeeded)})：自适应部分卸载 ({offloadLayers}/{totalLayers} 层)，上下文箝位为 {constrainedCtx} 以防共享内存溢出"
+                    : $"GPU 显存紧张 (可用 {FormatBytes(usableVram)} < 需求 {FormatBytes(weightVramNeeded)})：自适应部分卸载 ({offloadLayers}/{totalLayers} 层)，上下文箝位为 {constrainedCtx} 以防显存击穿",
+                Warning = isIntegratedGpu
+                    ? "当前核显共享内存无法全量装入模型权重，已自动执行部分层卸载保护"
+                    : "当前物理显存无法全量装入模型权重，已自动执行部分层卸载保护"
             };
 
             _logger?.LogInformation("[ChatPerformancePlanner] 规划结果: {Rationale}", constrainedProfile.Rationale);
@@ -466,6 +478,11 @@ public class ChatPerformancePlanner : IChatPerformancePlanner
                     rationale = $"显存边际充足 (盈余 {FormatBytes(vramSurplusForKv)})：自适应轻量化至 4096 (4K) 上下文以保证 KV Cache 安全边界";
                 }
                 break;
+        }
+
+        if (isIntegratedGpu)
+        {
+            rationale = $"集成核显 Vulkan 加速 (共享内存 {FormatBytes(usableVram)})：" + rationale;
         }
 
         var estimatedTotalVram = weightVramNeeded + ((ulong)optimalCtx * 128UL * 1024UL) + ((ulong)optimalBatch * 32UL * 1024UL);

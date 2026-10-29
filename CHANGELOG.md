@@ -2,6 +2,29 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.44] - 2026-10-30
+
+### 聊天模型核显 Vulkan 加速、LLM 重复退化熔断治理、智能会话滚动恢复与意图路由升级
+- **聊天模型 Linux AMD/Intel UMA 核显 Vulkan 加速与防回退治理 (`ChatPerformancePlanner.cs`, `ModelsController.cs`)**：
+  - **根本原因根治 (统一内存 UMA 显存误判)**：解决 Linux 容器下 AMD Ryzen APU / Intel 核显因无独立板载 VRAM（`TotalVramBytes == 0`）且无 DirectX 12 被 `ChatPerformancePlanner` 误判为无 GPU 支持而强制回退到纯 CPU 运行的问题；
+  - **动态虚拟共享显存配额**：识别 AMD/Intel 核显并自动分配 4GB 虚拟显存调度 Vulkan Compute Pipeline 全量卸载 (`GpuLayers = -1`)，使小参数对话模型（Qwen3.5-0.8B）流式生成速度提升数倍；
+  - **硬件感知与运行时状态回显**：在 `/api/Models/runtime-status` 中精准回显 `AMD Vulkan GPU (AMD Radeon GPU / APU)` 与 `全量卸载到 GPU`；
+  - **防回归自动化质量门禁 (`ChatPerformanceModeAndSettingsQualityGateTests.cs`)**：新增 4 项 Linux 核显 Vulkan 自适应规划、固定模式和 Controller 端点测试，21 项门禁全数通过。
+- **LLM 重复退化与死循环生成熔断器 (`RepetitionCircuitBreaker.cs`, `LocalLlamaChatClient.cs`)**：
+  - **多粒度 N-gram 重复模式探测**：实时滑动窗口监控 Token 序列，自动识别周期性重复退化（Repetition Degeneration）；
+  - **惩罚参数支持**：集成 `RepetitionPenalty`、`FrequencyPenalty` 和 `PresencePenalty`，并在前端系统设置提供可视化配置；
+  - **智能截断与自愈兜底**：探测到严重重复循环时提前优雅阻断输出，保障流式体验与计算资源不被耗尽。
+- **智能会话滚动恢复与用户意图保持机制 (`conversation-scroll.js`, `Chat.js`)**：
+  - **流式强制吸底问题解决**：引入用户交互意图感知，在用户向上滚动查看历史记录时自动暂停吸底跟随，杜绝强制跳帧；
+  - **状态机与 RAF 批处理**：提供滚动缓冲区管理，并在前端提供浮动“恢复自动滚动”按钮，与 Naive UI `n-scrollbar` 深度适配。
+- **意图路由分级分流与策略模式增强 (`IIntentRoutingStrategy.cs`, `IToolSelectionStrategy.cs`)**：
+  - 增强分层意图路由与正交工具过滤，减少推理上下文开销并规避工具幻觉。
+- **全套架构与调研技术文档归档 (`docs/`)**：
+  - `docs/chat-model-cpu-fallback-root-cause-and-vulkan-acceleration-architecture.md`
+  - `docs/llm-repetition-degeneration-prevention-and-circuit-breaker-architecture.md`
+  - `docs/streaming-conversation-scroll-restoration-and-user-intent-optimization.md`
+  - `docs/industry-mainstream-intent-routing-and-tool-selection-architecture.md`
+
 ## [1.0.43] - 2026-10-22
 
 ### 基于 MAF (Microsoft Agent Framework) 架构范式重构 Agent 协同体系与性能优化

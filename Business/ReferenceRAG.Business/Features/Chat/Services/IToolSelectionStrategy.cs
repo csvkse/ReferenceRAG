@@ -72,13 +72,20 @@ public class IntentAdaptiveToolSelectionStrategy : IToolSelectionStrategy
 
         var trimmed = userMessage?.Trim() ?? string.Empty;
 
-        // 2. 常见闲聊问候检测：如果用户只是打招呼或表达谢意，完全剔除工具定义，加速推理并杜绝小模型误调工具
+        // 2. 工具清单与能力介绍意图（如“介绍当前工具”、“可用工具”、“你能做什么”）：
+        //    必须完整下发所有已挂载工具（含 GetAvailableTools），确保模型对自身能力具有完整感知，严禁工具剥离丢失
+        if (IsToolInquiry(trimmed))
+        {
+            return allTools;
+        }
+
+        // 3. 常见闲聊问候检测：如果用户只是打招呼或表达谢意，完全剔除工具定义，加速推理并杜绝小模型误调工具
         if (IsChitchatGreeting(trimmed))
         {
             return Array.Empty<AITool>();
         }
 
-        // 3. 系统索引与目录状态意图（优先于通用知识检索，防止“知识库状态”被误当做笔记检索）
+        // 4. 系统索引与目录状态意图（优先于通用知识检索，防止“知识库状态”被误当做笔记检索）
         if (IsSystemStatusQuery(trimmed))
         {
             var filtered = allTools
@@ -93,13 +100,17 @@ public class IntentAdaptiveToolSelectionStrategy : IToolSelectionStrategy
             }
         }
 
-        // 4. 知识检索与笔记阅读意图：仅注入 SearchKnowledge 与 ReadNote
+        // 5. 知识检索与笔记阅读意图：注入所有知识库检索与阅读工具（严格对齐真实函数名 ReadFileContent，防止工具丢失）
         if (IsKnowledgeQuery(trimmed))
         {
             var filtered = allTools
                 .Where(t => t is AIFunction f && (
                     f.Name.Equals("SearchKnowledge", StringComparison.OrdinalIgnoreCase) ||
-                    f.Name.Equals("ReadNote", StringComparison.OrdinalIgnoreCase)))
+                    f.Name.Equals("BM25Search", StringComparison.OrdinalIgnoreCase) ||
+                    f.Name.Equals("SearchNoteByTitle", StringComparison.OrdinalIgnoreCase) ||
+                    f.Name.Equals("ReadFileContent", StringComparison.OrdinalIgnoreCase) ||
+                    f.Name.Equals("ReadNote", StringComparison.OrdinalIgnoreCase) ||
+                    f.Name.Equals("DrillDownChunk", StringComparison.OrdinalIgnoreCase)))
                 .ToList();
 
             if (filtered.Count > 0)
@@ -108,19 +119,42 @@ public class IntentAdaptiveToolSelectionStrategy : IToolSelectionStrategy
             }
         }
 
-        // 5. 默认保底：返回全部可用工具
+        // 6. 默认保底：返回全部可用工具
         return allTools;
+    }
+
+    private static bool IsToolInquiry(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+
+        string[] toolKeywords =
+        [
+            "当前工具", "可用工具", "有哪些工具", "你有什么工具", "介绍工具", "介绍当前工具",
+            "工具列表", "支持哪些工具", "挂载哪些工具", "挂载了哪些工具", "挂载工具", "系统工具",
+            "内置工具", "查看工具", "能调用什么工具", "能使用什么工具", "当前有什么工具",
+            "你能做什么", "你有什么功能", "你能干什么", "能力", "介绍一下你自己", "自我介绍",
+            "展示技能", "你有啥本事", "绝活"
+        ];
+
+        if (toolKeywords.Any(k => text.Contains(k, StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        return SemanticEmbeddingRoutingStrategy.ComputeSemanticOverlap(text, toolKeywords) >= 0.40f;
     }
 
     private static bool IsChitchatGreeting(string text)
     {
         if (string.IsNullOrWhiteSpace(text) || text.Length > 25) return false;
 
+        // 若具备工具/能力查询语义重叠，严禁误判为纯闲聊
+        if (IsToolInquiry(text)) return false;
+
         string[] greetings =
         [
             "你好", "您好", "hi", "hello", "嗨", "早上好", "中午好", "下午好", "晚上好",
+            "早安", "晚安", "哈喽", "hello there",
             "在吗", "在不在", "谢谢", "多谢", "thx", "thanks", "再见", "拜拜", "who are you",
-            "你是谁", "介绍一下你自己", "你能做什么"
+            "你是谁"
         ];
 
         // 清除常见标点与空白符后进行词缀匹配
