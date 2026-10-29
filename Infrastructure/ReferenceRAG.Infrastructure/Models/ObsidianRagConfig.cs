@@ -939,6 +939,16 @@ public class LocalGgufChatProfile
     public int ContextSize { get; set; } = 0; // 0 表示自适应
     public int BatchSize { get; set; } = 0;   // 0 表示自适应
     public int UBatchSize { get; set; } = 0;  // 0 表示自适应
+
+    /// <summary>重复惩罚因子重载（为 null 时继承全局配置）</summary>
+    public float? RepeatPenalty { get; set; }
+    /// <summary>频率惩罚因子重载（为 null 时继承全局配置）</summary>
+    public float? FrequencyPenalty { get; set; }
+    /// <summary>存在惩罚因子重载（为 null 时继承全局配置）</summary>
+    public float? PresencePenalty { get; set; }
+    /// <summary>惩罚 Token 窗口重载（为 null 时继承全局配置）</summary>
+    public int? PenaltyCount { get; set; }
+
     public HardwareAccelerationConfig Acceleration { get; set; } = new();
 }
 
@@ -980,9 +990,28 @@ public class ChatModelConfig
     public LocalOnnxGenAiChatProfile LocalOnnxGenAi { get; set; } = new();
     public OpenAiApiChatProfile OpenAiApi { get; set; } = new();
 
+    /// <summary>是否开启意图识别与语义路由（开启后自动进行意图预判与动态工具优化）</summary>
+    public bool EnableIntentRouting { get; set; } = true;
+
     public string SystemPrompt { get; set; } = "你是 ReferenceRAG 智能助手。";
     public float Temperature { get; set; } = 0.7f;
     public float TopP { get; set; } = 0.9f;
+
+    /// <summary>重复惩罚因子（1.0 为无惩罚，推荐 1.05~1.15）</summary>
+    public float RepeatPenalty { get; set; } = 1.1f;
+
+    /// <summary>频率惩罚因子（基于 token 出现频次施加线性惩罚，推荐 0.0~0.5）</summary>
+    public float FrequencyPenalty { get; set; } = 0.2f;
+
+    /// <summary>存在惩罚因子（只要 token 出现过就施加固定惩罚，推荐 0.0~0.3）</summary>
+    public float PresencePenalty { get; set; } = 0.1f;
+
+    /// <summary>重复惩罚考虑的最近 Token 数量（默认 128）</summary>
+    public int PenaltyCount { get; set; } = 128;
+
+    /// <summary>是否开启流式实时重复熔断器（检测到自回归死循环时自动截断，避免算力浪费与无限刷屏）</summary>
+    public bool EnableRepetitionCircuitBreaker { get; set; } = true;
+
     public int IdleTimeoutSeconds { get; set; } = 300;
 
     /// <summary>API 端点地址</summary>

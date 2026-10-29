@@ -27,6 +27,7 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
     private volatile string _activeBackend = "OpenAiApi";
     private volatile string _systemPrompt;
     private volatile string _model = "gpt-4o-mini";
+    private volatile bool _enableIntentRouting = true;
     private readonly AITool[] _tools;
     private readonly ConcurrentDictionary<string, ChatSession> _sessions = new();
     private readonly ILogger<MafChatService> _logger;
@@ -86,7 +87,23 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
     public string ActiveBackend => _activeBackend;
     public string CurrentModel => _model;
     public string SystemPrompt => _systemPrompt;
+    public bool EnableIntentRouting => _enableIntentRouting;
+    public float Temperature => _temperature;
+    public float TopP => _topP;
+    public float RepeatPenalty => _repeatPenalty;
+    public float FrequencyPenalty => _frequencyPenalty;
+    public float PresencePenalty => _presencePenalty;
+    public int PenaltyCount => _penaltyCount;
+    public bool EnableRepetitionCircuitBreaker => _enableRepetitionCircuitBreaker;
     public AITool[] Tools => _tools;
+
+    private float _temperature = 0.7f;
+    private float _topP = 0.9f;
+    private float _repeatPenalty = 1.1f;
+    private float _frequencyPenalty = 0.2f;
+    private float _presencePenalty = 0.1f;
+    private int _penaltyCount = 128;
+    private bool _enableRepetitionCircuitBreaker = true;
 
     /// <summary>
     /// 获取当前对话后端的模型能力元数据（视觉多模态、工具调用、上下文容量声明）
@@ -189,6 +206,7 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         var model = section["Model"] ?? "gpt-4o-mini";
         _model = model;
         _systemPrompt = section["SystemPrompt"] ?? "你是 ReferenceRAG 智能助手。";
+        _enableIntentRouting = section.GetValue("EnableIntentRouting", true);
         _maxSessions = Math.Max(1, section.GetValue("MaxSessions", 100));
         _maxMessagesPerSession = Math.Max(3, section.GetValue("MaxMessagesPerSession", 50));
         _sessionIdleTimeout = TimeSpan.FromMinutes(Math.Max(1, section.GetValue("SessionIdleMinutes", 60)));
@@ -201,7 +219,8 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             AIFunctionFactory.Create(SearchNoteByTitleAsync, "SearchNoteByTitle", "按笔记标题检索本地笔记。"),
             AIFunctionFactory.Create(GetFileStructureAsync, "GetFileStructure", "获取知识库文件目录结构树。"),
             AIFunctionFactory.Create(ReadFileContentAsync, "ReadFileContent", "读取指定文件的全部或部分内容。"),
-            AIFunctionFactory.Create(GetIndexStatusAsync, "GetIndexStatus", "获取知识库当前索引状态：向量分块总数、BM25 文档总数。")
+            AIFunctionFactory.Create(GetIndexStatusAsync, "GetIndexStatus", "获取知识库当前索引状态：向量分块总数、BM25 文档总数。"),
+            AIFunctionFactory.Create(GetAvailableToolsAsync, "GetAvailableTools", "获取当前智能助手内置已挂载的所有工具清单与功能描述。")
         ];
 
         if (_configManager != null)
@@ -238,7 +257,14 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                     batchSize: plan.BatchSize,
                     uBatchSize: plan.UBatchSize,
                     mmprojPath: visionMatch.MatchedProjectorPath,
-                    logger: _logger);
+                    logger: _logger,
+                    temperature: _temperature,
+                    topP: _topP,
+                    repeatPenalty: _repeatPenalty,
+                    frequencyPenalty: _frequencyPenalty,
+                    presencePenalty: _presencePenalty,
+                    penaltyCount: _penaltyCount,
+                    enableCircuitBreaker: _enableRepetitionCircuitBreaker);
                 _client = rawClient.AsBuilder().UseFunctionInvocation().Build();
             }
             else if (string.Equals(activeBackend, "LocalOnnxGenAi", StringComparison.OrdinalIgnoreCase) ||
@@ -330,6 +356,14 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         _systemPrompt = string.IsNullOrWhiteSpace(chatConfig.SystemPrompt)
             ? "你是 ReferenceRAG 智能助手。"
             : chatConfig.SystemPrompt.Trim();
+        _enableIntentRouting = chatConfig.EnableIntentRouting;
+        _temperature = chatConfig.Temperature;
+        _topP = chatConfig.TopP;
+        _repeatPenalty = chatConfig.RepeatPenalty;
+        _frequencyPenalty = chatConfig.FrequencyPenalty;
+        _presencePenalty = chatConfig.PresencePenalty;
+        _penaltyCount = chatConfig.PenaltyCount;
+        _enableRepetitionCircuitBreaker = chatConfig.EnableRepetitionCircuitBreaker;
 
         if (string.Equals(activeBackend, "LocalGguf", StringComparison.OrdinalIgnoreCase))
         {
@@ -375,9 +409,14 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             int batchSize = plan.BatchSize;
             int uBatchSize = plan.UBatchSize;
 
+            float effectiveRepeatPenalty = localGguf.RepeatPenalty ?? chatConfig.RepeatPenalty;
+            float effectiveFreqPenalty = localGguf.FrequencyPenalty ?? chatConfig.FrequencyPenalty;
+            float effectivePresPenalty = localGguf.PresencePenalty ?? chatConfig.PresencePenalty;
+            int effectivePenaltyCount = localGguf.PenaltyCount ?? chatConfig.PenaltyCount;
+
             _logger.LogInformation(
-                "正在初始化本地 GGUF 聊天客户端: ModelName={ModelName}, Path={Path}, GpuLayers={Layers}, ContextSize={Ctx}, BatchSize={Batch}, UBatchSize={UBatch} ({Rationale})",
-                modelName, modelPath, gpuLayers, contextSize, batchSize, uBatchSize, plan.Rationale);
+                "正在初始化本地 GGUF 聊天客户端: ModelName={ModelName}, Path={Path}, GpuLayers={Layers}, ContextSize={Ctx}, BatchSize={Batch}, UBatchSize={UBatch}, RepeatPenalty={RP}, FreqPenalty={FP}, PresPenalty={PP} ({Rationale})",
+                modelName, modelPath, gpuLayers, contextSize, batchSize, uBatchSize, effectiveRepeatPenalty, effectiveFreqPenalty, effectivePresPenalty, plan.Rationale);
             _activeContextSize = contextSize;
 
             try
@@ -391,7 +430,14 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                     batchSize: batchSize,
                     uBatchSize: uBatchSize,
                     mmprojPath: visionMatch.MatchedProjectorPath,
-                    logger: _logger);
+                    logger: _logger,
+                    temperature: _temperature,
+                    topP: _topP,
+                    repeatPenalty: effectiveRepeatPenalty,
+                    frequencyPenalty: effectiveFreqPenalty,
+                    presencePenalty: effectivePresPenalty,
+                    penaltyCount: effectivePenaltyCount,
+                    enableCircuitBreaker: _enableRepetitionCircuitBreaker);
 
                 var newClient = rawClient
                     .AsBuilder()
@@ -986,6 +1032,26 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         }
     }
 
+    [Description("获取当前智能助手内置已挂载的所有工具清单与功能描述。")]
+    private Task<string> GetAvailableToolsAsync()
+    {
+        RecordExecutedTool("GetAvailableTools");
+        var sb = new StringBuilder();
+        sb.AppendLine("当前 ReferenceRAG 智能助手已就绪并挂载以下工具：");
+        int idx = 1;
+        foreach (var tool in _tools)
+        {
+            if (tool is AIFunction func)
+            {
+                sb.AppendLine($"{idx}. **`{func.Name}`**：{func.Description}");
+                idx++;
+            }
+        }
+        sb.AppendLine();
+        sb.AppendLine("您可以在提问中直接指示相应操作（如“搜索知识库关于 Docker 的笔记”、“查看知识库文件结构”、“查询索引状态”），系统将自动为您调度执行。");
+        return Task.FromResult(sb.ToString());
+    }
+
     // ── 会话管理 ──────────────────────────────────────────────────────
 
     public string CreateSession()
@@ -1089,17 +1155,38 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
 
         // 1. 前置意图路由阶段 (Routing State)
         fsm.TransitionTo(ChatTurnState.Routing, "评估前置意图路由先验分流");
-        var decision = await CompositeIntentRouter.Default.RouteAsync(userMessage, _tools, ct);
-        turnContext.RoutingDecision = decision;
+        RoutingDecision decision;
+        IList<AITool> selectedTools;
 
-        // 2. 策略模式：意图自适应工具动态下发 (Strategy Pattern: Tool Selection)
-        var toolStrategy = new IntentAdaptiveToolSelectionStrategy();
-        var selectedTools = toolStrategy.SelectTools(userMessage, _tools, decision, GetCapabilities());
+        if (_enableIntentRouting)
+        {
+            decision = await CompositeIntentRouter.Default.RouteAsync(userMessage, _tools, ct);
+            var toolStrategy = new IntentAdaptiveToolSelectionStrategy();
+            selectedTools = toolStrategy.SelectTools(userMessage, _tools, decision, GetCapabilities());
+        }
+        else
+        {
+            decision = RoutingDecision.Unhandled("Disabled", "意图识别已在设置中关闭");
+            var toolStrategy = new AllToolsSelectionStrategy();
+            selectedTools = toolStrategy.SelectTools(userMessage, _tools, decision, GetCapabilities());
+        }
+
+        turnContext.RoutingDecision = decision;
 
         var options = new ChatOptions
         {
             Tools = [.. selectedTools],
-            MaxOutputTokens = 4096
+            MaxOutputTokens = 4096,
+            Temperature = _temperature,
+            TopP = _topP,
+            FrequencyPenalty = _frequencyPenalty,
+            PresencePenalty = _presencePenalty,
+            AdditionalProperties = new AdditionalPropertiesDictionary
+            {
+                ["RepeatPenalty"] = _repeatPenalty,
+                ["PenaltyCount"] = _penaltyCount,
+                ["EnableRepetitionCircuitBreaker"] = _enableRepetitionCircuitBreaker
+            }
         };
         var responseText = new StringBuilder();
         var streamedBadge = false;
@@ -1142,13 +1229,35 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             var phase2Options = new ChatOptions
             {
                 Tools = [], // 总结阶段不再挂载工具，专注生成纯粹总结
-                MaxOutputTokens = 4096
+                MaxOutputTokens = 4096,
+                Temperature = _temperature,
+                TopP = _topP,
+                FrequencyPenalty = _frequencyPenalty,
+                PresencePenalty = _presencePenalty,
+                AdditionalProperties = new AdditionalPropertiesDictionary
+                {
+                    ["RepeatPenalty"] = _repeatPenalty,
+                    ["PenaltyCount"] = _penaltyCount,
+                    ["EnableRepetitionCircuitBreaker"] = _enableRepetitionCircuitBreaker
+                }
             };
 
+            var phase2Breaker = _enableRepetitionCircuitBreaker ? new RepetitionCircuitBreaker() : null;
             await foreach (var update in client.GetStreamingResponseAsync(phase2History, phase2Options, ct))
             {
                 if (!string.IsNullOrEmpty(update.Text))
                 {
+                    if (phase2Breaker != null && !phase2Breaker.ProcessToken(update.Text, out var safeChunk))
+                    {
+                        _logger.LogWarning("[MafChatService] Phase 2 总结流式生成触发自回归重复熔断: {Reason}", phase2Breaker.BreakReason);
+                        if (!string.IsNullOrEmpty(safeChunk))
+                        {
+                            responseText.Append(safeChunk);
+                            yield return new SseEvent("text", Delta: safeChunk);
+                        }
+                        break;
+                    }
+
                     responseText.Append(update.Text);
                     yield return new SseEvent("text", Delta: update.Text);
                 }
@@ -1159,6 +1268,7 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             // 正常大模型自主推理与工具决策 (Phase 1 Inferencing)
             fsm.TransitionTo(ChatTurnState.Phase1Inferencing, "大模型自主推理与工具决策");
 
+            var phase1Breaker = _enableRepetitionCircuitBreaker ? new RepetitionCircuitBreaker() : null;
             await foreach (var update in client.GetStreamingResponseAsync(history, options, ct))
             {
                 if (!streamedBadge && _currentRequestExecutedTools.Value is { Count: > 0 } execTools)
@@ -1180,6 +1290,17 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
 
                 if (!string.IsNullOrEmpty(update.Text))
                 {
+                    if (phase1Breaker != null && !phase1Breaker.ProcessToken(update.Text, out var safeChunk))
+                    {
+                        _logger.LogWarning("[MafChatService] 流式响应触发自回归重复熔断: {Reason}", phase1Breaker.BreakReason);
+                        if (!string.IsNullOrEmpty(safeChunk))
+                        {
+                            responseText.Append(safeChunk);
+                            yield return new SseEvent("text", Delta: safeChunk);
+                        }
+                        break;
+                    }
+
                     responseText.Append(update.Text);
                     yield return new SseEvent("text", Delta: update.Text);
                 }
@@ -1318,9 +1439,23 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         }
 
         _currentRequestExecutedTools.Value = new List<string>();
-        options ??= new ChatOptions { Tools = [.. _tools] };
+        options ??= new ChatOptions
+        {
+            Tools = [.. _tools],
+            Temperature = _temperature,
+            TopP = _topP,
+            FrequencyPenalty = _frequencyPenalty,
+            PresencePenalty = _presencePenalty,
+            AdditionalProperties = new AdditionalPropertiesDictionary
+            {
+                ["RepeatPenalty"] = _repeatPenalty,
+                ["PenaltyCount"] = _penaltyCount,
+                ["EnableRepetitionCircuitBreaker"] = _enableRepetitionCircuitBreaker
+            }
+        };
         _lastChatActivityUtc = DateTime.UtcNow;
         var streamedBadge = false;
+        var completionBreaker = _enableRepetitionCircuitBreaker ? new RepetitionCircuitBreaker() : null;
         await foreach (var update in client.GetStreamingResponseAsync(messages, options, ct))
         {
             if (!streamedBadge && _currentRequestExecutedTools.Value is { Count: > 0 } execTools)
@@ -1331,6 +1466,16 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
 
             if (!string.IsNullOrEmpty(update.Text))
             {
+                if (completionBreaker != null && !completionBreaker.ProcessToken(update.Text, out var safeChunk))
+                {
+                    _logger.LogWarning("[MafChatService] StreamCompletionAsync 触发自回归重复熔断: {Reason}", completionBreaker.BreakReason);
+                    if (!string.IsNullOrEmpty(safeChunk))
+                    {
+                        yield return safeChunk;
+                    }
+                    break;
+                }
+
                 yield return update.Text;
             }
         }
@@ -1354,7 +1499,20 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         }
 
         _currentRequestExecutedTools.Value = new List<string>();
-        options ??= new ChatOptions { Tools = [.. _tools] };
+        options ??= new ChatOptions
+        {
+            Tools = [.. _tools],
+            Temperature = _temperature,
+            TopP = _topP,
+            FrequencyPenalty = _frequencyPenalty,
+            PresencePenalty = _presencePenalty,
+            AdditionalProperties = new AdditionalPropertiesDictionary
+            {
+                ["RepeatPenalty"] = _repeatPenalty,
+                ["PenaltyCount"] = _penaltyCount,
+                ["EnableRepetitionCircuitBreaker"] = _enableRepetitionCircuitBreaker
+            }
+        };
         _lastChatActivityUtc = DateTime.UtcNow;
         var response = await client.GetResponseAsync(messages, options, ct);
         var rawText = response?.Text ?? string.Empty;

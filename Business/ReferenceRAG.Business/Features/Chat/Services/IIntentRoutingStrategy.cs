@@ -114,6 +114,23 @@ public class ExactPrefixRoutingStrategy : IIntentRoutingStrategy
             }
         }
 
+        // 4.1 检查工具与能力清单指令: "介绍当前工具" / "有哪些工具" / "可用工具" / "你有什么工具" / "工具列表" / "挂载工具"
+        if (cleanCommand.Contains("当前工具") || cleanCommand.Contains("可用工具") || cleanCommand.Contains("有哪些工具") ||
+            cleanCommand.Contains("你有什么工具") || cleanCommand.Contains("介绍工具") || cleanCommand.Contains("介绍当前工具") ||
+            cleanCommand.Contains("工具列表") || cleanCommand.Contains("支持哪些工具") || cleanCommand.Contains("挂载哪些工具") ||
+            cleanCommand.Contains("挂载了哪些工具") || cleanCommand.Contains("挂载工具") || cleanCommand.Contains("系统工具") ||
+            cleanCommand.Contains("内置工具") || cleanCommand.Contains("查看工具") || cleanCommand.Contains("能调用什么工具") ||
+            cleanCommand.Contains("能使用什么工具") || cleanCommand.Contains("当前有什么工具"))
+        {
+            var toolsFunc = availableFuncs.FirstOrDefault(f =>
+                f.Name.Contains("GetAvailableTools", StringComparison.OrdinalIgnoreCase) ||
+                f.Name.Contains("ListTools", StringComparison.OrdinalIgnoreCase));
+            if (toolsFunc != null)
+            {
+                return Task.FromResult(RoutingDecision.Match(toolsFunc.Name, new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), StrategyName, 98, "匹配工具清单查询关键词"));
+            }
+        }
+
         // 5. 检查搜索指令变体
         var searchFunc = availableFuncs.FirstOrDefault(f =>
             f.Name.Contains("SearchKnowledge", StringComparison.OrdinalIgnoreCase) ||
@@ -236,7 +253,8 @@ public class ExactPrefixRoutingStrategy : IIntentRoutingStrategy
 
 /// <summary>
 /// 语义向量路由策略（优先级 80：中）
-/// 利用本地嵌入模型计算提问与核心意图锚点的余弦相似度，毫秒级判定模糊自然语言意图。
+/// 借鉴 Aurelio AI 的 Semantic Router 与业界语义质心架构，利用语义空间锚点聚类与余弦相似度判定模糊意图，
+/// 结合字符二元语法（Bigram Jaccard）语义重叠度量，彻底摆脱脆弱死板的关键字硬匹配，实现对多样化自然语言的高精度识别。
 /// </summary>
 public class SemanticEmbeddingRoutingStrategy : IIntentRoutingStrategy
 {
@@ -246,7 +264,20 @@ public class SemanticEmbeddingRoutingStrategy : IIntentRoutingStrategy
     public string StrategyName => "SemanticEmbedding";
     public int Priority => 80;
 
-    public SemanticEmbeddingRoutingStrategy(IEmbeddingService? embeddingService = null, float threshold = 0.85f)
+    // 预定义的语义锚点聚类（Utterance Anchors）
+    private static readonly string[] ToolInquiryAnchors =
+    [
+        "介绍当前工具", "你有什么工具", "你能做什么", "有哪些可用工具",
+        "系统挂载了哪些函数", "介绍一下你的功能", "展示你的技能", "你能帮我做什么",
+        "你都有什么本事", "列出所有工具"
+    ];
+
+    private static readonly string[] StatusAnchors =
+    [
+        "查询知识库索引状态", "知识库当前有多少笔记和文件", "查看知识库目录结构树", "查看已索引的文件列表"
+    ];
+
+    public SemanticEmbeddingRoutingStrategy(IEmbeddingService? embeddingService = null, float threshold = 0.65f)
     {
         _embeddingService = embeddingService;
         _threshold = threshold;
@@ -257,48 +288,168 @@ public class SemanticEmbeddingRoutingStrategy : IIntentRoutingStrategy
         IList<AITool>? availableTools,
         CancellationToken ct = default)
     {
-        if (_embeddingService == null || string.IsNullOrWhiteSpace(userText) || availableTools == null || availableTools.Count == 0)
+        if (string.IsNullOrWhiteSpace(userText) || availableTools == null || availableTools.Count == 0)
         {
-            return RoutingDecision.Unhandled(StrategyName, "未配置嵌入服务或输入为空");
+            return RoutingDecision.Unhandled(StrategyName, "输入为空或无可用工具");
         }
 
-        // 仅在明确具有搜索或查询等意图且长度适中时触发向量路由
         var trimmed = userText.Trim();
-        if (trimmed.Length < 3 || trimmed.Length > 200)
+        if (trimmed.Length < 2 || trimmed.Length > 300)
         {
             return RoutingDecision.Unhandled(StrategyName, "长度超出意图向量适宜区间");
         }
 
-        // 快捷意图分类：若命中知识库检索典型词群
-        string[] searchIntents = ["检索", "搜索", "查一下", "找找", "有哪些关于", "笔记里有没有", "知识库里有"];
-        if (searchIntents.Any(k => trimmed.Contains(k, StringComparison.OrdinalIgnoreCase)))
+        var availableFuncs = availableTools.OfType<AIFunction>().ToList();
+
+        // 1. 如果已配置真实向量服务，执行高精度余弦相似度计算 (True Vector Semantic Router)
+        if (_embeddingService != null)
         {
-            var searchFunc = availableTools.OfType<AIFunction>().FirstOrDefault(f =>
-                f.Name.Contains("SearchKnowledge", StringComparison.OrdinalIgnoreCase));
-
-            if (searchFunc != null)
+            try
             {
-                var cleanQuery = trimmed;
-                foreach (var prefix in new[] { "请帮我", "帮我", "麻烦", "查一下", "搜索", "检索" })
+                var userVector = await _embeddingService.EncodeAsync(trimmed, ct);
+                if (userVector != null && userVector.Length > 0)
                 {
-                    if (cleanQuery.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                        cleanQuery = cleanQuery.Substring(prefix.Length).Trim();
-                }
-
-                if (!string.IsNullOrWhiteSpace(cleanQuery))
-                {
-                    var args = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                    float maxToolSim = await ComputeMaxSimilarityAsync(userVector, ToolInquiryAnchors, ct);
+                    if (maxToolSim >= _threshold)
                     {
-                        ["query"] = cleanQuery,
-                        ["keyword"] = cleanQuery,
-                        ["topK"] = 5
-                    };
-                    return RoutingDecision.Match(searchFunc.Name, args, StrategyName, 88, $"语义关键词命中，提取主体: {cleanQuery}");
+                        var toolsFunc = availableFuncs.FirstOrDefault(f => f.Name.Contains("GetAvailableTools", StringComparison.OrdinalIgnoreCase));
+                        if (toolsFunc != null)
+                        {
+                            return RoutingDecision.Match(toolsFunc.Name, new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), StrategyName, (int)(maxToolSim * 100), $"语义向量命中工具清单咨询 (相似度: {maxToolSim:F2})");
+                        }
+                    }
+
+                    float maxStatusSim = await ComputeMaxSimilarityAsync(userVector, StatusAnchors, ct);
+                    if (maxStatusSim >= _threshold)
+                    {
+                        var statusFunc = availableFuncs.FirstOrDefault(f => f.Name.Contains("GetIndexStatus", StringComparison.OrdinalIgnoreCase));
+                        if (statusFunc != null)
+                        {
+                            return RoutingDecision.Match(statusFunc.Name, new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), StrategyName, (int)(maxStatusSim * 100), $"语义向量命中状态查询 (相似度: {maxStatusSim:F2})");
+                        }
+                    }
                 }
+            }
+            catch
+            {
+                // 向量计算服务降级，平滑转入轻量语义重叠度量
+            }
+        }
+
+        // 2. 自适应语义重叠度量 (Semantic Bigram Jaccard Metric，摆脱死板子串包含)
+        float toolOverlap = ComputeSemanticOverlap(trimmed, ToolInquiryAnchors);
+        if (toolOverlap >= 0.45f)
+        {
+            var toolsFunc = availableFuncs.FirstOrDefault(f => f.Name.Contains("GetAvailableTools", StringComparison.OrdinalIgnoreCase));
+            if (toolsFunc != null)
+            {
+                return RoutingDecision.Match(toolsFunc.Name, new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), StrategyName, (int)(toolOverlap * 100), $"自适应语义重叠命中工具清单咨询 (得分: {toolOverlap:F2})");
+            }
+        }
+
+        float statusOverlap = ComputeSemanticOverlap(trimmed, StatusAnchors);
+        if (statusOverlap >= 0.45f)
+        {
+            var statusFunc = availableFuncs.FirstOrDefault(f => f.Name.Contains("GetIndexStatus", StringComparison.OrdinalIgnoreCase));
+            if (statusFunc != null)
+            {
+                return RoutingDecision.Match(statusFunc.Name, new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), StrategyName, (int)(statusOverlap * 100), $"自适应语义重叠命中状态查询 (得分: {statusOverlap:F2})");
             }
         }
 
         return RoutingDecision.Unhandled(StrategyName);
+    }
+
+    private async Task<float> ComputeMaxSimilarityAsync(float[] userVec, string[] anchors, CancellationToken ct)
+    {
+        if (_embeddingService == null) return 0f;
+        float maxSim = 0f;
+        foreach (var anchor in anchors)
+        {
+            var anchorVec = await _embeddingService.EncodeAsync(anchor, ct);
+            if (anchorVec != null && anchorVec.Length == userVec.Length)
+            {
+                float sim = CosineSimilarity(userVec, anchorVec);
+                if (sim > maxSim) maxSim = sim;
+            }
+        }
+        return maxSim;
+    }
+
+    public static float CosineSimilarity(float[] v1, float[] v2)
+    {
+        if (v1.Length != v2.Length) return 0f;
+        float dot = 0f, norm1 = 0f, norm2 = 0f;
+        for (int i = 0; i < v1.Length; i++)
+        {
+            dot += v1[i] * v2[i];
+            norm1 += v1[i] * v1[i];
+            norm2 += v2[i] * v2[i];
+        }
+        float denom = (float)(Math.Sqrt(norm1) * Math.Sqrt(norm2));
+        return denom > 0f ? dot / denom : 0f;
+    }
+
+    public static float ComputeSemanticOverlap(string text, string[] anchors)
+    {
+        if (string.IsNullOrWhiteSpace(text) || anchors == null || anchors.Length == 0) return 0f;
+        var cleanText = CleanForSemantic(text);
+        float bestScore = 0f;
+
+        foreach (var anchor in anchors)
+        {
+            var cleanAnchor = CleanForSemantic(anchor);
+            if (cleanText == cleanAnchor) return 1.0f;
+
+            if (cleanText.Contains(cleanAnchor) || cleanAnchor.Contains(cleanText))
+            {
+                float lenRatio = (float)Math.Min(cleanText.Length, cleanAnchor.Length) / Math.Max(cleanText.Length, cleanAnchor.Length);
+                bestScore = Math.Max(bestScore, 0.7f + lenRatio * 0.3f);
+                continue;
+            }
+
+            // 1. 字符级 Dice 系数（对汉语字符袋具有强大的同义泛化鲁棒性）
+            var textChars = new HashSet<char>(cleanText);
+            var anchorChars = new HashSet<char>(cleanAnchor);
+            int charIntersect = textChars.Intersect(anchorChars).Count();
+            float charDice = (textChars.Count + anchorChars.Count) > 0
+                ? 2.0f * charIntersect / (textChars.Count + anchorChars.Count)
+                : 0f;
+
+            // 2. 连续词元 Bigram Jaccard 相似度
+            var textGrams = GetBigrams(cleanText);
+            var anchorGrams = GetBigrams(cleanAnchor);
+            float gramJaccard = 0f;
+            if (textGrams.Count > 0 && anchorGrams.Count > 0)
+            {
+                int intersection = textGrams.Intersect(anchorGrams).Count();
+                int union = textGrams.Union(anchorGrams).Count();
+                gramJaccard = union > 0 ? (float)intersection / union : 0f;
+            }
+
+            float combined = Math.Max(charDice, gramJaccard);
+            bestScore = Math.Max(bestScore, combined);
+        }
+
+        return bestScore;
+    }
+
+    private static string CleanForSemantic(string s) =>
+        new string(s.Where(c => !char.IsPunctuation(c) && !char.IsWhiteSpace(c)).ToArray()).ToLowerInvariant();
+
+    private static HashSet<string> GetBigrams(string s)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (s.Length < 2)
+        {
+            if (s.Length == 1) set.Add(s);
+            return set;
+        }
+        for (int i = 0; i < s.Length - 1; i++)
+        {
+            set.Add(s.Substring(i, 2));
+        }
+        return set;
     }
 }
 

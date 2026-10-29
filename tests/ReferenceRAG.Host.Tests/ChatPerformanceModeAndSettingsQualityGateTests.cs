@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using ReferenceRAG.Business.Features.Chat.Services;
 using ReferenceRAG.Core.Features.HardwareAcceleration;
+using ReferenceRAG.Core.Features.HardwareAcceleration.Detection;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Models;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
@@ -581,5 +582,182 @@ public sealed class ChatPerformanceModeAndSettingsQualityGateTests : IDisposable
         Assert.DoesNotContain("后端方案", jsContent);
         Assert.DoesNotContain("本地 GGUF 大模型 (Local GGUF)", jsContent);
         Assert.DoesNotContain("OpenAI 兼容 API (Online/API)", jsContent);
+    }
+
+    [Fact]
+    public void ChatPerformancePlanner_AmdApuIntegratedGpu_OnLinux_ShouldEnableVulkanAndFullOffload()
+    {
+        // 门禁：Linux 环境 AMD Radeon APU/核显（零独立显存），自适应规划应自动分配虚拟共享显存并全量卸载至 Vulkan
+        var mockDetector = new Mock<IHardwareDetector>();
+        var amdApu = new GpuDeviceInfo
+        {
+            Name = "AMD Radeon GPU / APU",
+            Vendor = GpuVendor.Amd,
+            TotalVramBytes = 0UL, // Linux APU 共享系统内存，无独立物理显存
+            IsPrimary = true
+        };
+        var context = new HardwareContext
+        {
+            GpuDevices = new List<GpuDeviceInfo> { amdApu },
+            PrimaryGpu = amdApu,
+            HasNvidiaGpu = false,
+            HasDirectX12 = false, // Linux 无 DirectX12
+            HasPortableCuda = false,
+            IsCuda12Available = false
+        };
+
+        var planner = new ChatPerformancePlanner(mockDetector.Object);
+        var profile = planner.PlanProfile(new ChatPerformancePlanningRequest
+        {
+            ModelName = "Qwen3.5-0.8B-Instruct-GGUF",
+            HardwareContext = context,
+            UseGpu = true,
+            PerformanceMode = "Adaptive",
+            AdaptiveStrategy = "Balanced"
+        });
+
+        Assert.True(profile.IsGpuAccelerated, "AMD APU 应判定为支持 GPU 加速");
+        Assert.Equal(-1, profile.GpuLayers);
+        Assert.Contains("集成核显 Vulkan 加速", profile.Rationale);
+        Assert.Null(profile.Warning);
+    }
+
+    [Fact]
+    public void ChatPerformancePlanner_IntelIntegratedGpu_OnLinux_ShouldEnableVulkanAndFullOffload()
+    {
+        // 门禁：Linux 环境 Intel 核显（零独立显存），自适应规划应自动启用 Vulkan 全量加速
+        var mockDetector = new Mock<IHardwareDetector>();
+        var intelGpu = new GpuDeviceInfo
+        {
+            Name = "Intel(R) UHD Graphics 770",
+            Vendor = GpuVendor.Intel,
+            TotalVramBytes = 0UL,
+            IsPrimary = true
+        };
+        var context = new HardwareContext
+        {
+            GpuDevices = new List<GpuDeviceInfo> { intelGpu },
+            PrimaryGpu = intelGpu,
+            HasNvidiaGpu = false,
+            HasDirectX12 = false,
+            HasPortableCuda = false,
+            IsCuda12Available = false
+        };
+
+        var planner = new ChatPerformancePlanner(mockDetector.Object);
+        var profile = planner.PlanProfile(new ChatPerformancePlanningRequest
+        {
+            ModelName = "Qwen2.5-1.5B-Instruct-GGUF",
+            HardwareContext = context,
+            UseGpu = true,
+            PerformanceMode = "Adaptive",
+            AdaptiveStrategy = "Balanced"
+        });
+
+        Assert.True(profile.IsGpuAccelerated);
+        Assert.Equal(-1, profile.GpuLayers);
+        Assert.Contains("集成核显 Vulkan 加速", profile.Rationale);
+    }
+
+    [Fact]
+    public void ChatPerformancePlanner_FixedMode_AmdIntegratedGpu_RespectsManualGpuLayers()
+    {
+        // 门禁：固定参数模式下，AMD 核显应支持用户指定的 GpuLayers，而不是被强退为 0
+        var mockDetector = new Mock<IHardwareDetector>();
+        var amdApu = new GpuDeviceInfo
+        {
+            Name = "AMD Radeon GPU / APU",
+            Vendor = GpuVendor.Amd,
+            TotalVramBytes = 0UL,
+            IsPrimary = true
+        };
+        var context = new HardwareContext
+        {
+            GpuDevices = new List<GpuDeviceInfo> { amdApu },
+            PrimaryGpu = amdApu,
+            HasNvidiaGpu = false,
+            HasDirectX12 = false
+        };
+
+        var planner = new ChatPerformancePlanner(mockDetector.Object);
+        var profile = planner.PlanProfile(new ChatPerformancePlanningRequest
+        {
+            ModelName = "Qwen3.5-0.8B-Instruct-GGUF",
+            HardwareContext = context,
+            UseGpu = true,
+            PerformanceMode = "Fixed",
+            UserGpuLayers = -1,
+            UserContextSize = 4096
+        });
+
+        Assert.True(profile.IsGpuAccelerated);
+        Assert.Equal(-1, profile.GpuLayers);
+        Assert.Equal(4096, profile.ContextSize);
+    }
+
+    [Fact]
+    public void ModelsController_GetRuntimeStatus_OnAmdIntegratedGpu_ReportsAmdVulkanGpu()
+    {
+        // 门禁：当聊天模型启用 GPU 时，AMD 核显环境下端点应准确回显 "AMD Vulkan GPU"
+        var configManager = new ConfigManager();
+        var cfg = configManager.Load();
+        cfg.Chat = new ChatModelConfig
+        {
+            ActiveBackend = "LocalGguf",
+            LocalGguf = new LocalGgufChatProfile
+            {
+                ModelName = "Qwen3.5-0.8B-Instruct-GGUF",
+                GpuLayers = -1
+            }
+        };
+        configManager.Save(cfg);
+
+        var modelManagerMock = new Mock<IModelManager>();
+        modelManagerMock.Setup(m => m.GetCurrentChatModel()).Returns(new ModelInfo
+        {
+            Name = "Qwen3.5-0.8B-Instruct-GGUF",
+            DisplayName = "Qwen3.5 0.8B Instruct",
+            ModelType = "chat",
+            InstalledVariants = new List<ModelVariantInfo>
+            {
+                new ModelVariantInfo { FileName = "Qwen3.5-0.8B.Q4_K_M.gguf", Format = "gguf", IsActive = true, Quantization = "Q4_K_M" }
+            }
+        });
+
+        var amdApu = new GpuDeviceInfo
+        {
+            Name = "AMD Radeon GPU / APU",
+            Vendor = GpuVendor.Amd,
+            TotalVramBytes = 0UL,
+            IsPrimary = true
+        };
+        var mockDetector = new Mock<IHardwareDetector>();
+        mockDetector.Setup(d => d.GetContext()).Returns(new HardwareContext
+        {
+            PrimaryGpu = amdApu,
+            GpuDevices = new List<GpuDeviceInfo> { amdApu },
+            HasNvidiaGpu = false,
+            HasDirectX12 = false
+        });
+
+        var controller = new ModelsController(
+            configManager,
+            modelManagerMock.Object,
+            new Mock<IEmbeddingService>().Object,
+            new Mock<IVectorStore>().Object,
+            NullLogger<ModelsController>.Instance,
+            rerankService: null,
+            telemetryService: null,
+            chatService: null,
+            hardwareDetector: mockDetector.Object);
+
+        var statusResult = controller.GetRuntimeStatus();
+        var okResult = Assert.IsType<OkObjectResult>(statusResult.Result);
+        var statusResponse = Assert.IsType<ModelsRuntimeStatusResponse>(okResult.Value);
+
+        Assert.NotNull(statusResponse.Chat);
+        Assert.True(statusResponse.Chat.IsGpuMode);
+        Assert.Equal("AMD Vulkan GPU (AMD Radeon GPU / APU)", statusResponse.Chat.ExecutionDevice);
+        Assert.Equal("全量卸载到 GPU", statusResponse.Chat.OffloadDescription);
     }
 }

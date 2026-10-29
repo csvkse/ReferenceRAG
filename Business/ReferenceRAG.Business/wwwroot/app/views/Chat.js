@@ -2,12 +2,13 @@ import { defineComponent as _defineComponent } from 'vue';
 import { ref, computed, nextTick, onMounted, onActivated, onUnmounted } from 'vue';
 import {renderMarkdown} from '/shared/safe-markdown.js';
 import { useMessage } from 'naive-ui';
-import { ChatbubblesOutline, AddOutline, SendOutline, RefreshOutline, CreateOutline, CopyOutline, DocumentTextOutline, LogoMarkdown, ImageOutline, CloseOutline, PlayOutline } from '@vicons/ionicons5';
+import { ChatbubblesOutline, AddOutline, SendOutline, RefreshOutline, CreateOutline, CopyOutline, DocumentTextOutline, LogoMarkdown, ImageOutline, CloseOutline, PlayOutline, ArrowDownOutline } from '@vicons/ionicons5';
 import { marked } from 'marked';
 import { API_URL } from '/app/config/env.js';
 import { useAuthStore } from '/app/stores/auth.js';
 import { ragFetch as fetch } from '/core/transport/index.js';
 import { modelsApi, settingsApi } from '/app/api/index.js';
+import { isNearConversationBottom, isConversationFollowPauseIntent, shouldResumeConversationFollow, shouldFollowConversationStream, shouldApplyConversationStreamScroll, resolveScrollContainer } from '/shared/conversation-scroll.js';
 const component = /*@__PURE__*/ _defineComponent({
     ...{ name: 'Chat' },
     __name: 'Chat',
@@ -21,9 +22,40 @@ const component = /*@__PURE__*/ _defineComponent({
         const input = ref('');
         const streaming = ref(false);
         let streamController;
-        const cancel = () => streamController?.abort();
-        onUnmounted(cancel);
         const scrollbarRef = ref(null);
+        let streamScrollFrame = 0;
+        let streamScrollRevision = 0;
+        let followConversationStream = true;
+        const conversationFollowPaused = ref(false);
+        const isNearBottom = ref(true);
+        let lastCanvasScrollTop = 0;
+
+        const getScrollContainer = () => resolveScrollContainer(scrollbarRef.value);
+
+        const cancelScheduledStreamScroll = () => {
+            streamScrollRevision++;
+            if (streamScrollFrame > 0) {
+                cancelAnimationFrame(streamScrollFrame);
+            }
+            streamScrollFrame = 0;
+        };
+
+        const pauseConversationFollow = () => {
+            conversationFollowPaused.value = true;
+            followConversationStream = false;
+            cancelScheduledStreamScroll();
+        };
+
+        const cancel = () => {
+            if (typeof streamController?.abort === 'function') {
+                streamController.abort();
+            }
+            cancelScheduledStreamScroll();
+        };
+        onUnmounted(() => {
+            cancel();
+            cancelScheduledStreamScroll();
+        });
         const toolDescriptions = ref([]);
         const initialized = ref(false);
         const rawSet = ref(new Set());
@@ -150,7 +182,9 @@ const component = /*@__PURE__*/ _defineComponent({
                 message.warning(visionUnsupportedReason.value || '当前选中的模型为纯语言模型（LLM），未挂载视觉投影器，无法识别图片。如需使用视觉识别，请切换为多模态视觉模型。');
                 return;
             }
-            fileInputRef.value?.click();
+            if (typeof fileInputRef.value?.click === 'function') {
+                fileInputRef.value.click();
+            }
         };
 
         const handleFileInputChange = (e) => {
@@ -247,9 +281,142 @@ const component = /*@__PURE__*/ _defineComponent({
                 headers['X-API-Key'] = authStore.apiKey;
             return headers;
         };
-        const scrollToBottom = async () => {
+        const scrollToBottom = async (smooth = false) => {
             await nextTick();
-            scrollbarRef.value?.scrollTo({ top: 999999, behavior: 'smooth' });
+            const target = getScrollContainer();
+            if (smooth) {
+                if (typeof scrollbarRef.value?.scrollTo === 'function') {
+                    scrollbarRef.value.scrollTo({ top: 999999, behavior: 'smooth' });
+                } else if (target) {
+                    if (typeof target.scrollTo === 'function') {
+                        target.scrollTo({ top: target.scrollHeight, behavior: 'smooth' });
+                    } else {
+                        target.scrollTop = target.scrollHeight;
+                    }
+                }
+            } else if (target) {
+                target.scrollTop = target.scrollHeight;
+                lastCanvasScrollTop = target.scrollTop;
+            } else if (typeof scrollbarRef.value?.scrollTo === 'function') {
+                scrollbarRef.value.scrollTo({ top: 999999, behavior: 'auto' });
+            }
+            isNearBottom.value = true;
+        };
+
+        const scheduleStreamScroll = () => {
+            const target = getScrollContainer();
+            if (!target || streamScrollFrame || conversationFollowPaused.value) return;
+
+            const scheduledRevision = streamScrollRevision;
+            streamScrollFrame = -1;
+
+            void nextTick(() => {
+                if (!shouldApplyConversationStreamScroll({
+                    scheduledRevision,
+                    currentRevision: streamScrollRevision,
+                    followAllowed: !conversationFollowPaused.value
+                })) {
+                    if (streamScrollFrame === -1) streamScrollFrame = 0;
+                    return;
+                }
+
+                streamScrollFrame = requestAnimationFrame(() => {
+                    streamScrollFrame = 0;
+                    const current = getScrollContainer();
+                    if (!current || !shouldApplyConversationStreamScroll({
+                        scheduledRevision,
+                        currentRevision: streamScrollRevision,
+                        followAllowed: !conversationFollowPaused.value
+                    })) return;
+
+                    const followAllowed = shouldFollowConversationStream({
+                        followRequested: followConversationStream,
+                        followPaused: conversationFollowPaused.value,
+                        scrollHeight: current.scrollHeight,
+                        scrollTop: current.scrollTop,
+                        clientHeight: current.clientHeight
+                    });
+
+                    if (!followAllowed) return;
+
+                    current.scrollTop = current.scrollHeight;
+                    lastCanvasScrollTop = current.scrollTop;
+                    isNearBottom.value = true;
+                });
+            });
+        };
+
+        const onCanvasWheel = (event) => {
+            if (isConversationFollowPauseIntent({ type: 'wheel', deltaY: event.deltaY })) {
+                pauseConversationFollow();
+            }
+        };
+
+        const onCanvasTouchStart = () => {
+            if (isConversationFollowPauseIntent({ type: 'touchstart' })) {
+                pauseConversationFollow();
+            }
+        };
+
+        const onCanvasPointerDown = (event) => {
+            const target = getScrollContainer();
+            const onRail = Boolean(event.target?.closest?.('.n-scrollbar-rail'));
+            const scrollbarWidth = (target && typeof target.offsetWidth === 'number' && typeof target.clientWidth === 'number')
+                ? target.offsetWidth - target.clientWidth
+                : 0;
+            const hasBoundingRect = Boolean(target && typeof target.getBoundingClientRect === 'function');
+            const onScrollbar = onRail || Boolean(hasBoundingRect && scrollbarWidth > 0 && event.clientX >= target.getBoundingClientRect().right - scrollbarWidth);
+            if (isConversationFollowPauseIntent({ type: 'pointerdown', onScrollbar })) {
+                pauseConversationFollow();
+            }
+        };
+
+        const onCanvasScroll = (event) => {
+            const target = event?.target || getScrollContainer();
+            if (!target) return;
+
+            const nearBottom = isNearConversationBottom({
+                scrollHeight: target.scrollHeight,
+                scrollTop: target.scrollTop,
+                clientHeight: target.clientHeight,
+                threshold: 96
+            });
+            isNearBottom.value = nearBottom;
+
+            if (conversationFollowPaused.value && shouldResumeConversationFollow({
+                sending: streaming.value,
+                resumeRequested: target.scrollTop > lastCanvasScrollTop,
+                scrollHeight: target.scrollHeight,
+                scrollTop: target.scrollTop,
+                clientHeight: target.clientHeight,
+                threshold: 96
+            })) {
+                conversationFollowPaused.value = false;
+                followConversationStream = true;
+            } else if (streaming.value && !conversationFollowPaused.value) {
+                followConversationStream = nearBottom;
+            }
+            lastCanvasScrollTop = target.scrollTop;
+        };
+
+        const resumeAndScrollToBottom = async () => {
+            conversationFollowPaused.value = false;
+            followConversationStream = true;
+            cancelScheduledStreamScroll();
+            await nextTick();
+            if (typeof scrollbarRef.value?.scrollTo === 'function') {
+                scrollbarRef.value.scrollTo({ top: 999999, behavior: 'smooth' });
+            } else {
+                const target = getScrollContainer();
+                if (target) {
+                    if (typeof target.scrollTo === 'function') {
+                        target.scrollTo({ top: target.scrollHeight, behavior: 'smooth' });
+                    } else {
+                        target.scrollTop = target.scrollHeight;
+                    }
+                }
+            }
+            isNearBottom.value = true;
         };
         const parseJsonSafe = async (res) => {
             const text = await res.text();
@@ -286,6 +453,9 @@ const component = /*@__PURE__*/ _defineComponent({
         const newSession = async () => {
             if (streaming.value)
                 return;
+            conversationFollowPaused.value = false;
+            followConversationStream = true;
+            cancelScheduledStreamScroll();
             if (sessionId.value)
                 await deleteSession(sessionId.value);
             messages.value = [];
@@ -343,8 +513,11 @@ const component = /*@__PURE__*/ _defineComponent({
             input.value = '';
             attachedImages.value = [];
             streaming.value = true;
+            conversationFollowPaused.value = false;
+            followConversationStream = true;
+            cancelScheduledStreamScroll();
             streamController = new AbortController();
-            await scrollToBottom();
+            await scrollToBottom(true);
             const assistantMsg = { role: 'assistant', content: '' };
             messages.value.push(assistantMsg);
 
@@ -383,11 +556,11 @@ const component = /*@__PURE__*/ _defineComponent({
                             const evt = JSON.parse(json);
                             if (evt.type === 'text' && evt.delta) {
                                 messages.value[messages.value.length - 1].content += evt.delta;
-                                await scrollToBottom();
+                                scheduleStreamScroll();
                             }
                             else if (evt.type === 'replace' && evt.delta !== undefined) {
                                 messages.value[messages.value.length - 1].content = evt.delta;
-                                await scrollToBottom();
+                                scheduleStreamScroll();
                             }
                             else if (evt.type === 'context' && evt.delta) {
                                 try {
@@ -418,7 +591,12 @@ const component = /*@__PURE__*/ _defineComponent({
             finally {
                 streamController = null;
                 streaming.value = false;
-                await scrollToBottom();
+                cancelScheduledStreamScroll();
+                if (!conversationFollowPaused.value) {
+                    await nextTick();
+                    const current = getScrollContainer();
+                    if (current) current.scrollTop = current.scrollHeight;
+                }
             }
         };
         const chatBackend = ref('LocalGguf');
@@ -528,18 +706,22 @@ const component = /*@__PURE__*/ _defineComponent({
             await Promise.all([initSession(), loadChatModelStatus(), fetchCapabilities()]);
         });
         onActivated(async () => {
-            await scrollToBottom();
+            if (!conversationFollowPaused.value) {
+                await scrollToBottom();
+            }
             loadChatModelStatus();
             fetchCapabilities();
         });
         onUnmounted(() => {
             window.removeEventListener('storage', handleStorageChange);
+            cancelScheduledStreamScroll();
             if (modelSyncChannel) {
                 try { modelSyncChannel.close(); } catch {}
             }
         });
         const __returned__ = {
             chatBackend, currentChatModel, currentChatDisplayName, chatVariant, isGpuMode, chatModelOptions, switchingModel, loadChatModelStatus, handleModelChange, cancel, message, authStore, sessionId, messages, input, streaming, scrollbarRef, toolDescriptions, initialized, rawSet, editVisible, editText, editIndex,
+            conversationFollowPaused, isNearBottom, onCanvasScroll, onCanvasWheel, onCanvasTouchStart, onCanvasPointerDown, resumeAndScrollToBottom,
             usedTokens, maxTokens, usagePercent, contextUsageDisplay, contextTagType, fetchContextUsage,
             supportsVision, visionUnsupportedReason, visionStatus, fetchCapabilities,
             attachedImages, fileInputRef, compressImage, addImageFile, removeAttachedImage, triggerSelectImage, handleFileInputChange, handlePaste,
@@ -554,12 +736,13 @@ const component = /*@__PURE__*/ _defineComponent({
             get LogoMarkdown() { return LogoMarkdown; },
             get ImageOutline() { return ImageOutline; },
             get CloseOutline() { return CloseOutline; },
-            get PlayOutline() { return PlayOutline; }
+            get PlayOutline() { return PlayOutline; },
+            get ArrowDownOutline() { return ArrowDownOutline; }
         };
         return __returned__;
     }
 });
 
-component.template = "\n  <n-space vertical :size=\"16\">\n    <!-- Header Bar -->\n    <n-card size=\"small\">\n      <n-space align=\"center\" justify=\"space-between\">\n        <n-space align=\"center\" :size=\"8\" style=\"flex-wrap: wrap\">\n          <n-icon :component=\"ChatbubblesOutline\" size=\"20\" />\n          <n-text strong>AI 对话 (Agent)</n-text>\n\n          <n-divider vertical style=\"margin: 0 4px\" />\n\n          <!-- 本地 GGUF 状态与快捷选择 -->\n          <template v-if=\"chatBackend === 'LocalGguf'\">\n            <n-tag size=\"small\" type=\"success\" round :bordered=\"false\">\n              本地 GGUF\n            </n-tag>\n            <n-select\n              v-if=\"chatModelOptions.length > 0\"\n              :value=\"currentChatModel\"\n              :options=\"chatModelOptions\"\n              :loading=\"switchingModel\"\n              size=\"small\"\n              style=\"width: 230px\"\n              placeholder=\"选择本地聊天模型\"\n              @update:value=\"handleModelChange\"\n            />\n            <n-tag v-else size=\"small\" type=\"warning\" round :bordered=\"false\">\n              {{ currentChatDisplayName || '未下载本地模型' }}\n            </n-tag>\n            <n-tag v-if=\"isGpuMode\" size=\"small\" type=\"success\" round :bordered=\"false\">\n              🚀 GPU 加速\n            </n-tag>\n            <n-tag v-else size=\"small\" type=\"warning\" round :bordered=\"false\">\n              💻 CPU 模式\n            </n-tag>\n            <n-tag v-if=\"chatVariant\" size=\"small\" :bordered=\"false\">\n              {{ chatVariant }}\n            </n-tag>\n          </template>\n\n          <!-- 本地 ONNX 状态 -->\n          <template v-else-if=\"chatBackend === 'LocalOnnxGenAi' || chatBackend === 'LocalOnnx'\">\n            <n-tag size=\"small\" type=\"info\" round :bordered=\"false\">\n              本地 ONNX\n            </n-tag>\n            <n-tag size=\"small\" type=\"default\" round>\n              {{ currentChatDisplayName || currentChatModel || 'Phi-3.5-mini-instruct-onnx' }}\n            </n-tag>\n            <n-tag size=\"small\" type=\"success\" round :bordered=\"false\">\n              ⚡ DirectML / CPU\n            </n-tag>\n          </template>\n\n          <!-- 线上 API 状态 -->\n          <template v-else>\n            <n-tag size=\"small\" type=\"info\" round :bordered=\"false\">\n              线上 API\n            </n-tag>\n            <n-tag size=\"small\" type=\"default\" round>\n              {{ currentChatDisplayName || 'OpenAI API' }}\n            </n-tag>\n          </template>\n\n          <n-divider vertical style=\"margin: 0 4px\" />\n          <n-tag size=\"small\" type=\"default\" round>{{ sessionId ? sessionId.slice(0, 8) : '—' }}</n-tag>\n          <n-tooltip trigger=\"hover\">\n            <template #trigger>\n              <n-tag size=\"small\" :type=\"contextTagType\" round :bordered=\"false\" style=\"cursor: default\">\n                📊 {{ contextUsageDisplay }}\n              </n-tag>\n            </template>\n            <div>已用上下文: {{ usedTokens.toLocaleString() }} / {{ maxTokens.toLocaleString() }} Tokens ({{ usagePercent }}%)</div>\n            <div style=\"font-size: 11px; opacity: 0.8; margin-top: 2px\">包含系统提示词、工具定义、历史消息及检索切片</div>\n          </n-tooltip>\n          <n-button v-if=\"streaming\" size=\"small\" type=\"warning\" ghost @click=\"cancel\">停止生成</n-button>\n        </n-space>\n\n        <n-space align=\"center\" :size=\"8\">\n          <n-button size=\"small\" secondary @click=\"newSession\" :disabled=\"streaming\">\n            <template #icon><n-icon :component=\"AddOutline\" /></template>\n            新对话\n          </n-button>\n        </n-space>\n      </n-space>\n    </n-card>\n\n    <!-- Message List -->\n    <n-card\n      :style=\"{ height: 'calc(100vh - 300px)', overflow: 'hidden' }\"\n      :content-style=\"{ padding: 0, height: '100%', display: 'flex', flexDirection: 'column' }\"\n    >\n      <n-scrollbar ref=\"scrollbarRef\" style=\"flex: 1\">\n        <div style=\"padding: 16px; display: flex; flex-direction: column; gap: 16px; min-height: 100%\">\n          <!-- Empty state -->\n          <div v-if=\"messages.length === 0\" style=\"flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 0; gap: 12px\">\n            <n-icon :component=\"ChatbubblesOutline\" size=\"52\" color=\"#63e2b7\" />\n            <n-text depth=\"3\">开始对话吧，可以搜索知识库、查询索引状态或上传图片提问</n-text>\n          </div>\n\n          <!-- Messages -->\n          <div\n            v-for=\"(msg, i) in messages\"\n            :key=\"i\"\n            :style=\"{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }\"\n          >\n            <div :style=\"{ maxWidth: '80%', display: 'flex', flexDirection: 'column', gap: '4px', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }\">\n              <n-card\n                size=\"small\"\n                :style=\"{\n                  background: msg.role === 'user' ? 'rgba(99,226,183,0.1)' : undefined,\n                  borderColor: msg.role === 'user' ? 'rgba(99,226,183,0.3)' : undefined\n                }\"\n              >\n                <!-- User message -->\n                <div v-if=\"msg.role === 'user'\">\n                  <!-- 图片附件预览 -->\n                  <div v-if=\"msg.images && msg.images.length > 0\" style=\"display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px\">\n                    <n-image\n                      v-for=\"(img, imgIdx) in msg.images\"\n                      :key=\"imgIdx\"\n                      :src=\"img\"\n                      width=\"120\"\n                      height=\"80\"\n                      object-fit=\"cover\"\n                      style=\"border-radius: 6px; cursor: pointer; border: 1px solid rgba(99,226,183,0.3)\"\n                    />\n                  </div>\n                  <div v-if=\"msg.content\" style=\"white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.6\">{{ msg.content.trimStart() }}</div>\n                </div>\n\n                <!-- Assistant message: 单卡片内聚状态渲染，思考中与流式内容同卡片无缝衔接，杜绝双回复框 -->\n                <div v-else>\n                  <div v-if=\"streaming && i === messages.length - 1 && !msg.content\" style=\"padding: 2px 0\">\n                    <n-space align=\"center\" :size=\"8\">\n                      <n-spin size=\"small\" />\n                      <n-text depth=\"3\" style=\"font-size: 13px\">思考中...</n-text>\n                      <n-text v-if=\"chatBackend === 'LocalGguf' || chatBackend === 'LocalOnnxGenAi' || chatBackend === 'LocalOnnx'\" depth=\"3\" style=\"font-size: 11px\">（本地模型唤醒或装载显存中）</n-text>\n                    </n-space>\n                  </div>\n                  <div v-else-if=\"rawSet.has(i)\" style=\"white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.6\">{{ msg.content.trimStart() }}<span v-if=\"streaming && i === messages.length - 1\" class=\"cursor-blink\">▌</span></div>\n                  <div v-else class=\"markdown-body\" v-html=\"renderMsg(msg, streaming && i === messages.length - 1)\"></div>\n                </div>\n              </n-card>\n\n              <!-- User actions -->\n              <div v-if=\"msg.role === 'user' && !streaming\" style=\"display: flex; gap: 4px; padding: 0 4px\">\n                <n-button text size=\"tiny\" style=\"opacity: 0.6; font-size: 11px\" @click=\"startEdit(i, msg.content)\">\n                  <template #icon><n-icon :component=\"CreateOutline\" size=\"12\" /></template>\n                  编辑\n                </n-button>\n                <n-button text size=\"tiny\" style=\"opacity: 0.6; font-size: 11px\" @click=\"retry(msg.content, i)\">\n                  <template #icon><n-icon :component=\"RefreshOutline\" size=\"12\" /></template>\n                  重试\n                </n-button>\n              </div>\n\n              <!-- Assistant actions -->\n              <div v-if=\"msg.role === 'assistant' && msg.content && !(streaming && i === messages.length - 1)\" style=\"display: flex; gap: 4px; padding: 0 4px\">\n                <n-button text size=\"tiny\" style=\"opacity: 0.6; font-size: 11px\" @click=\"copyText(msg.content)\">\n                  <template #icon><n-icon :component=\"CopyOutline\" size=\"12\" /></template>\n                  复制\n                </n-button>\n                <n-button text size=\"tiny\" style=\"opacity: 0.6; font-size: 11px\" @click=\"toggleRaw(i)\">\n                  <template #icon><n-icon :component=\"rawSet.has(i) ? LogoMarkdown : DocumentTextOutline\" size=\"12\" /></template>\n                  {{ rawSet.has(i) ? 'Markdown' : '原文' }}\n                </n-button>\n                <n-button v-if=\"!streaming && i === messages.length - 1 && isTruncatedMessage(msg.content)\" text size=\"tiny\" type=\"primary\" style=\"opacity: 0.9; font-size: 11px\" @click=\"continueGeneration\">\n                  <template #icon><n-icon :component=\"PlayOutline\" size=\"12\" /></template>\n                  继续生成\n                </n-button>\n              </div>\n            </div>\n          </div>\n        </div>\n      </n-scrollbar>\n    </n-card>\n\n    <!-- Input Area -->\n    <n-card size=\"small\">\n      <n-space vertical :size=\"8\">\n        <!-- Attached Images Thumbnail Preview -->\n        <div v-if=\"attachedImages.length > 0\" style=\"display: flex; gap: 8px; flex-wrap: wrap; padding-bottom: 4px\">\n          <div\n            v-for=\"(img, idx) in attachedImages\"\n            :key=\"img.id\"\n            style=\"position: relative; width: 64px; height: 64px; border-radius: 6px; overflow: hidden; border: 1px solid rgba(99,226,183,0.4)\"\n          >\n            <img :src=\"img.dataUrl\" style=\"width: 100%; height: 100%; object-fit: cover\" />\n            <div\n              style=\"position: absolute; top: 2px; right: 2px; cursor: pointer; background: rgba(0,0,0,0.65); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center\"\n              @click=\"removeAttachedImage(idx)\"\n              title=\"移除图片\"\n            >\n              <n-icon :component=\"CloseOutline\" size=\"14\" color=\"#fff\" />\n            </div>\n          </div>\n        </div>\n\n        <div style=\"display: flex; gap: 8px; align-items: flex-end\">\n          <input\n            ref=\"fileInputRef\"\n            type=\"file\"\n            accept=\"image/*\"\n            multiple\n            style=\"display: none\"\n            @change=\"handleFileInputChange\"\n          />\n          <n-tooltip trigger=\"hover\">\n            <template #trigger>\n              <n-button\n                secondary\n                size=\"small\"\n                style=\"height: 60px; padding: 0 12px; flex-shrink: 0\"\n                :disabled=\"streaming || attachedImages.length >= 4\"\n                @click=\"triggerSelectImage\"\n              >\n                <template #icon><n-icon :component=\"ImageOutline\" size=\"20\" :style=\"{ opacity: supportsVision ? 1 : (visionStatus === 'Unpaired' ? 0.65 : 0.4), color: visionStatus === 'Unpaired' ? '#f0a020' : undefined }\" /></template>\n              </n-button>\n            </template>\n            <div>{{ supportsVision ? '添加图片附件 (支持截图粘贴、文件上传，最多 4 张)' : (visionUnsupportedReason || '当前模型为纯语言模型，不支持视觉多模态识别') }}</div>\n          </n-tooltip>\n          <n-input\n            v-model:value=\"input\"\n            type=\"textarea\"\n            placeholder=\"输入消息或粘贴截图... (Enter 发送，Shift+Enter 换行)\"\n            :autosize=\"{ minRows: 2, maxRows: 5 }\"\n            style=\"flex: 1\"\n            :disabled=\"streaming\"\n            @paste=\"handlePaste\"\n            @keydown.enter=\"handleKeyDown\"\n          />\n          <n-button\n            type=\"primary\"\n            :loading=\"streaming\"\n            :disabled=\"(!input.trim() && attachedImages.length === 0) || !sessionId || streaming\"\n            style=\"height: 60px; padding: 0 16px; flex-shrink: 0\"\n            @click=\"send\"\n          >\n            <template #icon><n-icon :component=\"SendOutline\" /></template>\n          </n-button>\n        </div>\n        <n-collapse>\n          <n-collapse-item title=\"可用工具\" name=\"tools\">\n            <div style=\"display: flex; flex-direction: column; gap: 4px\">\n              <n-text v-for=\"(tool, idx) in toolDescriptions\" :key=\"idx\" depth=\"3\" style=\"font-size: 12px\">{{ tool }}</n-text>\n            </div>\n          </n-collapse-item>\n        </n-collapse>\n      </n-space>\n    </n-card>\n\n    <!-- Edit Modal -->\n    <n-modal v-model:show=\"editVisible\" preset=\"card\" title=\"编辑消息\" style=\"max-width: 520px\">\n      <n-input\n        v-model:value=\"editText\"\n        type=\"textarea\"\n        :autosize=\"{ minRows: 3, maxRows: 8 }\"\n        placeholder=\"编辑消息内容...\"\n      />\n      <template #footer>\n        <n-space justify=\"end\">\n          <n-button @click=\"editVisible = false\">取消</n-button>\n          <n-button type=\"primary\" @click=\"confirmEdit\" :disabled=\"!editText.trim()\">重新发送</n-button>\n        </n-space>\n      </template>\n    </n-modal>\n  </n-space>\n";
+component.template = "\n  <n-space vertical :size=\"16\">\n    <!-- Header Bar -->\n    <n-card size=\"small\">\n      <n-space align=\"center\" justify=\"space-between\">\n        <n-space align=\"center\" :size=\"8\" style=\"flex-wrap: wrap\">\n          <n-icon :component=\"ChatbubblesOutline\" size=\"20\" />\n          <n-text strong>AI 对话 (Agent)</n-text>\n\n          <n-divider vertical style=\"margin: 0 4px\" />\n\n          <!-- 本地 GGUF 状态与快捷选择 -->\n          <template v-if=\"chatBackend === 'LocalGguf'\">\n            <n-tag size=\"small\" type=\"success\" round :bordered=\"false\">\n              本地 GGUF\n            </n-tag>\n            <n-select\n              v-if=\"chatModelOptions.length > 0\"\n              :value=\"currentChatModel\"\n              :options=\"chatModelOptions\"\n              :loading=\"switchingModel\"\n              size=\"small\"\n              style=\"width: 230px\"\n              placeholder=\"选择本地聊天模型\"\n              @update:value=\"handleModelChange\"\n            />\n            <n-tag v-else size=\"small\" type=\"warning\" round :bordered=\"false\">\n              {{ currentChatDisplayName || '未下载本地模型' }}\n            </n-tag>\n            <n-tag v-if=\"isGpuMode\" size=\"small\" type=\"success\" round :bordered=\"false\">\n              🚀 GPU 加速\n            </n-tag>\n            <n-tag v-else size=\"small\" type=\"warning\" round :bordered=\"false\">\n              💻 CPU 模式\n            </n-tag>\n            <n-tag v-if=\"chatVariant\" size=\"small\" :bordered=\"false\">\n              {{ chatVariant }}\n            </n-tag>\n          </template>\n\n          <!-- 本地 ONNX 状态 -->\n          <template v-else-if=\"chatBackend === 'LocalOnnxGenAi' || chatBackend === 'LocalOnnx'\">\n            <n-tag size=\"small\" type=\"info\" round :bordered=\"false\">\n              本地 ONNX\n            </n-tag>\n            <n-tag size=\"small\" type=\"default\" round>\n              {{ currentChatDisplayName || currentChatModel || 'Phi-3.5-mini-instruct-onnx' }}\n            </n-tag>\n            <n-tag size=\"small\" type=\"success\" round :bordered=\"false\">\n              ⚡ DirectML / CPU\n            </n-tag>\n          </template>\n\n          <!-- 线上 API 状态 -->\n          <template v-else>\n            <n-tag size=\"small\" type=\"info\" round :bordered=\"false\">\n              线上 API\n            </n-tag>\n            <n-tag size=\"small\" type=\"default\" round>\n              {{ currentChatDisplayName || 'OpenAI API' }}\n            </n-tag>\n          </template>\n\n          <n-divider vertical style=\"margin: 0 4px\" />\n          <n-tag size=\"small\" type=\"default\" round>{{ sessionId ? sessionId.slice(0, 8) : '—' }}</n-tag>\n          <n-tooltip trigger=\"hover\">\n            <template #trigger>\n              <n-tag size=\"small\" :type=\"contextTagType\" round :bordered=\"false\" style=\"cursor: default\">\n                📊 {{ contextUsageDisplay }}\n              </n-tag>\n            </template>\n            <div>已用上下文: {{ usedTokens.toLocaleString() }} / {{ maxTokens.toLocaleString() }} Tokens ({{ usagePercent }}%)</div>\n            <div style=\"font-size: 11px; opacity: 0.8; margin-top: 2px\">包含系统提示词、工具定义、历史消息及检索切片</div>\n          </n-tooltip>\n          <n-button v-if=\"streaming\" size=\"small\" type=\"warning\" ghost @click=\"cancel\">停止生成</n-button>\n        </n-space>\n\n        <n-space align=\"center\" :size=\"8\">\n          <n-button size=\"small\" secondary @click=\"newSession\" :disabled=\"streaming\">\n            <template #icon><n-icon :component=\"AddOutline\" /></template>\n            新对话\n          </n-button>\n        </n-space>\n      </n-space>\n    </n-card>\n\n    <!-- Message List -->\n    <n-card\n      :style=\"{ height: 'calc(100vh - 300px)', overflow: 'hidden' }\"\n      :content-style=\"{ padding: 0, height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }\"\n    >\n      <n-scrollbar ref=\"scrollbarRef\" style=\"flex: 1\" @scroll=\"onCanvasScroll\" @wheel.passive=\"onCanvasWheel\" @touchstart.passive=\"onCanvasTouchStart\" @pointerdown=\"onCanvasPointerDown\">\n        <div style=\"padding: 16px; display: flex; flex-direction: column; gap: 16px; min-height: 100%\">\n          <!-- Empty state -->\n          <div v-if=\"messages.length === 0\" style=\"flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 0; gap: 12px\">\n            <n-icon :component=\"ChatbubblesOutline\" size=\"52\" color=\"#63e2b7\" />\n            <n-text depth=\"3\">开始对话吧，可以搜索知识库、查询索引状态或上传图片提问</n-text>\n          </div>\n\n          <!-- Messages -->\n          <div\n            v-for=\"(msg, i) in messages\"\n            :key=\"i\"\n            :style=\"{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }\"\n          >\n            <div :style=\"{ maxWidth: '80%', display: 'flex', flexDirection: 'column', gap: '4px', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }\">\n              <n-card\n                size=\"small\"\n                :style=\"{\n                  background: msg.role === 'user' ? 'rgba(99,226,183,0.1)' : undefined,\n                  borderColor: msg.role === 'user' ? 'rgba(99,226,183,0.3)' : undefined\n                }\"\n              >\n                <!-- User message -->\n                <div v-if=\"msg.role === 'user'\">\n                  <!-- 图片附件预览 -->\n                  <div v-if=\"msg.images && msg.images.length > 0\" style=\"display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px\">\n                    <n-image\n                      v-for=\"(img, imgIdx) in msg.images\"\n                      :key=\"imgIdx\"\n                      :src=\"img\"\n                      width=\"120\"\n                      height=\"80\"\n                      object-fit=\"cover\"\n                      style=\"border-radius: 6px; cursor: pointer; border: 1px solid rgba(99,226,183,0.3)\"\n                    />\n                  </div>\n                  <div v-if=\"msg.content\" style=\"white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.6\">{{ msg.content.trimStart() }}</div>\n                </div>\n\n                <!-- Assistant message: 单卡片内聚状态渲染，思考中与流式内容同卡片无缝衔接，杜绝双回复框 -->\n                <div v-else>\n                  <div v-if=\"streaming && i === messages.length - 1 && !msg.content\" style=\"padding: 2px 0\">\n                    <n-space align=\"center\" :size=\"8\">\n                      <n-spin size=\"small\" />\n                      <n-text depth=\"3\" style=\"font-size: 13px\">思考中...</n-text>\n                      <n-text v-if=\"chatBackend === 'LocalGguf' || chatBackend === 'LocalOnnxGenAi' || chatBackend === 'LocalOnnx'\" depth=\"3\" style=\"font-size: 11px\">（本地模型唤醒或装载显存中）</n-text>\n                    </n-space>\n                  </div>\n                  <div v-else-if=\"rawSet.has(i)\" style=\"white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.6\">{{ msg.content.trimStart() }}<span v-if=\"streaming && i === messages.length - 1\" class=\"cursor-blink\">▌</span></div>\n                  <div v-else class=\"markdown-body\" v-html=\"renderMsg(msg, streaming && i === messages.length - 1)\"></div>\n                </div>\n              </n-card>\n\n              <!-- User actions -->\n              <div v-if=\"msg.role === 'user' && !streaming\" style=\"display: flex; gap: 4px; padding: 0 4px\">\n                <n-button text size=\"tiny\" style=\"opacity: 0.6; font-size: 11px\" @click=\"startEdit(i, msg.content)\">\n                  <template #icon><n-icon :component=\"CreateOutline\" size=\"12\" /></template>\n                  编辑\n                </n-button>\n                <n-button text size=\"tiny\" style=\"opacity: 0.6; font-size: 11px\" @click=\"retry(msg.content, i)\">\n                  <template #icon><n-icon :component=\"RefreshOutline\" size=\"12\" /></template>\n                  重试\n                </n-button>\n              </div>\n\n              <!-- Assistant actions -->\n              <div v-if=\"msg.role === 'assistant' && msg.content && !(streaming && i === messages.length - 1)\" style=\"display: flex; gap: 4px; padding: 0 4px\">\n                <n-button text size=\"tiny\" style=\"opacity: 0.6; font-size: 11px\" @click=\"copyText(msg.content)\">\n                  <template #icon><n-icon :component=\"CopyOutline\" size=\"12\" /></template>\n                  复制\n                </n-button>\n                <n-button text size=\"tiny\" style=\"opacity: 0.6; font-size: 11px\" @click=\"toggleRaw(i)\">\n                  <template #icon><n-icon :component=\"rawSet.has(i) ? LogoMarkdown : DocumentTextOutline\" size=\"12\" /></template>\n                  {{ rawSet.has(i) ? 'Markdown' : '原文' }}\n                </n-button>\n                <n-button v-if=\"!streaming && i === messages.length - 1 && isTruncatedMessage(msg.content)\" text size=\"tiny\" type=\"primary\" style=\"opacity: 0.9; font-size: 11px\" @click=\"continueGeneration\">\n                  <template #icon><n-icon :component=\"PlayOutline\" size=\"12\" /></template>\n                  继续生成\n                </n-button>\n              </div>\n            </div>\n          </div>\n        </div>\n      </n-scrollbar>\n      <!-- Floating Scroll-to-Bottom / Resume Follow Button -->\n      <transition name=\"fade\">\n        <n-button\n          v-if=\"conversationFollowPaused || (!isNearBottom && messages.length > 3)\"\n          circle\n          type=\"primary\"\n          secondary\n          size=\"small\"\n          style=\"position: absolute; right: 28px; bottom: 18px; z-index: 10; box-shadow: 0 3px 12px rgba(0,0,0,0.25);\"\n          @click=\"resumeAndScrollToBottom\"\n          title=\"回到底部\"\n        >\n          <template #icon><n-icon :component=\"ArrowDownOutline\" /></template>\n        </n-button>\n      </transition>\n    </n-card>\n\n    <!-- Input Area -->\n    <n-card size=\"small\">\n      <n-space vertical :size=\"8\">\n        <!-- Attached Images Thumbnail Preview -->\n        <div v-if=\"attachedImages.length > 0\" style=\"display: flex; gap: 8px; flex-wrap: wrap; padding-bottom: 4px\">\n          <div\n            v-for=\"(img, idx) in attachedImages\"\n            :key=\"img.id\"\n            style=\"position: relative; width: 64px; height: 64px; border-radius: 6px; overflow: hidden; border: 1px solid rgba(99,226,183,0.4)\"\n          >\n            <img :src=\"img.dataUrl\" style=\"width: 100%; height: 100%; object-fit: cover\" />\n            <div\n              style=\"position: absolute; top: 2px; right: 2px; cursor: pointer; background: rgba(0,0,0,0.65); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center\"\n              @click=\"removeAttachedImage(idx)\"\n              title=\"移除图片\"\n            >\n              <n-icon :component=\"CloseOutline\" size=\"14\" color=\"#fff\" />\n            </div>\n          </div>\n        </div>\n\n        <div style=\"display: flex; gap: 8px; align-items: flex-end\">\n          <input\n            ref=\"fileInputRef\"\n            type=\"file\"\n            accept=\"image/*\"\n            multiple\n            style=\"display: none\"\n            @change=\"handleFileInputChange\"\n          />\n          <n-tooltip trigger=\"hover\">\n            <template #trigger>\n              <n-button\n                secondary\n                size=\"small\"\n                style=\"height: 60px; padding: 0 12px; flex-shrink: 0\"\n                :disabled=\"streaming || attachedImages.length >= 4\"\n                @click=\"triggerSelectImage\"\n              >\n                <template #icon><n-icon :component=\"ImageOutline\" size=\"20\" :style=\"{ opacity: supportsVision ? 1 : (visionStatus === 'Unpaired' ? 0.65 : 0.4), color: visionStatus === 'Unpaired' ? '#f0a020' : undefined }\" /></template>\n              </n-button>\n            </template>\n            <div>{{ supportsVision ? '添加图片附件 (支持截图粘贴、文件上传，最多 4 张)' : (visionUnsupportedReason || '当前模型为纯语言模型，不支持视觉多模态识别') }}</div>\n          </n-tooltip>\n          <n-input\n            v-model:value=\"input\"\n            type=\"textarea\"\n            placeholder=\"输入消息或粘贴截图... (Enter 发送，Shift+Enter 换行)\"\n            :autosize=\"{ minRows: 2, maxRows: 5 }\"\n            style=\"flex: 1\"\n            :disabled=\"streaming\"\n            @paste=\"handlePaste\"\n            @keydown.enter=\"handleKeyDown\"\n          />\n          <n-button\n            type=\"primary\"\n            :loading=\"streaming\"\n            :disabled=\"(!input.trim() && attachedImages.length === 0) || !sessionId || streaming\"\n            style=\"height: 60px; padding: 0 16px; flex-shrink: 0\"\n            @click=\"send\"\n          >\n            <template #icon><n-icon :component=\"SendOutline\" /></template>\n          </n-button>\n        </div>\n        <n-collapse>\n          <n-collapse-item title=\"可用工具\" name=\"tools\">\n            <div style=\"display: flex; flex-direction: column; gap: 4px\">\n              <n-text v-for=\"(tool, idx) in toolDescriptions\" :key=\"idx\" depth=\"3\" style=\"font-size: 12px\">{{ tool }}</n-text>\n            </div>\n          </n-collapse-item>\n        </n-collapse>\n      </n-space>\n    </n-card>\n\n    <!-- Edit Modal -->\n    <n-modal v-model:show=\"editVisible\" preset=\"card\" title=\"编辑消息\" style=\"max-width: 520px\">\n      <n-input\n        v-model:value=\"editText\"\n        type=\"textarea\"\n        :autosize=\"{ minRows: 3, maxRows: 8 }\"\n        placeholder=\"编辑消息内容...\"\n      />\n      <template #footer>\n        <n-space justify=\"end\">\n          <n-button @click=\"editVisible = false\">取消</n-button>\n          <n-button type=\"primary\" @click=\"confirmEdit\" :disabled=\"!editText.trim()\">重新发送</n-button>\n        </n-space>\n      </template>\n    </n-modal>\n  </n-space>\n";
 component.__scopeId = "data-v-936330d7";
 export default component;

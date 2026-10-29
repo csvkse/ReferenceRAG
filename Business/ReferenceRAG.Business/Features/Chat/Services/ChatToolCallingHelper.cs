@@ -29,7 +29,22 @@ public static class ChatToolCallingHelper
         if (tools == null || tools.Count == 0) return string.Empty;
 
         var sb = new StringBuilder();
-        sb.Append("\n# Tools\n\n");
+
+        if (!supportsVision)
+        {
+            sb.Append("\n## 内置专业能力画像 (Capability Manifest)\n");
+            sb.Append("你是 ReferenceRAG 智能助手，已就绪并内置挂载以下专业工具：\n");
+            foreach (var tool in tools)
+            {
+                if (tool is AIFunction func)
+                {
+                    sb.Append($"- **`{func.Name}`**：{func.Description}\n");
+                }
+            }
+            sb.Append("【能力自知准则】：当用户询问你有什么工具、具备什么能力、或要求介绍当前功能时，请直接依据上述已挂载工具如实回答，切勿声称“没有内置知识库工具”或臆造第三方未连接服务。\n\n");
+        }
+
+        sb.Append("# Tools\n\n");
         sb.Append("You may call one or more functions to assist with the user query. You are provided with function signatures within <tools></tools> XML tags:\n");
         sb.Append("<tools>\n");
 
@@ -60,11 +75,16 @@ public static class ChatToolCallingHelper
         if (!supportsVision)
         {
             sb.Append("# Two-Phase Tool Execution Protocol:\n");
-            sb.Append("Phase 1 (Tool Call): When a user query requires searching knowledge, reading notes, or retrieving system index status, call the appropriate tool IMMEDIATELY using <tool_call> tags. Do not explain the tools to the user unless explicitly asked.\n");
+            sb.Append("Phase 1 (Tool Call): When a user query requires searching knowledge, reading notes, retrieving system index status, or introducing/listing available tools (e.g. \"介绍当前工具\", \"有哪些工具\"), call the appropriate tool IMMEDIATELY using <tool_call> tags. Do not explain the tools to the user unless explicitly asked.\n");
             sb.Append("Example:\n");
             sb.Append("User: 查询知识库状态\n");
             sb.Append("Assistant: <tool_call>\n");
             sb.Append("{\"name\": \"GetIndexStatus\", \"arguments\": {}}\n");
+            sb.Append("</tool_call>\n\n");
+            sb.Append("Example 2:\n");
+            sb.Append("User: 介绍当前工具\n");
+            sb.Append("Assistant: <tool_call>\n");
+            sb.Append("{\"name\": \"GetAvailableTools\", \"arguments\": {}}\n");
             sb.Append("</tool_call>\n\n");
             sb.Append("Phase 2 (Final Answer): After receiving tool results (<tool_response>), synthesize the findings and answer the user in clear, polite, natural human language (Markdown format).\n");
             sb.Append("CRITICAL RULES FOR PHASE 2:\n");
@@ -72,7 +92,8 @@ public static class ChatToolCallingHelper
             sb.Append("2. If the tool response indicates no matching content was found (\"未找到相关内容\" or \"未检索到\"), directly and politely inform the user that no relevant notes/documents were found in the knowledge base, and suggest more specific business/technical keywords.\n");
             sb.Append("3. NEVER assume the user is just saying hello or testing command syntax.\n");
             sb.Append("4. NEVER lecture or educate the user about command syntax, formats, or how to use \"搜索: xxx\".\n");
-            sb.Append("5. Deliver the search conclusions and document summaries directly in Markdown.\n");
+            sb.Append("5. If the user asked to introduce or list tools, directly present the available tools and their capabilities based on the tool results in clean Markdown.\n");
+            sb.Append("6. Deliver the search conclusions and document summaries directly in Markdown.\n");
         }
 
         return sb.ToString();
@@ -850,6 +871,25 @@ public static class ChatToolCallingHelper
             if (structFunc != null)
             {
                 functionName = structFunc.Name;
+                arguments = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                return true;
+            }
+        }
+
+        // 4.1 检查工具与能力清单指令: "介绍当前工具" / "有哪些工具" / "可用工具" / "你有什么工具" / "工具列表" / "挂载工具"
+        if (cleanCommand.Contains("当前工具") || cleanCommand.Contains("可用工具") || cleanCommand.Contains("有哪些工具") ||
+            cleanCommand.Contains("你有什么工具") || cleanCommand.Contains("介绍工具") || cleanCommand.Contains("介绍当前工具") ||
+            cleanCommand.Contains("工具列表") || cleanCommand.Contains("支持哪些工具") || cleanCommand.Contains("挂载哪些工具") ||
+            cleanCommand.Contains("挂载了哪些工具") || cleanCommand.Contains("挂载工具") || cleanCommand.Contains("系统工具") ||
+            cleanCommand.Contains("内置工具") || cleanCommand.Contains("查看工具") || cleanCommand.Contains("能调用什么工具") ||
+            cleanCommand.Contains("能使用什么工具") || cleanCommand.Contains("当前有什么工具"))
+        {
+            var toolsFunc = availableFuncs.FirstOrDefault(f =>
+                f.Name.Contains("GetAvailableTools", StringComparison.OrdinalIgnoreCase) ||
+                f.Name.Contains("ListTools", StringComparison.OrdinalIgnoreCase));
+            if (toolsFunc != null)
+            {
+                functionName = toolsFunc.Name;
                 arguments = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
                 return true;
             }
