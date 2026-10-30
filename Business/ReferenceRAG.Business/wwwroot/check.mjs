@@ -126,9 +126,186 @@ export function checkTemplateBindings(templateStr, returnedKeysSet) {
   return Array.from(missing);
 }
 
+/**
+ * 解析 index.html 中的 <script type="importmap"> 映射表
+ */
+export function extractImportMap(rootDirectory) {
+  const htmlPath = path.join(rootDirectory, 'index.html');
+  if (!fs.existsSync(htmlPath)) return {};
+  const html = fs.readFileSync(htmlPath, 'utf8');
+  const mapMatch = html.match(/<script type="importmap">([\s\S]*?)<\/script>/);
+  if (!mapMatch) return {};
+  try {
+    const parsed = JSON.parse(mapMatch[1]);
+    return parsed.imports || {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 依据 importmap、根目录或相对路径解析模块规范名对应的绝对物理路径
+ */
+export function resolveModuleSpecifier(rootDirectory, fromFile, specifier, importMap = {}) {
+  if (specifier in importMap) {
+    const mapped = importMap[specifier];
+    if (mapped.startsWith('/')) {
+      return path.resolve(rootDirectory, mapped.slice(1));
+    }
+    return path.resolve(rootDirectory, mapped);
+  }
+  if (specifier.startsWith('/')) {
+    return path.resolve(rootDirectory, specifier.slice(1));
+  }
+  if (specifier.startsWith('.')) {
+    return path.resolve(path.dirname(fromFile), specifier);
+  }
+  return null;
+}
+
+/**
+ * 静态解析目标 ES 模块中导出的全部符号集合（含 default、具名导出、重导出、通配符 re-export）
+ */
+export function getModuleExports(filePath, rootDirectory, cache = new Map(), visited = new Set()) {
+  const normPath = path.resolve(filePath);
+  if (cache.has(normPath)) return cache.get(normPath);
+  if (visited.has(normPath)) return new Set();
+  visited.add(normPath);
+
+  if (!fs.existsSync(normPath)) return null;
+  const source = fs.readFileSync(normPath, 'utf8');
+  const exports = new Set();
+
+  // 1. export default ...
+  if (/export\s+default\b/.test(source)) {
+    exports.add('default');
+  }
+
+  // 2. export (async) function / class
+  for (const m of source.matchAll(/export\s+(?:async\s+)?(?:function|class)\s+([a-zA-Z0-9_$]+)/g)) {
+    exports.add(m[1]);
+  }
+
+  // 3. export (const|let|var) a = ..., b = ...
+  for (const m of source.matchAll(/export\s+(?:const|let|var)\s+([^;=]+?)(?:;|=)/g)) {
+    const decls = m[1];
+    for (const dm of decls.matchAll(/\b([a-zA-Z0-9_$]+)\b/g)) {
+      exports.add(dm[1]);
+    }
+  }
+
+  // 4. export { a, b as c, default as d } [from '...']
+  for (const m of source.matchAll(/export\s*\{([\s\S]*?)\}(?:\s*from\s*['"]([^'"]+)['"])?/g)) {
+    const list = m[1];
+    for (const item of list.split(',')) {
+      const trimmed = item.trim();
+      if (!trimmed) continue;
+      const asMatch = trimmed.match(/(?:^|\b)(?:[a-zA-Z0-9_$]+\s+as\s+)?([a-zA-Z0-9_$]+)$/);
+      if (asMatch) {
+        exports.add(asMatch[1]);
+      }
+    }
+  }
+
+  // 5. export * from '...'
+  for (const m of source.matchAll(/export\s*\*\s*from\s*['"]([^'"]+)['"]/g)) {
+    const reexportSpecifier = m[1];
+    let reexportPath;
+    if (reexportSpecifier.startsWith('.')) {
+      reexportPath = path.resolve(path.dirname(normPath), reexportSpecifier);
+    } else if (reexportSpecifier.startsWith('/')) {
+      reexportPath = path.resolve(rootDirectory, reexportSpecifier.slice(1));
+    }
+    if (reexportPath) {
+      const nested = getModuleExports(reexportPath, rootDirectory, cache, visited);
+      if (nested) {
+        for (const ne of nested) exports.add(ne);
+      }
+    }
+  }
+
+  cache.set(normPath, exports);
+  return exports;
+}
+
+/**
+ * 校验指定 JS 模块的所有 ESM import 语句，确认目标模块存在且导出了所导入的符号
+ */
+export function checkModuleImports(rootDirectory, fullPath, source, importMap = {}, cache = new Map()) {
+  const issues = [];
+  const relPath = path.relative(rootDirectory, fullPath).replace(/\\/g, '/');
+
+  // Match ES module import statements:
+  // e.g. import defaultItem from '...'
+  //      import { a, b as c } from '...'
+  //      import defaultItem, { a } from '...'
+  //      import * as ns from '...'
+  //      import '...'
+  const importRegex = /import\s+(?:([\w$]+)\s*,?\s*)?(?:(?:\*\s+as\s+([\w$]+))|(?=\{)|(\{[\s\S]*?\}))?\s*from\s*['"]([^'"]+)['"]/g;
+
+  for (const match of source.matchAll(importRegex)) {
+    const defaultImport = match[1];
+    const namespaceImport = match[2];
+    const namedImportsBlock = match[3];
+    const specifier = match[4];
+
+    const resolvedPath = resolveModuleSpecifier(rootDirectory, fullPath, specifier, importMap);
+    if (!resolvedPath) {
+      issues.push(`Unresolved module specifier '${specifier}' in ${relPath}`);
+      continue;
+    }
+
+    if (!fs.existsSync(resolvedPath)) {
+      const relResolved = path.relative(rootDirectory, resolvedPath).replace(/\\/g, '/');
+      issues.push(`Module not found: '${specifier}' (resolved to '/${relResolved}') in ${relPath}`);
+      continue;
+    }
+
+    // Namespace import: 只要模块物理存在即可
+    if (namespaceImport && !defaultImport && !namedImportsBlock) {
+      continue;
+    }
+
+    const exports = getModuleExports(resolvedPath, rootDirectory, cache);
+    if (!exports) continue;
+
+    if (defaultImport && !exports.has('default')) {
+      issues.push(`The requested module '${specifier}' does not provide a default export (imported as '${defaultImport}' in ${relPath})`);
+    }
+
+    if (namedImportsBlock) {
+      const cleanBlock = namedImportsBlock.replace(/[{}]/g, '');
+      const items = cleanBlock.split(',').map(s => s.trim()).filter(Boolean);
+      for (const item of items) {
+        const parts = item.split(/\s+as\s+/);
+        const importedName = parts[0].trim();
+        if (!exports.has(importedName)) {
+          issues.push(`The requested module '${specifier}' does not provide an export named '${importedName}' in ${relPath}`);
+        }
+      }
+    }
+  }
+
+  // 校验动态 import('...') 静态字面量路径
+  const dynamicImportRegex = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  for (const match of source.matchAll(dynamicImportRegex)) {
+    const specifier = match[1];
+    const resolvedPath = resolveModuleSpecifier(rootDirectory, fullPath, specifier, importMap);
+    if (!resolvedPath) continue;
+    if (!fs.existsSync(resolvedPath)) {
+      const relResolved = path.relative(rootDirectory, resolvedPath).replace(/\\/g, '/');
+      issues.push(`Missing dynamic import target: '${specifier}' (resolved to '/${relResolved}') in ${relPath}`);
+    }
+  }
+
+  return issues;
+}
+
 export function runQualityGate(rootDirectory) {
   let files = 0, templates = 0;
   const errors = [];
+  const importMap = extractImportMap(rootDirectory);
+  const moduleExportsCache = new Map();
 
   function visit(directory) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
@@ -149,11 +326,10 @@ export function runQualityGate(rootDirectory) {
       const source = fs.readFileSync(full, 'utf8');
       files++;
 
-      // 2. Local dependency check
-      for (const match of source.matchAll(/(?:from\s*|import\s*\()(['"])(\/[^'"]+)\1/g)) {
-        if (!fs.existsSync(path.join(rootDirectory, match[2]))) {
-          errors.push(`Missing local dependency in ${relPath}: ${match[2]}`);
-        }
+      // 2. ESM Import & Named Export Contract Verification (含 importmap 映射及具名导出符号检验)
+      const importErrors = checkModuleImports(rootDirectory, full, source, importMap, moduleExportsCache);
+      for (const err of importErrors) {
+        errors.push(err);
       }
 
       // 3. Vue template validation & unbound identifier check

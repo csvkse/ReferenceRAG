@@ -727,3 +727,64 @@ test('resolveScrollContainer defensively resolves Naive UI NScrollbar and preven
     assert(chatContent.includes('resolveScrollContainer'), 'Chat.js must use resolveScrollContainer helper');
 });
 
+test('ESM module import & export contract guardrail: checkModuleImports catches missing exports', async () => {
+    const { checkModuleImports, extractImportMap, getModuleExports } = await import('../check.mjs');
+    const path = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+
+    const testDir = path.dirname(fileURLToPath(import.meta.url));
+    const rootDir = path.resolve(testDir, '..');
+    const importMap = extractImportMap(rootDir);
+
+    // 1. 验证正常导入 KeyOutline 和 BookOutline 不报错
+    const validSource = `import { BookOutline, KeyOutline } from '@vicons/ionicons5';`;
+    const validIssues = checkModuleImports(rootDir, path.join(rootDir, 'app/layouts/MainLayout.js'), validSource, importMap);
+    assert.deepEqual(validIssues, [], 'Valid icon imports should have 0 issues');
+
+    // 2. 验证导入未导出的虚构图标会精准报错拦截
+    const invalidSource = `import { KeyOutline, NonExistentIconOutline } from '@vicons/ionicons5';`;
+    const invalidIssues = checkModuleImports(rootDir, path.join(rootDir, 'app/layouts/MainLayout.js'), invalidSource, importMap);
+    assert.equal(invalidIssues.length, 1);
+    assert.ok(invalidIssues[0].includes("The requested module '@vicons/ionicons5' does not provide an export named 'NonExistentIconOutline'"));
+
+    // 3. 验证未导出的 default 会精准报错拦截
+    const defaultInvalidSource = `import NonExistentDefault from '@vicons/ionicons5';`;
+    const defaultIssues = checkModuleImports(rootDir, path.join(rootDir, 'app/layouts/MainLayout.js'), defaultInvalidSource, importMap);
+    assert.equal(defaultIssues.length, 1);
+    assert.ok(defaultIssues[0].includes("does not provide a default export"));
+
+    // 4. 验证不存在的目标模块会报告 Module not found
+    const missingModuleSource = `import { Foo } from '/app/non-existent-module.js';`;
+    const missingModuleIssues = checkModuleImports(rootDir, path.join(rootDir, 'app/layouts/MainLayout.js'), missingModuleSource, importMap);
+    assert.equal(missingModuleIssues.length, 1);
+    assert.ok(missingModuleIssues[0].includes("Module not found"));
+});
+
+test('index.html importmap and vendor icons integrity: KeyOutline and all used icons are properly exported', async () => {
+    const { extractImportMap, getModuleExports } = await import('../check.mjs');
+    const path = await import('node:path');
+    const fs = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+
+    const testDir = path.dirname(fileURLToPath(import.meta.url));
+    const rootDir = path.resolve(testDir, '..');
+    const importMap = extractImportMap(rootDir);
+
+    // 1. 验证 @vicons/ionicons5 映射到 /vendor/icons.js
+    assert.equal(importMap['@vicons/ionicons5'], '/vendor/icons.js');
+
+    // 2. 验证物理文件及 KeyOutline.js 均存在
+    const iconsJsPath = path.join(rootDir, 'vendor/icons.js');
+    const keyOutlineJsPath = path.join(rootDir, 'vendor/icons/KeyOutline.js');
+    assert.ok(fs.existsSync(iconsJsPath), 'vendor/icons.js must exist');
+    assert.ok(fs.existsSync(keyOutlineJsPath), 'vendor/icons/KeyOutline.js must exist');
+
+    // 3. 验证导出的符号集合包含 KeyOutline
+    const exportedSymbols = getModuleExports(iconsJsPath, rootDir);
+    assert.ok(exportedSymbols.has('KeyOutline'), 'vendor/icons.js must export KeyOutline');
+    assert.ok(exportedSymbols.has('BookOutline'), 'vendor/icons.js must export BookOutline');
+    assert.ok(exportedSymbols.has('ImageOutline'), 'vendor/icons.js must export ImageOutline');
+    assert.ok(exportedSymbols.size >= 38, 'vendor/icons.js should export at least 38 icons');
+});
+
+
