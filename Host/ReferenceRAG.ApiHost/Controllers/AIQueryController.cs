@@ -175,6 +175,26 @@ public class AIQueryController : ControllerBase
         try
         {
             // 根据模式自动调整参数
+            var currentKey = HttpContext.Items["CurrentApiKey"] as ApiKeyEntity;
+            var effectiveSources = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(currentKey);
+            if (effectiveSources != null)
+            {
+                if (request.Sources == null || request.Sources.Count == 0)
+                {
+                    request.Sources = effectiveSources.ToList();
+                }
+                else
+                {
+                    request.Sources = request.Sources
+                        .Where(s => effectiveSources.Contains(s, StringComparer.OrdinalIgnoreCase))
+                        .ToList();
+                    if (request.Sources.Count == 0)
+                    {
+                        request.Sources = new List<string> { "__NO_ACCESS_EMPTY_SOURCE__" };
+                    }
+                }
+            }
+
             var adjustedRequest = AdjustRequestByMode(request);
 
             var response = await _searchService.SearchAsync(adjustedRequest);

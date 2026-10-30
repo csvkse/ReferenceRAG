@@ -2,6 +2,33 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.47] - 2026-10-30
+
+### 源管理全功能文件管理器、细粒度 API Key 树状授权与数据源 ABAC 隔离、流式行阅读及 Agent 级正则搜索引擎
+- **源管理页面集成全功能文件管理器 (`SourceFileManagerDrawer.js`, `FileSystemController.cs`, `Sources.js`)**：
+  - **知识源物理沙箱隔离**：集成 `FileBrowserPath.IsWithin` 安全校验，严防 `../` 跨目录穿越；
+  - **完备的日常文件操作**：支持多级目录浏览、新建文件夹、新建文件、重命名、移动、删除与在线文本预览/编辑（内置 2MB 保护阈值与 NUL 字节二进制嗅探）；
+  - **批量与压缩能力**：支持多文件并发上传与指定目录流式 Zip 打包下载。
+- **细粒度 API Key 树状授权与数据源级 ABAC 隔离 (`ApiKeys.js`, `ApiKeysController.cs`, `ApiKeyMiddleware.cs`, `ApiKeyStore.cs`)**：
+  - **双通道协议控制**：独立控制 API (`AllowApi`) 与 MCP (`AllowMcp`) 通道访问权限；
+  - **树状功能矩阵授权**：按模块（`chat`, `search`, `files`, `sources`, `index`, `models`, `system`）及细分动作进行父子联动勾选；
+  - **数据源级隔离与下推**：支持按数据源批量复选授权，检索接口（`AIQueryController`、`RagSearchTools`、`KnowledgeFileTools`）隐式下推授权源交集，彻底消除跨源数据穿透；
+  - **高性能存储与安全规范**：采用加盐 SHA-256 存储与微秒级并发内存缓存（`FindByHash`），提供一次性明文弹窗与客户端配置生成器（Claude Desktop / Curl / Python）。
+- **文件阅读流式行读取与 Markdown 大纲解析优化 (`IFileReaderService.cs`, `FileReaderService.cs`, `KnowledgeFileTools.cs`)**：
+  - **早中断行游标**：按 `startLine` 与 `endLine` 流式读取，到达目标行立即早中断（Early Break），杜绝超长文件全量加载造成的 LOH 内存泄漏与 Token 耗尽；
+  - **Markdown TOC 状态机**：精准解析 Frontmatter 与 H1~H6 标题目录，智能忽略代码块内注释字符；
+  - **级联知识库状态**：关联向量知识库分块数与最后索引时间。
+- **Agent 级文件高效关键字与正则搜索引擎 (`IFileSearchEngine.cs`, `ManagedFileSearchEngine.cs`, `FileSearchStrategies.cs`)**：
+  - **对标终端 `ripgrep` 与 `fd`**：为 AI Agent 扩展 `SearchFileContent` 与 `FindFilesByPattern` MCP 工具，零索引时效延迟，行号精确；
+  - **策略模式双轨驱动**：纯字串 SIMD 向量化加速（比正则快 10~50 倍）与安全非回溯正则（`RegexOptions.NonBacktracking`，严格 $O(N)$ 线性时间与 3 秒超时熔断，根除 ReDoS）；
+  - **状态机模式 Hunk 合并**：定长环形队列与倒计数器管理上下文，无缝合并临近与重叠代码块；
+  - **物理探针与安全保护**：512 字节二进制探测瞬时跳过、浅层剪枝忽略 `.git`/`node_modules`、搜索预算早中断；
+  - **源管理抽屉深度集成**：抽屉顶部提供即时搜索栏（正则/大小写切换）与带代码块高亮的搜索结果弹窗。
+- **全套架构与专项技术设计文档归档 (`docs/`)**：
+  - `docs/file-manager-and-fine-grained-apikey-authorization-architecture.md`
+  - `docs/file-reader-optimization-and-line-range-reading-architecture.md`
+  - `docs/agent-grade-file-search-engine-and-regex-optimization-architecture.md`
+
 ## [1.0.46] - 2026-10-30
 
 ### CI/CD 镜像标签覆盖修复、桌面端测试路径解耦与轻量 Vulkan 镜像重新发布

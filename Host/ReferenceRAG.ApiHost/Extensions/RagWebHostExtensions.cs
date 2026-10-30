@@ -100,6 +100,7 @@ public static class RagWebHostExtensions
             //registry.RegisterLocalTool<TestTools>();
             registry.RegisterLocalTool<RagSearchTools>();
             registry.RegisterLocalTool<EmbeddingTools>();
+            registry.RegisterLocalTool<KnowledgeFileTools>();
             //registry.RegisterLocalTool<IndexStatusTools>();
             //registry.RegisterLocalTool<SourceManagementTools>();
         });
