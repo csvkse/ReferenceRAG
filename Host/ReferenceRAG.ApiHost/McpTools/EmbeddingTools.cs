@@ -1,12 +1,17 @@
 using ModelContextProtocol.Server;
+using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Core.Interfaces;
 
 namespace ReferenceRAG.Service.McpTools;
 
 /// <summary>
-/// 向量化相关工具
+/// 向量化相关工具（归属 search 业务模块）
 /// </summary>
 [McpServerToolType]
 public class EmbeddingTools
@@ -28,6 +33,10 @@ public class EmbeddingTools
         [Description("待向量化的文本（必填）。可以是任何需要理解语义的文本，如句子、段落、问题等")] string text)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(EmbedText), out var permErr))
+        {
+            return permErr!;
+        }
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
 
         try
@@ -71,6 +80,10 @@ public class EmbeddingTools
         [Description("第二段文本（必填）")] string text2)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(CalculateSimilarity), out var permErr))
+        {
+            return permErr!;
+        }
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
 
         try
@@ -120,6 +133,10 @@ public class EmbeddingTools
         [Description("待向量化的文本列表（必填，JSON数组），如[\"文本1\",\"文本2\",\"文本3\"]")] string texts)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(EmbedBatch), out var permErr))
+        {
+            return permErr!;
+        }
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
 
         try

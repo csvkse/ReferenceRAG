@@ -163,32 +163,32 @@ public sealed class ApiKeysController : ControllerBase
                 .Select(s => new { name = s.Name, path = s.Path, enabled = s.Enabled })
                 .ToList();
 
-            var modules = new List<object>
-            {
-                new { key = "chat", label = "💬 对话与大模型问答", description = "支持 /v1/chat/completions 与 /api/MafChat 对话生成" },
-                new { key = "search", label = "🔍 知识库检索与嵌入", description = "支持 /api/AIQuery、/api/Search 与 /v1/embeddings" },
-                new { key = "sources", label = "📁 数据源配置管理", description = "支持查看与编辑数据源配置 (/api/Sources)" },
-                new { key = "files", label = "📄 知识库文件系统管理", description = "支持在已授权源中浏览、读取、编辑与下载文件" },
-                new { key = "index", label = "⚡ 索引与分块维护", description = "支持触发增量索引、全量重建与分块切片维护" },
-                new { key = "models", label = "🧠 模型管理与切换", description = "支持模型运行时状态查询与模型权重调度" },
-                new { key = "system", label = "🛠 系统与运维监控", description = "支持系统健康度检查、指标监控与日志查看" }
-            };
+            var categories = McpCatalogRegistry.GetCatalog();
 
-            var mcpTools = new List<object>
+            // 保持向后兼容现有前端/接口调用方字段
+            var modules = categories.Select(c => new
             {
-                new { name = "SemanticSearch", description = "知识库语义搜索（自然语言嵌入相似度）" },
-                new { name = "HybridSearch", description = "知识库混合搜索（BM25 关键词 + 向量双路融合）" },
-                new { name = "FindRelatedEntities", description = "知识图谱关联实体与路径拓扑发现" },
-                new { name = "GetFileTree", description = "知识库笔记目录树与层级探查" },
-                new { name = "ReadNoteContent", description = "知识库单篇笔记文本读取" },
-                new { name = "ListSources", description = "知识库数据源概览与宏观统计" },
-                new { name = "GetIndexStatus", description = "后台索引任务与健康度监控" }
-            };
+                key = c.ModuleCode,
+                label = c.Name,
+                description = c.Description,
+                supportsApi = c.SupportsApi,
+                supportsMcp = c.SupportsMcp,
+                toolCount = c.Tools.Count
+            }).ToList();
+
+            var mcpTools = categories.SelectMany(c => c.Tools).Select(t => new
+            {
+                name = t.Name,
+                description = t.Description,
+                riskLevel = t.RiskLevel,
+                module = t.ModuleCode
+            }).ToList();
 
             return Ok(new
             {
-                modules,
-                mcpTools,
+                categories, // 统一按功能模块划分的树状目录（对齐 WebToolForLinux）
+                modules,    // 兼容字段
+                mcpTools,   // 兼容字段
                 sources = availableSources
             });
         }

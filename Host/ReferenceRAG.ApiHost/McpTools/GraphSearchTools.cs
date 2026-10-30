@@ -1,10 +1,17 @@
 using ModelContextProtocol.Server;
+using System;
 using System.ComponentModel;
+using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Core.Interfaces;
 
 namespace ReferenceRAG.Service.McpTools;
 
+/// <summary>
+/// 知识图谱检索工具（归属 search 业务模块）
+/// </summary>
 [McpServerToolType]
 public class GraphSearchTools
 {
@@ -25,6 +32,10 @@ public class GraphSearchTools
         [Description("遍历深度，1-3，默认为 1")] int depth = 1)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GraphSearch), out var permErr))
+        {
+            return permErr!;
+        }
         var graphStore = scope.ServiceProvider.GetService<IGraphStore>();
         if (graphStore == null)
             return JsonSerializer.Serialize(new { error = "知识图谱功能未启用" });
@@ -61,6 +72,10 @@ public class GraphSearchTools
         [Description("最大返回数量，默认 10")] int limit = 10)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GraphSearchByTitle), out var permErr))
+        {
+            return permErr!;
+        }
         var graphStore = scope.ServiceProvider.GetService<IGraphStore>();
         if (graphStore == null)
             return JsonSerializer.Serialize(new { error = "知识图谱功能未启用" });

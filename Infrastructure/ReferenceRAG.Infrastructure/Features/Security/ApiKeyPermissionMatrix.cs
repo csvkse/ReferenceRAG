@@ -71,24 +71,64 @@ public static class ApiKeyPermissionMatrix
         return sources.ToList();
     }
 
+    /// <summary>
+    /// 依据双层权限（所属业务功能模块 + 细粒度工具白名单）决断是否允许调用 MCP 工具
+    /// 遵循 WebToolForLinux 架构方案：按业务功能模块划分，统一授权 API 与 MCP。
+    /// 1. 若 AllowMcp = false，直接拒绝；
+    /// 2. 检查 toolName 所属的业务功能模块，若 API Key 未被授予该模块权限（!HasScope(key, module)），直接拒绝（一票否决）；
+    /// 3. 若所属模块已授权，再校验细粒度工具白名单（允许 "*" 通配或具体工具名）。
+    /// </summary>
     public static bool IsMcpToolPermitted(ApiKeyEntity key, string toolName)
     {
         if (!key.AllowMcp) return false;
+
+        // 1. 业务功能模块级联校验 (核心安全屏障：模块未授权则其下所有工具禁止访问)
+        var module = McpCatalogRegistry.GetModuleByToolName(toolName);
+        if (!string.IsNullOrEmpty(module) && !HasScope(key, module))
+        {
+            return false;
+        }
+
+        // 2. 细粒度工具白名单过滤 (向下兼容与细分授权)
         if (string.IsNullOrWhiteSpace(key.AllowedMcpTools)) return false;
         var tools = ParseJsonOrTokens(key.AllowedMcpTools);
         if (tools.Contains("*")) return true;
         return tools.Contains(toolName, StringComparer.OrdinalIgnoreCase);
     }
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, HashSet<string>> TokenCache = new(StringComparer.Ordinal);
+    private const int MaxCacheSize = 1024;
+
+    /// <summary>
+    /// 解析 JSON 数组或分隔符字符串为大小写不敏感的 HashSet
+    /// 引入享元/记忆化模式（Flyweight / Memoization Pattern）缓存解析结果，避免高并发热路径上频繁 JSON 反序列化产生 GC 压力
+    /// </summary>
     public static HashSet<string> ParseJsonOrTokens(string input)
     {
+        if (string.IsNullOrWhiteSpace(input)) return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var trimmed = input.Trim();
+        if (TokenCache.TryGetValue(trimmed, out var cached))
+        {
+            return cached;
+        }
+
+        var parsed = ParseJsonOrTokensCore(trimmed);
+        if (TokenCache.Count < MaxCacheSize)
+        {
+            TokenCache.TryAdd(trimmed, parsed);
+        }
+        return parsed;
+    }
+
+    private static HashSet<string> ParseJsonOrTokensCore(string trimmed)
+    {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrWhiteSpace(input)) return set;
         try
         {
-            if (input.TrimStart().StartsWith('['))
+            if (trimmed.StartsWith('['))
             {
-                var list = JsonSerializer.Deserialize<List<string>>(input);
+                var list = JsonSerializer.Deserialize<List<string>>(trimmed);
                 if (list != null)
                 {
                     foreach (var item in list)
@@ -101,11 +141,19 @@ public static class ApiKeyPermissionMatrix
         }
         catch { }
 
-        foreach (var token in input.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+        foreach (var token in trimmed.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
         {
             var clean = token.Trim().Trim('"', '[', ']', '\'', ' ');
             if (!string.IsNullOrEmpty(clean)) set.Add(clean);
         }
         return set;
+    }
+
+    /// <summary>
+    /// 清空解析缓存（用于高频基准测试或单元测试重置）
+    /// </summary>
+    public static void ClearTokenCache()
+    {
+        TokenCache.Clear();
     }
 }

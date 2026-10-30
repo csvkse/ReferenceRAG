@@ -116,6 +116,19 @@ public class ApiKeyMiddleware
         var hasActiveCustomKeys = apiKeyStore != null && (await apiKeyStore.GetAllAsync()).Any(k => k.IsEnabled);
         if ((!enabled || string.IsNullOrEmpty(expectedApiKey)) && !hasActiveCustomKeys)
         {
+            // 空对象模式（Null Object Pattern）：注入匿名全通实体，确保下游 MCP 与工具安全守卫无需处理 null
+            context.Items["CurrentApiKey"] = new ApiKeyEntity
+            {
+                Id = "anonymous_open_access",
+                Name = "免密开放访问",
+                IsEnabled = true,
+                AllowApi = true,
+                AllowMcp = true,
+                AllowedScopes = "[\"*\"]",
+                AllowedMcpTools = "[\"*\"]",
+                SourceScopeMode = "all",
+                AllowedSources = "[]"
+            };
             await _next(context);
             return;
         }

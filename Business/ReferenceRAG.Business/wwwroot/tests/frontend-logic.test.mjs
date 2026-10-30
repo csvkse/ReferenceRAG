@@ -787,4 +787,197 @@ test('index.html importmap and vendor icons integrity: KeyOutline and all used i
     assert.ok(exportedSymbols.size >= 38, 'vendor/icons.js should export at least 38 icons');
 });
 
+test('ApiKeys unified permission tree logic: tri-state cascade between module scopes and child MCP tools', () => {
+    // 模拟元数据目录 (7大功能模块，对齐 WebToolForLinux 规范)
+    const mockCategories = [
+        {
+            key: 'chat',
+            name: '对话与大模型问答',
+            moduleCode: 'chat',
+            supportsApi: true,
+            supportsMcp: false,
+            tools: []
+        },
+        {
+            key: 'search',
+            name: '知识检索与语义嵌入',
+            moduleCode: 'search',
+            supportsApi: true,
+            supportsMcp: true,
+            tools: [
+                { name: 'SemanticSearch', riskLevel: 'Read', moduleCode: 'search' },
+                { name: 'HybridSearch', riskLevel: 'Read', moduleCode: 'search' },
+                { name: 'RerankResults', riskLevel: 'Read', moduleCode: 'search' }
+            ]
+        },
+        {
+            key: 'files',
+            name: '文件系统与文本阅读',
+            moduleCode: 'files',
+            supportsApi: true,
+            supportsMcp: true,
+            tools: [
+                { name: 'GetFileTree', riskLevel: 'Read', moduleCode: 'files' },
+                { name: 'ReadNoteContent', riskLevel: 'Read', moduleCode: 'files' }
+            ]
+        }
+    ];
+
+    const form = {
+        selectedScopes: [],
+        selectedTools: []
+    };
+
+    const getCategorySelectedToolCount = (cat) => {
+        if (!cat.tools || cat.tools.length === 0) return 0;
+        return cat.tools.filter(t => form.selectedTools.includes(t.name)).length;
+    };
+
+    const isCategoryFullyChecked = (cat) => {
+        if (!form.selectedScopes.includes(cat.moduleCode)) return false;
+        if (!cat.tools || cat.tools.length === 0) return true;
+        return getCategorySelectedToolCount(cat) === cat.tools.length;
+    };
+
+    const isCategoryIndeterminate = (cat) => {
+        const modChecked = form.selectedScopes.includes(cat.moduleCode);
+        if (!cat.tools || cat.tools.length === 0) return false;
+        const count = getCategorySelectedToolCount(cat);
+        if (modChecked) {
+            return count > 0 && count < cat.tools.length;
+        } else {
+            return count > 0;
+        }
+    };
+
+    const toggleCategoryNode = (cat) => {
+        const isChecked = isCategoryFullyChecked(cat);
+        if (isChecked) {
+            form.selectedScopes = form.selectedScopes.filter(m => m !== cat.moduleCode);
+            if (cat.tools && cat.tools.length > 0) {
+                const toolNames = new Set(cat.tools.map(t => t.name));
+                form.selectedTools = form.selectedTools.filter(t => !toolNames.has(t));
+            }
+        } else {
+            if (!form.selectedScopes.includes(cat.moduleCode)) {
+                form.selectedScopes.push(cat.moduleCode);
+            }
+            if (cat.tools && cat.tools.length > 0) {
+                const toolSet = new Set(form.selectedTools);
+                cat.tools.forEach(t => toolSet.add(t.name));
+                form.selectedTools = Array.from(toolSet);
+            }
+        }
+    };
+
+    const toggleToolNode = (cat, toolName) => {
+        const idx = form.selectedTools.indexOf(toolName);
+        if (idx >= 0) {
+            form.selectedTools.splice(idx, 1);
+        } else {
+            form.selectedTools.push(toolName);
+            // 自动同步激活所属功能模块
+            if (!form.selectedScopes.includes(cat.moduleCode)) {
+                form.selectedScopes.push(cat.moduleCode);
+            }
+        }
+    };
+
+    const searchCat = mockCategories[1];
+
+    // 1. 初始状态：未勾选
+    assert.equal(isCategoryFullyChecked(searchCat), false);
+    assert.equal(isCategoryIndeterminate(searchCat), false);
+
+    // 2. 勾选分类节点：同时授权模块与所有旗下工具
+    toggleCategoryNode(searchCat);
+    assert.ok(form.selectedScopes.includes('search'));
+    assert.equal(form.selectedTools.length, 3);
+    assert.ok(form.selectedTools.includes('SemanticSearch'));
+    assert.ok(form.selectedTools.includes('HybridSearch'));
+    assert.ok(form.selectedTools.includes('RerankResults'));
+    assert.equal(isCategoryFullyChecked(searchCat), true);
+    assert.equal(isCategoryIndeterminate(searchCat), false);
+
+    // 3. 微调反选其中一个工具：触发三态 Indeterminate
+    toggleToolNode(searchCat, 'RerankResults');
+    assert.equal(form.selectedTools.length, 2);
+    assert.ok(form.selectedScopes.includes('search')); // 父模块仍然授权
+    assert.equal(isCategoryFullyChecked(searchCat), false);
+    assert.equal(isCategoryIndeterminate(searchCat), true);
+
+    // 4. 单独勾选未授权模块旗下的工具：自动将父模块加入 selectedScopes
+    const filesCat = mockCategories[2];
+    assert.ok(!form.selectedScopes.includes('files'));
+    toggleToolNode(filesCat, 'GetFileTree');
+    assert.ok(form.selectedScopes.includes('files'), 'Toggling child tool must activate parent module scope');
+    assert.ok(form.selectedTools.includes('GetFileTree'));
+    assert.equal(isCategoryIndeterminate(filesCat), true);
+
+    // 5. 对半选状态的分类点击：首先变为全选状态
+    toggleCategoryNode(searchCat);
+    assert.equal(isCategoryFullyChecked(searchCat), true);
+    assert.equal(isCategoryIndeterminate(searchCat), false);
+    assert.ok(form.selectedTools.includes('RerankResults'));
+
+    // 6. 对全选状态的分类点击：模块与旗下工具全部被取消清空
+    toggleCategoryNode(searchCat);
+    assert.ok(!form.selectedScopes.includes('search'));
+    assert.ok(!form.selectedTools.includes('SemanticSearch'));
+    assert.ok(!form.selectedTools.includes('HybridSearch'));
+    assert.ok(!form.selectedTools.includes('RerankResults'));
+    assert.equal(isCategoryFullyChecked(searchCat), false);
+    assert.equal(isCategoryIndeterminate(searchCat), false);
+});
+
+test('ApiKeys security presets and search filtering work as expected', () => {
+    const mockCategories = [
+        {
+            key: 'chat',
+            name: '对话与大模型问答',
+            moduleCode: 'chat',
+            supportsApi: true,
+            supportsMcp: false,
+            tools: []
+        },
+        {
+            key: 'search',
+            name: '知识检索与语义嵌入',
+            moduleCode: 'search',
+            supportsApi: true,
+            supportsMcp: true,
+            tools: [
+                { name: 'SemanticSearch', riskLevel: 'Read', moduleCode: 'search', description: '向量搜索' },
+                { name: 'HybridSearch', riskLevel: 'Read', moduleCode: 'search', description: '混合搜索' }
+            ]
+        },
+        {
+            key: 'system',
+            name: '系统运维',
+            moduleCode: 'system',
+            supportsApi: true,
+            supportsMcp: true,
+            tools: [
+                { name: 'RestartService', riskLevel: 'Dangerous', moduleCode: 'system', description: '重启服务' }
+            ]
+        }
+    ];
+
+    // 协议过滤
+    const filterByProto = (proto) => mockCategories.filter(cat => {
+        if (proto === 'api' && !cat.supportsApi) return false;
+        if (proto === 'mcp' && !cat.supportsMcp) return false;
+        return true;
+    });
+
+    assert.equal(filterByProto('all').length, 3);
+    assert.equal(filterByProto('api').length, 3);
+    assert.equal(filterByProto('mcp').length, 2); // chat 仅支持 API，不暴露 MCP
+
+    // 只读策略
+    const readOnlyTools = mockCategories.flatMap(c => c.tools.filter(t => t.riskLevel === 'Read').map(t => t.name));
+    assert.equal(readOnlyTools.length, 2);
+    assert.ok(!readOnlyTools.includes('RestartService'), 'Dangerous tools must be excluded in ReadOnly preset');
+});
+
 

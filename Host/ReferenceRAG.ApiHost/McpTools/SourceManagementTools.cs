@@ -1,8 +1,10 @@
 using ModelContextProtocol.Server;
 using System.ComponentModel;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Service.McpTools;
 
@@ -27,7 +29,11 @@ public class SourceManagementTools
     public async Task<string> ListSources()
     {
         using var scope = _serviceProvider.CreateScope();
-        var config = scope.ServiceProvider.GetRequiredService<ObsidianRagConfig>();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(ListSources), out var permErr))
+        {
+            return permErr!;
+        }
+        var config = scope.ServiceProvider.GetRequiredService<ConfigManager>().Load();
         var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
         var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
 
@@ -91,7 +97,11 @@ public class SourceManagementTools
         [Description("数据源名称（必填），如\"VNote\"、\"Note\"，或完整路径")] string sourceName)
     {
         using var scope = _serviceProvider.CreateScope();
-        var config = scope.ServiceProvider.GetRequiredService<ObsidianRagConfig>();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetSourceInfo), out var permErr))
+        {
+            return permErr!;
+        }
+        var config = scope.ServiceProvider.GetRequiredService<ConfigManager>().Load();
         var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
         var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
 
@@ -178,7 +188,11 @@ public class SourceManagementTools
     public async Task<string> GetSystemStats()
     {
         using var scope = _serviceProvider.CreateScope();
-        var config = scope.ServiceProvider.GetRequiredService<ObsidianRagConfig>();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetSystemStats), out var permErr))
+        {
+            return permErr!;
+        }
+        var config = scope.ServiceProvider.GetRequiredService<ConfigManager>().Load();
         var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
         var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
         var embeddingService = scope.ServiceProvider.GetService<IEmbeddingService>();

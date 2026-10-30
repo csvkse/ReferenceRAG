@@ -2,6 +2,27 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.49] - 2026-10-31
+
+### 统一业务模块授权与 MCP 工具白名单架构、长连接即时吊销感知与全景安全模型收敛
+- **统一业务功能模块授权与 MCP 二级工具树状矩阵（对齐 WebToolForLinux 规范，`McpCatalogRegistry.cs`, `ApiKeys.js`, `ApiKeyPermissionMatrix.cs`）**：
+  - **建立领域单例事实来源（SSoT）**：创建 `McpCatalogRegistry`，规范管理 `chat`, `search`, `files`, `sources`, `index`, `models`, `system` 7 大功能模块与其下挂载的全部 MCP 工具，标注各模块对 REST API / MCP 双通道的支持属性与工具安全风险级别（`Read` / `Execute` / `Dangerous`）；
+  - **彻底阻断跨模块越权穿透漏洞**：重构 `ApiKeyPermissionMatrix.IsMcpToolPermitted`，实施三层级联防御（通道控制 -> 业务模块级联一票否决 -> 细粒度工具白名单），彻底杜绝“禁用模块但靠 MCP 白名单通配 `*` 窃取数据”的严重安全隐患；
+  - **重构前端统一权限树交互 (`ApiKeys.js`)**：移除原本割裂的“业务模块授权”和“MCP 工具白名单”平行表单项，替换为基于 `metaCatalog.categories` 的统一功能树状矩阵，支持三态联动（全选、半选、取消）、快捷安全策略预设（`全选全部`、`标准问答检索`、`只读探测`、`清空`）与协议类型/关键字实时快筛。
+- **全局安全体系收敛与设计模式优化（`McpPermissionGuard.cs`, `RagWebHostExtensions.cs`, `ApiKeyMiddleware.cs`）**：
+  - **解除 McpHelper 内部静态认证限制**：关闭 `McpHelper` 内置的单一静态密钥拦截器，将 MCP SSE/Stdio 端点鉴权全权交由全局 `ApiKeyMiddleware` 统一网关管辖，原生支持使用数据库动态生成的 `rag_live_xxx` 授权 ApiKey 接入 Claude Desktop、Cursor 等 Agent 工具，消除了动态 ApiKey 误杀缺陷；
+  - **DIAG 应急通道物理旁路隔离**：确保 `/__diag` 带外诊断中枢继续由独立环境变量 `DIAG_KEY` 驱动，不受主业务鉴权与权限矩阵变更影响；
+  - **长连接实时吊销感知状态机（Live Revocation Awareness）**：在 `McpPermissionGuard` 中引入轻量级状态机与内存缓存校验，在 SSE 长连接保持期间，一旦管理员在后台停用或删除 ApiKey，下一次工具调用立即毫秒级阻断，杜绝会话过期逃逸；
+  - **享元/记忆化模式优化（Flyweight Pattern）**：在 `ApiKeyPermissionMatrix` 中引入 `TokenCache` 缓存 JSON 解析结果，避免高并发热路径上频繁反序列化产生 GC 压力；
+  - **空对象模式（Null Object Pattern）**：在免密兼容模式下安全注入虚拟全通凭据（`anonymous_open_access`），消除下游所有的空引用模糊态。
+- **全栈质量门禁与防回归自动化体系 (`ApiKeyAuthorizationTests.cs`, `frontend-logic.test.mjs`, `verify-gate.ps1`)**：
+  - **反射级架构守护门禁**：新增 `AllRegisteredMcpTools_MustHaveValidModuleMapping_InCatalogRegistry`，通过反射动态扫描所有 `[McpServerToolType]` 工具，强制断言每个工具均在注册中心声明归属模块，从根源杜绝新增工具脱管；
+  - **多维防回归单元测试**：增补长连接实时吊销测试、越权一票否决测试、享元缓存一致性测试及前端三态状态机单元测试；
+  - **集成至自动化质量门禁**：将鉴权测试正式纳入 `scripts/verify-gate.ps1`，全量 141 项测试 100% 绿色通过。
+- **专项架构与深度设计文档归档 (`docs/`)**：
+  - `docs/unified-module-authorization-and-mcp-whitelist-architecture.md`
+  - `docs/unified-apikey-mcphelper-diagnostics-security-architecture.md`
+
 ## [1.0.48] - 2026-10-31
 
 ### 修复 @vicons/ionicons5 缺失 KeyOutline 启动失败故障与 ESM 模块导入/导出全栈双轨长效门禁架构

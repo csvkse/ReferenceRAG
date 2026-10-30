@@ -1,7 +1,7 @@
 import { defineComponent as _defineComponent, ref, reactive, computed, onMounted, h } from 'vue';
 import {
     NCard, NSpace, NButton, NTag, NDataTable, NModal, NForm, NFormItem,
-    NInput, NCheckbox, NCheckboxGroup, NRadio, NRadioGroup, NAlert, NText,
+    NInput, NCheckbox, NCheckboxGroup, NRadio, NRadioGroup, NRadioButton, NAlert, NText,
     NPopconfirm, NDescriptions, NDescriptionsItem, useMessage
 } from 'naive-ui';
 import { apiKeysApi } from '/app/api/index.js';
@@ -14,7 +14,7 @@ const component = /*@__PURE__*/ _defineComponent({
 
         const keys = ref([]);
         const loading = ref(false);
-        const metaCatalog = ref({ modules: [], mcpTools: [], sources: [] });
+        const metaCatalog = ref({ categories: [], modules: [], mcpTools: [], sources: [] });
 
         // 新建/编辑弹窗
         const showModal = ref(false);
@@ -34,6 +34,11 @@ const component = /*@__PURE__*/ _defineComponent({
             selectedSources: []
         });
 
+        // 统一权限树搜索与交互状态
+        const scopeSearchKeyword = ref('');
+        const scopeProtocolFilter = ref('all'); // 'all', 'api', 'mcp'
+        const collapsedCategories = ref(new Set());
+
         // 明文展示弹窗（仅新建一次）
         const showSecretModal = ref(false);
         const createdSecret = reactive({
@@ -49,7 +54,7 @@ const component = /*@__PURE__*/ _defineComponent({
         const loadCatalog = async () => {
             try {
                 const res = await apiKeysApi.getMetaCatalog();
-                metaCatalog.value = res.data || { modules: [], mcpTools: [], sources: [] };
+                metaCatalog.value = res.data || { categories: [], modules: [], mcpTools: [], sources: [] };
             } catch (err) {
                 console.warn('获取权限元数据失败:', err);
             }
@@ -77,6 +82,161 @@ const component = /*@__PURE__*/ _defineComponent({
             }
         };
 
+        // 过滤后的业务分类列表
+        const filteredCategories = computed(() => {
+            const list = metaCatalog.value.categories || [];
+            const kw = scopeSearchKeyword.value.trim().toLowerCase();
+            const proto = scopeProtocolFilter.value;
+
+            return list.filter(cat => {
+                if (proto === 'api' && !cat.supportsApi) return false;
+                if (proto === 'mcp' && !cat.supportsMcp) return false;
+
+                if (!kw) return true;
+                const matchCat = (cat.name || '').toLowerCase().includes(kw) ||
+                                 (cat.key || '').toLowerCase().includes(kw) ||
+                                 (cat.moduleCode || '').toLowerCase().includes(kw) ||
+                                 (cat.description || '').toLowerCase().includes(kw);
+                if (matchCat) return true;
+                const matchTool = (cat.tools || []).some(t =>
+                    (t.name || '').toLowerCase().includes(kw) || (t.description || '').toLowerCase().includes(kw)
+                );
+                return matchTool;
+            });
+        });
+
+        // 折叠状态控制
+        const isCategoryCollapsed = (key) => collapsedCategories.value.has(key);
+        const toggleCategoryCollapse = (key) => {
+            if (collapsedCategories.value.has(key)) {
+                collapsedCategories.value.delete(key);
+            } else {
+                collapsedCategories.value.add(key);
+            }
+        };
+        const toggleExpandAll = () => {
+            const categories = metaCatalog.value.categories || [];
+            if (collapsedCategories.value.size > 0) {
+                collapsedCategories.value.clear();
+            } else {
+                categories.forEach(c => collapsedCategories.value.add(c.key));
+            }
+        };
+
+        // 统计模块下已勾选工具数
+        const getCategorySelectedToolCount = (cat) => {
+            if (!cat.tools || cat.tools.length === 0) return 0;
+            return cat.tools.filter(t => form.selectedTools.includes(t.name)).length;
+        };
+
+        // 分类勾选判定（三态联动）
+        const isCategoryFullyChecked = (cat) => {
+            if (!form.selectedScopes.includes(cat.moduleCode)) return false;
+            if (!cat.tools || cat.tools.length === 0) return true;
+            return getCategorySelectedToolCount(cat) === cat.tools.length;
+        };
+
+        const isCategoryIndeterminate = (cat) => {
+            const modChecked = form.selectedScopes.includes(cat.moduleCode);
+            if (!cat.tools || cat.tools.length === 0) return false;
+            const count = getCategorySelectedToolCount(cat);
+            if (modChecked) {
+                return count > 0 && count < cat.tools.length;
+            } else {
+                return count > 0;
+            }
+        };
+
+        const syncGlobalFlags = () => {
+            const categories = metaCatalog.value.categories || [];
+            const allModules = categories.map(c => c.moduleCode);
+            const allTools = categories.flatMap(c => (c.tools || []).map(t => t.name));
+
+            form.allScopes = allModules.length > 0 && allModules.every(m => form.selectedScopes.includes(m));
+            form.allTools = allTools.length > 0 && allTools.every(t => form.selectedTools.includes(t));
+        };
+
+        // 切换业务分类主节点勾选
+        const toggleCategoryNode = (cat) => {
+            const isChecked = isCategoryFullyChecked(cat);
+            if (isChecked) {
+                // 取消该模块授权，并同步移除其下所有 MCP 工具
+                form.selectedScopes = form.selectedScopes.filter(m => m !== cat.moduleCode);
+                if (cat.tools && cat.tools.length > 0) {
+                    const toolNames = new Set(cat.tools.map(t => t.name));
+                    form.selectedTools = form.selectedTools.filter(t => !toolNames.has(t));
+                }
+            } else {
+                // 开启该模块授权，并同步勾选其下所有 MCP 工具
+                if (!form.selectedScopes.includes(cat.moduleCode)) {
+                    form.selectedScopes.push(cat.moduleCode);
+                }
+                if (cat.tools && cat.tools.length > 0) {
+                    const toolSet = new Set(form.selectedTools);
+                    cat.tools.forEach(t => toolSet.add(t.name));
+                    form.selectedTools = Array.from(toolSet);
+                }
+            }
+            syncGlobalFlags();
+        };
+
+        // 工具叶子节点勾选
+        const isToolChecked = (toolName) => {
+            return form.selectedTools.includes(toolName);
+        };
+
+        const toggleToolNode = (cat, toolName) => {
+            const idx = form.selectedTools.indexOf(toolName);
+            if (idx >= 0) {
+                form.selectedTools.splice(idx, 1);
+            } else {
+                form.selectedTools.push(toolName);
+                // 自动同步激活父级业务功能模块！
+                if (!form.selectedScopes.includes(cat.moduleCode)) {
+                    form.selectedScopes.push(cat.moduleCode);
+                }
+            }
+            syncGlobalFlags();
+        };
+
+        // 快捷安全策略预设
+        const selectAll = () => {
+            const categories = metaCatalog.value.categories || [];
+            form.selectedScopes = categories.map(c => c.moduleCode);
+            form.selectedTools = categories.flatMap(c => (c.tools || []).map(t => t.name));
+            form.allScopes = true;
+            form.allTools = true;
+            message.success('已应用「全量放行」策略');
+        };
+
+        const selectStandardOps = () => {
+            const standardModules = ['chat', 'search', 'files', 'sources'];
+            form.selectedScopes = [...standardModules];
+            const categories = metaCatalog.value.categories || [];
+            form.selectedTools = categories
+                .filter(c => standardModules.includes(c.moduleCode))
+                .flatMap(c => (c.tools || []).map(t => t.name));
+            syncGlobalFlags();
+            message.success('已应用「知识问答与检索」预设策略');
+        };
+
+        const selectReadOnly = () => {
+            const categories = metaCatalog.value.categories || [];
+            form.selectedScopes = categories.map(c => c.moduleCode);
+            form.selectedTools = categories
+                .flatMap(c => (c.tools || []).filter(t => t.riskLevel === 'Read').map(t => t.name));
+            syncGlobalFlags();
+            message.success('已应用「只读探测」安全策略');
+        };
+
+        const clearAll = () => {
+            form.selectedScopes = [];
+            form.selectedTools = [];
+            form.allScopes = false;
+            form.allTools = false;
+            message.info('已清空全部功能模块与工具');
+        };
+
         const openCreateModal = () => {
             isEdit.value = false;
             currentId.value = null;
@@ -84,11 +244,16 @@ const component = /*@__PURE__*/ _defineComponent({
             form.allowApi = true;
             form.allowMcp = true;
             form.allScopes = true;
-            form.selectedScopes = metaCatalog.value.modules.map(m => m.key);
+            const categories = metaCatalog.value.categories || [];
+            form.selectedScopes = categories.map(m => m.moduleCode);
             form.allTools = true;
-            form.selectedTools = metaCatalog.value.mcpTools.map(t => t.name);
+            form.selectedTools = categories.flatMap(c => (c.tools || []).map(t => t.name));
             form.sourceScopeMode = 'all';
-            form.selectedSources = metaCatalog.value.sources.map(s => s.name);
+            form.selectedSources = (metaCatalog.value.sources || []).map(s => s.name);
+
+            collapsedCategories.value.clear();
+            scopeSearchKeyword.value = '';
+            scopeProtocolFilter.value = 'all';
             showModal.value = true;
         };
 
@@ -99,10 +264,14 @@ const component = /*@__PURE__*/ _defineComponent({
             form.allowApi = row.allowApi;
             form.allowMcp = row.allowMcp;
 
+            const categories = metaCatalog.value.categories || [];
+            const allCatModules = categories.map(m => m.moduleCode);
+            const allCatTools = categories.flatMap(c => (c.tools || []).map(t => t.name));
+
             const scopes = parseJsonArray(row.allowedScopes);
             if (scopes.includes('*') || scopes.length === 0) {
                 form.allScopes = true;
-                form.selectedScopes = metaCatalog.value.modules.map(m => m.key);
+                form.selectedScopes = [...allCatModules];
             } else {
                 form.allScopes = false;
                 form.selectedScopes = scopes;
@@ -111,7 +280,7 @@ const component = /*@__PURE__*/ _defineComponent({
             const tools = parseJsonArray(row.allowedMcpTools);
             if (tools.includes('*') || tools.length === 0) {
                 form.allTools = true;
-                form.selectedTools = metaCatalog.value.mcpTools.map(t => t.name);
+                form.selectedTools = [...allCatTools];
             } else {
                 form.allTools = false;
                 form.selectedTools = tools;
@@ -119,23 +288,12 @@ const component = /*@__PURE__*/ _defineComponent({
 
             form.sourceScopeMode = row.sourceScopeMode || 'all';
             const sources = parseJsonArray(row.allowedSources);
-            form.selectedSources = sources.length > 0 ? sources : metaCatalog.value.sources.map(s => s.name);
+            form.selectedSources = sources.length > 0 ? sources : (metaCatalog.value.sources || []).map(s => s.name);
 
+            collapsedCategories.value.clear();
+            scopeSearchKeyword.value = '';
+            scopeProtocolFilter.value = 'all';
             showModal.value = true;
-        };
-
-        const handleToggleAllScopes = (checked) => {
-            form.allScopes = checked;
-            if (checked) {
-                form.selectedScopes = metaCatalog.value.modules.map(m => m.key);
-            }
-        };
-
-        const handleToggleAllTools = (checked) => {
-            form.allTools = checked;
-            if (checked) {
-                form.selectedTools = metaCatalog.value.mcpTools.map(t => t.name);
-            }
         };
 
         const handleSave = async () => {
@@ -145,6 +303,10 @@ const component = /*@__PURE__*/ _defineComponent({
             }
             if (!form.allowApi && !form.allowMcp) {
                 message.warning('请至少开启一种通道（REST API 或 MCP 协议）');
+                return;
+            }
+            if (form.selectedScopes.length === 0) {
+                message.warning('请至少勾选一个业务功能模块');
                 return;
             }
 
@@ -259,7 +421,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 })
             },
             {
-                title: '功能模块范围',
+                title: '业务功能模块',
                 key: 'allowedScopes',
                 ellipsis: { tooltip: true },
                 render: (row) => {
@@ -273,9 +435,24 @@ const component = /*@__PURE__*/ _defineComponent({
                 }
             },
             {
+                title: 'MCP 工具范围',
+                key: 'allowedMcpTools',
+                width: 140,
+                render: (row) => {
+                    if (!row.allowMcp) {
+                        return h(NTag, { type: 'default', size: 'small' }, { default: () => '未开启 MCP' });
+                    }
+                    const tools = parseJsonArray(row.allowedMcpTools);
+                    if (tools.includes('*') || tools.length === 0) {
+                        return h(NTag, { type: 'info', size: 'small' }, { default: () => '全部工具 (*)' });
+                    }
+                    return h(NTag, { type: 'info', size: 'small', secondary: true }, { default: () => `已选 ${tools.length} 个工具` });
+                }
+            },
+            {
                 title: '数据源范围',
                 key: 'sourceScopeMode',
-                width: 150,
+                width: 140,
                 render: (row) => {
                     if (row.sourceScopeMode === 'all') {
                         return h(NTag, { type: 'success', size: 'small', secondary: true }, { default: () => '全部知识源' });
@@ -329,8 +506,14 @@ const component = /*@__PURE__*/ _defineComponent({
         const __returned__ = {
             keys, loading, metaCatalog, showModal, isEdit, submitting, form,
             showSecretModal, createdSecret, showGuideModal, guideKey, mcpConfigJson,
-            columns, loadKeys, openCreateModal, openEditModal, handleToggleAllScopes,
-            handleToggleAllTools, handleSave, handleToggle, handleDelete, copyToClipboard, openGuide
+            columns, loadKeys, openCreateModal, openEditModal, handleSave, handleToggle,
+            handleDelete, copyToClipboard, openGuide,
+            // 统一树状矩阵状态与操作方法
+            filteredCategories, isCategoryCollapsed, toggleCategoryCollapse, toggleExpandAll,
+            isCategoryFullyChecked, isCategoryIndeterminate, toggleCategoryNode,
+            getCategorySelectedToolCount, isToolChecked, toggleToolNode,
+            selectAll, selectStandardOps, selectReadOnly, clearAll,
+            scopeSearchKeyword, scopeProtocolFilter
         };
         return __returned__;
     }
@@ -351,7 +534,7 @@ component.template = `
       </template>
 
       <n-text depth="3" style="display: block; margin-bottom: 16px;">
-        为第三方应用、AI Agent（如 Cursor、Claude Desktop、Dify）及内部系统分配独立的细粒度访问凭证，支持 REST API 与 MCP 协议树状权限隔离与数据源分流。
+        为第三方应用、AI Agent（如 Cursor、Claude Desktop、Dify）及内部系统分配独立的细粒度访问凭证，支持 REST API 与 MCP 协议功能模块化统一授权与数据源分流。
       </n-text>
 
       <n-data-table
@@ -368,7 +551,7 @@ component.template = `
       v-model:show="showModal"
       preset="card"
       :title="isEdit ? '编辑 API Key 权限' : '新建 API Key'"
-      style="width: 820px; max-width: 90vw;"
+      style="width: 860px; max-width: 92vw;"
     >
       <n-space vertical :size="16">
         <n-form label-placement="left" label-width="120">
@@ -387,42 +570,125 @@ component.template = `
             </n-space>
           </n-form-item>
 
-          <!-- 功能模块授权 -->
-          <n-form-item label="业务模块授权">
-            <n-space vertical :size="8" style="width: 100%;">
-              <n-checkbox :checked="form.allScopes" @update:checked="handleToggleAllScopes">
-                全选所有业务模块 (*)
-              </n-checkbox>
-              <div v-if="!form.allScopes" style="background: rgba(128,128,128,0.06); padding: 12px; border-radius: 6px;">
-                <n-checkbox-group v-model:value="form.selectedScopes">
-                  <n-space vertical :size="8">
-                    <n-checkbox v-for="m in metaCatalog.modules" :key="m.key" :value="m.key">
-                      <span>{{ m.label }}</span>
-                      <n-text depth="3" style="margin-left: 8px; font-size: 12px;">({{ m.description }})</n-text>
-                    </n-checkbox>
-                  </n-space>
-                </n-checkbox-group>
+          <!-- 统一业务模块与 MCP 工具树状授权矩阵 (对齐 WebToolForLinux 规范) -->
+          <n-form-item label="业务与MCP权限" required>
+            <div style="width: 100%; border: 1px solid rgba(128,128,128,0.2); border-radius: 8px; padding: 12px; background: rgba(128,128,128,0.03);">
+              <!-- 头部工具栏与策略预设 -->
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
+                <div>
+                  <span style="font-weight: 600; font-size: 13px;">功能模块与 MCP 二级工具树</span>
+                  <n-text depth="3" style="font-size: 11px; margin-left: 8px;">
+                    (勾选模块同时授权 API 与旗下 MCP 工具，支持展开反选微调)
+                  </n-text>
+                </div>
+                <n-space size="small">
+                  <n-button size="tiny" quaternary type="primary" @click="selectAll">全选全部</n-button>
+                  <n-button size="tiny" quaternary type="info" @click="selectStandardOps">标准问答检索</n-button>
+                  <n-button size="tiny" quaternary type="warning" @click="selectReadOnly">只读探测</n-button>
+                  <n-button size="tiny" quaternary type="error" @click="clearAll">清空</n-button>
+                  <n-button size="tiny" quaternary @click="toggleExpandAll">展开/折叠</n-button>
+                </n-space>
               </div>
-            </n-space>
-          </n-form-item>
 
-          <!-- MCP 工具授权 -->
-          <n-form-item v-if="form.allowMcp" label="MCP 工具白名单">
-            <n-space vertical :size="8" style="width: 100%;">
-              <n-checkbox :checked="form.allTools" @update:checked="handleToggleAllTools">
-                全选所有 MCP 工具 (*)
-              </n-checkbox>
-              <div v-if="!form.allTools" style="background: rgba(128,128,128,0.06); padding: 12px; border-radius: 6px;">
-                <n-checkbox-group v-model:value="form.selectedTools">
-                  <n-space vertical :size="8">
-                    <n-checkbox v-for="t in metaCatalog.mcpTools" :key="t.name" :value="t.name">
-                      <span style="font-family: monospace; font-weight: 500;">{{ t.name }}</span>
-                      <n-text depth="3" style="margin-left: 8px; font-size: 12px;">- {{ t.description }}</n-text>
-                    </n-checkbox>
-                  </n-space>
-                </n-checkbox-group>
+              <!-- 搜索与协议过滤器 -->
+              <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
+                <n-input
+                  v-model:value="scopeSearchKeyword"
+                  placeholder="搜索模块名称、#code、MCP 工具名或功能描述..."
+                  size="small"
+                  clearable
+                  style="flex: 1;"
+                />
+                <n-radio-group v-model:value="scopeProtocolFilter" size="small">
+                  <n-radio-button value="all">全部</n-radio-button>
+                  <n-radio-button value="api">仅 API</n-radio-button>
+                  <n-radio-button value="mcp">仅 MCP</n-radio-button>
+                </n-radio-group>
               </div>
-            </n-space>
+
+              <!-- 树状卡片滚动容器 -->
+              <div style="max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px;">
+                <div v-if="filteredCategories.length === 0" style="text-align: center; padding: 24px; color: #888; font-size: 12px;">
+                  未匹配到符合条件的业务模块或 MCP 工具
+                </div>
+
+                <!-- 模块级卡片 (父节点) -->
+                <div
+                  v-for="cat in filteredCategories"
+                  :key="cat.key"
+                  style="border: 1px solid rgba(128,128,128,0.18); border-radius: 6px; overflow: hidden; background: rgba(128,128,128,0.04);"
+                >
+                  <!-- 模块头部 -->
+                  <div
+                    style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: rgba(128,128,128,0.06); cursor: pointer; user-select: none;"
+                    @click="toggleCategoryCollapse(cat.key)"
+                  >
+                    <div style="display: flex; align-items: center; gap: 8px; flex: 1;">
+                      <span style="font-size: 11px; color: #888; width: 14px; text-align: center;">
+                        {{ isCategoryCollapsed(cat.key) ? '▶' : '▼' }}
+                      </span>
+                      <n-checkbox
+                        :checked="isCategoryFullyChecked(cat)"
+                        :indeterminate="isCategoryIndeterminate(cat)"
+                        @click.stop
+                        @update:checked="() => toggleCategoryNode(cat)"
+                      />
+                      <div>
+                        <span style="font-weight: 600; font-size: 13px;">{{ cat.name }}</span>
+                        <span style="font-family: monospace; font-size: 11px; margin-left: 6px; color: #18a058;">#{{ cat.moduleCode }}</span>
+                        <n-text depth="3" style="font-size: 11px; margin-left: 8px; display: inline-block;">{{ cat.description }}</n-text>
+                      </div>
+                    </div>
+
+                    <!-- 通道标记与工具计数 -->
+                    <n-space size="tiny" align="center" style="flex-shrink: 0;" @click.stop>
+                      <n-tag v-if="cat.supportsApi" size="tiny" type="success" secondary>REST API</n-tag>
+                      <n-tag v-if="cat.supportsMcp" size="tiny" type="info" secondary>MCP</n-tag>
+                      <n-tag v-if="cat.tools && cat.tools.length > 0" size="tiny" :bordered="false">
+                        {{ getCategorySelectedToolCount(cat) }} / {{ cat.tools.length }} 工具
+                      </n-tag>
+                    </n-space>
+                  </div>
+
+                  <!-- 二级 MCP 叶子工具列表 (展开展示) -->
+                  <div
+                    v-if="!isCategoryCollapsed(cat.key) && cat.tools && cat.tools.length > 0"
+                    style="padding: 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; background: rgba(0,0,0,0.08); border-top: 1px solid rgba(128,128,128,0.12);"
+                  >
+                    <div
+                      v-for="t in cat.tools"
+                      :key="t.name"
+                      style="border: 1px solid rgba(128,128,128,0.15); border-radius: 6px; padding: 8px 10px; background: rgba(128,128,128,0.05); display: flex; align-items: flex-start; gap: 8px; cursor: pointer;"
+                      @click="toggleToolNode(cat, t.name)"
+                    >
+                      <n-checkbox
+                        :checked="isToolChecked(t.name)"
+                        @click.stop
+                        @update:checked="() => toggleToolNode(cat, t.name)"
+                        style="margin-top: 2px;"
+                      />
+                      <div style="flex: 1; min-width: 0;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+                          <span style="font-family: monospace; font-weight: 600; font-size: 12px; color: #2080f0; word-break: break-all;">
+                            {{ t.name }}
+                          </span>
+                          <n-tag
+                            size="tiny"
+                            :type="t.riskLevel === 'Read' ? 'success' : (t.riskLevel === 'Execute' ? 'info' : 'warning')"
+                            secondary
+                          >
+                            {{ t.riskLevel === 'Read' ? '只读' : (t.riskLevel === 'Execute' ? '执行' : '高危') }}
+                          </n-tag>
+                        </div>
+                        <n-text depth="3" style="font-size: 11px; line-height: 1.3; display: block; margin-top: 3px;">
+                          {{ t.description }}
+                        </n-text>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </n-form-item>
 
           <!-- 数据源级隔离 -->

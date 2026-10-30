@@ -1,12 +1,16 @@
 using ModelContextProtocol.Server;
+using System;
 using System.ComponentModel;
+using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Core.Interfaces;
 
 namespace ReferenceRAG.Service.McpTools;
 
 /// <summary>
-/// 索引状态查询工具
+/// 索引状态查询工具（归属 index 业务模块）
 /// </summary>
 [McpServerToolType]
 public class IndexStatusTools
@@ -26,6 +30,10 @@ public class IndexStatusTools
     public async Task<string> GetIndexStatus()
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetIndexStatus), out var permErr))
+        {
+            return permErr!;
+        }
         var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
         var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
 
@@ -76,7 +84,7 @@ public class IndexStatusTools
     }
 
     /// <summary>
-    /// 获取指定文档/片段的详细信息。
+    /// 获取指定文档片段的详细信息。
     /// 在需要查看某个具体文档内容或调试检索结果时使用。
     /// </summary>
     /// <param name="chunkId">文档片段ID（Chunk ID）</param>
@@ -85,6 +93,10 @@ public class IndexStatusTools
         [Description("文档片段ID（Chunk ID，必填）。从搜索结果的refId字段获取")] string chunkId)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetDocumentInfo), out var permErr))
+        {
+            return permErr!;
+        }
         var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
 
         try
@@ -148,6 +160,10 @@ public class IndexStatusTools
         [Description("返回文件数量限制，默认20")] int limit = 20)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(ListFiles), out var permErr))
+        {
+            return permErr!;
+        }
         var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
 
         try
