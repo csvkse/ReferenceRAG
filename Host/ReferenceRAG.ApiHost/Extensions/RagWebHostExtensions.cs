@@ -59,24 +59,14 @@ public static class RagWebHostExtensions
         // MAF 流式聊天服务（内存会话）
 
         #region MCP Server 配置
-        // 通过密钥协调器统一解析访问密钥（配置文件优先 > 环境变量）
-        var mcpKeyResolver = new AuthenticationKeyResolutionCoordinator(configuration: configuration);
-        var mcpResolved = mcpKeyResolver.ResolveKey();
-        var mcApiKeys = (mcpResolved.IsEnabled && !string.IsNullOrWhiteSpace(mcpResolved.ApiKey))
-            ? new List<string> { mcpResolved.ApiKey }
-            : new List<string>();
-
+        // MCP 传输层与协议端点配置：
+        // 鉴权职责由上游全局 ApiKeyMiddleware 统一看门管辖（同时支持系统静态主密钥与数据库动态授权 ApiKey）。
+        // McpHelper 禁用内置的单一静态认证，消除双重校验与动态 ApiKey 误杀缺陷。
         var appMiddlewareOptions = new AppMiddlewareOptions
         {
-            Authentication = new AuthenticationOptions  // 添加 MCP 认证配置
+            Authentication = new AuthenticationOptions
             {
-                Enabled = mcApiKeys.Count > 0,
-                Type = AuthenticationType.ApiKey,
-                ApiKey = new ApiKeyOptions
-                {
-                    Keys = mcApiKeys,
-                    HeaderName = "X-Api-Key"
-                }
+                Enabled = false
             },
             Mcp = new MopOptions
             {
@@ -85,9 +75,8 @@ public static class RagWebHostExtensions
                 ServerName = "ReferenceRAG-MCP",
                 ServerVersion = "1.0.0",
                 TransportType = MopTransportType.Sse,
-                SseEndpoint = "/api/mcp",  // 添加 SSE 端点
-                Backends = new List<BackendEndpoint>
-                { }
+                SseEndpoint = "/api/mcp",  // SSE 协议暴露端点
+                Backends = new List<BackendEndpoint>()
             }
         };
 
@@ -97,12 +86,12 @@ public static class RagWebHostExtensions
         // 注册自定义 MCP Tools
         services.AddMcpToolRegistry(registry =>
         {
-            //registry.RegisterLocalTool<TestTools>();
             registry.RegisterLocalTool<RagSearchTools>();
             registry.RegisterLocalTool<EmbeddingTools>();
             registry.RegisterLocalTool<KnowledgeFileTools>();
-            //registry.RegisterLocalTool<IndexStatusTools>();
-            //registry.RegisterLocalTool<SourceManagementTools>();
+            registry.RegisterLocalTool<GraphSearchTools>();
+            registry.RegisterLocalTool<IndexStatusTools>();
+            registry.RegisterLocalTool<SourceManagementTools>();
         });
         #endregion
 

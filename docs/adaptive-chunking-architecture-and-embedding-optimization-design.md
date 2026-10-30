@@ -1,5 +1,7 @@
 # 自适应分段模式（Adaptive Chunking）与嵌入模型性能最大化架构设计
 
+> **2026-10-31 统一审核说明**：本文仅保留既有算法背景。后续核心契约、状态/版本和实施顺序以[统一契约与实施计划](unified-architecture-contracts-and-implementation-plan.md)为准；算法细节见[解析专题](document-parsing-content-profiles-and-adapter-management-architecture.md)与[总体规范](per-source-data-isolation-and-multi-model-dynamic-lifecycle-architecture.md)。本文固定收益/最佳窗口比例、向后兼容与旧阶段表均不作为新架构承诺或排期。
+
 > **状态**：方案调研与架构设计完成（等待评审，不执行代码修改）  
 > **面向模块**：`ReferenceRAG.Business/Features/Chunking`、`ReferenceRAG.Infrastructure/Models`、`ReferenceRAG.Business/wwwroot/app/views/Settings.js`  
 > **核心设计模式**：适配器模式（Adapter Pattern）+ 策略模式（Strategy Pattern）+ 状态机模式（State Machine Pattern）
