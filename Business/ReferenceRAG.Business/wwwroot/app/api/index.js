@@ -232,8 +232,24 @@ export const chatApi = {
 };
 // FileSystem
 export const fileSystemApi = {
-    browse: (path = '', folderOnly = true) => api.get('/FileSystem/browse', { params: { path, folderOnly } }),
-    mkdir: (path) => api.post('/FileSystem/mkdir', { path })
+    browse: (path = '', folderOnly = false) => api.get('/FileSystem/browse', { params: { path, folderOnly } }),
+    mkdir: (path) => api.post('/FileSystem/mkdir', { path }),
+    readText: (path, sourcePath = '') => api.get('/FileSystem/read-text', { params: { path, sourcePath } }),
+    writeText: (path, content, sourcePath = '') => api.post('/FileSystem/write-text', { path, content, sourcePath }),
+    executeAction: (action, sourcePath, targetPath = null, recursive = false, sandBoxRoot = null) =>
+        api.post('/FileSystem/action', { action, sourcePath, targetPath, recursive, sandBoxRoot }),
+    upload: (path, formData, sourcePath = '') => api.post(`/FileSystem/upload?path=${encodeURIComponent(path)}&sourcePath=${encodeURIComponent(sourcePath || '')}`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+    }),
+    readRange: (path, startLine = 1, endLine = 200, sourcePath = '') =>
+        api.get('/FileSystem/read-range', { params: { path, startLine, endLine, sourcePath } }),
+    getMetadata: (path, sourcePath = '') =>
+        api.get('/FileSystem/metadata', { params: { path, sourcePath } }),
+    search: (query) => api.post('/FileSystem/search', query),
+    findFiles: (sourceName = null, globPattern = '*', maxResults = 100) =>
+        api.get('/FileSystem/find-files', { params: { sourceName, globPattern, maxResults } }),
+    getDownloadUrl: (path, sourcePath = '') => `${API_URL}/FileSystem/download?path=${encodeURIComponent(path)}&sourcePath=${encodeURIComponent(sourcePath || '')}`,
+    getDownloadZipUrl: (path, sourcePath = '') => `${API_URL}/FileSystem/download-zip?path=${encodeURIComponent(path)}&sourcePath=${encodeURIComponent(sourcePath || '')}`
 };
 // Logs
 export const logsApi = {
@@ -242,5 +258,14 @@ export const logsApi = {
     getDownloadUrl: (name) => `${API_URL}/Logs/Files/${encodeURIComponent(name)}/download`,
     getOperations: (params) => api.get('/Logs/Operations', { params }),
     recordOperation: (data) => api.post('/Logs/Operations', data)
+};
+// ApiKeys (授权管理)
+export const apiKeysApi = {
+    getAll: () => api.get('/ApiKeys'),
+    getMetaCatalog: () => api.get('/ApiKeys/meta-catalog'),
+    create: (data) => api.post('/ApiKeys', data),
+    update: (id, data) => api.put(`/ApiKeys/${encodeURIComponent(id)}`, data),
+    toggle: (id, isEnabled) => api.patch(`/ApiKeys/${encodeURIComponent(id)}/toggle`, { isEnabled }),
+    delete: (id) => api.delete(`/ApiKeys/${encodeURIComponent(id)}`)
 };
 export default api;

@@ -1,21 +1,26 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.ApiHost.Authentication;
+using ReferenceRAG.Core.Interfaces;
+using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Infrastructure.Features.Security;
 
 namespace ReferenceRAG.Service.Middleware;
 
 /// <summary>
-/// API Key 访问控制与认证中间件
-/// 策略模型：默认强制认证（Default-Deny），仅显式公共白名单放行（公开探测端点、前端页面与静态资源、独立诊断通道）。
-/// 密钥仲裁：严格遵循“配置文件优先级最高，其次是环境变量”策略。
-/// 凭据提取：支持 Header (X-API-Key / Authorization: Bearer)、Query (access_token / apiKey / api_key)、Cookie (reference_rag_api_key)。
+/// API Key 访问控制与双轨认证中间件：
+/// 策略模型：默认强制认证（Default-Deny），支持系统主密钥与数据库多租户 API Key 并存；
+/// 细粒度控制：涵盖通道控制 (REST API vs MCP)、业务模块树状控制 (Chat/Search/Sources/Files/Index/Models/System) 以及数据源隔离上下文注入；
+/// 性能保障：内存加盐 SHA-256 并发字典直查，拦截路径零 I/O 阻塞。
 /// </summary>
 public class ApiKeyMiddleware
 {
@@ -43,7 +48,8 @@ public class ApiKeyMiddleware
         "/guide",
         "/graph",
         "/chat",
-        "/logs"
+        "/logs",
+        "/apikeys"
     };
 
     // 显式白名单：前端静态资源目录前缀
@@ -82,6 +88,7 @@ public class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        var apiKeyStore = context.RequestServices.GetService<IApiKeyStore>();
         var (enabled, expectedApiKey) = GetApiKeyConfig(context);
 
         // 0. 特殊显式健康检查端点: /api/system/health - Docker/K8s 容器健康检查端点，无条件放行（支持 GET 与 HEAD）
@@ -94,17 +101,20 @@ public class ApiKeyMiddleware
         // 1. 特殊显式端点: /api/auth/check - 始终响应当前鉴权需求状态，无条件放行
         if (context.Request.Path.StartsWithSegments("/api/auth/check"))
         {
+            var hasDbKeys = apiKeyStore != null && (await apiKeyStore.GetAllAsync()).Any(k => k.IsEnabled);
+            var isAuthRequired = enabled || hasDbKeys;
             context.Response.StatusCode = StatusCodes.Status200OK;
             await context.Response.WriteAsJsonAsync(new
             {
-                authRequired = enabled,
-                message = enabled ? "API Key is required" : "No authentication required"
+                authRequired = isAuthRequired,
+                message = isAuthRequired ? "API Key is required" : "No authentication required"
             });
             return;
         }
 
-        // 2. 若未启用认证（未配置密钥），所有接口全部放行（免密兼容模式）
-        if (!enabled || string.IsNullOrEmpty(expectedApiKey))
+        // 2. 若系统既未配置静态主 Key，数据库中也没有任何已启用的自定义 Key，全部放行（免密兼容模式）
+        var hasActiveCustomKeys = apiKeyStore != null && (await apiKeyStore.GetAllAsync()).Any(k => k.IsEnabled);
+        if ((!enabled || string.IsNullOrEmpty(expectedApiKey)) && !hasActiveCustomKeys)
         {
             await _next(context);
             return;
@@ -132,7 +142,33 @@ public class ApiKeyMiddleware
             return;
         }
 
-        if (!string.Equals(providedKey, expectedApiKey, StringComparison.Ordinal))
+        ApiKeyEntity? matchedKey = null;
+
+        // 4.1 优先校验静态主密钥（完全权限超级管理员）
+        if (enabled && !string.IsNullOrEmpty(expectedApiKey) && string.Equals(providedKey, expectedApiKey, StringComparison.Ordinal))
+        {
+            matchedKey = new ApiKeyEntity
+            {
+                Id = "system_master_key",
+                Name = "系统静态主密钥",
+                KeyPrefix = expectedApiKey.Length > 8 ? expectedApiKey[..8] : expectedApiKey,
+                IsEnabled = true,
+                AllowApi = true,
+                AllowMcp = true,
+                AllowedScopes = "[\"*\"]",
+                AllowedMcpTools = "[\"*\"]",
+                SourceScopeMode = "all",
+                AllowedSources = "[]"
+            };
+        }
+        else if (apiKeyStore != null)
+        {
+            // 4.2 校验数据库 API Key (加盐 SHA-256 微秒并发缓存查验)
+            var hash = ApiKeyStore.ComputeHash(providedKey);
+            matchedKey = apiKeyStore.FindByHash(hash);
+        }
+
+        if (matchedKey == null)
         {
             _logger.LogWarning("API Key verification failed, source IP: {RemoteIp}, path: {Path}",
                 context.Connection.RemoteIpAddress, context.Request.Path);
@@ -144,10 +180,59 @@ public class ApiKeyMiddleware
             return;
         }
 
-        // 5. 凭据校验通过：若通过 query string 传入，且为浏览器 GET 请求（例如访问 /swagger?apiKey=...），自动注入 Session Cookie 方便页面子资源加载
+        if (!matchedKey.IsEnabled)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { error = "API Key 已被禁用" });
+            return;
+        }
+
+        if (matchedKey.ExpiresAt.HasValue && matchedKey.ExpiresAt.Value < DateTime.UtcNow)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { error = "API Key 已过期" });
+            return;
+        }
+
+        // 4.3 协议通道校验 (Channels)
+        var pathStr = context.Request.Path.Value ?? "";
+        var isMcpRequest = pathStr.StartsWith("/api/mcp", StringComparison.OrdinalIgnoreCase)
+                        || pathStr.StartsWith("/mcp", StringComparison.OrdinalIgnoreCase);
+
+        if (isMcpRequest && !matchedKey.AllowMcp)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { error = "此 API Key 未被授权使用 MCP 协议通道" });
+            return;
+        }
+
+        if (!isMcpRequest && !matchedKey.AllowApi)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { error = "此 API Key 未被授权使用 REST API 通道" });
+            return;
+        }
+
+        // 4.4 业务模块权限校验 (Scopes)
+        var targetModule = ResolveTargetModule(pathStr);
+        if (!string.IsNullOrEmpty(targetModule) && !ApiKeyPermissionMatrix.HasScope(matchedKey, targetModule))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { error = $"此 API Key 无权访问业务模块: {targetModule}" });
+            return;
+        }
+
+        // 注入当前上下文
+        context.Items["CurrentApiKey"] = matchedKey;
+        if (matchedKey.Id != "system_master_key" && apiKeyStore != null)
+        {
+            apiKeyStore.RecordLastUsed(matchedKey.Id);
+        }
+
+        // 5. 凭据校验通过：若通过 query string 传入，且为浏览器 GET 请求，自动注入 Session Cookie 方便页面子资源加载
         if (HttpMethods.IsGet(context.Request.Method) && HasQueryApiKey(context))
         {
-            context.Response.Cookies.Append(ApiKeyCookieName, expectedApiKey, new CookieOptions
+            context.Response.Cookies.Append(ApiKeyCookieName, providedKey, new CookieOptions
             {
                 Path = "/",
                 HttpOnly = true,
@@ -157,6 +242,41 @@ public class ApiKeyMiddleware
         }
 
         await _next(context);
+    }
+
+    private static string? ResolveTargetModule(string path)
+    {
+        if (path.StartsWith("/api/chat", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/api/mafchat", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/v1/chat", StringComparison.OrdinalIgnoreCase))
+            return "chat";
+
+        if (path.StartsWith("/api/aiquery", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/api/search", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/v1/embeddings", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/api/bm25index/search", StringComparison.OrdinalIgnoreCase))
+            return "search";
+
+        if (path.StartsWith("/api/sources", StringComparison.OrdinalIgnoreCase))
+            return "sources";
+
+        if (path.StartsWith("/api/filesystem", StringComparison.OrdinalIgnoreCase))
+            return "files";
+
+        if (path.StartsWith("/api/index", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/api/bm25index", StringComparison.OrdinalIgnoreCase))
+            return "index";
+
+        if (path.StartsWith("/api/models", StringComparison.OrdinalIgnoreCase))
+            return "models";
+
+        if (path.StartsWith("/api/system", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/api/settings", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/api/logs", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/api/apikeys", StringComparison.OrdinalIgnoreCase))
+            return "system";
+
+        return null;
     }
 
     /// <summary>
@@ -185,7 +305,7 @@ public class ApiKeyMiddleware
             return true;
         }
 
-        // 2. 受控临时诊断通道（由 TemporaryDiagnostics 的独立中间件与 DIAG_KEY 管辖，物理隔离）
+        // 3. 受控临时诊断通道（由 TemporaryDiagnostics 的独立中间件与 DIAG_KEY 管辖，物理隔离）
         var diagPrefix = ResolveDiagPrefix(context);
         if (context.Request.Path.StartsWithSegments(diagPrefix))
         {
@@ -201,24 +321,34 @@ public class ApiKeyMiddleware
             }
         }
 
-        // 4. 根目录静态图标/脚本
-        if (WhitelistedStaticFiles.Contains(pathStr))
+        // 5. 根目录静态文件（/app.js、/favicon.ico、/favicon.svg）
+        if (WhitelistedStaticFiles.Contains(normalizedApiPath))
         {
             return true;
         }
 
-        // 5. 前端 SPA 页面路由（仅在 GET 请求时放行伺服 index.html 视图）
-        if (HttpMethods.IsGet(context.Request.Method))
+        // 6. 静态 HTML/SPA 页面与视图（仅限安全只读的 GET / HEAD 方法）
+        if (HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
         {
-            var normalizedPath = pathStr.TrimEnd('/');
-            if (string.IsNullOrEmpty(normalizedPath))
-            {
-                normalizedPath = "/";
-            }
-
-            if (WhitelistedSpaPageRoutes.Contains(normalizedPath))
+            if (WhitelistedSpaPageRoutes.Contains(normalizedApiPath) ||
+                string.IsNullOrEmpty(normalizedApiPath))
             {
                 return true;
+            }
+
+            var extension = Path.GetExtension(normalizedApiPath);
+            if (!string.IsNullOrEmpty(extension))
+            {
+                if (extension.Equals(".js", StringComparison.OrdinalIgnoreCase) ||
+                    extension.Equals(".css", StringComparison.OrdinalIgnoreCase) ||
+                    extension.Equals(".html", StringComparison.OrdinalIgnoreCase) ||
+                    extension.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+                    extension.Equals(".svg", StringComparison.OrdinalIgnoreCase) ||
+                    extension.Equals(".ico", StringComparison.OrdinalIgnoreCase) ||
+                    extension.Equals(".woff2", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
             }
         }
 
@@ -251,7 +381,6 @@ public class ApiKeyMiddleware
 
     private static (bool Enabled, string? Key) GetApiKeyConfig(HttpContext context)
     {
-        // 1. 优先通过 IAuthenticationKeyResolver 仲裁解析（严格满足：配置文件 > 环境变量）
         var resolver = context.RequestServices.GetService<IAuthenticationKeyResolver>();
         if (resolver == null)
         {
@@ -266,7 +395,6 @@ public class ApiKeyMiddleware
             return (true, result.ApiKey);
         }
 
-        // 2. 回退检查 HttpContext.Items 覆盖（用于特定单元测试场景）
         if (context.Items["ApiKeyEnabled"] is bool itemsEnabled && itemsEnabled)
         {
             var itemsKey = context.Items["ApiKeyValue"] as string;
@@ -278,13 +406,11 @@ public class ApiKeyMiddleware
 
     private static string? ExtractApiKey(HttpContext context)
     {
-        // 1. Header: X-API-Key
         if (context.Request.Headers.TryGetValue(ApiKeyHeaderName, out var headerKey) && !string.IsNullOrWhiteSpace(headerKey))
         {
             return headerKey.ToString().Trim();
         }
 
-        // 2. Header: Authorization: Bearer <key>
         if (context.Request.Headers.TryGetValue("Authorization", out var authHeader))
         {
             var authStr = authHeader.ToString();
@@ -298,7 +424,6 @@ public class ApiKeyMiddleware
             }
         }
 
-        // 3. Query string: access_token (SignalR WebSocket / SSE 标准握手), apiKey, api_key (Swagger UI 等浏览器直链)
         if (context.Request.Query.TryGetValue("access_token", out var tokenQuery) && !string.IsNullOrWhiteSpace(tokenQuery))
         {
             return tokenQuery.ToString().Trim();
@@ -314,7 +439,6 @@ public class ApiKeyMiddleware
             return apiKeySnakeQuery.ToString().Trim();
         }
 
-        // 4. Cookie: reference_rag_api_key (浏览器访问 Swagger UI 等场景的自动会话维持)
         if (context.Request.Cookies.TryGetValue(ApiKeyCookieName, out var cookieKey) && !string.IsNullOrWhiteSpace(cookieKey))
         {
             return cookieKey.Trim();

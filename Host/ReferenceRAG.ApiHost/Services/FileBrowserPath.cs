@@ -115,4 +115,14 @@ public static class FileBrowserPath
         var dir = directory.Replace('\\', '/').TrimEnd('/');
         return dir + "/" + name.TrimStart('/');
     }
+
+    public static bool IsWithin(string candidatePath, string rootPath)
+    {
+        var normCandidate = Normalize(candidatePath);
+        var normRoot = Normalize(rootPath);
+        if (normRoot == "/") return true;
+        if (normCandidate.Equals(normRoot, Comparison)) return true;
+        var prefix = normRoot.EndsWith('/') ? normRoot : normRoot + "/";
+        return normCandidate.StartsWith(prefix, Comparison);
+    }
 }

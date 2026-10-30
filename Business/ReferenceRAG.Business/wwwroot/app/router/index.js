@@ -92,6 +92,12 @@ const routes = [
                 name: 'Chat',
                 component: () => import('/app/views/Chat.js'),
                 meta: { title: 'AI 对话' }
+            },
+            {
+                path: 'apikeys',
+                name: 'ApiKeys',
+                component: () => import('/app/views/ApiKeys.js'),
+                meta: { title: 'API 授权' }
             }
         ]
     }
@@ -118,58 +124,27 @@ router.beforeEach(async (to, _from, next) => {
 
     // 服务端未启用认证时，所有路由皆可自由访问
     if (!serverAuthRequired) {
-        if (to.path === '/login') {
-            next('/');
-            return;
-        }
-        next();
-        return;
+        return next();
     }
 
-    // 服务端启用认证时的公开页面（如登录页）
+    // 公开路由直接放行
     if (to.meta.public) {
-        if (to.path === '/login' && authStore.isAuthenticated) {
-            next('/');
-            return;
+        // 已登录用户访问登录页时重定向到首页
+        if (authStore.isAuthenticated) {
+            return next({ path: '/' });
         }
-        next();
-        return;
+        return next();
     }
 
-    // 受保护页面：必须具备 API Key
-    if (authStore.isAuthenticated) {
-        next();
-        return;
+    // 需要认证的路由检查登录状态
+    if (!authStore.isAuthenticated) {
+        return next({
+            path: '/login',
+            query: { redirect: to.fullPath }
+        });
     }
 
-    // 未登录，拦截并跳转登录页
-    next({ path: '/login', query: to.fullPath !== '/' ? { redirect: to.fullPath } : undefined });
-});
-router.onError((error) => {
-    console.error('[Router Error]', error);
-    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-        const errorMsg = error?.message || String(error);
-        document.getElementById('runtime-error')?.remove();
-        const notice = document.createElement('div');
-        notice.id = 'runtime-error';
-        notice.setAttribute('role', 'alert');
-        notice.style.cssText = 'position:fixed;top:20px;right:20px;max-width:500px;z-index:999999;background:#1f1315;border:1px solid #ff4d4f;border-radius:8px;padding:16px 20px;color:#fff;box-shadow:0 8px 32px rgba(0,0,0,0.6);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.5;';
-        notice.innerHTML = `
-          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
-            <div style="font-weight:600;font-size:15px;color:#ff7875;display:flex;align-items:center;gap:6px">
-              <span>⚠️</span><span>页面路由加载失败</span>
-            </div>
-            <button onclick="this.closest('#runtime-error').remove()" style="background:none;border:none;color:#888;cursor:pointer;font-size:18px;line-height:1;padding:0">&times;</button>
-          </div>
-          <div style="margin-top:8px;font-size:13px;color:#ddd;word-break:break-word;font-family:monospace;background:rgba(0,0,0,0.3);padding:8px 10px;border-radius:4px">
-            ${errorMsg.replace(/</g, '&lt;').replace(/>/g, '&gt;')}
-          </div>
-          <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:10px">
-            <button onclick="window.location.reload()" style="background:#ff4d4f;border:none;color:#fff;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;font-weight:500">刷新页面</button>
-          </div>
-        `;
-        document.body.append(notice);
-    }
+    next();
 });
 
 export default router;

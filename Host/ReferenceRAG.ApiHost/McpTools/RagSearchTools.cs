@@ -1,6 +1,8 @@
 using ModelContextProtocol.Server;
 using System.ComponentModel;
 using System.Text.Json;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Models;
@@ -8,7 +10,7 @@ using ReferenceRAG.Core.Models;
 namespace ReferenceRAG.Service.McpTools;
 
 /// <summary>
-/// RAG 搜索相关工具
+/// RAG 搜索相关工具（语义搜索、混合搜索与模型重排）
 /// </summary>
 [McpServerToolType]
 public class RagSearchTools
@@ -31,9 +33,14 @@ public class RagSearchTools
     public async Task<string> SemanticSearch(
         [Description("搜索查询文本（必填）。使用完整的问题或关键词，如\"Obsidian如何配置插件\"、\"Python异步编程\"")] string query,
         [Description("返回结果数量，默认5。建议1-10，数值越大结果越多但处理越慢")] int topK = 5,
-        [Description("数据源名称列表（可选），如[\"VNote\",\"Note\"]。空值表示搜索所有数据源")] string? sources = null)
+        [Description("数据源名称列表（可选），如[\"VNote\",\"Note\"]。留空则自动使用当前授权的所有知识源")] string? sources = null)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!CheckToolPermission(scope.ServiceProvider, nameof(SemanticSearch), out var permErr))
+        {
+            return JsonSerializer.Serialize(new { success = false, error = permErr });
+        }
+
         var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
 
         try
@@ -51,12 +58,15 @@ public class RagSearchTools
                 request.Sources = JsonSerializer.Deserialize<List<string>>(sources);
             }
 
+            ApplyApiKeySourceIsolation(scope.ServiceProvider, request);
+
             var response = await searchService.SearchAsync(request);
 
             return JsonSerializer.Serialize(new
             {
                 success = true,
                 query = query,
+                searchedSources = request.Sources ?? new List<string>(),
                 count = response.Chunks.Count,
                 stats = response.Stats,
                 chunks = response.Chunks.Select(c => new
@@ -104,6 +114,11 @@ public class RagSearchTools
         [Description("是否启用重排提升相关性，默认false。重排会消耗更多资源但结果更准确")] bool enableRerank = false)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!CheckToolPermission(scope.ServiceProvider, nameof(HybridSearch), out var permErr))
+        {
+            return JsonSerializer.Serialize(new { success = false, error = permErr });
+        }
+
         var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
 
         try
@@ -118,12 +133,15 @@ public class RagSearchTools
                 EnableRerank = enableRerank
             };
 
+            ApplyApiKeySourceIsolation(scope.ServiceProvider, request);
+
             var response = await searchService.SearchAsync(request);
 
             return JsonSerializer.Serialize(new
             {
                 success = true,
                 query = query,
+                searchedSources = request.Sources ?? new List<string>(),
                 count = response.Chunks.Count,
                 mode = response.Mode.ToString(),
                 rerankApplied = response.RerankApplied,
@@ -171,6 +189,11 @@ public class RagSearchTools
         [Description("最终返回数量，默认5")] int topK = 5)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!CheckToolPermission(scope.ServiceProvider, nameof(RerankResults), out var permErr))
+        {
+            return JsonSerializer.Serialize(new { success = false, error = permErr });
+        }
+
         var rerankService = scope.ServiceProvider.GetRequiredService<IRerankService>();
 
         try
@@ -210,6 +233,43 @@ public class RagSearchTools
                 error = ex.Message,
                 query = query
             });
+        }
+    }
+
+    private static bool CheckToolPermission(IServiceProvider sp, string toolName, out string? error)
+    {
+        var httpContextAccessor = sp.GetService<IHttpContextAccessor>();
+        var currentKey = httpContextAccessor?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+        if (currentKey != null && !ApiKeyPermissionMatrix.IsMcpToolPermitted(currentKey, toolName))
+        {
+            error = $"此 API Key 未被授权调用 MCP 工具: {toolName}";
+            return false;
+        }
+        error = null;
+        return true;
+    }
+
+    private static void ApplyApiKeySourceIsolation(IServiceProvider sp, AIQueryRequest request)
+    {
+        var httpContextAccessor = sp.GetService<IHttpContextAccessor>();
+        var currentKey = httpContextAccessor?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+        var effectiveSources = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(currentKey);
+        if (effectiveSources != null)
+        {
+            if (request.Sources == null || request.Sources.Count == 0)
+            {
+                request.Sources = effectiveSources.ToList();
+            }
+            else
+            {
+                request.Sources = request.Sources
+                    .Where(s => effectiveSources.Contains(s, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+                if (request.Sources.Count == 0)
+                {
+                    request.Sources = new List<string> { "__NO_ACCESS_EMPTY_SOURCE__" };
+                }
+            }
         }
     }
 }
