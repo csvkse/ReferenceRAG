@@ -121,27 +121,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 1. CPU 元数据提取
+      # 1. CPU / Universal 元数据提取 (唯一拥有 latest 标签)
       - name: Extract Docker metadata (CPU)
         id: meta_cpu
         if: matrix.variant == 'cpu'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
             type=raw,value=cpu,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
 
-      # 2. NVIDIA CUDA 元数据提取（明确 NVIDIA 标识，并保留兼容别名）
+      # 2. NVIDIA CUDA 元数据提取 (严格禁用 latest 避免覆盖通用镜像)
       - name: Extract Docker metadata (NVIDIA CUDA)
         id: meta_cuda
         if: matrix.variant == 'cuda'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}},suffix=-cuda
             type=semver,pattern={{major}}.{{minor}},suffix=-cuda
@@ -150,13 +153,15 @@ jobs:
             type=raw,value=cuda-12.8,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
             type=raw,value=nvidia,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
 
-      # 3. AMD ROCm 元数据提取
+      # 3. AMD ROCm 元数据提取 (严格禁用 latest 避免覆盖通用镜像)
       - name: Extract Docker metadata (AMD ROCm)
         id: meta_rocm
         if: matrix.variant == 'rocm'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}},suffix=-rocm
             type=semver,pattern={{major}}.{{minor}},suffix=-rocm
@@ -164,13 +169,15 @@ jobs:
             type=raw,value=rocm,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
             type=raw,value=amd,enable=${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
 
-      # 4. Intel GPU 元数据提取
+      # 4. Intel GPU 元数据提取 (严格禁用 latest 避免覆盖通用镜像)
       - name: Extract Docker metadata (Intel GPU)
         id: meta_intel
         if: matrix.variant == 'intel'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}},suffix=-intel
             type=semver,pattern={{major}}.{{minor}},suffix=-intel
