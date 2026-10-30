@@ -2,6 +2,16 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.46] - 2026-10-30
+
+### CI/CD 镜像标签覆盖修复、桌面端测试路径解耦与轻量 Vulkan 镜像重新发布
+- **Docker 矩阵构建标签防护 (`docker-build.yml`)**：
+  - **根除 `latest` 标签竞态覆盖缺陷**：在 `cuda`、`rocm`、`intel` 镜像构建矩阵中显式锁定 `flavor: latest=false`，严格确保只有通用轻量版 (`cpu`/Universal) 拥有 `latest` 标签，彻底避免 ROCm 镜像中的 853MB `rocblas` 大层误覆盖 `latest`；
+- **前端测试运行路径跨环境适配 (`frontend-logic.test.mjs`)**：
+  - 将硬编码的 `path.resolve` 重构为模块级 `new URL(..., import.meta.url)` 动态寻址，彻底解决桌面端 Release CI 在 `wwwroot` 子目录执行测试时的 ENOENT 报错；
+- **重新发布完整镜像集群 (`v1.0.46`)**：
+  - 保证 `latest`、`1.0.46` 100% 对应约 330MB 纯净轻量的 Universal Vulkan 原生加速镜像。
+
 ## [1.0.45] - 2026-10-30
 
 ### Docker 默认镜像支持 Vulkan 硬件加速、消除 800MB ROCm 冗余层与模型硬件支持矩阵落地
