@@ -1,6 +1,6 @@
 services:
   # ------------------------------------------------------------
-  # 1. 通用 CPU 镜像（默认：全平台支持，包括 AMD/Intel/云服务器/无显卡环境）
+  # 1. 通用 CPU / Vulkan 硬件加速镜像（推荐默认：全平台支持，包括 AMD/Intel APU 核显、AMD/Intel 独显 Vulkan 加速、云服务器与纯 CPU 环境）
   # 启动命令: docker compose up -d
   # ------------------------------------------------------------
   reference-rag-cpu:
@@ -8,11 +8,16 @@ services:
     image: ghcr.io/csvkse/referencerag:latest
     ports:
       - "5123:5000"
+    # 若宿主机具备 AMD APU 核显、AMD 独显或 Intel 显卡，取消下方 devices 与 group_add 注释即可一键启用 Vulkan 硬件全量加速
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - video
+    #   - render
     volumes:
       # 持久化数据与配置（appsettings.json 自动持久化保存在 data 目录中，升级不丢失）
       - ../../data:/app/data
       - ../../artifacts/logs/docker:/app/logs
-      # 持久化模型
       - ../../models:/app/models
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
@@ -63,7 +68,7 @@ services:
     restart: unless-stopped
 
   # ------------------------------------------------------------
-  # 3. AMD ROCm 显卡加速镜像（AMD Radeon RX 5000~8000 独显 / Ryzen APU 核显）
+  # 3. AMD ROCm 显卡加速镜像（仅限 AMD Radeon RX 5000~8000 旗舰独显 / Instinct MI 计算卡；AMD APU 核显请使用上方默认 latest 镜像即可）
   # 启动命令: docker compose --profile rocm up -d
   # ------------------------------------------------------------
   reference-rag-rocm:

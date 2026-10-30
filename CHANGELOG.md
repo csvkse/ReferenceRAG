@@ -2,6 +2,18 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.45] - 2026-10-30
+
+### Docker 默认镜像支持 Vulkan 硬件加速、消除 800MB ROCm 冗余层与模型硬件支持矩阵落地
+- **Docker 默认镜像 (`latest`) 升级为 Universal (CPU + Vulkan) 双模原生加速 (`Dockerfile`, `compose.yml`)**：
+  - **根本解决 AMD APU 核显下载 853MB 巨型层问题**：将默认镜像构建参数升级为 `GpuBackend=universal`，直接打包 `LLamaSharp.Backend.Vulkan.Linux`；
+  - **内置完整 Mesa Vulkan 物理驱动支持**：在运行时容器内安装 `mesa-vulkan-drivers`（Mesa RADV/ANV/LAVAPIPE ICD 驱动实现）；
+  - **GPU 访问权限自愈与环境变量优化**：将非 root `appuser` 用户绑定至 `video` 与 `render` 用户组，杜绝在容器内挂载 `/dev/dri` 时的 `Permission Denied` 异常，动态链接库搜索路径自动关联 Vulkan 原生目录；
+  - **极致轻量**：镜像压缩大小仅增加 ~25MB（保持在 ~230MB 黄金体积），不仅支持纯 CPU 环境，挂载 `/dev/dri` 时亦能全量激活 AMD Ryzen APU 核显、AMD Radeon 独显与 Intel 显卡的 Vulkan 硬件算力。
+- **全平台硬件支持矩阵与 Docker 镜像选型权威指南 (`docs/model-format-hardware-matrix-and-docker-selection-guide.md`)**：
+  - **ONNX vs GGUF 生态全维对比**：深度剖析微软 ONNX Runtime 与 llama.cpp 在 Windows DirectML 与 Linux Vulkan/CUDA 上的支持断层，阐明 GGUF 是破解 Linux AMD APU 核显缺乏通用 GPU 加速提供者（EP）的最佳路径；
+  - **4 套官方 Docker 镜像选型决策树**：梳理 `latest`（通用 CPU/Vulkan）、`cuda`（NVIDIA 独显）、`intel`（Intel OpenVINO）、`rocm`（AMD 旗舰独显/计算卡）的适用边界、体积图谱与实操部署指令。
+
 ## [1.0.44] - 2026-10-30
 
 ### 聊天模型核显 Vulkan 加速、LLM 重复退化熔断治理、智能会话滚动恢复与意图路由升级
