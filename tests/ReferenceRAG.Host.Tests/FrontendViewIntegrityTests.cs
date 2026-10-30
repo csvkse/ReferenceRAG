@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Xunit;
 
@@ -182,5 +183,185 @@ public sealed class FrontendViewIntegrityTests
         {
             // 在未安装 node 的精简环境中跳过本单项测试
         }
+    }
+
+    private static Dictionary<string, string> ExtractImportMap(string wwwroot)
+    {
+        var htmlPath = Path.Combine(wwwroot, "index.html");
+        if (!File.Exists(htmlPath)) return new Dictionary<string, string>();
+
+        var html = File.ReadAllText(htmlPath);
+        var match = Regex.Match(html, @"<script type=""importmap"">([\s\S]*?)</script>");
+        if (!match.Success) return new Dictionary<string, string>();
+
+        try
+        {
+            using var doc = JsonDocument.Parse(match.Groups[1].Value);
+            var result = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (doc.RootElement.TryGetProperty("imports", out var importsEl))
+            {
+                foreach (var prop in importsEl.EnumerateObject())
+                {
+                    result[prop.Name] = prop.Value.GetString() ?? "";
+                }
+            }
+            return result;
+        }
+        catch
+        {
+            return new Dictionary<string, string>();
+        }
+    }
+
+    private static HashSet<string> GetModuleExportedSymbols(string filePath, string wwwroot, Dictionary<string, HashSet<string>> cache, HashSet<string> visited)
+    {
+        var fullPath = Path.GetFullPath(filePath);
+        if (cache.TryGetValue(fullPath, out var cached)) return cached;
+        if (!visited.Add(fullPath) || !File.Exists(fullPath)) return new HashSet<string>(StringComparer.Ordinal);
+
+        var source = File.ReadAllText(fullPath);
+        var exports = new HashSet<string>(StringComparer.Ordinal);
+
+        if (Regex.IsMatch(source, @"export\s+default\b"))
+        {
+            exports.Add("default");
+        }
+
+        foreach (Match m in Regex.Matches(source, @"export\s+(?:async\s+)?(?:function|class)\s+([a-zA-Z0-9_$]+)"))
+        {
+            exports.Add(m.Groups[1].Value);
+        }
+
+        foreach (Match m in Regex.Matches(source, @"export\s+(?:const|let|var)\s+([^;=]+?)(?:;|=)"))
+        {
+            foreach (Match id in Regex.Matches(m.Groups[1].Value, @"\b([a-zA-Z0-9_$]+)\b"))
+            {
+                exports.Add(id.Groups[1].Value);
+            }
+        }
+
+        foreach (Match m in Regex.Matches(source, @"export\s*\{([\s\S]*?)\}(?:\s*from\s*['""]([^'""]+)['""])?"))
+        {
+            var list = m.Groups[1].Value;
+            var parts = list.Split(',');
+            foreach (var part in parts)
+            {
+                var trimmed = part.Trim();
+                if (string.IsNullOrEmpty(trimmed)) continue;
+                var asMatch = Regex.Match(trimmed, @"(?:^|\b)(?:[a-zA-Z0-9_$]+\s+as\s+)?([a-zA-Z0-9_$]+)$");
+                if (asMatch.Success)
+                {
+                    exports.Add(asMatch.Groups[1].Value);
+                }
+            }
+        }
+
+        foreach (Match m in Regex.Matches(source, @"export\s*\*\s*from\s*['""]([^'""]+)['""]"))
+        {
+            var reexportSpecifier = m.Groups[1].Value;
+            string? reexportPath = null;
+            if (reexportSpecifier.StartsWith('.'))
+            {
+                reexportPath = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(fullPath)!, reexportSpecifier));
+            }
+            else if (reexportSpecifier.StartsWith('/'))
+            {
+                reexportPath = Path.GetFullPath(Path.Combine(wwwroot, reexportSpecifier.TrimStart('/')));
+            }
+
+            if (reexportPath != null && File.Exists(reexportPath))
+            {
+                var nested = GetModuleExportedSymbols(reexportPath, wwwroot, cache, visited);
+                foreach (var s in nested) exports.Add(s);
+            }
+        }
+
+        cache[fullPath] = exports;
+        return exports;
+    }
+
+    [Fact]
+    public void AllFrontendViews_EsmModuleImports_MustMatchTargetExportedSymbols()
+    {
+        var root = FindRepoRoot();
+        var wwwroot = Path.Combine(root, "Business", "ReferenceRAG.Business", "wwwroot");
+        var importMap = ExtractImportMap(wwwroot);
+        var files = GetFrontendViewFiles(root);
+        Assert.NotEmpty(files);
+
+        var cache = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        var errors = new List<string>();
+
+        var importRegex = new Regex(@"import\s+(?:([\w$]+)\s*,?\s*)?(?:(?:\*\s+as\s+([\w$]+))|(?=\{)|(\{[\s\S]*?\}))?\s*from\s*['""]([^'""]+)['""]");
+
+        foreach (var file in files)
+        {
+            var relFile = Path.GetRelativePath(root, file).Replace('\\', '/');
+            var content = File.ReadAllText(file);
+
+            foreach (Match match in importRegex.Matches(content))
+            {
+                var defaultImport = match.Groups[1].Value;
+                var namespaceImport = match.Groups[2].Value;
+                var namedBlock = match.Groups[3].Value;
+                var specifier = match.Groups[4].Value;
+
+                string? resolvedPath = null;
+                if (importMap.TryGetValue(specifier, out var mapped))
+                {
+                    resolvedPath = Path.GetFullPath(Path.Combine(wwwroot, mapped.TrimStart('/')));
+                }
+                else if (specifier.StartsWith('/'))
+                {
+                    resolvedPath = Path.GetFullPath(Path.Combine(wwwroot, specifier.TrimStart('/')));
+                }
+                else if (specifier.StartsWith('.'))
+                {
+                    resolvedPath = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(file)!, specifier));
+                }
+
+                if (resolvedPath == null)
+                {
+                    errors.Add($"[{relFile}] 无法解析模块规范名: '{specifier}'");
+                    continue;
+                }
+
+                if (!File.Exists(resolvedPath))
+                {
+                    errors.Add($"[{relFile}] 模块目标文件不存在: '{specifier}' -> {resolvedPath}");
+                    continue;
+                }
+
+                if (!string.IsNullOrEmpty(namespaceImport) && string.IsNullOrEmpty(defaultImport) && string.IsNullOrEmpty(namedBlock))
+                {
+                    continue;
+                }
+
+                var exports = GetModuleExportedSymbols(resolvedPath, wwwroot, cache, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+
+                if (!string.IsNullOrEmpty(defaultImport) && !exports.Contains("default"))
+                {
+                    errors.Add($"[{relFile}] 模块 '{specifier}' 未提供 default 导出 (导入名: '{defaultImport}')");
+                }
+
+                if (!string.IsNullOrEmpty(namedBlock))
+                {
+                    var clean = namedBlock.Trim('{', '}');
+                    var items = clean.Split(',').Select(x => x.Trim()).Where(x => !string.IsNullOrEmpty(x));
+                    foreach (var item in items)
+                    {
+                        var parts = Regex.Split(item, @"\s+as\s+");
+                        var importedName = parts[0].Trim();
+                        if (!exports.Contains(importedName))
+                        {
+                            errors.Add($"[{relFile}] 模块 '{specifier}' 未提供名为 '{importedName}' 的导出符号 (浏览器端将抛出 SyntaxError 启动失败)");
+                        }
+                    }
+                }
+            }
+        }
+
+        Assert.True(errors.Count == 0,
+            $"发现 {errors.Count} 处 ESM 模块导入/导出契约违背异常:\n" + string.Join("\n", errors));
     }
 }

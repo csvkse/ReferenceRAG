@@ -2,6 +2,20 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.48] - 2026-10-31
+
+### 修复 @vicons/ionicons5 缺失 KeyOutline 启动失败故障与 ESM 模块导入/导出全栈双轨长效门禁架构
+- **修复 `@vicons/ionicons5` 缺失 `KeyOutline` 图标导致前端启动失败致命语法错误 (`KeyOutline.js`, `vendor/icons.js`, `MainLayout.js`)**：
+  - 针对项目精简裁剪的 `@vicons/ionicons5` vendor 子集，规范实现 `KeyOutline.js` 矢量组件（基于 Ionicons 5 官方 Path 数据与 Vue 3 `defineComponent` 格式）；
+  - 在 `vendor/icons.js` 及离线 `node_modules/@vicons/ionicons5` 中完整重导出 `KeyOutline`，彻底解决浏览器在加载 `MainLayout.js` 时抛出的 `SyntaxError: The requested module '@vicons/ionicons5' does not provide an export named 'KeyOutline'` 导致应用白屏无法启动问题。
+- **全栈 ESM 模块导入/导出符号契约双轨长效门禁与防回归体系 (`check.mjs`, `FrontendViewIntegrityTests.cs`, `frontend-logic.test.mjs`)**：
+  - **Node.js 静态门禁引擎升级 (`check.mjs`)**：原生解析 `index.html` 中的 `<script type="importmap">`，递归解析所有目标模块的导出符号表（涵盖 default、具名导出、声明变量、别名重命名及 `export *` 通配符重导出），毫秒级严格校验所有 JS 文件的 import 语句，对任何不存在模块或未导出具名符号实施即刻阻断；
+  - **C# 宿主 xUnit 集成门禁 (`FrontendViewIntegrityTests.cs`)**：新增 `AllFrontendViews_EsmModuleImports_MustMatchTargetExportedSymbols` 自动化守卫测试，脱离 Node 运行时环境依然能原生断言 importmap 与符号契约；
+  - **双向防回归自动化测试 (`frontend-logic.test.mjs`)**：增补负向探测（验证未导出符号与未提供 default 时精准报错拦截）与正向契约用例，全套 26 项前端单测全绿。
+- **专项架构与深度复盘设计文档归档 (`docs/`)**：
+  - `docs/vicons-missing-export-root-cause-solution-and-esm-guardrail.md`
+  - `docs/per-source-data-isolation-and-multi-model-dynamic-lifecycle-architecture.md`
+
 ## [1.0.47] - 2026-10-30
 
 ### 源管理全功能文件管理器、细粒度 API Key 树状授权与数据源 ABAC 隔离、流式行阅读及 Agent 级正则搜索引擎
