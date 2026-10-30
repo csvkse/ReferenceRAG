@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# ReferenceRAG: shared static ES modules, no frontend build stage.
+# ReferenceRAG: shared static ES modules, Universal CPU + Vulkan Native Acceleration.
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
@@ -10,7 +10,7 @@ COPY Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.cspr
 COPY Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj ./Business/ReferenceRAG.Business/
 COPY Host/ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj ./Host/ReferenceRAG.ApiHost/
 COPY Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj ./Host/ReferenceRAG.WebHost/
-RUN dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -p:GpuBackend=cpu
+RUN dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -p:GpuBackend=universal
 
 # Stage 2: Build & Publish (prune Windows/macOS native runtimes to shrink Linux image)
 COPY Infrastructure/ ./Infrastructure/
@@ -21,31 +21,34 @@ COPY support/config/appsettings.template.json ./support/config/
 RUN dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
     -c Release \
     -o /app/publish \
-    /p:GpuBackend=cpu \
+    /p:GpuBackend=universal \
     /p:UseAppHost=false \
     /p:DebugType=none \
     /p:DebugSymbols=false \
     && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx*
 
 # ============================================================
-# Stage 3: Runtime (CPU version)
+# Stage 3: Runtime (Universal: CPU + Vulkan Native Acceleration)
 # ============================================================
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-# Install wget for health check, libgomp1 for native CPU inference, libvulkan1 for Vulkan acceleration, and gosu for user privilege drop
+# Install wget for health check, libgomp1 for native CPU inference, libvulkan1 & mesa-vulkan-drivers for Vulkan acceleration, and gosu for user privilege drop
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     libgomp1 \
     libvulkan1 \
+    mesa-vulkan-drivers \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Create data directory, compatibility symlink, and non-root user
+# Create data directory, compatibility symlink, and non-root user (ensure video & render groups exist for GPU DRI device access)
 RUN mkdir -p /app/data /app/models /app/logs \
     && ln -sf /app/logs /app/Logs \
     && groupadd -r appgroup \
-    && useradd -r -g appgroup appuser \
+    && (getent group video || groupadd -r video) \
+    && (getent group render || groupadd -r render) \
+    && useradd -r -g appgroup -G video,render appuser \
     && chown -R appuser:appgroup /app
 
 # Copy published application and entrypoint script
@@ -64,7 +67,7 @@ ENV LogsPath=/app/logs
 ENV DOTNET_RUNNING_IN_CONTAINER=true
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-ENV LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:/app/runtimes/linux-x64/native/vulkan:${LD_LIBRARY_PATH}"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
