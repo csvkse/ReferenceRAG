@@ -526,8 +526,7 @@ The user is asking for an introduction to Chengdu. I’ll provide an overview.
 
 test('Settings.js chat model tab includes enableIntentRouting toggle with sensible defaults', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
-    const filePath = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Settings.js');
+    const filePath = new URL('../app/views/Settings.js', import.meta.url);
     const content = fs.readFileSync(filePath, 'utf8');
 
     // 1. 验证默认配置中默认开启意图识别与路由
@@ -543,8 +542,7 @@ test('Settings.js chat model tab includes enableIntentRouting toggle with sensib
 
 test('Settings.js chat model tab includes repetition penalty, frequency/presence penalties, and stream circuit breaker', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
-    const filePath = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Settings.js');
+    const filePath = new URL('../app/views/Settings.js', import.meta.url);
     const content = fs.readFileSync(filePath, 'utf8');
 
     // 1. 默认配置参数
@@ -641,8 +639,7 @@ test('conversation-scroll.js: scroll buffer calculations, user intent pause, and
 
 test('Chat.js integrates conversation-scroll state machine, RAF batching, and floating resume button', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
-    const chatPath = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Chat.js');
+    const chatPath = new URL('../app/views/Chat.js', import.meta.url);
     const content = fs.readFileSync(chatPath, 'utf8');
 
     // 1. 验证导入通用滚动状态机模块
@@ -723,8 +720,7 @@ test('resolveScrollContainer defensively resolves Naive UI NScrollbar and preven
 
     // 6. 验证 Chat.js 源码已消除不安全的 $el?.querySelector 直接调用
     const fs = await import('node:fs');
-    const path = await import('node:path');
-    const chatPath = path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/Chat.js');
+    const chatPath = new URL('../app/views/Chat.js', import.meta.url);
     const chatContent = fs.readFileSync(chatPath, 'utf8');
 
     assert(!chatContent.includes('$el?.querySelector'), 'Chat.js must not contain raw un-guarded $el?.querySelector call');
