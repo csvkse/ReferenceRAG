@@ -1002,8 +1002,8 @@ test('Component prop rules guardrail: checkComponentPropRules detects invalid sp
 
     // 3. Verify actual ApiKeys.js and App.js have zero violations
     const fs = await import('node:fs');
-    const path = await import('node:path');
-    const apiKeysSrc = fs.readFileSync(path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/ApiKeys.js'), 'utf8');
+    const apiKeysFile = new URL('../app/views/ApiKeys.js', import.meta.url);
+    const apiKeysSrc = fs.readFileSync(apiKeysFile, 'utf8');
     assert.equal(checkComponentPropRules(apiKeysSrc, 'ApiKeys.js').length, 0, 'ApiKeys.js must have zero invalid space size props');
 });
 
