@@ -980,4 +980,32 @@ test('ApiKeys security presets and search filtering work as expected', () => {
     assert.ok(!readOnlyTools.includes('RestartService'), 'Dangerous tools must be excluded in ReadOnly preset');
 });
 
+test('Component prop rules guardrail: checkComponentPropRules detects invalid space sizes preventing undefined split/horizontal crashes', async () => {
+    const { checkComponentPropRules } = await import('../check.mjs');
+
+    // 1. Valid sizes
+    assert.equal(checkComponentPropRules('<n-space size="small">', 'test.js').length, 0);
+    assert.equal(checkComponentPropRules('<n-space size="medium">', 'test.js').length, 0);
+    assert.equal(checkComponentPropRules('<n-space size="large">', 'test.js').length, 0);
+    assert.equal(checkComponentPropRules('<n-space :size="16">', 'test.js').length, 0);
+    assert.equal(checkComponentPropRules('h(NSpace, { size: "small" })', 'test.js').length, 0);
+    assert.equal(checkComponentPropRules('h(NSpace, { size: 12 })', 'test.js').length, 0);
+
+    // 2. Invalid 'tiny' size (the exact bug that caused Cannot read properties of undefined reading split)
+    const tagErrors = checkComponentPropRules('<n-space size="tiny" align="center">', 'ApiKeys.js');
+    assert.equal(tagErrors.length, 1);
+    assert.match(tagErrors[0], /Invalid size="tiny" on <n-space>/);
+
+    const hErrors = checkComponentPropRules('h(NSpace, { size: "tiny" })', 'ApiKeys.js');
+    assert.equal(hErrors.length, 1);
+    assert.match(hErrors[0], /Invalid size: 'tiny' in h\(NSpace, ...\)/);
+
+    // 3. Verify actual ApiKeys.js and App.js have zero violations
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const apiKeysSrc = fs.readFileSync(path.resolve('Business/ReferenceRAG.Business/wwwroot/app/views/ApiKeys.js'), 'utf8');
+    assert.equal(checkComponentPropRules(apiKeysSrc, 'ApiKeys.js').length, 0, 'ApiKeys.js must have zero invalid space size props');
+});
+
+
 

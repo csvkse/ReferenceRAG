@@ -413,7 +413,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 title: '通道权限',
                 key: 'channels',
                 width: 140,
-                render: (row) => h(NSpace, { size: 'tiny' }, {
+                render: (row) => h(NSpace, { size: 'small' }, {
                     default: () => [
                         h(NTag, { type: row.allowApi ? 'success' : 'default', size: 'small' }, { default: () => 'API' }),
                         h(NTag, { type: row.allowMcp ? 'info' : 'default', size: 'small' }, { default: () => 'MCP' })
@@ -429,7 +429,7 @@ const component = /*@__PURE__*/ _defineComponent({
                     if (scopes.includes('*') || scopes.length === 0) {
                         return h(NTag, { type: 'primary', size: 'small' }, { default: () => '全模块放行 (*)' });
                     }
-                    return h(NSpace, { size: 'tiny' }, {
+                    return h(NSpace, { size: 'small' }, {
                         default: () => scopes.map(s => h(NTag, { size: 'small', secondary: true }, { default: () => s }))
                     });
                 }
@@ -641,7 +641,7 @@ component.template = `
                     </div>
 
                     <!-- 通道标记与工具计数 -->
-                    <n-space size="tiny" align="center" style="flex-shrink: 0;" @click.stop>
+                    <n-space size="small" align="center" style="flex-shrink: 0;" @click.stop>
                       <n-tag v-if="cat.supportsApi" size="tiny" type="success" secondary>REST API</n-tag>
                       <n-tag v-if="cat.supportsMcp" size="tiny" type="info" secondary>MCP</n-tag>
                       <n-tag v-if="cat.tools && cat.tools.length > 0" size="tiny" :bordered="false">
