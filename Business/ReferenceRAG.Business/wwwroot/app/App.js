@@ -7,6 +7,12 @@ const component = /*@__PURE__*/ _defineComponent({
         __expose();
         const isDark = ref(true);
         const currentTheme = computed(() => isDark.value ? darkTheme : null);
+        // 全局主题兜底：扩展 Naive UI NSpace 未定义的 gapTiny，防止业务代码误传 size="tiny" 时内部 split(' ') 抛出未捕获运行时异常
+        const themeOverrides = {
+            Space: {
+                gapTiny: '4px 8px'
+            }
+        };
         const toggleTheme = () => {
             isDark.value = !isDark.value;
             localStorage.setItem('rag_theme', isDark.value ? 'dark' : 'light');
@@ -34,10 +40,10 @@ const component = /*@__PURE__*/ _defineComponent({
             }
             updateBodyClass();
         });
-        const __returned__ = { isDark, currentTheme, toggleTheme, updateBodyClass, get zhCN() { return zhCN; }, get dateZhCN() { return dateZhCN; } };
+        const __returned__ = { isDark, currentTheme, themeOverrides, toggleTheme, updateBodyClass, get zhCN() { return zhCN; }, get dateZhCN() { return dateZhCN; } };
         return __returned__;
     }
 });
 
-component.template = "\n  <n-config-provider :theme=\"currentTheme\" :locale=\"zhCN\" :date-locale=\"dateZhCN\">\n    <n-loading-bar-provider>\n      <n-message-provider>\n        <n-notification-provider>\n          <n-dialog-provider>\n            <router-view />\n          </n-dialog-provider>\n        </n-notification-provider>\n      </n-message-provider>\n    </n-loading-bar-provider>\n  </n-config-provider>\n";
+component.template = "\n  <n-config-provider :theme=\"currentTheme\" :theme-overrides=\"themeOverrides\" :locale=\"zhCN\" :date-locale=\"dateZhCN\">\n    <n-loading-bar-provider>\n      <n-message-provider>\n        <n-notification-provider>\n          <n-dialog-provider>\n            <router-view />\n          </n-dialog-provider>\n        </n-notification-provider>\n      </n-message-provider>\n    </n-loading-bar-provider>\n  </n-config-provider>\n";
 export default component;

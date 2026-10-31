@@ -301,6 +301,35 @@ export function checkModuleImports(rootDirectory, fullPath, source, importMap = 
   return issues;
 }
 
+export function checkComponentPropRules(source, relPath) {
+  const issues = [];
+  const validSpaceSizes = new Set(['small', 'medium', 'large']);
+
+  // 1. Template validation: <n-space ... size="..." ...>
+  for (const m of source.matchAll(/<n-space\b([^>]*)>/gi)) {
+    const sizeMatch = m[1].match(/\bsize=["']([^"']+)["']/i);
+    if (sizeMatch) {
+      const val = sizeMatch[1].trim();
+      if (!validSpaceSizes.has(val) && isNaN(Number(val))) {
+        issues.push(`Invalid size="${val}" on <n-space> in ${relPath}: Naive UI Space only supports 'small'|'medium'|'large' or number/[number, number]. Passing '${val}' crashes at runtime (reading 'split'/'horizontal').`);
+      }
+    }
+  }
+
+  // 2. Render function validation: h(NSpace, { size: '...' })
+  for (const m of source.matchAll(/h\s*\(\s*NSpace\s*,\s*\{([^}]*)\}/g)) {
+    const sizeMatch = m[1].match(/\bsize\s*:\s*['"]([^'"]+)['"]/);
+    if (sizeMatch) {
+      const val = sizeMatch[1].trim();
+      if (!validSpaceSizes.has(val) && isNaN(Number(val))) {
+        issues.push(`Invalid size: '${val}' in h(NSpace, ...) in ${relPath}: Naive UI Space only supports 'small'|'medium'|'large' or number. Passing '${val}' crashes at runtime (reading 'split'/'horizontal').`);
+      }
+    }
+  }
+
+  return issues;
+}
+
 export function runQualityGate(rootDirectory) {
   let files = 0, templates = 0;
   const errors = [];
@@ -355,6 +384,12 @@ export function runQualityGate(rootDirectory) {
       const undeclaredReturned = checkReturnedScope(source);
       if (undeclaredReturned.length > 0) {
         errors.push(`Undeclared identifier(s) in ${relPath} __returned__: [${undeclaredReturned.join(', ')}] will throw ReferenceError at runtime`);
+      }
+
+      // 5. Component prop contract & enum validation (Naive UI NSpace size enum, preventing 'split'/'horizontal' crashes)
+      const propErrors = checkComponentPropRules(source, relPath);
+      for (const err of propErrors) {
+        errors.push(err);
       }
     }
   }

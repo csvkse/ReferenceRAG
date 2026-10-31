@@ -2,6 +2,23 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.50] - 2026-11-01
+
+### 修复 Naive UI NSpace size="tiny" 运行时异常与组件属性契约全栈双轨门禁架构
+- **修复 Naive UI `NSpace` 传参 `size="tiny"` 导致 `reading 'split'` 与 `reading 'horizontal'` 崩溃异常 (`ApiKeys.js`)**：
+  - **根因消除**：排查并消除了 `ApiKeys.js` 中表格通道标签、业务模块列与新建弹窗二级卡片头部 3 处非法的 `size: 'tiny'` / `size="tiny"`，规范调整为官方合法的 `size: 'small'` 与 `size="small"`；
+  - **组件渲染恢复**：彻底解决 API Key 授权管理页面及弹窗在挂载时由 `gap.split(' ')` 抛错导致卡片头部右侧通道标签与工具计数徽标渲染中断问题。
+- **全局运行时弹性兜底体系（Defense in Depth，`App.js`）**：
+  - **根 Provider 主题补丁注入**：在 `App.js` 的 `n-config-provider` 中通过 `theme-overrides` 全局补齐 `Space: { gapTiny: '4px 8px' }`；
+  - **运行时免死金牌**：即使未来任何业务视图误传未定义的间距参数，Naive UI 底层也能优雅匹配回退尺寸，彻底阻断空指针调用与页面白屏风险。
+- **全栈双轨组件属性契约门禁与防回归体系 (`check.mjs`, `FrontendViewIntegrityTests.cs`, `frontend-logic.test.mjs`)**：
+  - **Node.js 静态门禁引擎扩展 (`check.mjs`)**：新增 `checkComponentPropRules` 静态检测规则，全面扫描 Vue 模板 AST 与 `h(NSpace)` 渲染函数中的组件属性枚举，拦截已知非法属性参数；
+  - **C# xUnit 集成门禁 (`FrontendViewIntegrityTests.cs`)**：新增 `AllFrontendViews_NaiveUiSpaceSize_MustBeValidEnumOrNumber` 自动化守卫测试，脱离 Node 环境依然能在 .NET CI 中阻断非标准 Space 尺寸定义；
+  - **双向防回归单元测试 (`frontend-logic.test.mjs`)**：增补合法尺寸放行、非法 `tiny` 拦截与真实视图零违规断言，全套 29 项前端单测全绿。
+- **专项架构与深度设计文档归档 (`docs/`)**：
+  - `docs/naive-ui-space-size-runtime-exception-investigation-and-guardrails.md`
+  - `docs/per-source-data-isolation-and-multi-model-feasibility-review-and-design-patterns.md`
+
 ## [1.0.49] - 2026-10-31
 
 ### 统一业务模块授权与 MCP 工具白名单架构、长连接即时吊销感知与全景安全模型收敛

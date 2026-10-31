@@ -364,4 +364,59 @@ public sealed class FrontendViewIntegrityTests
         Assert.True(errors.Count == 0,
             $"发现 {errors.Count} 处 ESM 模块导入/导出契约违背异常:\n" + string.Join("\n", errors));
     }
+
+    [Fact]
+    public void AllFrontendViews_NaiveUiSpaceSize_MustBeValidEnumOrNumber()
+    {
+        var root = FindRepoRoot();
+        var files = GetFrontendViewFiles(root);
+        Assert.NotEmpty(files);
+
+        var errors = new List<string>();
+        var validSizes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "small", "medium", "large" };
+
+        var tagSpaceRegex = new Regex(@"<n-space\b([^>]*)>", RegexOptions.IgnoreCase);
+        var tagSizeRegex = new Regex(@"\bsize=[""']([^""']+)[""']", RegexOptions.IgnoreCase);
+        var hSpaceRegex = new Regex(@"h\s*\(\s*NSpace\s*,\s*\{([^}]*)\}");
+        var hSizeRegex = new Regex(@"\bsize\s*:\s*['""]([^'""]+)['""]");
+
+        foreach (var file in files)
+        {
+            var relFile = Path.GetRelativePath(root, file).Replace('\\', '/');
+            var content = File.ReadAllText(file);
+
+            // 1. Template <n-space ... size="..." ...>
+            foreach (Match tm in tagSpaceRegex.Matches(content))
+            {
+                var attrs = tm.Groups[1].Value;
+                var sm = tagSizeRegex.Match(attrs);
+                if (sm.Success)
+                {
+                    var val = sm.Groups[1].Value.Trim();
+                    if (!validSizes.Contains(val) && !double.TryParse(val, out _))
+                    {
+                        errors.Add($"[{relFile}] <n-space> 存在非法 size=\"{val}\"，Naive UI Space 仅支持 'small'|'medium'|'large' 或数字，传 tiny 会导致运行时异常 (reading 'split'/'horizontal')");
+                    }
+                }
+            }
+
+            // 2. Render h(NSpace, { size: '...' })
+            foreach (Match hm in hSpaceRegex.Matches(content))
+            {
+                var props = hm.Groups[1].Value;
+                var sm = hSizeRegex.Match(props);
+                if (sm.Success)
+                {
+                    var val = sm.Groups[1].Value.Trim();
+                    if (!validSizes.Contains(val) && !double.TryParse(val, out _))
+                    {
+                        errors.Add($"[{relFile}] h(NSpace, ...) 存在非法 size: '{val}'，Naive UI Space 仅支持 'small'|'medium'|'large' 或数字，传 tiny 会导致运行时异常 (reading 'split'/'horizontal')");
+                    }
+                }
+            }
+        }
+
+        Assert.True(errors.Count == 0,
+            $"发现 {errors.Count} 处 Naive UI NSpace size 属性违规缺陷:\n" + string.Join("\n", errors));
+    }
 }
