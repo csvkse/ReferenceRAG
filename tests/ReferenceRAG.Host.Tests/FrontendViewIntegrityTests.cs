@@ -419,4 +419,64 @@ public sealed class FrontendViewIntegrityTests
         Assert.True(errors.Count == 0,
             $"发现 {errors.Count} 处 Naive UI NSpace size 属性违规缺陷:\n" + string.Join("\n", errors));
     }
+
+    [Fact]
+    public void AllFrontendViews_FlexScrollContainers_MustNotShrinkChildElements()
+    {
+        var root = FindRepoRoot();
+        var files = GetFrontendViewFiles(root);
+        Assert.NotEmpty(files);
+
+        var errors = new List<string>();
+        var flexScrollRegex = new Regex(@"<([a-zA-Z0-9_-]+)\b([^>]*style=[""'][^""']*[""'][^>]*)>", RegexOptions.IgnoreCase);
+        var styleRegex = new Regex(@"style=[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+        var childDivRegex = new Regex(@"<div\b([^>]*style=[""'][^""']*[""'][^>]*)>", RegexOptions.IgnoreCase);
+
+        foreach (var file in files)
+        {
+            var relFile = Path.GetRelativePath(root, file).Replace('\\', '/');
+            var content = File.ReadAllText(file);
+
+            foreach (Match match in flexScrollRegex.Matches(content))
+            {
+                var tagName = match.Groups[1].Value;
+                var sm = styleRegex.Match(match.Groups[2].Value);
+                if (!sm.Success) continue;
+                var style = sm.Groups[1].Value;
+
+                var isFlex = Regex.IsMatch(style, @"display:\s*flex", RegexOptions.IgnoreCase);
+                var isCol = Regex.IsMatch(style, @"flex-direction:\s*column", RegexOptions.IgnoreCase);
+                var isScroll = Regex.IsMatch(style, @"overflow(?:-y)?:\s*auto", RegexOptions.IgnoreCase);
+                var hasHeight = Regex.IsMatch(style, @"(?:max-height|height):", RegexOptions.IgnoreCase);
+
+                if (isFlex && isCol && isScroll && hasHeight)
+                {
+                    var startPos = match.Index + match.Length;
+                    var length = Math.Min(3000, content.Length - startPos);
+                    var snippet = content.Substring(startPos, length);
+
+                    foreach (Match childMatch in childDivRegex.Matches(snippet))
+                    {
+                        var csm = styleRegex.Match(childMatch.Groups[1].Value);
+                        if (!csm.Success) continue;
+                        var cStyle = csm.Groups[1].Value;
+
+                        var hasOverflowHidden = Regex.IsMatch(cStyle, @"overflow:\s*hidden", RegexOptions.IgnoreCase);
+                        var hasFlexShrinkZero = Regex.IsMatch(cStyle, @"flex-shrink:\s*0", RegexOptions.IgnoreCase) ||
+                                                Regex.IsMatch(cStyle, @"flex:\s*0\s+0", RegexOptions.IgnoreCase) ||
+                                                Regex.IsMatch(cStyle, @"flex:\s*none", RegexOptions.IgnoreCase);
+
+                        if (hasOverflowHidden && !hasFlexShrinkZero)
+                        {
+                            errors.Add($"[{relFile}] <{tagName}> 纵向滚动容器 (flex-direction: column + overflow-y: auto) 内的子级 <div> 具有 'overflow: hidden' 但缺失 'flex-shrink: 0'，导致 Flexbox 将子项高度压缩至 0 产生重叠挤压缺陷！");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Assert.True(errors.Count == 0,
+            $"发现 {errors.Count} 处 Flex 滚动容器子元素收缩重叠缺陷:\n" + string.Join("\n", errors));
+    }
 }

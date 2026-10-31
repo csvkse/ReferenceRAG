@@ -2,6 +2,20 @@
 
 本文件记录面向使用者的重要变化。完整提交记录和安装包见 [GitHub Releases](https://github.com/csvkse/ReferenceRAG/releases)。
 
+## [1.0.51] - 2026-11-01
+
+### 修复弹窗选项重叠挤压缺陷与 Flex 滚动容器抗压缩双轨质量门禁架构
+- **修复 API Key 权限树卡片重叠挤压与截断缺陷 (`ApiKeys.js`)**：
+  - **根因消除（锁死主轴尺寸）**：排查并解决了在 `max-height: 380px` 纵向 Flex 滚动容器中，子项目因 `overflow: hidden` 导致 W3C 自动最小高度（`min-height: auto`）降为 `0` 并被 `flex-shrink: 1` 强行压扁至 25px 的隐性布局缺陷；
+  - **抗收缩与排版优化**：在模块级卡片上明确声明 `flex-shrink: 0;`，确保卡片高度 100% 由自身内容撑开；重构卡片头部布局（`min-height: 44px`、`padding: 10px 12px` 与 `min-width: 0`），确保长文本自适应折行且右侧通道徽标完整展示；
+  - **滚动机制恢复**：当模块展开或列表总高超出 380px 时，平滑激活 `overflow-y: auto` 滚动条，彻底根除选项卡片相互遮挡与重叠。
+- **全栈双轨 Flex 滚动容器防挤压质量门禁与防回归体系 (`check.mjs`, `FrontendViewIntegrityTests.cs`, `frontend-logic.test.mjs`)**：
+  - **Node.js 静态门禁引擎扩展 (`check.mjs`)**：新增 `checkFlexScrollContainerRules` 静态检测规则，自动扫描全站纵向 Flex 滚动容器，阻断直接子元素含 `overflow: hidden` 但缺少 `flex-shrink: 0` 的收缩风险；
+  - **C# xUnit 集成门禁 (`FrontendViewIntegrityTests.cs`)**：新增 `AllFrontendViews_FlexScrollContainers_MustNotShrinkChildElements` 自动化守卫测试，脱离 Node 环境原生守卫全站视图排版稳定性；
+  - **双向防回归单元测试 (`frontend-logic.test.mjs`)**：增补负向危险模式拦截、正向 `flex-shrink: 0` 放行与真实视图零违规断言，全套 40 项前端单测全绿通过。
+- **专项架构与深度设计文档归档 (`docs/`)**：
+  - `docs/flex-scroll-shrink-overlap-investigation-and-guardrails.md`
+
 ## [1.0.50] - 2026-11-01
 
 ### 修复 Naive UI NSpace size="tiny" 运行时异常与组件属性契约全栈双轨门禁架构

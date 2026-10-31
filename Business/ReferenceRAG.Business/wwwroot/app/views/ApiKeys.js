@@ -616,15 +616,15 @@ component.template = `
                 <div
                   v-for="cat in filteredCategories"
                   :key="cat.key"
-                  style="border: 1px solid rgba(128,128,128,0.18); border-radius: 6px; overflow: hidden; background: rgba(128,128,128,0.04);"
+                  style="border: 1px solid rgba(128,128,128,0.18); border-radius: 6px; overflow: hidden; background: rgba(128,128,128,0.04); flex-shrink: 0;"
                 >
                   <!-- 模块头部 -->
                   <div
-                    style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: rgba(128,128,128,0.06); cursor: pointer; user-select: none;"
+                    style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; min-height: 44px; background: rgba(128,128,128,0.06); cursor: pointer; user-select: none;"
                     @click="toggleCategoryCollapse(cat.key)"
                   >
-                    <div style="display: flex; align-items: center; gap: 8px; flex: 1;">
-                      <span style="font-size: 11px; color: #888; width: 14px; text-align: center;">
+                    <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
+                      <span style="font-size: 11px; color: #888; width: 14px; text-align: center; flex-shrink: 0;">
                         {{ isCategoryCollapsed(cat.key) ? '▶' : '▼' }}
                       </span>
                       <n-checkbox
@@ -632,8 +632,9 @@ component.template = `
                         :indeterminate="isCategoryIndeterminate(cat)"
                         @click.stop
                         @update:checked="() => toggleCategoryNode(cat)"
+                        style="flex-shrink: 0;"
                       />
-                      <div>
+                      <div style="flex: 1; min-width: 0;">
                         <span style="font-weight: 600; font-size: 13px;">{{ cat.name }}</span>
                         <span style="font-family: monospace; font-size: 11px; margin-left: 6px; color: #18a058;">#{{ cat.moduleCode }}</span>
                         <n-text depth="3" style="font-size: 11px; margin-left: 8px; display: inline-block;">{{ cat.description }}</n-text>
@@ -641,7 +642,7 @@ component.template = `
                     </div>
 
                     <!-- 通道标记与工具计数 -->
-                    <n-space size="small" align="center" style="flex-shrink: 0;" @click.stop>
+                    <n-space size="small" align="center" style="flex-shrink: 0; margin-left: 12px;" @click.stop>
                       <n-tag v-if="cat.supportsApi" size="tiny" type="success" secondary>REST API</n-tag>
                       <n-tag v-if="cat.supportsMcp" size="tiny" type="info" secondary>MCP</n-tag>
                       <n-tag v-if="cat.tools && cat.tools.length > 0" size="tiny" :bordered="false">
