@@ -13,6 +13,8 @@ using ReferenceRAG.Core.Extensions;
 using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Business.Features.KnowledgeBase;
+using ReferenceRAG.Core.Features.KnowledgeBase;
 using ReferenceRAG.Service.Controllers;
 using ReferenceRAG.Service.Hubs;
 using ReferenceRAG.Service.McpTools;
@@ -42,6 +44,8 @@ public static class RagWebHostExtensions
         catch { }
 
         ReferenceRAG.Business.Composition.BusinessComposition.AddRagBusiness(services, configuration);
+        services.AddKnowledgeBaseStorage();
+        services.AddKnowledgeBaseServices();
         Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<ReferenceRAG.Business.Features.App.Contracts.IPlatformActions,ReferenceRAG.Business.Features.App.Contracts.BrowserPlatformActions>(services);
         services.AddSingleton<IndexEventPublisher>();
         services.AddSingleton<ReferenceRAG.Business.Features.Indexing.Contracts.IIndexEventPublisher>(sp => sp.GetRequiredService<IndexEventPublisher>());
@@ -92,6 +96,7 @@ public static class RagWebHostExtensions
             registry.RegisterLocalTool<GraphSearchTools>();
             registry.RegisterLocalTool<IndexStatusTools>();
             registry.RegisterLocalTool<SourceManagementTools>();
+            registry.RegisterLocalTool<KnowledgeBaseMcpTools>();
         });
         #endregion
 

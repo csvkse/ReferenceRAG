@@ -172,7 +172,11 @@ export const modelsApi = {
     // 切换模型变体（嵌入、重排或聊天）
     switchVariant: (modelName, variantFileName, isRerank = false, modelType = null) => api.post('/Models/switch-variant', { modelName, variantFileName, isRerank, modelType }),
     // 删除模型特定变体
-    deleteVariant: (modelName, variantFileName, isRerank = false) => api.delete(`/Models/variant?modelName=${encodeURIComponent(modelName)}&variantFileName=${encodeURIComponent(variantFileName)}&isRerank=${isRerank}`)
+    deleteVariant: (modelName, variantFileName, isRerank = false) => api.delete(`/Models/variant?modelName=${encodeURIComponent(modelName)}&variantFileName=${encodeURIComponent(variantFileName)}&isRerank=${isRerank}`),
+    // 动态拉取远程模型列表
+    discoverRemoteModels: (data) => api.post('/Models/remote-models', data),
+    // 探针测试并探测模型输出维度
+    probeDimension: (data) => api.post('/Models/probe-dimension', data)
 };
 // vectorsApi / vectorIndexApi removed — use indexJobsApi + indexApi
 // System
@@ -268,4 +272,25 @@ export const apiKeysApi = {
     toggle: (id, isEnabled) => api.patch(`/ApiKeys/${encodeURIComponent(id)}/toggle`, { isEnabled }),
     delete: (id) => api.delete(`/ApiKeys/${encodeURIComponent(id)}`)
 };
+// 知识库物理隔离与多模型调度 API (v3.3 规范)
+export const knowledgeBasesApi = {
+    getAll: () => api.get('/knowledge-bases'),
+    getById: (id) => api.get(`/knowledge-bases/${encodeURIComponent(id)}`),
+    create: (data) => api.post('/knowledge-bases', data),
+    delete: (id) => api.delete(`/knowledge-bases/${encodeURIComponent(id)}`),
+    getConnectors: (id) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/connectors`),
+    addConnector: (id, data) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/connectors`, data),
+    deleteConnector: (id, connectorId) => api.delete(`/knowledge-bases/${encodeURIComponent(id)}/connectors/${encodeURIComponent(connectorId)}`),
+    triggerSync: (id, connectorId) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/jobs`, { connectorId }),
+    getEmbeddingSpecs: () => api.get('/knowledge-bases/embedding-specs'),
+    getJob: (jobId) => api.get(`/jobs/${encodeURIComponent(jobId)}`),
+    listJobs: (kbId = null) => api.get('/jobs', { params: { knowledgeBaseId: kbId } }),
+    cancelJob: (jobId) => api.post(`/jobs/${encodeURIComponent(jobId)}/cancel`)
+};
+
+// 跨知识库受控检索 API
+export const knowledgeBaseSearchApi = {
+    search: (data) => api.post('/knowledge-base-search', data)
+};
+
 export default api;

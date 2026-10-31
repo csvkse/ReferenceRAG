@@ -28,6 +28,12 @@ const routes = [
                 meta: { title: '向量搜索' }
             },
             {
+                path: 'knowledge-bases',
+                name: 'KnowledgeBases',
+                component: () => import('/app/views/KnowledgeBases.js'),
+                meta: { title: '知识库管理' }
+            },
+            {
                 path: 'sources',
                 name: 'Sources',
                 component: () => import('/app/views/Sources.js'),

@@ -1450,6 +1450,153 @@ public async Task<ActionResult<ModelDownloadOptions>> GetRerankDownloadOptions(s
 
         return NotFound(new { error = "聊天模型不存在或删除失败" });
     }
+
+    /// <summary>
+    /// 拉取远程 OpenAI 兼容服务（如 SiliconFlow, Ollama, DeepSeek 等）的模型列表
+    /// </summary>
+    [HttpPost("remote-models")]
+    public async Task<ActionResult> DiscoverRemoteModels([FromBody] DiscoverRemoteModelsRequest request, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.BaseUrl))
+        {
+            return BadRequest(new { error = "API 基础地址 BaseUrl 不能为空" });
+        }
+
+        try
+        {
+            var baseUrl = request.BaseUrl.Trim().TrimEnd('/');
+            var url = baseUrl.EndsWith("/models", StringComparison.OrdinalIgnoreCase)
+                ? baseUrl
+                : $"{baseUrl}/models";
+
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            if (!string.IsNullOrWhiteSpace(request.ApiKey))
+            {
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", request.ApiKey.Trim());
+            }
+
+            var resp = await http.GetAsync(url, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                var errPayload = await resp.Content.ReadAsStringAsync(ct);
+                return StatusCode((int)resp.StatusCode, new { error = $"远端服务返回错误 ({(int)resp.StatusCode}): {errPayload}" });
+            }
+
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var models = new List<string>();
+
+            if (doc.RootElement.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var item in dataEl.EnumerateArray())
+                {
+                    if (item.TryGetProperty("id", out var idProp))
+                    {
+                        var modelId = idProp.GetString();
+                        if (!string.IsNullOrWhiteSpace(modelId)) models.Add(modelId);
+                    }
+                }
+            }
+            else if (doc.RootElement.TryGetProperty("models", out var modelsEl) && modelsEl.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var item in modelsEl.EnumerateArray())
+                {
+                    if (item.TryGetProperty("name", out var nameProp))
+                    {
+                        var modelName = nameProp.GetString();
+                        if (!string.IsNullOrWhiteSpace(modelName)) models.Add(modelName);
+                    }
+                }
+            }
+
+            return Ok(new
+            {
+                success = true,
+                count = models.Count,
+                models = models.OrderBy(m => m).ToList()
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "拉取远程模型列表异常: {BaseUrl}", request.BaseUrl);
+            return StatusCode(500, new { error = $"连接远端服务失败: {ex.Message}" });
+        }
+    }
+
+    /// <summary>
+    /// 发送探测请求以测定指定远程嵌入模型的输出向量维度
+    /// </summary>
+    [HttpPost("probe-dimension")]
+    public async Task<ActionResult> ProbeDimension([FromBody] ProbeDimensionRequest request, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.BaseUrl))
+        {
+            return BadRequest(new { error = "API 基础地址 BaseUrl 不能为空" });
+        }
+        if (string.IsNullOrWhiteSpace(request.ModelName))
+        {
+            return BadRequest(new { error = "模型名称 ModelName 不能为空" });
+        }
+
+        try
+        {
+            var baseUrl = request.BaseUrl.Trim().TrimEnd('/');
+            var url = baseUrl.EndsWith("/embeddings", StringComparison.OrdinalIgnoreCase)
+                ? baseUrl
+                : $"{baseUrl}/embeddings";
+
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+            if (!string.IsNullOrWhiteSpace(request.ApiKey))
+            {
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", request.ApiKey.Trim());
+            }
+
+            var payload = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                model = request.ModelName.Trim(),
+                input = new[] { "probe test" }
+            });
+
+            using var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            var resp = await http.PostAsync(url, content, ct);
+            var respBody = await resp.Content.ReadAsStringAsync(ct);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                return StatusCode((int)resp.StatusCode, new { error = $"探针探测失败 ({(int)resp.StatusCode}): {respBody}" });
+            }
+
+            using var doc = System.Text.Json.JsonDocument.Parse(respBody);
+            int dimension = 0;
+            if (doc.RootElement.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                var first = dataEl.EnumerateArray().FirstOrDefault();
+                if (first.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                    first.TryGetProperty("embedding", out var embEl) &&
+                    embEl.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    dimension = embEl.GetArrayLength();
+                }
+            }
+
+            if (dimension <= 0)
+            {
+                return BadRequest(new { error = "远端返回成功但未解析到有效的向量浮点数组" });
+            }
+
+            return Ok(new
+            {
+                success = true,
+                dimension = dimension,
+                modelName = request.ModelName
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "探针探测向量维度异常: {ModelName} @ {BaseUrl}", request.ModelName, request.BaseUrl);
+            return StatusCode(500, new { error = $"探针连接失败: {ex.Message}" });
+        }
+    }
 }
 
 /// <summary>
@@ -1588,4 +1735,9 @@ public class DownloadProjectorRequest
     /// </summary>
     public string? Repository { get; set; }
 }
+
+public sealed record DiscoverRemoteModelsRequest(string BaseUrl, string? ApiKey = null);
+
+public sealed record ProbeDimensionRequest(string BaseUrl, string ModelName, string? ApiKey = null);
+
 

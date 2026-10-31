@@ -53,6 +53,11 @@ const component = /*@__PURE__*/ _defineComponent({
                 icon: renderIcon(FolderOutline),
                 children: [
                     {
+                        label: '知识库管理',
+                        key: 'KnowledgeBases',
+                        icon: renderIcon(LayersOutline)
+                    },
+                    {
                         label: '源管理',
                         key: 'Sources',
                         icon: renderIcon(FolderOutline)
