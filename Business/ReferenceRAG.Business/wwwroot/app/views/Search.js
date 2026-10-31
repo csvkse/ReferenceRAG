@@ -2,7 +2,7 @@ import { defineComponent as _defineComponent } from 'vue';
 import { ref, computed, onMounted, onActivated, watch } from 'vue';
 import { useMessage } from 'naive-ui';
 import { SearchOutline, ArrowDownOutline, OpenOutline, CloseOutline, RefreshOutline, CubeOutline, GitMergeOutline, LayersOutline, OptionsOutline } from '@vicons/ionicons5';
-import { aiQueryApi, sourcesApi, pathsApi } from '/app/api/index.js';
+import { aiQueryApi, sourcesApi, pathsApi, knowledgeBasesApi, knowledgeBaseSearchApi } from '/app/api/index.js';
 const component = /*@__PURE__*/ _defineComponent({
     ...{ name: 'Search' },
     __name: 'Search',
@@ -20,6 +20,20 @@ const component = /*@__PURE__*/ _defineComponent({
         const selectedPaths = ref([]);
         const pathsLoading = ref(false);
         const searchStatus = ref(null);
+        const knowledgeBases = ref([]);
+        const selectedKbIds = ref([]);
+        const kbOptions = computed(() => knowledgeBases.value.map(kb => ({
+            label: `${kb.name} (${kb.embeddingSpecId})`,
+            value: kb.id
+        })));
+        const loadKnowledgeBases = async () => {
+            try {
+                const res = await knowledgeBasesApi.getAll();
+                knowledgeBases.value = res.data || [];
+            } catch (e) {
+                console.warn('Failed to load knowledge bases in search:', e);
+            }
+        };
         // Mode default configurations - keep UI small and let backend fill the rest
         const modeDefaults = {
             Quick: { topK: 5, enableRerank: false },
@@ -265,7 +279,7 @@ const component = /*@__PURE__*/ _defineComponent({
             loadPaths();
             loadSearchStatus();
         });
-        const __returned__ = { searchQuery, loading, searched, searchError, showAdvanced, searchResponse, sources, paths, selectedPaths, pathsLoading, searchStatus, modeDefaults, defaultOptions, searchOptions, isDefaultOptions, sourceOptions, pathTreeData, selectedPathFolders, handlePathSelect, showDrilldown, drilldownLoading, drilldownResponse, phaseItems, hasAnyPhase, getScoreType, truncateContent, handleKeyDown, handleClearQuery, handleReset, handleSearch, handleDrilldown, loadSources, loadPaths, loadSearchStatus, getStrategyDisplayName, getStepTagType, displayChunks, get SearchOutline() { return SearchOutline; }, get ArrowDownOutline() { return ArrowDownOutline; }, get OpenOutline() { return OpenOutline; }, get CloseOutline() { return CloseOutline; }, get RefreshOutline() { return RefreshOutline; }, get CubeOutline() { return CubeOutline; }, get GitMergeOutline() { return GitMergeOutline; }, get LayersOutline() { return LayersOutline; }, get OptionsOutline() { return OptionsOutline; } };
+        const __returned__ = { searchQuery, loading, searched, searchError, showAdvanced, searchResponse, sources, paths, selectedPaths, pathsLoading, searchStatus, modeDefaults, defaultOptions, searchOptions, isDefaultOptions, sourceOptions, pathTreeData, selectedPathFolders, handlePathSelect, showDrilldown, drilldownLoading, drilldownResponse, phaseItems, hasAnyPhase, getScoreType, truncateContent, handleKeyDown, handleClearQuery, handleReset, handleSearch, handleDrilldown, loadSources, loadPaths, loadSearchStatus, getStrategyDisplayName, getStepTagType, displayChunks, knowledgeBases, selectedKbIds, kbOptions, loadKnowledgeBases, get SearchOutline() { return SearchOutline; }, get ArrowDownOutline() { return ArrowDownOutline; }, get OpenOutline() { return OpenOutline; }, get CloseOutline() { return CloseOutline; }, get RefreshOutline() { return RefreshOutline; }, get CubeOutline() { return CubeOutline; }, get GitMergeOutline() { return GitMergeOutline; }, get LayersOutline() { return LayersOutline; }, get OptionsOutline() { return OptionsOutline; } };
         return __returned__;
     }
 });

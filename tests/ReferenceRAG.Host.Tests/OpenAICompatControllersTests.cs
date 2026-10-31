@@ -294,4 +294,85 @@ public class OpenAICompatControllersTests
         Assert.True(usage.GetProperty("completion_tokens").GetInt32() > 0);
         Assert.True(usage.GetProperty("total_tokens").GetInt32() > 0);
     }
+
+    [Fact]
+    public async Task OpenAIModelsController_GetModels_WithCatalogStore_Returns_KnowledgeBaseModels()
+    {
+        var (chatService, embeddingMock, rerankMock) = CreateTestServices();
+        var catalogMock = new Mock<ReferenceRAG.Core.Features.KnowledgeBase.Storage.ICatalogStore>();
+        catalogMock.Setup(c => c.ListKnowledgeBasesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<ReferenceRAG.Core.Features.KnowledgeBase.Domain.KnowledgeBaseDefinition>
+            {
+                new("kb-legal", "Legal KB", "Law Docs", true, 1, 1, "spec-1", DateTime.UtcNow, DateTime.UtcNow)
+            });
+
+        var controller = new OpenAIModelsController(
+            embeddingMock.Object,
+            rerankMock.Object,
+            chatService,
+            NullLogger<OpenAIModelsController>.Instance,
+            catalogStore: catalogMock.Object)
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+        };
+
+        var actionResult = controller.GetModels();
+        var contentResult = Assert.IsType<ContentResult>(actionResult);
+        using var doc = JsonDocument.Parse(contentResult.Content!);
+        var data = doc.RootElement.GetProperty("data").EnumerateArray().ToList();
+        var modelIds = data.Select(m => m.GetProperty("id").GetString()).ToList();
+
+        Assert.Contains("kb:kb-legal", modelIds);
+    }
+
+    [Fact]
+    public async Task OpenAIChatController_WithKnowledgeBaseId_Injects_RetrievedContext()
+    {
+        var (chatService, _, _) = CreateTestServices(
+            apiKey: "sk-valid-key",
+            responseText: "Answer based on context");
+
+        var kbSearchMock = new Mock<ReferenceRAG.Business.Features.KnowledgeBase.Services.IKnowledgeBaseSearchService>();
+        kbSearchMock.Setup(s => s.SearchAsync(It.IsAny<ReferenceRAG.Business.Features.KnowledgeBase.Services.CrossKnowledgeBaseSearchRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ReferenceRAG.Business.Features.KnowledgeBase.Services.CrossKnowledgeBaseSearchResponse(
+                Query: "What is clause 5?",
+                Items: new List<ReferenceRAG.Core.Features.KnowledgeBase.Domain.RecallItem>
+                {
+                    new("chunk-1", "doc-1", "contract.pdf", "Clause 5 requires 30 days notice.", 0.95, ReferenceRAG.Core.Features.KnowledgeBase.Domain.ScoreKind.RRF, 1)
+                },
+                SuccessfulKnowledgeBaseIds: new[] { "kb-legal" },
+                FailedKnowledgeBaseIds: Array.Empty<string>(),
+                PartialSuccess: false,
+                ScoreKind: ReferenceRAG.Core.Features.KnowledgeBase.Domain.ScoreKind.RRF,
+                Elapsed: TimeSpan.FromMilliseconds(5)
+            ));
+
+        var controller = new OpenAIChatController(
+            chatService,
+            new SimpleTokenizer(),
+            NullLogger<OpenAIChatController>.Instance,
+            kbSearchService: kbSearchMock.Object)
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+        };
+
+        var requestJson = """
+        {
+            "model": "kb:kb-legal",
+            "messages": [{"role": "user", "content": "What is clause 5?"}],
+            "stream": false
+        }
+        """;
+
+        using var doc = JsonDocument.Parse(requestJson);
+        var actionResult = await controller.CreateChatCompletion(doc.RootElement, CancellationToken.None);
+        var contentResult = Assert.IsType<ContentResult>(actionResult);
+        Assert.Equal(200, controller.Response.StatusCode);
+
+        // 验证确实调用了知识库检索，且传递了目标知识库 kb-legal
+        kbSearchMock.Verify(s => s.SearchAsync(
+            It.Is<ReferenceRAG.Business.Features.KnowledgeBase.Services.CrossKnowledgeBaseSearchRequest>(r =>
+                r.Query == "What is clause 5?" && r.KnowledgeBaseIds.Contains("kb-legal")),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
 }

@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Service.Services;
@@ -20,6 +21,7 @@ public class OpenAIModelsController : ControllerBase
     private readonly IRerankService _rerankService;
     private readonly MafChatService _chatService;
     private readonly IModelManager? _modelManager;
+    private readonly ICatalogStore? _catalogStore;
     private readonly ILogger<OpenAIModelsController> _logger;
 
     private static readonly JsonSerializerOptions CamelCase = new()
@@ -33,18 +35,20 @@ public class OpenAIModelsController : ControllerBase
         IRerankService rerankService,
         MafChatService chatService,
         ILogger<OpenAIModelsController> logger,
-        IModelManager? modelManager = null)
+        IModelManager? modelManager = null,
+        ICatalogStore? catalogStore = null)
     {
         _embeddingService = embeddingService;
         _rerankService = rerankService;
         _chatService = chatService;
         _logger = logger;
         _modelManager = modelManager;
+        _catalogStore = catalogStore;
     }
 
     /// <summary>
     /// GET /v1/models
-    /// 列出当前已激活可用的模型（包括 RAG 增强模型、激活 Chat 模型、激活 Embedding 模型、激活 Rerank 模型）。
+    /// 列出当前已激活可用的模型（包括 RAG 增强模型、激活 Chat 模型、激活 Embedding 模型、激活 Rerank 模型以及多库隔离虚拟模型）。
     /// 如需列出本地已下载的全部未激活模型，可指定 ?include_all=true。
     /// </summary>
     [HttpGet("v1/models")]
@@ -62,6 +66,30 @@ public class OpenAIModelsController : ControllerBase
                 description = "ReferenceRAG 知识库混合检索增强生成助手 (Hybrid RAG Assistant)"
             }
         };
+
+        // 活跃知识库虚拟模型（支持 kb:<kbId> 直接路由）
+        if (_catalogStore != null)
+        {
+            try
+            {
+                var kbs = _catalogStore.ListKnowledgeBasesAsync().GetAwaiter().GetResult();
+                foreach (var kb in kbs)
+                {
+                    modelList.Add(new
+                    {
+                        id = $"kb:{kb.Id}",
+                        @object = "model",
+                        created = now,
+                        owned_by = "reference-rag",
+                        description = $"Knowledge Base: {kb.Name} ({kb.Description})"
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "列出知识库模型列表失败");
+            }
+        }
 
         // 活跃聊天模型（当前就绪）
         var currentChat = !string.IsNullOrWhiteSpace(_chatService.CurrentModel)

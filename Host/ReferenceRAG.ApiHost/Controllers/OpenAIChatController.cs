@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Business.Features.KnowledgeBase.Services;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Service.Services;
 
@@ -22,6 +23,7 @@ public class OpenAIChatController : ControllerBase
     private readonly MafChatService _chatService;
     private readonly ITokenizer _tokenizer;
     private readonly ILogger<OpenAIChatController> _logger;
+    private readonly IKnowledgeBaseSearchService? _kbSearchService;
 
     private static readonly JsonSerializerOptions CamelCase = new()
     {
@@ -32,11 +34,13 @@ public class OpenAIChatController : ControllerBase
     public OpenAIChatController(
         MafChatService chatService,
         ITokenizer tokenizer,
-        ILogger<OpenAIChatController> logger)
+        ILogger<OpenAIChatController> logger,
+        IKnowledgeBaseSearchService? kbSearchService = null)
     {
         _chatService = chatService;
         _tokenizer = tokenizer;
         _logger = logger;
+        _kbSearchService = kbSearchService;
     }
 
     /// <summary>
@@ -89,6 +93,31 @@ public class OpenAIChatController : ControllerBase
 
         bool stream = request.TryGetProperty("stream", out var streamEl) && streamEl.ValueKind == JsonValueKind.True;
 
+        // 提取知识库参数（可来自 body 中的 knowledge_base_ids / knowledge_base_id 或 header 中的 X-Knowledge-Base-Id 或 model 为 kb:<id>）
+        var targetKbIds = new List<string>();
+        if (request.TryGetProperty("knowledge_base_ids", out var kbIdsEl) && kbIdsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in kbIdsEl.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+                    targetKbIds.Add(item.GetString()!.Trim());
+            }
+        }
+        else if (request.TryGetProperty("knowledge_base_id", out var kbIdEl) && kbIdEl.ValueKind == JsonValueKind.String)
+        {
+            var id = kbIdEl.GetString()?.Trim();
+            if (!string.IsNullOrWhiteSpace(id)) targetKbIds.Add(id);
+        }
+        else if (Request.Headers.TryGetValue("X-Knowledge-Base-Id", out var headerKbId))
+        {
+            var id = headerKbId.ToString().Trim();
+            if (!string.IsNullOrWhiteSpace(id)) targetKbIds.Add(id);
+        }
+        else if (model.StartsWith("kb:", StringComparison.OrdinalIgnoreCase))
+        {
+            targetKbIds.Add(model["kb:".Length..].Trim());
+        }
+
         // 4. 检查服务配置就绪状态
         if (!_chatService.IsConfigured)
         {
@@ -100,14 +129,51 @@ public class OpenAIChatController : ControllerBase
         // 仅 model 精确等于 "reference-rag" 时触发：名称含 "rag" 的普通模型
         // （如 storage-rag-7b）会被误判为知识库增强模式，强行注入检索上下文。
         const string RagAssistantModelId = "reference-rag";
-        bool isRagMode = string.Equals(model, RagAssistantModelId, StringComparison.OrdinalIgnoreCase);
+        bool isRagMode = string.Equals(model, RagAssistantModelId, StringComparison.OrdinalIgnoreCase) || targetKbIds.Count > 0;
 
         if (isRagMode)
         {
             var latestUserQuery = messages.LastOrDefault(m => m.Role == ChatRole.User)?.Text ?? string.Empty;
             if (!string.IsNullOrWhiteSpace(latestUserQuery))
             {
-                var ragContext = await _chatService.RetrieveRagContextAsync(latestUserQuery, topK: 5, ct);
+                string ragContext = string.Empty;
+                if (_kbSearchService != null && targetKbIds.Count > 0)
+                {
+                    try
+                    {
+                        var kbResult = await _kbSearchService.SearchAsync(new CrossKnowledgeBaseSearchRequest(
+                            Query: latestUserQuery,
+                            KnowledgeBaseIds: targetKbIds,
+                            TopK: 5
+                        ), ct);
+
+                        if (kbResult.Items.Count > 0)
+                        {
+                            var sb = new StringBuilder();
+                            sb.AppendLine("## 知识库检索参考片段 (Knowledge Base Context)");
+                            sb.AppendLine("以下内容检索自隔离知识库。请优先结合这些参考资料准确回答问题，并在引用的观点后标注对应出处：\n");
+                            for (int i = 0; i < kbResult.Items.Count; i++)
+                            {
+                                var item = kbResult.Items[i];
+                                sb.AppendLine($"[{i + 1}] 《{item.SourceKey}》 (分块: {item.ChunkId}, 评分: {item.Score:F3})");
+                                sb.AppendLine("```markdown");
+                                sb.AppendLine(item.Text);
+                                sb.AppendLine("```\n");
+                            }
+                            ragContext = sb.ToString();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[OpenAICompat] 检索隔离知识库失败，尝试降级为全局检索");
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(ragContext))
+                {
+                    ragContext = await _chatService.RetrieveRagContextAsync(latestUserQuery, topK: 5, ct);
+                }
+
                 if (!string.IsNullOrWhiteSpace(ragContext))
                 {
                     // 在消息头部注入 RAG 系统参考提示词
