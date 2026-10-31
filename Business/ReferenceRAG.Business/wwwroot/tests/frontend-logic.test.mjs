@@ -1007,5 +1007,38 @@ test('Component prop rules guardrail: checkComponentPropRules detects invalid sp
     assert.equal(checkComponentPropRules(apiKeysSrc, 'ApiKeys.js').length, 0, 'ApiKeys.js must have zero invalid space size props');
 });
 
+test('Flex scroll container rules guardrail: checkFlexScrollContainerRules detects child shrink hazards preventing squashed overlapping options', async () => {
+    const { checkFlexScrollContainerRules } = await import('../check.mjs');
+
+    // 1. Buggy snippet: flex column scroll container with child having overflow: hidden but no flex-shrink: 0
+    const buggySnippet = `
+      <div style="max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;">
+        <div style="border: 1px solid #333; overflow: hidden; background: #222;">
+          <span>Item 1</span>
+        </div>
+      </div>
+    `;
+    const hazardErrors = checkFlexScrollContainerRules(buggySnippet, 'TestView.js');
+    assert.equal(hazardErrors.length, 1);
+    assert.match(hazardErrors[0], /Flex scroll shrink hazard/);
+
+    // 2. Fixed snippet: child has flex-shrink: 0
+    const fixedSnippet = `
+      <div style="max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;">
+        <div style="border: 1px solid #333; overflow: hidden; background: #222; flex-shrink: 0;">
+          <span>Item 1</span>
+        </div>
+      </div>
+    `;
+    assert.equal(checkFlexScrollContainerRules(fixedSnippet, 'TestView.js').length, 0);
+
+    // 3. Verify actual ApiKeys.js has zero shrink hazards
+    const fs = await import('node:fs');
+    const apiKeysFile = new URL('../app/views/ApiKeys.js', import.meta.url);
+    const apiKeysSrc = fs.readFileSync(apiKeysFile, 'utf8');
+    assert.equal(checkFlexScrollContainerRules(apiKeysSrc, 'ApiKeys.js').length, 0, 'ApiKeys.js must have zero flex scroll shrink hazards');
+});
+
+
 
 

@@ -330,6 +330,49 @@ export function checkComponentPropRules(source, relPath) {
   return issues;
 }
 
+export function checkFlexScrollContainerRules(source, relPath) {
+  const issues = [];
+  const flexScrollTagRegex = /<([a-zA-Z0-9_-]+)\b([^>]*style=["'][^"']*["'][^>]*)>/gi;
+
+  let match;
+  while ((match = flexScrollTagRegex.exec(source)) !== null) {
+    const tagName = match[1];
+    const attrs = match[2];
+    const styleMatch = attrs.match(/style=["']([^"']*)["']/i);
+    if (!styleMatch) continue;
+    const style = styleMatch[1];
+
+    const isFlex = /display:\s*flex/i.test(style);
+    const isCol = /flex-direction:\s*column/i.test(style);
+    const isScroll = /overflow(?:-y)?:\s*auto/i.test(style);
+    const hasHeight = /(?:max-height|height):/i.test(style);
+
+    if (isFlex && isCol && isScroll && hasHeight) {
+      const startPos = match.index + match[0].length;
+      const snippet = source.slice(startPos, startPos + 3000);
+
+      const childDivRegex = /<div\b([^>]*style=["'][^"']*["'][^>]*)>/gi;
+      let childMatch;
+      while ((childMatch = childDivRegex.exec(snippet)) !== null) {
+        const cAttrs = childMatch[1];
+        const cStyleMatch = cAttrs.match(/style=["']([^"']*)["']/i);
+        if (!cStyleMatch) continue;
+        const cStyle = cStyleMatch[1];
+
+        const hasOverflowHidden = /overflow:\s*hidden/i.test(cStyle);
+        const hasFlexShrinkZero = /flex-shrink:\s*0/i.test(cStyle) || /flex:\s*0\s+0/i.test(cStyle) || /flex:\s*none/i.test(cStyle);
+
+        if (hasOverflowHidden && !hasFlexShrinkZero) {
+          issues.push(`Flex scroll shrink hazard in ${relPath}: child <div> inside <${tagName}> with flex-direction: column and overflow-y: auto has 'overflow: hidden' but lacks 'flex-shrink: 0'. This causes CSS flexbox to compress child heights down to 0, squashing and clipping options instead of triggering scroll.`);
+          break;
+        }
+      }
+    }
+  }
+
+  return issues;
+}
+
 export function runQualityGate(rootDirectory) {
   let files = 0, templates = 0;
   const errors = [];
@@ -389,6 +432,12 @@ export function runQualityGate(rootDirectory) {
       // 5. Component prop contract & enum validation (Naive UI NSpace size enum, preventing 'split'/'horizontal' crashes)
       const propErrors = checkComponentPropRules(source, relPath);
       for (const err of propErrors) {
+        errors.push(err);
+      }
+
+      // 6. Flex scroll container child sizing validation (prevent child cards with overflow: hidden from being squashed to 0 height)
+      const flexErrors = checkFlexScrollContainerRules(source, relPath);
+      for (const err of flexErrors) {
         errors.push(err);
       }
     }
