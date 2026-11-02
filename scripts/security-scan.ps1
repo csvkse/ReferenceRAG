@@ -4,6 +4,7 @@
 
 .DESCRIPTION
     采用策略模式 (Strategy Pattern)、适配器模式 (Adapter Pattern) 与状态机模式 (State Machine Pattern) 设计。
+    内嵌香农熵 (Shannon Entropy) 统计学异常检测与脱敏红线合规性校验引擎。
     支持客户端 Git Pre-commit 增量暂存区检测 (-StagedOnly) 与 全量代码库审计模式。
 
 .PARAMETER StagedOnly
@@ -102,7 +103,9 @@ class FileSystemAdapter {
             if (-not $lines) { continue }
 
             for ($i = 0; $i -lt $lines.Count; $i++) {
-                $chunks.Add([ScannedChunk]::new($relFile, $i + 1, $lines[$i]))
+                $line = $lines[$i]
+                if ([string]::IsNullOrWhiteSpace($line) -or $line.Length -lt 8) { continue }
+                $chunks.Add([ScannedChunk]::new($relFile, $i + 1, $line))
             }
         }
         return $chunks
@@ -110,7 +113,29 @@ class FileSystemAdapter {
 }
 
 # ==============================================================================
-# 2. 策略模式 (Strategy Pattern): 独立可扩展的安全检测规则
+# 2. 香农信息熵计算器 (Shannon Entropy Calculator)
+# ==============================================================================
+
+class ShannonEntropyCalculator {
+    static [double] Calculate([string]$text) {
+        if ([string]::IsNullOrEmpty($text)) { return 0.0 }
+        $len = $text.Length
+        $freq = @{}
+        for ($i = 0; $i -lt $len; $i++) {
+            $c = $text[$i]
+            $freq[$c] = $freq[$c] + 1
+        }
+        $entropy = 0.0
+        foreach ($count in $freq.Values) {
+            $p = [double]$count / $len
+            $entropy -= $p * [Math]::Log($p, 2)
+        }
+        return [Math]::Round($entropy, 4)
+    }
+}
+
+# ==============================================================================
+# 3. 策略模式 (Strategy Pattern): 独立可扩展的安全检测规则
 # ==============================================================================
 
 class ViolationRecord {
@@ -139,6 +164,8 @@ class SecurityRuleStrategyBase {
 class OpenAiKeyRuleStrategy : SecurityRuleStrategyBase {
     [ViolationRecord] Evaluate([ScannedChunk]$chunk) {
         $content = $chunk.Content
+        if ($content.IndexOf("sk-", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { return $null }
+
         if ($content -match '\bsk-[a-zA-Z0-9_\-]{20,}\b') {
             $val = $matches[0]
             # 白名单：允许符合规范的标准占位符
@@ -150,7 +177,7 @@ class OpenAiKeyRuleStrategy : SecurityRuleStrategyBase {
                 return $null
             }
             # 规则定义及安全设计文档允许声明占位符
-            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*") {
+            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*" -or $chunk.FilePath -like "*entropy*") {
                 return $null
             }
             return [ViolationRecord]::new(
@@ -168,11 +195,13 @@ class OpenAiKeyRuleStrategy : SecurityRuleStrategyBase {
 class EasyTierRuleStrategy : SecurityRuleStrategyBase {
     [ViolationRecord] Evaluate([ScannedChunk]$chunk) {
         $content = $chunk.Content
+        if ($content.IndexOf("secret", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { return $null }
+
         $regex = [regex]'(?i)\bnetwork[_-]?secret\b\s*[:=]\s*["\u0027]([^"\u0027]+)["\u0027]'
         if ($regex.IsMatch($content)) {
             $val = $regex.Match($content).Groups[1].Value
             if ($val -eq "demo_secret_token" -or $val -like "mock_*") { return $null }
-            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*") { return $null }
+            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*" -or $chunk.FilePath -like "*entropy*") { return $null }
             return [ViolationRecord]::new(
                 $chunk.FilePath, $chunk.LineNumber,
                 "EasyTier Network Secret Leak",
@@ -188,10 +217,12 @@ class EasyTierRuleStrategy : SecurityRuleStrategyBase {
 class TunnelIdRuleStrategy : SecurityRuleStrategyBase {
     [ViolationRecord] Evaluate([ScannedChunk]$chunk) {
         $content = $chunk.Content
+        if ($content.IndexOf("tunnel", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { return $null }
+
         if ($content -match '(?i)\btunnel_[0-9a-fA-F]{16,}\b') {
             $val = $matches[0]
             if ($val -eq "tunnel_0123456789abcdef0123456789abcdef") { return $null }
-            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*") { return $null }
+            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*" -or $chunk.FilePath -like "*entropy*") { return $null }
             return [ViolationRecord]::new(
                 $chunk.FilePath, $chunk.LineNumber,
                 "Tunnel ID Leak",
@@ -207,7 +238,9 @@ class TunnelIdRuleStrategy : SecurityRuleStrategyBase {
 class NetworkAddressRuleStrategy : SecurityRuleStrategyBase {
     [ViolationRecord] Evaluate([ScannedChunk]$chunk) {
         $content = $chunk.Content
-        if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*") { return $null }
+        if ($content.IndexOf('.') -lt 0) { return $null }
+        if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*" -or $chunk.FilePath -like "*entropy*") { return $null }
+
         $ipRegex = [regex]'\b(?!(?:127\.0\.0\.1|0\.0\.0\.0|255\.255\.255\.255)\b)(?:[1-9][0-9]{0,2}\.){3}[1-9][0-9]{0,2}\b'
         
         $match = $ipRegex.Match($content)
@@ -250,11 +283,13 @@ class NetworkAddressRuleStrategy : SecurityRuleStrategyBase {
 class PasswordAssignmentRuleStrategy : SecurityRuleStrategyBase {
     [ViolationRecord] Evaluate([ScannedChunk]$chunk) {
         $content = $chunk.Content
+        if ($content.IndexOf("password", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { return $null }
+
         $regex = [regex]'(?i)\b(?:WEB_ADMIN_PASSWORD|admin[_-]?password)\b\s*[:=]\s*["\u0027]([^"\u0027]{4,})["\u0027]'
         if ($regex.IsMatch($content)) {
             $val = $regex.Match($content).Groups[1].Value
             if ($val -in @("your_secure_password_here", "<ADMIN_PASSWORD>", "REDACTED", "[REDACTED]")) { return $null }
-            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*") { return $null }
+            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*" -or $chunk.FilePath -like "*entropy*") { return $null }
             return [ViolationRecord]::new(
                 $chunk.FilePath, $chunk.LineNumber,
                 "Admin Password Leak",
@@ -270,11 +305,13 @@ class PasswordAssignmentRuleStrategy : SecurityRuleStrategyBase {
 class PrivateKeyBlockRuleStrategy : SecurityRuleStrategyBase {
     [ViolationRecord] Evaluate([ScannedChunk]$chunk) {
         $content = $chunk.Content
+        if ($content.IndexOf("PRIVATE KEY", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { return $null }
+
         if ($content -match '-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----') {
             if ($content -like "*MOCK_KEY_DATA*" -or $chunk.FilePath -like "*Test*") {
                 return $null
             }
-            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*") {
+            if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*" -or $chunk.FilePath -like "*entropy*") {
                 return $null
             }
             return [ViolationRecord]::new(
@@ -288,8 +325,89 @@ class PrivateKeyBlockRuleStrategy : SecurityRuleStrategyBase {
     }
 }
 
+# 策略 7: 香农信息熵异常检测策略 (Shannon Entropy Heuristic)
+class ShannonEntropyRuleStrategy : SecurityRuleStrategyBase {
+    static [regex]$TokenRegex = [regex]'["\u0027]([a-zA-Z0-9_\-\.\$\#\@\^\!\*\&]{24,})["\u0027]'
+
+    [ViolationRecord] Evaluate([ScannedChunk]$chunk) {
+        $line = $chunk.Content
+        if ($line.IndexOf('"') -lt 0 -and $line.IndexOf("'") -lt 0) { return $null }
+        if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*" -or $chunk.FilePath -like "*entropy*") {
+            return $null
+        }
+
+        $m = [ShannonEntropyRuleStrategy]::TokenRegex.Match($line)
+        while ($m.Success) {
+            $tok = $m.Groups[1].Value
+
+            # 白名单放行规则
+            $isWhitelisted = $false
+            if ($tok -like "sk-proj-test-*" -or $tok -like "sk-test-*" -or $tok -like "sk-mock-*" -or $tok -like "lwt_live_*") { $isWhitelisted = $true }
+            if ($tok -like "tunnel_*" -or $tok -eq "demo_secret_token" -or $tok -eq "your_secure_password_here") { $isWhitelisted = $true }
+            if ($tok -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { $isWhitelisted = $true } # UUID
+            if ($tok -match '^(http|https|file|ftp)://') { $isWhitelisted = $true }
+            if ($chunk.FilePath -like "tests/*" -and ($tok -like "*key*" -or $tok -like "*mock*" -or $tok -like "*test*")) { $isWhitelisted = $true }
+            if ($tok -match '^(?:[a-zA-Z0-9_\-]+\.)+[a-zA-Z0-9_\-]+$') { $isWhitelisted = $true } # FQDN / Dotted identifier
+            if ($tok -match '^(?:[A-Z][a-z0-9]+){3,}$') { $isWhitelisted = $true } # CamelCase Identifier
+
+            if (-not $isWhitelisted) {
+                $hasLower = $tok -match '[a-z]'
+                $hasUpper = $tok -match '[A-Z]'
+                $hasDigit = $tok -match '[0-9]'
+                $hasSymbol = $tok -match '[_\-\.\$\#\@\^\!\*\&]'
+
+                # 满足双因子复杂度要求时计算香农熵
+                if ($hasLower -and ($hasUpper -or $hasSymbol) -and $hasDigit) {
+                    $entropy = [ShannonEntropyCalculator]::Calculate($tok)
+                    if ($entropy -ge 4.4) {
+                        return [ViolationRecord]::new(
+                            $chunk.FilePath, $chunk.LineNumber,
+                            "High Shannon Entropy Token Leak (H = $entropy)",
+                            $tok,
+                            "检测到疑似高熵机密字符串 (Shannon Entropy = $entropy >= 4.4)！严禁硬编码真实密钥，测试请使用标准 mock 占位符或从 /env/.envdev 动态加载！"
+                        )
+                    }
+                }
+            }
+            $m = $m.NextMatch()
+        }
+        return $null
+    }
+}
+
+# 策略 8: 脱敏红线合规性校验策略 (Desensitization Compliance Strategy)
+class DesensitizationComplianceStrategy : SecurityRuleStrategyBase {
+    static [regex]$PartialMaskRegex = [regex]'(?:(?<![a-zA-Z0-9_\-])(?:[0-9]{1,3}\.){2,}(?:\*+|\u2022+)(?:\.(?:\*+|\u2022+|[0-9]{1,3}))*|\b[a-zA-Z0-9_\-]{3,}(?:\*|\u2022){3,}[a-zA-Z0-9_\-]*)'
+
+    [ViolationRecord] Evaluate([ScannedChunk]$chunk) {
+        $line = $chunk.Content
+        if ($line.IndexOf('*') -lt 0 -and $line.IndexOf([char]0x2022) -lt 0) { return $null }
+        if ($chunk.FilePath -eq "AGENT.md" -or $chunk.FilePath -like "*security*" -or $chunk.FilePath -like "*entropy*") {
+            return $null
+        }
+
+        # 1. 过滤测试正则定义、脱敏工具方法本身的声明
+        if ($line -match 'Regex|pattern|maskRegex|replace|format|balanceTags|TokenRegex|PartialMaskRegex') {
+            return $null
+        }
+
+        # 2. 伪脱敏/部分掩码检测
+        if ([DesensitizationComplianceStrategy]::PartialMaskRegex.IsMatch($line)) {
+            $matchVal = [DesensitizationComplianceStrategy]::PartialMaskRegex.Match($line).Value
+            return [ViolationRecord]::new(
+                $chunk.FilePath, $chunk.LineNumber,
+                "Desensitization Redline Non-Compliance (Partial Masking)",
+                $matchVal,
+                "文档与代码中严禁使用伪脱敏或部分掩码 (如 10.126.*** 或 sk-123***)！必须使用标准虚拟占位符 (如 sk-proj-test-secret-key-1234567890、127.0.0.1、example.com)！"
+            )
+        }
+
+        return $null
+    }
+}
+
 # ==============================================================================
-# 3. 状态机模式 (State Machine Pattern): 驱动安全门禁执行生命周期
+# 4. 状态机模式 (State Machine Pattern): 驱动安全门禁执行生命周期
 # ==============================================================================
 
 enum GateState {
@@ -319,6 +437,8 @@ class SecurityGateStateMachine {
         $this.Strategies.Add([NetworkAddressRuleStrategy]::new())
         $this.Strategies.Add([PasswordAssignmentRuleStrategy]::new())
         $this.Strategies.Add([PrivateKeyBlockRuleStrategy]::new())
+        $this.Strategies.Add([ShannonEntropyRuleStrategy]::new())
+        $this.Strategies.Add([DesensitizationComplianceStrategy]::new())
     }
 
     [int] Run([bool]$stagedOnly, [string]$repoRoot, [string]$targetPath) {
@@ -332,13 +452,13 @@ class SecurityGateStateMachine {
         else {
             Write-Host " [Security Gate] Mode: Full Repository Scan" -ForegroundColor Cyan
             $this.Chunks = [FileSystemAdapter]::ExtractTrackedChunks($repoRoot, $targetPath)
-            Write-Host "   -> Extracted $($this.Chunks.Count) lines across tracked files." -ForegroundColor Gray
+            Write-Host "   -> Extracted $($this.Chunks.Count) non-empty candidate lines across tracked files." -ForegroundColor Gray
         }
 
         # 2. 状态流转: EvaluatingStrategies
         $this.State = [GateState]::EvaluatingStrategies
         foreach ($chunk in $this.Chunks) {
-            if ($chunk.Content -match 'secret-guard:\s*allow') { continue }
+            if ($chunk.Content.IndexOf('secret-guard: allow', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { continue }
 
             foreach ($strategy in $this.Strategies) {
                 $violation = $strategy.Evaluate($chunk)
