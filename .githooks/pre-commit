@@ -1,0 +1,31 @@
+#!/usr/bin/env sh
+# ==============================================================================
+# ReferenceRAG Pre-commit Security & Credential Gate Hook
+# ==============================================================================
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCAN_SCRIPT="$REPO_ROOT/scripts/security-scan.ps1"
+
+if [ ! -f "$SCAN_SCRIPT" ]; then
+    exit 0
+fi
+
+# 优先尝试 pwsh (PowerShell 7+), 其次尝试 powershell (Windows PowerShell 5.1)
+if command -v pwsh >/dev/null 2>&1; then
+    pwsh -NoProfile -ExecutionPolicy Bypass -File "$SCAN_SCRIPT" -StagedOnly
+    EXIT_CODE=$?
+elif command -v powershell >/dev/null 2>&1; then
+    powershell -NoProfile -ExecutionPolicy Bypass -File "$SCAN_SCRIPT" -StagedOnly
+    EXIT_CODE=$?
+else
+    echo "Warning: PowerShell runtime not detected. Skipping client-side hook."
+    exit 0
+fi
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "\n[ERROR] Commit rejected by ReferenceRAG Security & Credential Governance Gate." >&2
+    echo "Please resolve the violations listed above or use /env/.envdev for local test credentials.\n" >&2
+    exit 1
+fi
+
+exit 0

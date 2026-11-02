@@ -25,8 +25,18 @@ function Write-Section([string]$title) {
 }
 
 try {
+    # ── 0. 凭据安全红线与敏感信息门禁 ──
+    Write-Section "0/4 Security & Credential Governance Check"
+    $scanScript = Join-Path $PSScriptRoot "security-scan.ps1"
+    if (Test-Path $scanScript) {
+        & $scanScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "Security & Credential Governance Gate failed with exit code $LASTEXITCODE"
+        }
+    }
+
     # ── 1. 前端静态语法与 AST 符号绑定门禁 ──
-    Write-Section "1/3 Frontend Static AST & Symbol Binding Check"
+    Write-Section "1/4 Frontend Static AST & Symbol Binding Check"
     $frontendDir = Join-Path $RepoRoot "Business\ReferenceRAG.Business\wwwroot"
     Push-Location $frontendDir
     try {
@@ -40,7 +50,7 @@ try {
     }
 
     # ── 2. 前端单元测试 ──
-    Write-Section "2/3 Frontend Unit Tests"
+    Write-Section "2/4 Frontend Unit Tests"
     Push-Location $frontendDir
     try {
         npm test
@@ -53,7 +63,7 @@ try {
     }
 
     # ── 3. 后端契约门禁与核心回归测试 ──
-    Write-Section "3/3 Backend Quality Gate Contract & Regression Tests"
+    Write-Section "3/4 Backend Quality Gate Contract & Regression Tests"
     if ($Full) {
         Write-Host "Running FULL test suite across solution..." -ForegroundColor Yellow
         dotnet test --logger "console;verbosity=normal"

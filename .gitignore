@@ -102,3 +102,13 @@ appsettings.json
 .web-migration-*.log
 .desktop-migration-*.log
 .host-migration-*.log
+
+# Sensitive environment configuration & secrets
+env/
+.envdev
+*.envdev
+/env/.envdev
+
+# Secret documentation & uncommitted governance records
+docs_secret/
+/docs_secret/

@@ -128,7 +128,7 @@ private static void PreloadLinuxOpenVinoDependencies(string dir)
 }
 ```
 
-### 4.2 实机测试验证（127.0.0.1 现场）
+### 4.2 实机测试验证（127.0.0.1 容器现场）
 在现场容器中应用该修复后，再次执行 `--probe-hardware`，子进程探测瞬间成功通过，输出完整硬件就绪 JSON：
 ```json
 {
