@@ -67,39 +67,46 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
     {
         var results = new List<HybridSearchResult>();
 
-        // 1. BM25 关键词搜索（先做同义词扩展，提升关键词 miss 召回率）
-        var bm25Sw = Stopwatch.StartNew();
-        var bm25Query = _synonymService?.ExpandQuery(query) ?? query;
-        var bm25Results = await _bm25Store.SearchAsync(bm25Query, topK * 2, k1, b);
+        // 1 & 2. Fork-Join 真正并发执行 BM25 词法检索与 Embedding 向量检索
+        var bm25Task = Task.Run(async () =>
+        {
+            var bm25Sw = Stopwatch.StartNew();
+            var bm25Query = _synonymService?.ExpandQuery(query) ?? query;
+            var bmResults = await _bm25Store.SearchAsync(bm25Query, topK * 2, k1, b);
+            bm25Sw.Stop();
+            SearchTraceContext.RecordBm25(bm25Sw.ElapsedMilliseconds);
+            return bmResults;
+        }, cancellationToken);
+
+        var vecTask = Task.Run(async () =>
+        {
+            var vecSw = Stopwatch.StartNew();
+            var qVec = precomputedQueryVector
+                ?? await _embeddingService.EncodeAsync(query, EmbeddingMode.Query, cancellationToken);
+            var mName = _embeddingService.ModelName;
+            var vecResults = await _vectorStore.SearchAsync(qVec, mName, topK * 2, cancellationToken);
+            vecSw.Stop();
+            SearchTraceContext.RecordVector(vecSw.ElapsedMilliseconds);
+            return vecResults;
+        }, cancellationToken);
+
+        await Task.WhenAll(bm25Task, vecTask);
+
+        var bm25Results = await bm25Task;
         var bm25RankMap = CreateRankMap(bm25Results.Select(r => r.ChunkId).ToList());
-        // 使用 GroupBy 处理可能的重复 ChunkId，取第一个结果
         var bm25Dict = bm25Results
             .GroupBy(r => r.ChunkId)
             .ToDictionary(g => g.Key, g => g.First());
-
-        // 获取 BM25 最大分数用于归一化
         var maxBm25Score = bm25Results.Count > 0 ? bm25Results.Max(r => r.Score) : 1.0;
         if (maxBm25Score <= 0) maxBm25Score = 1.0;
-        bm25Sw.Stop();
-        SearchTraceContext.RecordBm25(bm25Sw.ElapsedMilliseconds);
 
-        // 2. Embedding 语义搜索（复用调用方预计算的向量，避免重复推理）
-        var vecSw = Stopwatch.StartNew();
-        var queryVector = precomputedQueryVector
-            ?? await _embeddingService.EncodeAsync(query, EmbeddingMode.Query, cancellationToken);
-        var modelName = _embeddingService.ModelName;
-        var embeddingResults = await _vectorStore.SearchAsync(queryVector, modelName, topK * 2, cancellationToken);
-        // 使用 GroupBy 处理可能的重复 ChunkId，取第一个结果
+        var embeddingResults = await vecTask;
         var embeddingDict = embeddingResults
             .GroupBy(r => r.ChunkId)
             .ToDictionary(g => g.Key, g => g.First());
         var embeddingRankMap = CreateRankMap(embeddingResults.Select(r => r.ChunkId).ToList());
-
-        // 获取 Embedding 最大分数用于归一化
         var maxEmbeddingScore = embeddingResults.Any() ? embeddingResults.Max(r => r.Score) : 1.0;
         if (maxEmbeddingScore <= 0) maxEmbeddingScore = 1.0;
-        vecSw.Stop();
-        SearchTraceContext.RecordVector(vecSw.ElapsedMilliseconds);
 
         // 3. 收集所有候选文档ID
         var fuseSw = Stopwatch.StartNew();
@@ -107,7 +114,7 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
 
         // 4. 融合 BM25 和 Embedding 结果
         var fusedScores = _options.UseRRF
-            ? FuseWithRRF(allDocIds, bm25RankMap, embeddingRankMap)
+            ? FuseWithRRF(allDocIds, bm25RankMap, embeddingRankMap, query)
             : FuseWithWeightedAverage(allDocIds, bm25Dict, embeddingDict, maxBm25Score, maxEmbeddingScore);
 
         // 5. 排序候选池并在截取 Top-K 时应用文件夹过滤
@@ -234,29 +241,30 @@ internal class HybridSearchService : IRougamo<SearchTraceAttribute>, IHybridSear
     }
 
     /// <summary>
-    /// 使用 RRF (Reciprocal Rank Fusion) 融合排名
+    /// 使用自适应 RRF (Adaptive Reciprocal Rank Fusion) 融合排名
     /// </summary>
     private Dictionary<string, float> FuseWithRRF(
         HashSet<string> allDocIds,
         Dictionary<string, int> bm25RankMap,
-        Dictionary<string, int> embeddingRankMap)
+        Dictionary<string, int> embeddingRankMap,
+        string? query = null)
     {
         var fusedScores = new Dictionary<string, float>();
         var k = _options.RRFK;
+        var (wBm25, wVector) = ReferenceRAG.Core.Features.Search.Fusion.AdaptiveSearchFusionHelper.CalculateWeights(query);
 
         foreach (var docId in allDocIds)
         {
             var bm25Rank = bm25RankMap.GetValueOrDefault(docId, -1);
             var embeddingRank = embeddingRankMap.GetValueOrDefault(docId, -1);
 
-            // 同时出现在两个列表：标准 RRF 求和；仅出现在一个列表：打 0.5 折扣
             double fusedScore;
             if (bm25Rank >= 0 && embeddingRank >= 0)
-                fusedScore = 1.0 / (k + bm25Rank) + 1.0 / (k + embeddingRank);
+                fusedScore = (wBm25 / (k + bm25Rank)) + (wVector / (k + embeddingRank));
             else if (bm25Rank >= 0)
-                fusedScore = 0.5 / (k + bm25Rank);
+                fusedScore = (wBm25 * 0.5) / (k + bm25Rank);
             else if (embeddingRank >= 0)
-                fusedScore = 0.5 / (k + embeddingRank);
+                fusedScore = (wVector * 0.5) / (k + embeddingRank);
             else
                 fusedScore = 0;
 

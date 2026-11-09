@@ -9,12 +9,14 @@ namespace ReferenceRAG.Core.Features.Search.Fusion;
 public sealed class RrfSearchFusionStrategy : ISearchFusionStrategy
 {
     private readonly int _k;
+    private readonly string? _query;
 
     public ScoreKind ScoreKind => ScoreKind.RRF;
 
-    public RrfSearchFusionStrategy(int k = 60)
+    public RrfSearchFusionStrategy(int k = 60, string? query = null)
     {
         _k = k > 0 ? k : 60;
+        _query = query;
     }
 
     public IReadOnlyList<RecallItem> Fuse(IReadOnlyList<RecallSnapshot> snapshots, int topK)
@@ -24,7 +26,7 @@ public sealed class RrfSearchFusionStrategy : ISearchFusionStrategy
             return Array.Empty<RecallItem>();
         }
 
-        // Map: chunkKey -> (Accumulated RRF Score, RecallItem)
+        var (wBm25, wVector) = AdaptiveSearchFusionHelper.CalculateWeights(_query);
         var merged = new Dictionary<string, (double TotalScore, RecallItem Item)>();
 
         foreach (var snapshot in snapshots)
@@ -34,7 +36,8 @@ public sealed class RrfSearchFusionStrategy : ISearchFusionStrategy
             for (int rank = 0; rank < snapshot.Items.Count; rank++)
             {
                 var item = snapshot.Items[rank];
-                var rrfScore = 1.0 / (_k + rank + 1);
+                var weight = item.ScoreKind == ScoreKind.BM25 ? wBm25 : (item.ScoreKind == ScoreKind.Cosine ? wVector : 0.5);
+                var rrfScore = weight / (_k + rank + 1);
 
                 var key = $"{snapshot.KnowledgeBaseId}::{item.ChunkId}";
                 if (merged.TryGetValue(key, out var existing))

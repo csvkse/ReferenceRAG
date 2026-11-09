@@ -1,0 +1,140 @@
+{
+  "纯词法长句检索 (BM25+NEAR+PRF)": {
+    "top1Rate": "100%",
+    "top1Count": 10,
+    "top5Rate": "100%",
+    "top5Count": 10,
+    "avgElapsed": 76,
+    "cases": [
+      {
+        "id": "long-01",
+        "title": "口语长句与因果探究",
+        "rank": 1,
+        "elapsedMs": 81
+      },
+      {
+        "id": "long-02",
+        "title": "场景细节与刀剑互换",
+        "rank": 1,
+        "elapsedMs": 81
+      },
+      {
+        "id": "long-03",
+        "title": "数字细节与越女剑法",
+        "rank": 1,
+        "elapsedMs": 44
+      },
+      {
+        "id": "long-04",
+        "title": "无专名情境描述 (验证 PRF 涌现)",
+        "rank": 1,
+        "elapsedMs": 82
+      },
+      {
+        "id": "long-05",
+        "title": "古代鉴赏长句与典籍溯源",
+        "rank": 1,
+        "elapsedMs": 80
+      },
+      {
+        "id": "long-06",
+        "title": "环境互动与雪坑反杀",
+        "rank": 1,
+        "elapsedMs": 92
+      },
+      {
+        "id": "long-07",
+        "title": "历史前因与宏大叙事",
+        "rank": 1,
+        "elapsedMs": 84
+      },
+      {
+        "id": "long-08",
+        "title": "跨章节千古名典因果",
+        "rank": 1,
+        "elapsedMs": 68
+      },
+      {
+        "id": "long-09",
+        "title": "人物命运发展与悲剧结局",
+        "rank": 1,
+        "elapsedMs": 97
+      },
+      {
+        "id": "long-10",
+        "title": "悬念反转与场景毒药",
+        "rank": 1,
+        "elapsedMs": 51
+      }
+    ]
+  },
+  "稠密向量检索 (bge-m3 Dense)": {
+    "top1Rate": "80%",
+    "top1Count": 8,
+    "top5Rate": "90%",
+    "top5Count": 9,
+    "avgElapsed": 253,
+    "cases": [
+      {
+        "id": "long-01",
+        "title": "口语长句与因果探究",
+        "rank": 1,
+        "elapsedMs": 458
+      },
+      {
+        "id": "long-02",
+        "title": "场景细节与刀剑互换",
+        "rank": 1,
+        "elapsedMs": 243
+      },
+      {
+        "id": "long-03",
+        "title": "数字细节与越女剑法",
+        "rank": null,
+        "elapsedMs": 217
+      },
+      {
+        "id": "long-04",
+        "title": "无专名情境描述 (验证 PRF 涌现)",
+        "rank": 3,
+        "elapsedMs": 230
+      },
+      {
+        "id": "long-05",
+        "title": "古代鉴赏长句与典籍溯源",
+        "rank": 1,
+        "elapsedMs": 224
+      },
+      {
+        "id": "long-06",
+        "title": "环境互动与雪坑反杀",
+        "rank": 1,
+        "elapsedMs": 204
+      },
+      {
+        "id": "long-07",
+        "title": "历史前因与宏大叙事",
+        "rank": 1,
+        "elapsedMs": 244
+      },
+      {
+        "id": "long-08",
+        "title": "跨章节千古名典因果",
+        "rank": 1,
+        "elapsedMs": 215
+      },
+      {
+        "id": "long-09",
+        "title": "人物命运发展与悲剧结局",
+        "rank": 1,
+        "elapsedMs": 264
+      },
+      {
+        "id": "long-10",
+        "title": "悬念反转与场景毒药",
+        "rank": 1,
+        "elapsedMs": 233
+      }
+    ]
+  }
+}

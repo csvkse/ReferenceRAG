@@ -8,9 +8,13 @@ using System.Text.Json;
 using Microsoft.Extensions.AI;
 using OpenAI;
 using ReferenceRAG.Business.Features.Chat.Services;
+using ReferenceRAG.Business.Features.KnowledgeBase.Services;
+using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Storage;
 
 namespace ReferenceRAG.Service.Services;
 
@@ -18,6 +22,7 @@ public record SseEvent(string Type, string? Delta = null, string? Message = null
 
 public class MafChatService : IDisposable, IChatModelCapabilityProvider
 {
+    private static readonly AsyncLocal<IReadOnlyList<string>?> _currentRequestKnowledgeBaseIds = new();
     private volatile IChatClient? _client;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHttpClientFactory _httpClientFactory;
@@ -28,6 +33,8 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
     private volatile string _systemPrompt;
     private volatile string _model = "gpt-4o-mini";
     private volatile bool _enableIntentRouting = true;
+    private readonly ReferenceRAG.Infrastructure.Features.Cognitive.IJevDecisionEngine? _jevDecisionEngine;
+    private readonly CompositeIntentRouter _intentRouter;
     private readonly AITool[] _tools;
     private readonly ConcurrentDictionary<string, ChatSession> _sessions = new();
     private readonly ILogger<MafChatService> _logger;
@@ -189,7 +196,8 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         HttpMessageHandler? httpMessageHandler = null,
         ConfigManager? configManager = null,
         IModelManager? modelManager = null,
-        IMultimodalMessageAdapter? multimodalAdapter = null)
+        IMultimodalMessageAdapter? multimodalAdapter = null,
+        ReferenceRAG.Infrastructure.Features.Cognitive.IJevDecisionEngine? jevDecisionEngine = null)
     {
         _scopeFactory = scopeFactory;
         _httpClientFactory = httpClientFactory;
@@ -199,6 +207,33 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         _configManager = configManager;
         _modelManager = modelManager;
         _multimodalAdapter = multimodalAdapter ?? new MultimodalMessageAdapter(logger);
+
+        _jevDecisionEngine = jevDecisionEngine;
+        if (_jevDecisionEngine == null && _configManager != null)
+        {
+            try
+            {
+                var ragCfg = _configManager.Load();
+                if (ragCfg.SystemOne != null && ragCfg.SystemOne.Enabled &&
+                    !string.IsNullOrWhiteSpace(ragCfg.SystemOne.ApiKey) &&
+                    !ragCfg.SystemOne.ApiKey.StartsWith("<", StringComparison.Ordinal))
+                {
+                    var client = new ReferenceRAG.Infrastructure.Features.Cognitive.JevSystemOneClient(
+                        ragCfg.SystemOne.ApiKey,
+                        ragCfg.SystemOne.BaseUrl,
+                        ragCfg.SystemOne.Model,
+                        _httpMessageHandler,
+                        timeoutSeconds: Math.Max(3, ragCfg.SystemOne.TimeoutMs / 1000));
+                    _jevDecisionEngine = new ReferenceRAG.Infrastructure.Features.Cognitive.JevDecisionEngine(
+                        client, enabled: true, retrievalThreshold: ragCfg.SystemOne.RetrievalConfidenceThreshold);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[MafChatService] 自动初始化 Jev 决策引擎失败: {Message}", ex.Message);
+            }
+        }
+        _intentRouter = CompositeIntentRouter.CreateDefault(_jevDecisionEngine);
 
         var section = config.GetSection("Chat");
         var endpoint = section["Endpoint"] ?? "https://api.openai.com/v1";
@@ -351,6 +386,33 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         var config = _configManager.Load();
         var chatConfig = config.Chat ?? new ChatModelConfig();
         var activeBackend = chatConfig.ActiveBackend ?? "OpenAiApi";
+
+        if (!string.IsNullOrEmpty(chatConfig.ActiveModelUrn))
+        {
+            var urn = ReferenceRAG.Core.Features.ModelManagement.Helpers.ModelUrn.Parse(chatConfig.ActiveModelUrn);
+            if (urn.IsProvider)
+            {
+                activeBackend = "OpenAiApi";
+                var prov = config.ModelProviders?.FirstOrDefault(p => string.Equals(p.Id, urn.ProviderId, StringComparison.OrdinalIgnoreCase));
+                if (prov != null)
+                {
+                    chatConfig.OpenAiApi ??= new OpenAiApiChatProfile();
+                    chatConfig.OpenAiApi.Endpoint = prov.BaseUrl;
+                    chatConfig.OpenAiApi.ApiKey = prov.ApiKey ?? string.Empty;
+                    chatConfig.OpenAiApi.Model = urn.ModelId;
+                }
+            }
+            else if (urn.IsLocal)
+            {
+                activeBackend = "LocalGguf";
+                chatConfig.LocalGguf ??= new LocalGgufChatProfile();
+                if (string.IsNullOrWhiteSpace(chatConfig.LocalGguf.ModelName) || chatConfig.ActiveModelUrn != "local:qwen2.5-7b-instruct-q4_k_m")
+                {
+                    chatConfig.LocalGguf.ModelName = urn.ModelName;
+                }
+            }
+        }
+
         _chatModelIdleTimeoutSeconds = chatConfig.IdleTimeoutSeconds > 0 ? chatConfig.IdleTimeoutSeconds : 300;
 
         _systemPrompt = string.IsNullOrWhiteSpace(chatConfig.SystemPrompt)
@@ -629,13 +691,65 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         try
         {
             using var scope = _scopeFactory.CreateScope();
+
+            // 优先检测是否挂载了物理知识库
+            var boundKbs = _currentRequestKnowledgeBaseIds.Value;
+            var kbSearch = scope.ServiceProvider.GetService<IKnowledgeBaseSearchService>();
+            var catalog = scope.ServiceProvider.GetService<ICatalogStore>();
+
+            List<string>? targetKbIds = boundKbs?.ToList();
+            if ((targetKbIds == null || targetKbIds.Count == 0) && catalog != null)
+            {
+                var allKbs = await catalog.ListKnowledgeBasesAsync();
+                targetKbIds = allKbs.Where(k => k.Enabled).Select(k => k.Id).ToList();
+            }
+
+            if (kbSearch != null && targetKbIds != null && targetKbIds.Count > 0)
+            {
+                var kbReq = new CrossKnowledgeBaseSearchRequest(
+                    Query: effectiveQuery,
+                    KnowledgeBaseIds: targetKbIds,
+                    TopK: topK
+                );
+                var kbResp = await kbSearch.SearchAsync(kbReq);
+                if (kbResp.Items.Count > 0)
+                {
+                    const int maxCharsPerChunk = 800;
+                    const int maxCharsTotal = 5000;
+                    var sbKb = new StringBuilder();
+                    sbKb.AppendLine($"## 知识库检索结果（共 {kbResp.Items.Count} 条，耗时 {kbResp.Elapsed.TotalMilliseconds:F0}ms）\n");
+                    for (int i = 0; i < kbResp.Items.Count; i++)
+                    {
+                        var item = kbResp.Items[i];
+                        var title = Path.GetFileNameWithoutExtension(item.SourceKey);
+                        var chunkHeader = $"[{i + 1}] 《{title}》\n    文件: {item.SourceKey}（分块: {item.ChunkId}，得分: {item.Score:F3}）\n    ---";
+                        var content = item.Text ?? string.Empty;
+                        if (content.Length > maxCharsPerChunk)
+                        {
+                            content = content[..maxCharsPerChunk] + "\n    ... [片段内容较长已截断]";
+                        }
+                        var chunkBlock = $"{chunkHeader}\n{content}\n\n";
+                        if (sbKb.Length + chunkBlock.Length > maxCharsTotal)
+                        {
+                            sbKb.AppendLine($"... [为适配模型上下文限制，已省略剩余 {kbResp.Items.Count - i} 条较低相关度检索结果]");
+                            break;
+                        }
+                        sbKb.Append(chunkBlock);
+                    }
+                    return sbKb.ToString();
+                }
+            }
+
+            var allowedSources = scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
+            if (allowedSources is { Count: 0 }) return "当前授权范围内没有可检索的数据源。";
             var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
             var request = new AIQueryRequest
             {
                 Query = effectiveQuery,
                 TopK = topK,
-                Mode = QueryMode.HybridRerank,
-                ContextWindow = 1
+                Mode = scope.ServiceProvider.GetService<ConfigManager>()?.Load().Search.ChatQueryMode ?? QueryMode.HybridRerank,
+                ContextWindow = 1,
+                Sources = allowedSources?.ToList()
             };
             var response = await searchService.SearchAsync(request);
 
@@ -689,12 +803,16 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         try
         {
             using var scope = _scopeFactory.CreateScope();
+            var allowedSources = scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
+            if (allowedSources is { Count: 0 }) return "当前授权范围内没有可检索的数据源。";
             var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
             var response = await searchService.DrillDownAsync(new DrillDownRequest
             {
                 Query = query,
                 RefIds = [refId],
-                ExpandContext = expandContext
+                ExpandContext = expandContext,
+                Mode = scope.ServiceProvider.GetService<ConfigManager>()?.Load().Search.ChatQueryMode,
+                Sources = allowedSources?.ToList()
             });
             return string.IsNullOrWhiteSpace(response.FullContext)
                 ? "未能展开该片段内容。"
@@ -719,23 +837,72 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         {
             if (string.IsNullOrWhiteSpace(effectiveKeyword)) return "搜索关键词不能为空。";
             using var scope = _scopeFactory.CreateScope();
+
+            // 优先检索挂载的物理知识库
+            var boundKbs = _currentRequestKnowledgeBaseIds.Value;
+            var kbSearch = scope.ServiceProvider.GetService<IKnowledgeBaseSearchService>();
+            var catalog = scope.ServiceProvider.GetService<ICatalogStore>();
+
+            List<string>? targetKbIds = boundKbs?.ToList();
+            if ((targetKbIds == null || targetKbIds.Count == 0) && catalog != null)
+            {
+                var allKbs = await catalog.ListKnowledgeBasesAsync();
+                targetKbIds = allKbs.Where(k => k.Enabled).Select(k => k.Id).ToList();
+            }
+
+            if (kbSearch != null && targetKbIds != null && targetKbIds.Count > 0)
+            {
+                var kbReq = new CrossKnowledgeBaseSearchRequest(
+                    Query: effectiveKeyword,
+                    KnowledgeBaseIds: targetKbIds,
+                    TopK: topK,
+                    UseLexicalTokenizer: true
+                );
+                var kbResp = await kbSearch.SearchAsync(kbReq);
+                if (kbResp.Items.Count > 0)
+                {
+                    var entries = kbResp.Items.Select((c, i) => $"[{i + 1}] 《{Path.GetFileNameWithoutExtension(c.SourceKey)}》\n    文件: {c.SourceKey}（分块: {c.ChunkId}，得分: {c.Score:F3}）\n{(c.Text.Length > 800 ? c.Text[..800] : c.Text)}");
+                    var output = string.Join("\n\n", entries);
+                    return output.Length > 5000 ? output[..5000] : output;
+                }
+            }
+
+            var allowedSources = scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
+            if (allowedSources is { Count: 0 }) return "当前授权范围内没有可检索的数据源。";
+            var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
+            var config = configManager.Load();
+            if (config.Search.ChatQueryMode == QueryMode.Lexical)
+            {
+                var search = scope.ServiceProvider.GetRequiredService<ISearchService>();
+                var response = await search.SearchAsync(new AIQueryRequest
+                {
+                    Query = effectiveKeyword, TopK = topK, Mode = QueryMode.Lexical, EnableRerank = false,
+                    Sources = allowedSources?.ToList()
+                });
+                if (response.Chunks.Count == 0) return $"未找到关键词「{effectiveKeyword}」的匹配内容。";
+                var entries = response.Chunks.Select((c, i) => $"[{i + 1}] {c.Title ?? c.FilePath}（行 {c.StartLine}-{c.EndLine}）\n{(c.Content.Length > 800 ? c.Content[..800] : c.Content)}");
+                var output = string.Join("\n\n", entries);
+                return output.Length > 5000 ? output[..5000] : output;
+            }
+            if (!config.Indexing.EmbeddingEnabled)
+                return "当前已禁用向量索引，请将对话检索模式设置为词法检索。";
+            if (config.Search.EnableLexical || LexicalIndexCoordinator.HasPersistedStaleVectors(Path.Combine(config.DataPath ?? "data", "vectors.db")))
+                return "旧 BM25 索引可能过期，请使用词法检索。";
             var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
             var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
-            var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
-
-            var config = configManager.Load();
             var enabledSources = config.Sources
                 .Where(s => s.Enabled)
                 .Select(s => s.Name)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (allowedSources != null) enabledSources.IntersectWith(allowedSources);
 
-            if (config.Sources.Count > 0 && enabledSources.Count == 0)
+            if ((config.Sources.Count > 0 || allowedSources != null) && enabledSources.Count == 0)
                 return $"未找到关键词「{effectiveKeyword}」的匹配内容（所有数据源均已停用）。";
 
             var results = await bm25Store.SearchAsync(effectiveKeyword, topK * 2);
 
             var filteredResults = new List<BM25SearchResult>();
-            if (config.Sources.Count > 0)
+            if (config.Sources.Count > 0 || allowedSources != null)
             {
                 foreach (var item in results)
                 {
@@ -800,11 +967,46 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         {
             if (string.IsNullOrWhiteSpace(titleQuery)) return "笔记标题关键词不能为空。";
             using var scope = _scopeFactory.CreateScope();
-            var graphStore = scope.ServiceProvider.GetRequiredService<IGraphStore>();
-            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+
+            // 优先在挂载的物理知识库图谱中按标题检索
+            var boundKbs = _currentRequestKnowledgeBaseIds.Value;
+            var kbStorage = scope.ServiceProvider.GetService<IKnowledgeBaseStorageManager>();
+            var catalog = scope.ServiceProvider.GetService<ICatalogStore>();
+
+            List<string>? targetKbIds = boundKbs?.ToList();
+            if ((targetKbIds == null || targetKbIds.Count == 0) && catalog != null)
+            {
+                var allKbs = await catalog.ListKnowledgeBasesAsync();
+                targetKbIds = allKbs.Where(k => k.Enabled).Select(k => k.Id).ToList();
+            }
+
+            if (kbStorage != null && targetKbIds != null && targetKbIds.Count > 0)
+            {
+                var matchedNodes = new List<GraphNode>();
+                foreach (var kbId in targetKbIds)
+                {
+                    if (!await kbStorage.ExistsAsync(kbId)) continue;
+                    await using var lease = await kbStorage.AcquireLeaseAsync(kbId, StorageAccess.ReadOnly);
+                    var kbNodes = await lease.Store.GraphStore.SearchNodesAsync(titleQuery, limit);
+                    matchedNodes.AddRange(kbNodes);
+                }
+                if (matchedNodes.Count > 0)
+                {
+                    var lines = matchedNodes.Take(limit).Select((n, i) => $"[{i + 1}] ID: {n.Id} | 标题: 《{n.Title}》 | 类型: {n.Type}");
+                    return $"## 知识库图谱匹配节点（共 {matchedNodes.Count} 条）\n" + string.Join("\n", lines);
+                }
+            }
+
+            if (scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources() != null)
+                return "受限数据源授权下请使用词法检索查找笔记。";
             var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
 
             var config = configManager.Load();
+            if (!config.Indexing.EmbeddingEnabled || config.Search.EnableLexical ||
+                LexicalIndexCoordinator.HasPersistedStaleVectors(Path.Combine(config.DataPath ?? "data", "vectors.db")))
+                return "当前图谱可能未同步，请使用词法检索查找笔记。";
+            var graphStore = scope.ServiceProvider.GetRequiredService<IGraphStore>();
+            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
             var enabledSources = config.Sources
                 .Where(s => s.Enabled)
                 .Select(s => s.Name)
@@ -877,7 +1079,7 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             if (paths.Length > 20) return "单次最多查询 20 个文件。";
 
             using var scope = _scopeFactory.CreateScope();
-            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+            var allowedSources = scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
             var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
 
             var config = configManager.Load();
@@ -885,6 +1087,7 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                 .Where(s => s.Enabled)
                 .Select(s => s.Name)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (allowedSources != null) enabledSources.IntersectWith(allowedSources);
 
             var sb = new StringBuilder();
             sb.AppendLine("## 文件章节结构");
@@ -899,8 +1102,7 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                 }
 
                 var normalizedPath = Path.GetFullPath(rawPath);
-                var file = await vectorStore.GetFileByPathAsync(normalizedPath)
-                           ?? await vectorStore.GetFileByPathAsync(rawPath);
+                var (file, chunks) = await GetChatDocumentAsync(scope.ServiceProvider, config, normalizedPath, allowedSources);
 
                 if (file == null)
                 {
@@ -908,15 +1110,11 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                     continue;
                 }
 
-                if (config.Sources.Count > 0 && (!enabledSources.Contains(file.Source ?? "")))
+                if ((config.Sources.Count > 0 || allowedSources != null) && (!enabledSources.Contains(file.Source ?? "")))
                 {
                     sb.AppendLine($"- {rawPath}: 文件所属数据源已停用");
                     continue;
                 }
-
-                var chunks = (await vectorStore.GetChunksByFileAsync(file.Id))
-                    .OrderBy(c => c.ChunkOrder)
-                    .ToList();
 
                 sb.AppendLine($"### {(string.IsNullOrEmpty(file.Title) ? file.Path : file.Title)}");
                 sb.AppendLine($"路径: {file.Path}");
@@ -955,7 +1153,7 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                 return $"startLine ({startLine}) 不能大于 endLine ({endLine})。";
 
             using var scope = _scopeFactory.CreateScope();
-            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+            var allowedSources = scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
             var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
 
             var config = configManager.Load();
@@ -963,18 +1161,17 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                 .Where(s => s.Enabled)
                 .Select(s => s.Name)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (allowedSources != null) enabledSources.IntersectWith(allowedSources);
 
             var normalizedPath = Path.GetFullPath(filePath);
-            var file = await vectorStore.GetFileByPathAsync(normalizedPath)
-                       ?? await vectorStore.GetFileByPathAsync(filePath);
+            var (file, allChunks) = await GetChatDocumentAsync(scope.ServiceProvider, config, normalizedPath, allowedSources);
 
             if (file == null)
                 return "文件未被索引。";
 
-            if (config.Sources.Count > 0 && (!enabledSources.Contains(file.Source ?? "")))
+            if ((config.Sources.Count > 0 || allowedSources != null) && (!enabledSources.Contains(file.Source ?? "")))
                 return "该文件所属数据源已停用，无法读取内容。";
 
-            var allChunks = await vectorStore.GetChunksByFileAsync(file.Id);
             var filtered = allChunks.OrderBy(c => c.ChunkOrder);
             var hasRange = startLine > 0 || endLine > 0;
             if (hasRange)
@@ -1012,6 +1209,50 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         }
     }
 
+    private static async Task<(FileRecord? File, IReadOnlyList<ChunkRecord> Chunks)> GetChatDocumentAsync(
+        IServiceProvider services, ObsidianRagConfig config, string path, IReadOnlyList<string>? allowedSources)
+    {
+        var lexical = config.Search.EnableLexical && config.Search.ChatQueryMode == QueryMode.Lexical;
+        FileRecord? file;
+        if (lexical)
+        {
+            var sources = config.Sources.Where(s => s.Enabled &&
+                (allowedSources == null || allowedSources.Contains(s.Name, StringComparer.OrdinalIgnoreCase))).Select(s => s.Name);
+            var scope = new LexicalSearchScope(sources, fileAllowed: f => ChatFileIsAllowed(config, f, allowedSources));
+            var result = await services.GetRequiredService<LexicalIndexCoordinator>().ReadAuthorizedFileAsync(path, scope);
+            var latest = services.GetRequiredService<ConfigManager>().Load();
+            var currentGrants = services.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
+            if (result.File != null && (!ChatFileIsAllowed(latest, result.File, allowedSources) ||
+                                        !ChatFileIsAllowed(latest, result.File, currentGrants)))
+                return (null, Array.Empty<ChunkRecord>());
+            return (result.File, result.Chunks.OrderBy(c => c.ChunkOrder).ToList());
+        }
+        else
+        {
+            if (!config.Indexing.EmbeddingEnabled || config.Search.EnableLexical ||
+                LexicalIndexCoordinator.HasPersistedStaleVectors(Path.Combine(config.DataPath ?? "data", "vectors.db")))
+                throw new SearchCapabilityException("vector_index_incomplete", "旧原文索引可能过期，请使用词法检索模式。");
+            file = await services.GetRequiredService<IVectorStore>().GetFileByPathAsync(path);
+        }
+        if (file == null) return (null, Array.Empty<ChunkRecord>());
+        if (!ChatFileIsAllowed(config, file, allowedSources))
+            return (null, Array.Empty<ChunkRecord>());
+        var chunks = await services.GetRequiredService<IVectorStore>().GetChunksByFileAsync(file.Id);
+        var latestConfig = services.GetRequiredService<ConfigManager>().Load();
+        var latestGrants = services.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
+        if (!ChatFileIsAllowed(latestConfig, file, allowedSources) || !ChatFileIsAllowed(latestConfig, file, latestGrants))
+            return (null, Array.Empty<ChunkRecord>());
+        return (file, chunks.OrderBy(c => c.ChunkOrder).ToList());
+    }
+
+    private static bool ChatFileIsAllowed(ObsidianRagConfig config, FileRecord file, IReadOnlyList<string>? allowedSources)
+    {
+        var source = IndexService.FindLexicalSource(Path.GetFullPath(file.Path), config.Sources);
+        return source != null && source.Enabled && string.Equals(source.Name, file.Source, StringComparison.OrdinalIgnoreCase) &&
+            (allowedSources == null || allowedSources.Contains(source.Name, StringComparer.OrdinalIgnoreCase)) &&
+            IndexService.IsLexicalPathAllowed(file.Path, source);
+    }
+
     [Description("获取知识库当前索引状态：向量分块总数、BM25 文档总数。")]
     private async Task<string> GetIndexStatusAsync()
     {
@@ -1019,6 +1260,33 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         try
         {
             using var scope = _scopeFactory.CreateScope();
+
+            var boundKbs = _currentRequestKnowledgeBaseIds.Value;
+            var kbStorage = scope.ServiceProvider.GetService<IKnowledgeBaseStorageManager>();
+            var catalog = scope.ServiceProvider.GetService<ICatalogStore>();
+
+            List<string>? targetKbIds = boundKbs?.ToList();
+            if ((targetKbIds == null || targetKbIds.Count == 0) && catalog != null)
+            {
+                var allKbs = await catalog.ListKnowledgeBasesAsync();
+                targetKbIds = allKbs.Where(k => k.Enabled).Select(k => k.Id).ToList();
+            }
+
+            if (kbStorage != null && targetKbIds != null && targetKbIds.Count > 0)
+            {
+                long totalVectors = 0;
+                foreach (var kbId in targetKbIds)
+                {
+                    if (!await kbStorage.ExistsAsync(kbId)) continue;
+                    await using var lease = await kbStorage.AcquireLeaseAsync(kbId, StorageAccess.ReadOnly);
+                    var manifest = await lease.Store.GetManifestAsync();
+                    totalVectors += manifest.ActiveVectorCount;
+                }
+                return $"挂载知识库（共 {targetKbIds.Count} 个库）：活跃分块/向量总数 {totalVectors}。";
+            }
+
+            if (scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources() != null)
+                return "受限数据源授权下不提供全局索引统计。";
             var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
             var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
             var vectorStats = await vectorStore.GetVectorStatsAsync();
@@ -1084,14 +1352,23 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         string sessionId,
         string userMessage,
         CancellationToken ct = default)
-        => StreamAsync(sessionId, userMessage, null, ct);
+        => StreamAsync(sessionId, userMessage, null, null, ct);
+
+    public IAsyncEnumerable<SseEvent> StreamAsync(
+        string sessionId,
+        string userMessage,
+        IReadOnlyList<string>? images,
+        CancellationToken ct = default)
+        => StreamAsync(sessionId, userMessage, images, null, ct);
 
     public async IAsyncEnumerable<SseEvent> StreamAsync(
         string sessionId,
         string userMessage,
         IReadOnlyList<string>? images,
+        IReadOnlyList<string>? knowledgeBaseIds,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        _currentRequestKnowledgeBaseIds.Value = knowledgeBaseIds;
         var client = _client;
         if (client is null)
         {
@@ -1160,9 +1437,16 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
 
         if (_enableIntentRouting)
         {
-            decision = await CompositeIntentRouter.Default.RouteAsync(userMessage, _tools, ct);
-            var toolStrategy = new IntentAdaptiveToolSelectionStrategy();
-            selectedTools = toolStrategy.SelectTools(userMessage, _tools, decision, GetCapabilities());
+            decision = await (_intentRouter ?? CompositeIntentRouter.Default).RouteAsync(userMessage, _tools, ct);
+            if (!decision.Handled && decision.Reason.Contains("闲聊模式", StringComparison.OrdinalIgnoreCase))
+            {
+                selectedTools = Array.Empty<AITool>();
+            }
+            else
+            {
+                var toolStrategy = new IntentAdaptiveToolSelectionStrategy();
+                selectedTools = toolStrategy.SelectTools(userMessage, _tools, decision, GetCapabilities());
+            }
         }
         else
         {
@@ -1384,15 +1668,18 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             if (string.IsNullOrWhiteSpace(query)) return string.Empty;
 
             using var scope = _scopeFactory.CreateScope();
+            var allowedSources = scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
+            if (allowedSources is { Count: 0 }) return string.Empty;
             var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
             var request = new AIQueryRequest
             {
                 Query = query,
                 TopK = topK,
-                Mode = QueryMode.HybridRerank,
-                ContextWindow = 1
+                Mode = scope.ServiceProvider.GetService<ConfigManager>()?.Load().Search.ChatQueryMode ?? QueryMode.HybridRerank,
+                ContextWindow = 1,
+                Sources = allowedSources?.ToList()
             };
-            var response = await searchService.SearchAsync(request);
+            var response = await searchService.SearchAsync(request, ct);
 
             if (response.Chunks.Count == 0)
                 return string.Empty;

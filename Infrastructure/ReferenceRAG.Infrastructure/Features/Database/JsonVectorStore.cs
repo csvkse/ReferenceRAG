@@ -8,7 +8,7 @@ namespace ReferenceRAG.Storage;
 /// <summary>
 /// JSON 向量存储（开发测试用）
 /// </summary>
-public class JsonVectorStore : IVectorStore, IDisposable
+public class JsonVectorStore : IVectorStore, IDocumentStore, IDisposable
 {
     private readonly string _dataPath;
     private readonly JsonSerializerOptions _jsonOptions;
@@ -181,6 +181,21 @@ public class JsonVectorStore : IVectorStore, IDisposable
         await SaveDataAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyDictionary<string, ChunkRecord>> GetChunksByIdsAsync(
+        IReadOnlyCollection<string> ids, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        cancellationToken.ThrowIfCancellationRequested();
+        await EnsureInitializedAsync(cancellationToken);
+        var result = new Dictionary<string, ChunkRecord>(StringComparer.Ordinal);
+        foreach (var id in ids)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_chunks.TryGetValue(id, out var chunk)) result[id] = chunk;
+        }
+        return result;
+    }
+
     public async Task<ChunkRecord?> GetChunkAsync(string id, CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
@@ -305,6 +320,14 @@ public class JsonVectorStore : IVectorStore, IDisposable
         }
 
         return result;
+    }
+
+    public async Task<IReadOnlyDictionary<string, VectorRecord>> GetVectorsByChunkIdsAsync(
+        IEnumerable<string> chunkIds, string modelName, CancellationToken cancellationToken = default)
+    {
+        var vectors = await GetVectorsByChunkIdsAsync(chunkIds, cancellationToken);
+        return vectors.Where(pair => string.Equals(pair.Value.ModelName, modelName, StringComparison.Ordinal))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
     }
 
     public async Task DeleteVectorAsync(string id, CancellationToken cancellationToken = default)

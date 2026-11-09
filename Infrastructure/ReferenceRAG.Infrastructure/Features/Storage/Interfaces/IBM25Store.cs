@@ -1,7 +1,12 @@
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
 namespace ReferenceRAG.Core.Interfaces;
 
 /// <summary>
-/// BM25 存储接口 - 单一索引模式
+/// BM25 存储接口 - 支持单一内容索引与多字段加权 (Title, Heading, Content)
 /// </summary>
 public interface IBM25Store
 {
@@ -13,9 +18,21 @@ public interface IBM25Store
     Task IndexDocumentAsync(string chunkId, string content);
 
     /// <summary>
+    /// 索引单个包含标题与章节的多字段文档
+    /// </summary>
+    Task IndexDocumentAsync(string chunkId, string title, string heading, string content) =>
+        IndexDocumentAsync(chunkId, content);
+
+    /// <summary>
     /// 批量索引文档
     /// </summary>
     Task IndexBatchAsync(IEnumerable<(string chunkId, string content)> documents, IProgress<int>? progress = null);
+
+    /// <summary>
+    /// 批量索引包含标题与章节的多字段文档
+    /// </summary>
+    Task IndexBatchAsync(IEnumerable<(string chunkId, string title, string heading, string content)> documents, IProgress<int>? progress = null) =>
+        IndexBatchAsync(documents.Select(d => (d.chunkId, d.content)), progress);
 
     /// <summary>
     /// 清空所有索引
@@ -30,7 +47,7 @@ public interface IBM25Store
     // ==================== 搜索操作 ====================
 
     /// <summary>
-    /// BM25 搜索
+    /// BM25 搜索 (支持多字段加权: Title 5.0, Heading 2.0, Body 1.0)
     /// </summary>
     Task<List<BM25SearchResult>> SearchAsync(string query, int topK = 10, float k1 = 1.5f, float b = 0.75f);
 
@@ -46,6 +63,9 @@ public interface IBM25Store
     /// 调用方从 IVectorStore.GetAllChunkIdsAsync() 获取有效 ID 集合后传入。
     /// </summary>
     Task<int> CleanupOrphanDocumentsAsync(IEnumerable<string> validChunkIds, CancellationToken cancellationToken = default);
+
+    /// <summary>Checks both the exact ID set and indexed content for a completed full rebuild.</summary>
+    Task<bool> VerifyExactIndexAsync(IReadOnlyDictionary<string, string> expectedDocuments, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

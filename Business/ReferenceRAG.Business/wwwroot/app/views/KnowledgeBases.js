@@ -1,12 +1,15 @@
 import { defineComponent as _defineComponent } from 'vue';
-import { ref, onMounted, onUnmounted, h } from 'vue';
+import { ref, onMounted, onUnmounted, onActivated, h, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { NTag, NButton, useMessage, useDialog } from 'naive-ui';
-import { BookOutline, CubeOutline, FolderOutline, GridOutline, LayersOutline, PlayOutline, TrashOutline, RefreshOutline, AddOutline, SearchOutline, SettingsOutline } from '@vicons/ionicons5';
+import { BookOutline, CubeOutline, FolderOutline, GridOutline, LayersOutline, PlayOutline, TrashOutline, RefreshOutline, AddOutline, SearchOutline, SettingsOutline, CreateOutline, DocumentTextOutline, CheckmarkCircleOutline } from '@vicons/ionicons5';
 import { knowledgeBasesApi, modelsApi } from '/app/api/index.js';
+import { isDesktop, selectFolder } from '/core/platform.js';
+import FolderPickerModal from '/app/components/FolderPickerModal.js';
 
 const component = /*@__PURE__*/ _defineComponent({
     ...{ name: 'KnowledgeBases' },
+    components: { FolderPickerModal },
     __name: 'KnowledgeBases',
     setup(__props, { expose: __expose }) {
         __expose();
@@ -30,19 +33,37 @@ const component = /*@__PURE__*/ _defineComponent({
         const createForm = ref({
             name: '',
             description: '',
-            bindingMode: 'preset', // 'preset' | 'online'
-            presetSpecId: 'bge-m3-default',
-            onlineProvider: 'siliconflow',
-            onlineBaseUrl: 'https://api.siliconflow.cn/v1',
-            onlineApiKey: '',
-            onlineModelName: 'BAAI/bge-m3',
-            detectedDimension: 1024,
+            bindingMode: 'default', // 'default' | 'local' | 'online'
+            localSpecId: '',
+            onlineSpecId: '',
             initialFolder: '',
-            initialPattern: '*.md,*.txt,*.pdf',
-            enableDualChannel: false,
-            ingestionBackend: 'OpenAiApi',
-            searchBackend: 'LocalOnnx'
+            initialPattern: '*.md,*.txt,*.pdf'
         });
+
+        const localSpecs = computed(() => {
+            return embeddingSpecs.value.filter(s => s.id.startsWith('local_') || s.searchBackend === 'LocalOnnx');
+        });
+
+        const onlineSpecs = computed(() => {
+            return embeddingSpecs.value.filter(s => s.id.startsWith('prov_') || s.ingestionBackend === 'OpenAiApi');
+        });
+
+        const goToModelManagement = (tab = 'embedding') => {
+            showCreateModal.value = false;
+            router.push(tab === 'providers' ? '/models?tab=providers' : '/models');
+        };
+
+        const resetCreateForm = () => {
+            createForm.value = {
+                name: '',
+                description: '',
+                bindingMode: 'default',
+                localSpecId: localSpecs.value[0]?.id || '',
+                onlineSpecId: onlineSpecs.value[0]?.id || '',
+                initialFolder: '',
+                initialPattern: '*.md,*.txt,*.pdf'
+            };
+        };
 
         // 连接器抽屉状态
         const showConnectorDrawer = ref(false);
@@ -52,19 +73,77 @@ const component = /*@__PURE__*/ _defineComponent({
         const newConnectorPath = ref('');
         const newConnectorPattern = ref('*.md,*.txt,*.pdf');
 
+        // 文件夹选择器状态
+        const showFolderPicker = ref(false);
+        const folderPickerTarget = ref('connector'); // 'initial' | 'connector'
+
+        const handleFolderSelected = (selectedPath) => {
+            if (selectedPath) {
+                if (folderPickerTarget.value === 'initial') {
+                    createForm.value.initialFolder = selectedPath;
+                } else {
+                    newConnectorPath.value = selectedPath;
+                }
+            }
+        };
+
+        const selectInitialDirectory = async () => {
+            folderPickerTarget.value = 'initial';
+            if (isDesktop) {
+                try {
+                    const path = await selectFolder();
+                    if (path) handleFolderSelected(path);
+                } catch (error) {
+                    message.error(error.message);
+                }
+            } else {
+                showFolderPicker.value = true;
+            }
+        };
+
+        const selectConnectorDirectory = async () => {
+            folderPickerTarget.value = 'connector';
+            if (isDesktop) {
+                try {
+                    const path = await selectFolder();
+                    if (path) handleFolderSelected(path);
+                } catch (error) {
+                    message.error(error.message);
+                }
+            } else {
+                showFolderPicker.value = true;
+            }
+        };
+
         // 加载所有知识库及连接器
         const loadKnowledgeBases = async () => {
             loading.value = true;
             try {
                 const res = await knowledgeBasesApi.getAll();
-                knowledgeBases.value = res.data || [];
+                const list = res.data || [];
+                knowledgeBases.value = list.map(k => ({
+                    id: k.id || k.Id,
+                    name: k.name || k.Name,
+                    description: k.description || k.Description,
+                    enabled: k.enabled !== undefined ? k.enabled : k.Enabled,
+                    embeddingSpecId: k.embeddingSpecId || k.EmbeddingSpecId,
+                    createdAt: k.createdAt || k.CreatedAt,
+                    updatedAt: k.updatedAt || k.UpdatedAt
+                }));
                 
                 // 并发获取各库连接器信息
                 const map = {};
                 await Promise.all(knowledgeBases.value.map(async (kb) => {
                     try {
                         const connRes = await knowledgeBasesApi.getConnectors(kb.id);
-                        map[kb.id] = connRes.data || [];
+                        const cList = connRes.data || [];
+                        map[kb.id] = cList.map(c => ({
+                            id: c.id || c.Id,
+                            kind: c.kind || c.Kind,
+                            targetPath: c.targetPath || c.TargetPath,
+                            filePattern: c.filePattern || c.FilePattern,
+                            syncState: c.syncState || c.SyncState
+                        }));
                     } catch (e) {
                         map[kb.id] = [];
                     }
@@ -83,6 +162,12 @@ const component = /*@__PURE__*/ _defineComponent({
             try {
                 const res = await knowledgeBasesApi.getEmbeddingSpecs();
                 embeddingSpecs.value = res.data || [];
+                if (!createForm.value.localSpecId && localSpecs.value.length > 0) {
+                    createForm.value.localSpecId = localSpecs.value[0].id;
+                }
+                if (!createForm.value.onlineSpecId && onlineSpecs.value.length > 0) {
+                    createForm.value.onlineSpecId = onlineSpecs.value[0].id;
+                }
             } catch (err) {
                 console.warn('获取预设 EmbeddingSpecs 失败:', err);
             }
@@ -177,31 +262,35 @@ const component = /*@__PURE__*/ _defineComponent({
                     description: createForm.value.description.trim()
                 };
 
-                if (createForm.value.bindingMode === 'preset') {
-                    payload.embeddingSpecId = createForm.value.presetSpecId;
+                if (createForm.value.bindingMode === 'local') {
+                    if (!createForm.value.localSpecId) {
+                        message.warning('请选择已就绪的本地模型');
+                        creating.value = false;
+                        return;
+                    }
+                    payload.embeddingSpecId = createForm.value.localSpecId;
+                } else if (createForm.value.bindingMode === 'online') {
+                    if (!createForm.value.onlineSpecId) {
+                        message.warning('请选择在线服务商纳管模型');
+                        creating.value = false;
+                        return;
+                    }
+                    payload.embeddingSpecId = createForm.value.onlineSpecId;
                 } else {
-                    // 自定义/线上 API 模型
-                    payload.embeddingSpec = {
-                        id: `spec_${Date.now()}`,
-                        modelName: createForm.value.onlineModelName.trim(),
-                        dimension: createForm.value.detectedDimension || 1024,
-                        metric: 'cosine',
-                        enableDualChannel: createForm.value.enableDualChannel,
-                        ingestionBackend: createForm.value.enableDualChannel ? 'OpenAiApi' : null,
-                        ingestionBaseUrl: createForm.value.onlineBaseUrl,
-                        ingestionApiKey: createForm.value.onlineApiKey,
-                        searchBackend: createForm.value.enableDualChannel ? 'LocalOnnx' : null
-                    };
+                    // 默认模板模式
+                    payload.embeddingSpecId = 'default-spec';
                 }
 
                 const res = await knowledgeBasesApi.create(payload);
                 const newKb = res.data;
-                message.success(`知识库「${newKb.name}」创建成功`);
+                const kbId = newKb.id || newKb.Id;
+                const kbName = newKb.name || newKb.Name;
+                message.success(`知识库「${kbName}」创建成功`);
 
                 // 若指定了初始本地文件夹，自动绑定连接器
                 if (createForm.value.initialFolder.trim()) {
                     try {
-                        await knowledgeBasesApi.addConnector(newKb.id, {
+                        await knowledgeBasesApi.addConnector(kbId, {
                             kind: 'Folder',
                             targetPath: createForm.value.initialFolder.trim(),
                             filePattern: createForm.value.initialPattern.trim() || null
@@ -280,13 +369,310 @@ const component = /*@__PURE__*/ _defineComponent({
             }
         };
 
-        // 触发同步作业
+        // 触发单个同步作业
         const handleTriggerSync = async (kbId, connectorId) => {
             try {
                 const res = await knowledgeBasesApi.triggerSync(kbId, connectorId);
                 message.success('已触发异步同步任务: ' + res.data.id);
             } catch (err) {
                 message.error('触发同步失败: ' + (err.response?.data?.message || err.message));
+            }
+        };
+
+        // 同步当前知识库的所有连接器
+        const handleSyncAllConnectors = async () => {
+            if (!currentKb.value || currentConnectors.value.length === 0) return;
+            let successCount = 0;
+            for (const conn of currentConnectors.value) {
+                try {
+                    await knowledgeBasesApi.triggerSync(currentKb.value.id, conn.id);
+                    successCount++;
+                } catch (e) {
+                    console.error('Trigger sync failed for connector:', conn.id, e);
+                }
+            }
+            message.success(`已触发 ${successCount} 个连接器的同步任务`);
+        };
+
+        // ==================== 知识库编辑与启停 ====================
+        const showEditModal = ref(false);
+        const updatingKb = ref(false);
+        const editForm = ref({ id: '', name: '', description: '', enabled: true, embeddingSpecId: '' });
+
+        const openEditModal = (kb) => {
+            editForm.value = {
+                id: kb.id,
+                name: kb.name,
+                description: kb.description || '',
+                enabled: kb.enabled,
+                embeddingSpecId: kb.embeddingSpecId
+            };
+            showEditModal.value = true;
+        };
+
+        const handleUpdateKbSubmit = async () => {
+            if (!editForm.value.name.trim()) {
+                message.error('知识库名称不能为空');
+                return;
+            }
+            updatingKb.value = true;
+            try {
+                await knowledgeBasesApi.update(editForm.value.id, {
+                    name: editForm.value.name.trim(),
+                    description: editForm.value.description?.trim(),
+                    enabled: editForm.value.enabled,
+                    embeddingSpecId: editForm.value.embeddingSpecId
+                });
+                message.success('知识库已更新');
+                showEditModal.value = false;
+                await loadKnowledgeBases();
+            } catch (err) {
+                message.error('更新知识库失败: ' + (err.response?.data?.message || err.message));
+            } finally {
+                updatingKb.value = false;
+            }
+        };
+
+        const handleToggleKb = async (kb, enabled) => {
+            try {
+                await knowledgeBasesApi.toggle(kb.id, enabled);
+                message.success(enabled ? '知识库已启用' : '知识库已停用');
+                kb.enabled = enabled;
+            } catch (err) {
+                message.error('切换知识库状态失败: ' + (err.response?.data?.message || err.message));
+            }
+        };
+
+        // ==================== 连接器编辑 ====================
+        const showEditConnectorModal = ref(false);
+        const updatingConn = ref(false);
+        const editConnForm = ref({ id: '', targetPath: '', filePattern: '', enabled: true });
+
+        const openEditConnectorModal = (conn) => {
+            editConnForm.value = {
+                id: conn.id,
+                targetPath: conn.targetPath,
+                filePattern: conn.filePattern || '*.md,*.txt,*.pdf',
+                enabled: conn.enabled
+            };
+            showEditConnectorModal.value = true;
+        };
+
+        const handleUpdateConnectorSubmit = async () => {
+            if (!editConnForm.value.targetPath.trim()) {
+                message.error('连接器目标路径不能为空');
+                return;
+            }
+            updatingConn.value = true;
+            try {
+                await knowledgeBasesApi.updateConnector(currentKb.value.id, editConnForm.value.id, {
+                    targetPath: editConnForm.value.targetPath.trim(),
+                    filePattern: editConnForm.value.filePattern?.trim(),
+                    enabled: editConnForm.value.enabled
+                });
+                message.success('连接器配置已更新');
+                showEditConnectorModal.value = false;
+                await loadCurrentConnectors();
+            } catch (err) {
+                message.error('更新连接器失败: ' + (err.response?.data?.message || err.message));
+            } finally {
+                updatingConn.value = false;
+            }
+        };
+
+        // ==================== 文档与切片管理 (HITL Explorer) ====================
+        const showExplorerDrawer = ref(false);
+        const explorerTab = ref('chunks'); // 'documents' | 'chunks'
+        const explorerKb = ref(null);
+
+        // 文档状态
+        const documents = ref([]);
+        const loadingDocs = ref(false);
+        const docSearch = ref('');
+        const docPage = ref(1);
+        const docPageSize = ref(20);
+        const docTotal = ref(0);
+
+        // 切片状态
+        const chunks = ref([]);
+        const loadingChunks = ref(false);
+        const chunkSearch = ref('');
+        const chunkDocFilter = ref(null);
+        const chunkEnabledOnly = ref(false);
+        const chunkPage = ref(1);
+        const chunkPageSize = ref(20);
+        const chunkTotal = ref(0);
+
+        // 单切片编辑与添加
+        const editingChunkId = ref(null);
+        const editingChunkText = ref('');
+        const recomputeEmbeddingImmediately = ref(true);
+        const savingChunk = ref(false);
+
+        const showAddChunkModal = ref(false);
+        const addingChunk = ref(false);
+        const newChunkForm = ref({ text: '', title: '' });
+
+        const openExplorerDrawer = async (kb) => {
+            explorerKb.value = kb;
+            explorerTab.value = 'chunks';
+            chunkDocFilter.value = null;
+            chunkSearch.value = '';
+            chunkPage.value = 1;
+            docPage.value = 1;
+            docSearch.value = '';
+            showExplorerDrawer.value = true;
+            await Promise.all([loadExplorerDocuments(), loadExplorerChunks()]);
+        };
+
+        const loadExplorerDocuments = async () => {
+            if (!explorerKb.value) return;
+            loadingDocs.value = true;
+            try {
+                const res = await knowledgeBasesApi.getDocuments(explorerKb.value.id, {
+                    page: docPage.value,
+                    pageSize: docPageSize.value,
+                    search: docSearch.value || undefined
+                });
+                documents.value = res.data.items || [];
+                docTotal.value = res.data.total || 0;
+            } catch (err) {
+                message.error('获取文档列表失败: ' + (err.response?.data?.message || err.message));
+            } finally {
+                loadingDocs.value = false;
+            }
+        };
+
+        const loadExplorerChunks = async () => {
+            if (!explorerKb.value) return;
+            loadingChunks.value = true;
+            try {
+                const res = await knowledgeBasesApi.getChunks(explorerKb.value.id, {
+                    documentId: chunkDocFilter.value || undefined,
+                    page: chunkPage.value,
+                    pageSize: chunkPageSize.value,
+                    search: chunkSearch.value || undefined,
+                    enabledOnly: chunkEnabledOnly.value ? true : undefined
+                });
+                chunks.value = res.data.items || [];
+                chunkTotal.value = res.data.total || 0;
+            } catch (err) {
+                message.error('获取切片列表失败: ' + (err.response?.data?.message || err.message));
+            } finally {
+                loadingChunks.value = false;
+            }
+        };
+
+        const filterChunksByDoc = (doc) => {
+            chunkDocFilter.value = doc.id;
+            explorerTab.value = 'chunks';
+            chunkPage.value = 1;
+            loadExplorerChunks();
+        };
+
+        const handleDeleteDoc = (doc) => {
+            dialog.warning({
+                title: '确认删除文档',
+                content: `确定要删除文档「${doc.sourceKey}」吗？这将同时清理其关联的所有分块与向量。 `,
+                positiveText: '确认删除',
+                negativeText: '取消',
+                onPositiveClick: async () => {
+                    try {
+                        await knowledgeBasesApi.deleteDocument(explorerKb.value.id, doc.id);
+                        message.success('文档已删除');
+                        await loadExplorerDocuments();
+                        if (chunkDocFilter.value === doc.id) {
+                            chunkDocFilter.value = null;
+                        }
+                        await loadExplorerChunks();
+                    } catch (err) {
+                        message.error('删除文档失败: ' + (err.response?.data?.message || err.message));
+                    }
+                }
+            });
+        };
+
+        const handleToggleChunk = async (chunk, enabled) => {
+            try {
+                await knowledgeBasesApi.toggleChunk(explorerKb.value.id, chunk.id, enabled);
+                chunk.enabled = enabled;
+                message.success(enabled ? '切片已启用' : '切片已停用');
+            } catch (err) {
+                message.error('切换切片状态失败: ' + (err.response?.data?.message || err.message));
+            }
+        };
+
+        const startEditChunk = (chunk) => {
+            editingChunkId.value = chunk.id;
+            editingChunkText.value = chunk.text;
+            recomputeEmbeddingImmediately.value = true;
+        };
+
+        const cancelEditChunk = () => {
+            editingChunkId.value = null;
+            editingChunkText.value = '';
+        };
+
+        const saveEditChunk = async (chunk) => {
+            if (!editingChunkText.value.trim()) {
+                message.error('切片文本不能为空');
+                return;
+            }
+            savingChunk.value = true;
+            try {
+                const res = await knowledgeBasesApi.updateChunk(explorerKb.value.id, chunk.id, {
+                    text: editingChunkText.value.trim(),
+                    recomputeEmbeddingImmediately: recomputeEmbeddingImmediately.value
+                });
+                message.success('切片已更新并同步刷新全文索引与向量');
+                chunk.text = res.data.text;
+                chunk.tokenCount = res.data.tokenCount;
+                chunk.hasVector = res.data.hasVector;
+                editingChunkId.value = null;
+            } catch (err) {
+                message.error('保存切片失败: ' + (err.response?.data?.message || err.message));
+            } finally {
+                savingChunk.value = false;
+            }
+        };
+
+        const handleDeleteChunk = (chunk) => {
+            dialog.warning({
+                title: '确认删除切片',
+                content: '确定要删除该切片分段吗？此操作不可逆。',
+                positiveText: '确认删除',
+                negativeText: '取消',
+                onPositiveClick: async () => {
+                    try {
+                        await knowledgeBasesApi.deleteChunk(explorerKb.value.id, chunk.id);
+                        message.success('切片已删除');
+                        await loadExplorerChunks();
+                    } catch (err) {
+                        message.error('删除切片失败: ' + (err.response?.data?.message || err.message));
+                    }
+                }
+            });
+        };
+
+        const handleAddChunk = async () => {
+            if (!newChunkForm.value.text.trim()) {
+                message.error('切片内容不能为空');
+                return;
+            }
+            addingChunk.value = true;
+            try {
+                await knowledgeBasesApi.createChunk(explorerKb.value.id, {
+                    text: newChunkForm.value.text.trim(),
+                    documentId: chunkDocFilter.value || null
+                });
+                message.success('已成功添加切片');
+                showAddChunkModal.value = false;
+                newChunkForm.value = { text: '', title: '' };
+                await loadExplorerChunks();
+            } catch (err) {
+                message.error('添加切片失败: ' + (err.response?.data?.message || err.message));
+            } finally {
+                addingChunk.value = false;
             }
         };
 
@@ -313,13 +699,31 @@ const component = /*@__PURE__*/ _defineComponent({
             await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs()]);
         });
 
+        onActivated(async () => {
+            await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs()]);
+        });
+
         const __returned__ = {
-            router, message, dialog, loading, knowledgeBases, connectorsMap, embeddingSpecs,
+            showEditModal, updatingKb, editForm, openEditModal, handleUpdateKbSubmit, handleToggleKb,
+            showEditConnectorModal, updatingConn, editConnForm, openEditConnectorModal, handleUpdateConnectorSubmit,
+            showExplorerDrawer, explorerTab, explorerKb, openExplorerDrawer,
+            documents, loadingDocs, docSearch, docPage, docPageSize, docTotal, loadExplorerDocuments, filterChunksByDoc, handleDeleteDoc,
+            chunks, loadingChunks, chunkSearch, chunkDocFilter, chunkEnabledOnly, chunkPage, chunkPageSize, chunkTotal, loadExplorerChunks,
+            editingChunkId, editingChunkText, recomputeEmbeddingImmediately, savingChunk, startEditChunk, cancelEditChunk, saveEditChunk,
+            handleToggleChunk, handleDeleteChunk, showAddChunkModal, addingChunk, newChunkForm, handleAddChunk,
+            get CreateOutline() { return CreateOutline; },
+            get DocumentTextOutline() { return DocumentTextOutline; },
+            get CheckmarkCircleOutline() { return CheckmarkCircleOutline; },
+            
+
+            router, message, dialog, loading, knowledgeBases, connectorsMap, embeddingSpecs, localSpecs, onlineSpecs, goToModelManagement, resetCreateForm,
             showCreateModal, creating, fetchingModels, probingDimension, remoteModelOptions, createForm,
             showConnectorDrawer, currentKb, currentConnectors, loadingConnectors, newConnectorPath, newConnectorPattern,
+            showFolderPicker, folderPickerTarget, handleFolderSelected, selectInitialDirectory, selectConnectorDirectory,
             loadKnowledgeBases, loadEmbeddingSpecs, handleProviderChange, handleDiscoverRemoteModels, handleProbeDimension,
             handleCreateSubmit, openConnectorsDrawer, loadCurrentConnectors, handleAddConnector, handleDeleteConnector,
-            handleTriggerSync, handleDeleteKnowledgeBase,
+            handleTriggerSync, handleSyncAllConnectors, handleDeleteKnowledgeBase,
+            get FolderPickerModal() { return FolderPickerModal; },
             get NTag() { return NTag; },
             get NButton() { return NButton; },
             get BookOutline() { return BookOutline; },
@@ -389,17 +793,29 @@ component.template = `
             </n-space>
 
             <template #action>
-              <n-space justify="space-between">
-                <n-button size="small" secondary @click="openConnectorsDrawer(kb)">
-                  <template #icon><n-icon :component="FolderOutline" /></template>
-                  数据连接器
-                </n-button>
-                <n-space>
-                  <n-button size="small" quaternary type="error" @click="handleDeleteKnowledgeBase(kb)">
-                    <template #icon><n-icon :component="TrashOutline" /></template>
-                    删除
+              <n-space justify="space-between" align="center">
+                <n-space size="small" align="center">
+                  <n-button size="small" secondary @click="openExplorerDrawer(kb)">
+                    <template #icon><n-icon :component="DocumentTextOutline" /></template>
+                    文档切片
+                  </n-button>
+                  <n-button size="small" secondary @click="openConnectorsDrawer(kb)">
+                    <template #icon><n-icon :component="FolderOutline" /></template>
+                    连接器 ({{ (connectorsMap[kb.id] || []).length }})
+                  </n-button>
+                  <n-button size="small" secondary @click="openEditModal(kb)">
+                    <template #icon><n-icon :component="CreateOutline" /></template>
+                    编辑
+                  </n-button>
+                  <n-button size="small" type="primary" secondary @click="router.push('/search')">
+                    <template #icon><n-icon :component="SearchOutline" /></template>
+                    检索
                   </n-button>
                 </n-space>
+                <n-button size="small" quaternary type="error" @click="handleDeleteKnowledgeBase(kb)">
+                  <template #icon><n-icon :component="TrashOutline" /></template>
+                  删除
+                </n-button>
               </n-space>
             </template>
           </n-card>
@@ -427,108 +843,70 @@ component.template = `
           <n-input v-model:value="createForm.description" type="textarea" placeholder="描述此知识库的数据范畴与主要用途" :rows="2" />
         </n-form-item>
 
-        <n-divider title-placement="left">嵌入模型绑定 (不可变规格契约)</n-divider>
+        <n-divider title-placement="left">向量空间规范 (Embedding & Vector Space)</n-divider>
 
         <n-form-item label="模型来源模式">
           <n-radio-group v-model:value="createForm.bindingMode" name="bindingMode">
-            <n-radio-button value="preset">本地/系统已有预设规范</n-radio-button>
-            <n-radio-button value="online">线上 API 模型提供商 (SiliconFlow/Ollama/OpenAI等)</n-radio-button>
+            <n-radio-button value="default">🌟 系统默认模板 (极速零配置)</n-radio-button>
+            <n-radio-button value="local">💻 本地已就绪模型 (Local ONNX)</n-radio-button>
+            <n-radio-button value="online">🌐 在线服务商模型 (Cloud Providers)</n-radio-button>
           </n-radio-group>
         </n-form-item>
 
-        <!-- 模式一：选择预设模型规范 -->
-        <div v-if="createForm.bindingMode === 'preset'">
-          <n-form-item label="选择模型规格 (EmbeddingSpec)">
+        <!-- 模式一：系统默认模板 -->
+        <div v-if="createForm.bindingMode === 'default'">
+          <n-alert type="info" style="margin-bottom: 12px;">
+            直接继承系统默认嵌入模型与宿主机 GPU/CPU 硬件加速。适合绝大多数通用知识库场景，零门槛秒级创建。
+          </n-alert>
+        </div>
+
+        <!-- 模式二：本地已就绪模型 (硬门禁) -->
+        <div v-else-if="createForm.bindingMode === 'local'">
+          <div v-if="localSpecs.length === 0">
+            <n-alert type="warning" style="margin-bottom: 12px;">
+              <span>本地暂未检测到已就绪且启用的嵌入模型。</span>
+              <n-button size="tiny" type="primary" secondary style="margin-left: 8px;" @click="goToModelManagement('embedding')">
+                前往「模型管理」下载
+              </n-button>
+            </n-alert>
+          </div>
+          <n-form-item v-else label="选择本地嵌入模型">
             <n-select
-              v-model:value="createForm.presetSpecId"
-              :options="embeddingSpecs.map(s => ({ label: s.name ? (s.name + ' (' + s.dimension + 'd)') : (s.modelName + ' (' + s.dimension + 'd) [' + s.id + ']'), value: s.id }))"
-              placeholder="选择绑定的模型规范"
+              v-model:value="createForm.localSpecId"
+              :options="localSpecs.map(s => ({ label: s.modelName + ' (' + s.dimension + ' 维) [本地 ONNX]', value: s.id }))"
+              placeholder="选择已就绪的本地模型"
             />
           </n-form-item>
         </div>
 
-        <!-- 模式二：配置线上 API 提供商与模型列表 -->
+        <!-- 模式三：集中式在线服务商统一资产 -->
         <div v-else>
-          <n-form-item label="选择 API 提供商快捷预设">
-            <n-space>
-              <n-button size="small" :type="createForm.onlineProvider === 'siliconflow' ? 'primary' : 'default'" @click="handleProviderChange('siliconflow')">
-                SiliconFlow 硅基流动
+          <div v-if="onlineSpecs.length === 0">
+            <n-alert type="warning" style="margin-bottom: 12px;">
+              <span>尚未在系统中配置在线服务商（如 SiliconFlow、OpenAI、Ollama 等）。</span>
+              <n-button size="tiny" type="primary" secondary style="margin-left: 8px;" @click="goToModelManagement('providers')">
+                前往「模型管理」添加在线服务商
               </n-button>
-              <n-button size="small" :type="createForm.onlineProvider === 'ollama' ? 'primary' : 'default'" @click="handleProviderChange('ollama')">
-                本地 Ollama
-              </n-button>
-              <n-button size="small" :type="createForm.onlineProvider === 'openai' ? 'primary' : 'default'" @click="handleProviderChange('openai')">
-                OpenAI 官方
-              </n-button>
-              <n-button size="small" :type="createForm.onlineProvider === 'deepseek' ? 'primary' : 'default'" @click="handleProviderChange('deepseek')">
-                DeepSeek
-              </n-button>
-              <n-button size="small" :type="createForm.onlineProvider === 'custom' ? 'primary' : 'default'" @click="handleProviderChange('custom')">
-                自定义端点
-              </n-button>
-            </n-space>
+            </n-alert>
+          </div>
+          <n-form-item v-else label="选择服务商纳管模型">
+            <n-select
+              v-model:value="createForm.onlineSpecId"
+              :options="onlineSpecs.map(s => ({ label: s.modelName + ' (' + s.dimension + ' 维) [云端]', value: s.id }))"
+              placeholder="从已接入的服务商模型资产中选择"
+            />
           </n-form-item>
-
-          <n-grid :cols="2" :x-gap="12">
-            <n-gi>
-              <n-form-item label="API 基础地址 (Base URL)">
-                <n-input v-model:value="createForm.onlineBaseUrl" placeholder="https://api.siliconflow.cn/v1" />
-              </n-form-item>
-            </n-gi>
-            <n-gi>
-              <n-form-item label="API Key">
-                <n-input v-model:value="createForm.onlineApiKey" type="password" show-password-on="click" placeholder="sk-..." />
-              </n-form-item>
-            </n-gi>
-          </n-grid>
-
-          <n-grid :cols="2" :x-gap="12">
-            <n-gi>
-              <n-form-item label="选择或输入模型名称">
-                <n-space vertical style="width: 100%;">
-                  <n-input-group>
-                    <n-input v-model:value="createForm.onlineModelName" placeholder="例如: BAAI/bge-m3" />
-                    <n-button type="info" :loading="fetchingModels" @click="handleDiscoverRemoteModels">
-                      拉取列表
-                    </n-button>
-                  </n-input-group>
-                  <n-select
-                    v-if="remoteModelOptions.length > 0"
-                    v-model:value="createForm.onlineModelName"
-                    :options="remoteModelOptions"
-                    filterable
-                    placeholder="从远端拉取到的模型列表中选取"
-                  />
-                </n-space>
-              </n-form-item>
-            </n-gi>
-
-            <n-gi>
-              <n-form-item label="向量维度 (Embedding Dimension)">
-                <n-input-group>
-                  <n-input-number v-model:value="createForm.detectedDimension" :min="64" :max="8192" style="width: 100%;" />
-                  <n-button type="success" :loading="probingDimension" @click="handleProbeDimension">
-                    探测维度
-                  </n-button>
-                </n-input-group>
-              </n-form-item>
-            </n-gi>
-          </n-grid>
         </div>
-
-        <n-form-item label="双通道解耦加速 (Dual-Channel Optimization)">
-          <n-space align="center">
-            <n-switch v-model:value="createForm.enableDualChannel" />
-            <n-text depth="3">开启后：文档入库走线上云端高速 API，搜索查询走本地轻量引擎（兼顾秒级入库与本地离线零成本）</n-text>
-          </n-space>
-        </n-form-item>
 
         <n-divider title-placement="left">初始数据连接器 (可选)</n-divider>
 
         <n-grid :cols="2" :x-gap="12">
           <n-gi>
             <n-form-item label="本地目标文件夹路径">
-              <n-input v-model:value="createForm.initialFolder" placeholder="例如: D:\\Documents\\TechNotes" />
+              <n-input-group style="width: 100%;">
+                <n-input v-model:value="createForm.initialFolder" placeholder="例如: D:\\Documents\\TechNotes" />
+                <n-button secondary type="primary" @click="selectInitialDirectory">选择文件夹</n-button>
+              </n-input-group>
             </n-form-item>
           </n-gi>
           <n-gi>
@@ -560,7 +938,10 @@ component.template = `
           <!-- 添加新连接器表单 -->
           <n-card title="挂载本地新目录" size="small">
             <n-space vertical :size="10">
-              <n-input v-model:value="newConnectorPath" placeholder="本地完整路径 (如 E:\\Notes)" />
+              <n-input-group style="width: 100%;">
+                <n-input v-model:value="newConnectorPath" placeholder="本地完整路径 (如 E:\\Notes)" />
+                <n-button secondary type="primary" @click="selectConnectorDirectory">选择文件夹</n-button>
+              </n-input-group>
               <n-input v-model:value="newConnectorPattern" placeholder="文件规则 (默认 *.md,*.txt,*.pdf)" />
               <n-button type="primary" block @click="handleAddConnector">
                 <template #icon><n-icon :component="AddOutline" /></template>
@@ -571,6 +952,12 @@ component.template = `
 
           <!-- 已挂载连接器列表 -->
           <n-card title="已挂载连接器列表" size="small">
+            <template #header-extra>
+              <n-button v-if="currentConnectors.length > 0" size="small" type="primary" secondary @click="handleSyncAllConnectors">
+                <template #icon><n-icon :component="PlayOutline" /></template>
+                同步全部连接器
+              </n-button>
+            </template>
             <n-spin :show="loadingConnectors">
               <n-list v-if="currentConnectors.length > 0">
                 <n-list-item v-for="conn in currentConnectors" :key="conn.id">
@@ -580,6 +967,10 @@ component.template = `
                         <n-button size="small" type="primary" secondary @click="handleTriggerSync(currentKb.id, conn.id)">
                           <template #icon><n-icon :component="PlayOutline" /></template>
                           立即同步
+                        </n-button>
+                        <n-button size="small" secondary @click="openEditConnectorModal(conn)">
+                          <template #icon><n-icon :component="CreateOutline" /></template>
+                          编辑
                         </n-button>
                         <n-button size="small" quaternary type="error" @click="handleDeleteConnector(conn.id)">
                           <template #icon><n-icon :component="TrashOutline" /></template>
@@ -595,6 +986,241 @@ component.template = `
         </n-space>
       </n-drawer-content>
     </n-drawer>
+
+    <!-- Folder Picker Modal for Web Mode -->
+    <folder-picker-modal
+      v-model:show="showFolderPicker"
+      :initial-path="folderPickerTarget === 'initial' ? createForm.initialFolder : newConnectorPath"
+      @select="handleFolderSelected"
+    />
+  
+    <!-- 编辑知识库模态框 -->
+    <n-modal v-model:show="showEditModal" preset="card" title="编辑知识库设置" style="max-width: 560px">
+      <n-form :model="editForm" label-placement="left" label-width="110">
+        <n-form-item label="知识库名称" required>
+          <n-input v-model:value="editForm.name" placeholder="请输入知识库名称" />
+        </n-form-item>
+        <n-form-item label="知识库描述">
+          <n-input v-model:value="editForm.description" type="textarea" :rows="2" placeholder="知识库简介与用途说明" />
+        </n-form-item>
+        <n-form-item label="启用状态">
+          <n-switch v-model:value="editForm.enabled">
+            <template #checked>已启用 (参与检索与监控)</template>
+            <template #unchecked>已停用 (暂停服务)</template>
+          </n-switch>
+        </n-form-item>
+        <n-form-item label="模型规格 ID">
+          <n-input v-model:value="editForm.embeddingSpecId" placeholder="例如 bge-m3-default" />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showEditModal = false">取消</n-button>
+          <n-button type="primary" :loading="updatingKb" @click="handleUpdateKbSubmit">保存修改</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 编辑连接器模态框 -->
+    <n-modal v-model:show="showEditConnectorModal" preset="card" title="编辑连接器规则" style="max-width: 540px">
+      <n-form :model="editConnForm" label-placement="left" label-width="100">
+        <n-form-item label="目标路径" required>
+          <n-input v-model:value="editConnForm.targetPath" placeholder="本地绝对路径" />
+        </n-form-item>
+        <n-form-item label="文件过滤模式">
+          <n-input v-model:value="editConnForm.filePattern" placeholder="例如 *.md,*.txt,*.pdf" />
+        </n-form-item>
+        <n-form-item label="启用同步">
+          <n-switch v-model:value="editConnForm.enabled" />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showEditConnectorModal = false">取消</n-button>
+          <n-button type="primary" :loading="updatingConn" @click="handleUpdateConnectorSubmit">保存连接器</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 文档与切片精细化治理抽屉 (Documents & Chunks HITL Explorer) -->
+    <n-drawer v-model:show="showExplorerDrawer" :width="900" placement="right">
+      <n-drawer-content :title="'知识库治理与切片微调 - ' + (explorerKb ? explorerKb.name : '')" closable>
+        <n-tabs v-model:value="explorerTab" type="line" animated>
+          <!-- 文档视图 -->
+          <n-tab-pane name="documents" tab="收录文档列表">
+            <n-space vertical :size="12">
+              <n-space justify="space-between" align="center">
+                <n-input v-model:value="docSearch" placeholder="搜索文档名或路径..." clearable @keydown.enter="loadExplorerDocuments" style="width: 300px">
+                  <template #prefix><n-icon :component="SearchOutline" /></template>
+                </n-input>
+                <n-button secondary size="small" @click="loadExplorerDocuments" :loading="loadingDocs">
+                  <template #icon><n-icon :component="RefreshOutline" /></template>
+                  刷新文档
+                </n-button>
+              </n-space>
+
+              <n-spin :show="loadingDocs">
+                <div v-if="documents.length === 0" style="padding: 40px 0; text-align: center;">
+                  <n-text depth="3">暂无收录文档</n-text>
+                </div>
+                <n-list v-else hoverable clickable>
+                  <n-list-item v-for="doc in documents" :key="doc.id">
+                    <n-thing :title="doc.sourceKey" :description="'ID: ' + doc.id">
+                      <template #header-extra>
+                        <n-space align="center">
+                          <n-tag size="small" type="info">{{ doc.chunkCount }} 个切片</n-tag>
+                          <n-tag size="small" type="default">v{{ doc.documentVersion }}</n-tag>
+                        </n-space>
+                      </template>
+                      <template #action>
+                        <n-space justify="space-between" align="center">
+                          <n-text depth="3" style="font-size: 12px">更新时间: {{ new Date(doc.updatedAt).toLocaleString() }}</n-text>
+                          <n-space size="small">
+                            <n-button size="small" secondary type="primary" @click="filterChunksByDoc(doc)">
+                              查看切片
+                            </n-button>
+                            <n-button size="small" quaternary type="error" @click="handleDeleteDoc(doc)">
+                              删除文档
+                            </n-button>
+                          </n-space>
+                        </n-space>
+                      </template>
+                    </n-thing>
+                  </n-list-item>
+                </n-list>
+              </n-spin>
+
+              <n-pagination
+                v-if="docTotal > docPageSize"
+                v-model:page="docPage"
+                :page-size="docPageSize"
+                :item-count="docTotal"
+                @update:page="loadExplorerDocuments"
+              />
+            </n-space>
+          </n-tab-pane>
+
+          <!-- 切片管理与纠错视图 -->
+          <n-tab-pane name="chunks" tab="切片管理与纠错 (HITL)">
+            <n-space vertical :size="12">
+              <n-space justify="space-between" align="center">
+                <n-space align="center" :size="12">
+                  <n-input v-model:value="chunkSearch" placeholder="搜索切片内容..." clearable @keydown.enter="loadExplorerChunks" style="width: 260px">
+                    <template #prefix><n-icon :component="SearchOutline" /></template>
+                  </n-input>
+                  <n-tag v-if="chunkDocFilter" closable @close="chunkDocFilter = null; loadExplorerChunks()">
+                    过滤文档: {{ documents.find(d => d.id === chunkDocFilter)?.sourceKey || chunkDocFilter.slice(0, 8) }}
+                  </n-tag>
+                  <n-checkbox v-model:checked="chunkEnabledOnly" @update:checked="loadExplorerChunks">
+                    仅有效切片
+                  </n-checkbox>
+                </n-space>
+                <n-space align="center">
+                  <n-button type="primary" size="small" @click="showAddChunkModal = true">
+                    <template #icon><n-icon :component="AddOutline" /></template>
+                    + 手动添加分段
+                  </n-button>
+                  <n-button secondary size="small" @click="loadExplorerChunks" :loading="loadingChunks">
+                    <template #icon><n-icon :component="RefreshOutline" /></template>
+                    刷新
+                  </n-button>
+                </n-space>
+              </n-space>
+
+              <n-spin :show="loadingChunks">
+                <div v-if="chunks.length === 0" style="padding: 40px 0; text-align: center;">
+                  <n-text depth="3">暂无匹配分块记录</n-text>
+                </div>
+                <div v-else style="display: flex; flex-direction: column; gap: 12px;">
+                  <n-card v-for="chk in chunks" :key="chk.id" size="small" :bordered="true" style="border-radius: 6px;">
+                    <template #header>
+                      <n-space align="center" justify="space-between">
+                        <n-space align="center" :size="8">
+                          <n-tag size="small" type="default">#{{ chk.ordinal }}</n-tag>
+                          <n-tag size="small" type="info">{{ chk.tokenCount }} 字/Tokens</n-tag>
+                          <n-tag size="small" :type="chk.hasVector ? 'success' : 'warning'">
+                            {{ chk.hasVector ? '向量就绪' : '无向量' }}
+                          </n-tag>
+                          <n-text v-if="chk.documentSourceKey" depth="3" style="font-size: 12px;">[{{ chk.documentSourceKey }}]</n-text>
+                        </n-space>
+                        <n-space align="center" :size="8">
+                          <n-switch :value="chk.enabled" size="small" @update:value="val => handleToggleChunk(chk, val)">
+                            <template #checked>已启用</template>
+                            <template #unchecked>已下线</template>
+                          </n-switch>
+                          <n-button v-if="editingChunkId !== chk.id" size="tiny" secondary @click="startEditChunk(chk)">
+                            <template #icon><n-icon :component="CreateOutline" /></template>
+                            微调
+                          </n-button>
+                          <n-button size="tiny" quaternary type="error" @click="handleDeleteChunk(chk)">
+                            <template #icon><n-icon :component="TrashOutline" /></template>
+                          </n-button>
+                        </n-space>
+                      </n-space>
+                    </template>
+
+                    <!-- 查看模式 -->
+                    <div v-if="editingChunkId !== chk.id" style="white-space: pre-wrap; font-size: 13px; line-height: 1.6; color: #ddd; max-height: 180px; overflow-y: auto;">
+                      {{ chk.text }}
+                    </div>
+
+                    <!-- 原地编辑模式 (HITL) -->
+                    <div v-else style="display: flex; flex-direction: column; gap: 8px;">
+                      <n-input
+                        v-model:value="editingChunkText"
+                        type="textarea"
+                        :autosize="{ minRows: 3, maxRows: 8 }"
+                        placeholder="编辑切片文本内容..."
+                      />
+                      <n-space justify="space-between" align="center">
+                        <n-checkbox v-model:checked="recomputeEmbeddingImmediately">
+                          即时重算密集向量 (300ms 刷新)
+                        </n-checkbox>
+                        <n-space size="small">
+                          <n-button size="small" @click="cancelEditChunk">取消</n-button>
+                          <n-button size="small" type="primary" :loading="savingChunk" @click="saveEditChunk(chk)">
+                            保存修改并重新索引
+                          </n-button>
+                        </n-space>
+                      </n-space>
+                    </div>
+                  </n-card>
+                </div>
+              </n-spin>
+
+              <n-pagination
+                v-if="chunkTotal > chunkPageSize"
+                v-model:page="chunkPage"
+                :page-size="chunkPageSize"
+                :item-count="chunkTotal"
+                @update:page="loadExplorerChunks"
+              />
+            </n-space>
+          </n-tab-pane>
+        </n-tabs>
+      </n-drawer-content>
+    </n-drawer>
+
+    <!-- 手动添加切片模态框 -->
+    <n-modal v-model:show="showAddChunkModal" preset="card" title="手动补充知识分段" style="max-width: 600px">
+      <n-form :model="newChunkForm" label-placement="top">
+        <n-form-item label="分段文本内容 (将即时计算向量并加入 BM25 索引)" required>
+          <n-input
+            v-model:value="newChunkForm.text"
+            type="textarea"
+            :autosize="{ minRows: 5, maxRows: 10 }"
+            placeholder="输入规章制度、问答对或业务知识补充项..."
+          />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showAddChunkModal = false">取消</n-button>
+          <n-button type="primary" :loading="addingChunk" @click="handleAddChunk">确认添加</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
   </n-space>
 `;
 

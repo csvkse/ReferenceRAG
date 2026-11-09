@@ -18,7 +18,7 @@ namespace ReferenceRAG.Storage;
 /// - 向量子表（vec_{model}）：每个模型一个 vec0 虚拟表，拥有独立的向量索引
 /// - 模型元数据表（models）：记录每个模型的维度和统计信息
 /// </summary>
-public class SqliteVectorStore : IVectorStore, IDisposable
+public class SqliteVectorStore : IVectorStore, IDocumentStore, IDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly string _dbPath;
@@ -914,6 +914,40 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         }
     }
 
+    public async Task<IReadOnlyDictionary<string, ChunkRecord>> GetChunksByIdsAsync(
+        IReadOnlyCollection<string> ids, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        cancellationToken.ThrowIfCancellationRequested();
+        var chunks = new Dictionary<string, ChunkRecord>(StringComparer.Ordinal);
+        var uniqueIds = ids.Distinct(StringComparer.Ordinal).ToArray();
+        if (uniqueIds.Length == 0) return chunks;
+
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            foreach (var batch in uniqueIds.Chunk(500))
+            {
+                using var command = _connection.CreateCommand();
+                var parameters = new string[batch.Length];
+                for (var i = 0; i < batch.Length; i++)
+                {
+                    parameters[i] = $"@id{i}";
+                    AddParameter(command, parameters[i], batch[i]);
+                }
+                command.CommandText = $"SELECT * FROM chunks WHERE id IN ({string.Join(",", parameters)})";
+                using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var chunk = ReadChunkRecord(reader);
+                    chunks[chunk.Id] = chunk;
+                }
+            }
+            return chunks;
+        }
+        finally { _writeLock.Release(); }
+    }
+
     public async Task<ChunkRecord?> GetChunkAsync(string id, CancellationToken cancellationToken = default)
     {
         await _writeLock.WaitAsync(cancellationToken);
@@ -1355,6 +1389,36 @@ public class SqliteVectorStore : IVectorStore, IDisposable
         finally { _writeLock.Release(); }
 
         return result;
+    }
+
+    public async Task<IReadOnlyDictionary<string, VectorRecord>> GetVectorsByChunkIdsAsync(
+        IEnumerable<string> chunkIds, string modelName, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelName);
+        var ids = chunkIds.Distinct(StringComparer.Ordinal).ToArray();
+        var result = new Dictionary<string, VectorRecord>(StringComparer.Ordinal);
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!_modelDimensions.TryGetValue(modelName, out var dimension)) return result;
+            var table = ModelToTableName(modelName);
+            foreach (var batch in ids.Chunk(200))
+            {
+                using var cmd = _connection.CreateCommand();
+                var parameters = batch.Select((_, i) => $"@id{i}").ToArray();
+                cmd.CommandText = $"SELECT chunk_id,embedding FROM {table} WHERE chunk_id IN ({string.Join(",", parameters)})";
+                for (var i = 0; i < batch.Length; i++) AddParameter(cmd, parameters[i], batch[i]);
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var id = reader.GetString(0);
+                    result[id] = new VectorRecord { Id = $"vec_{id}", ChunkId = id, ModelName = modelName,
+                        Dimension = dimension, Vector = BlobToVector(reader.GetFieldValue<byte[]>(1)) };
+                }
+            }
+            return result;
+        }
+        finally { _writeLock.Release(); }
     }
 
     public async Task DeleteVectorAsync(string id, CancellationToken cancellationToken = default)

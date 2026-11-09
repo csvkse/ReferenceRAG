@@ -4,7 +4,7 @@ import {
     NInput, NCheckbox, NCheckboxGroup, NRadio, NRadioGroup, NRadioButton, NAlert, NText,
     NPopconfirm, NDescriptions, NDescriptionsItem, useMessage
 } from 'naive-ui';
-import { apiKeysApi } from '/app/api/index.js';
+import { apiKeysApi, knowledgeBasesApi } from '/app/api/index.js';
 
 const component = /*@__PURE__*/ _defineComponent({
     name: 'ApiKeys',
@@ -53,8 +53,13 @@ const component = /*@__PURE__*/ _defineComponent({
 
         const loadCatalog = async () => {
             try {
-                const res = await apiKeysApi.getMetaCatalog();
-                metaCatalog.value = res.data || { categories: [], modules: [], mcpTools: [], sources: [] };
+                const [metaRes, kbRes] = await Promise.all([
+                    apiKeysApi.getMetaCatalog(),
+                    knowledgeBasesApi.getAll().catch(() => ({ data: [] }))
+                ]);
+                const baseCatalog = metaRes.data || { categories: [], modules: [], mcpTools: [], sources: [] };
+                baseCatalog.knowledgeBases = kbRes.data || [];
+                metaCatalog.value = baseCatalog;
             } catch (err) {
                 console.warn('获取权限元数据失败:', err);
             }
@@ -450,15 +455,15 @@ const component = /*@__PURE__*/ _defineComponent({
                 }
             },
             {
-                title: '数据源范围',
+                title: '知识库/源范围',
                 key: 'sourceScopeMode',
-                width: 140,
+                width: 150,
                 render: (row) => {
                     if (row.sourceScopeMode === 'all') {
-                        return h(NTag, { type: 'success', size: 'small', secondary: true }, { default: () => '全部知识源' });
+                        return h(NTag, { type: 'success', size: 'small', secondary: true }, { default: () => '全部知识库/源' });
                     }
                     const sources = parseJsonArray(row.allowedSources);
-                    return h(NTag, { type: 'warning', size: 'small' }, { default: () => `限制: ${sources.length} 个源` });
+                    return h(NTag, { type: 'warning', size: 'small' }, { default: () => `限制: ${sources.length} 项` });
                 }
             },
             {
@@ -692,29 +697,44 @@ component.template = `
             </div>
           </n-form-item>
 
-          <!-- 数据源级隔离 -->
-          <n-form-item label="数据源访问隔离" required>
+          <!-- 知识库与数据源访问隔离 -->
+          <n-form-item label="知识库与数据源隔离" required>
             <n-space vertical :size="8" style="width: 100%;">
               <n-radio-group v-model:value="form.sourceScopeMode">
                 <n-space>
                   <n-radio value="all">
-                    全部知识源 (允许全局跨库检索与问答)
+                    全部知识库与源 (允许全局跨库无限制检索与问答)
                   </n-radio>
                   <n-radio value="custom">
-                    限制特定知识源 (最小权限原则，仅允许检索勾选源)
+                    限制特定知识库/源 (最小权限原则，仅允许检索勾选项)
                   </n-radio>
                 </n-space>
               </n-radio-group>
 
               <div v-if="form.sourceScopeMode === 'custom'" style="background: rgba(128,128,128,0.06); padding: 12px; border-radius: 6px; margin-top: 8px;">
-                <n-checkbox-group v-model:value="form.selectedSources">
-                  <n-space vertical :size="8">
-                    <n-checkbox v-for="s in metaCatalog.sources" :key="s.name" :value="s.name">
-                      <span style="font-weight: 500;">📁 {{ s.name }}</span>
-                      <n-text depth="3" style="margin-left: 8px; font-size: 12px;">({{ s.path }})</n-text>
-                    </n-checkbox>
-                  </n-space>
-                </n-checkbox-group>
+                <div v-if="metaCatalog.knowledgeBases && metaCatalog.knowledgeBases.length > 0" style="margin-bottom: 12px;">
+                  <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">📚 授权知识库：</div>
+                  <n-checkbox-group v-model:value="form.selectedSources">
+                    <n-space vertical :size="6">
+                      <n-checkbox v-for="kb in metaCatalog.knowledgeBases" :key="'kb:' + kb.id" :value="kb.name">
+                        <span style="font-weight: 500;">📚 {{ kb.name }}</span>
+                        <n-text depth="3" style="margin-left: 8px; font-size: 12px;">({{ kb.embeddingSpecId || '默认规范' }})</n-text>
+                      </n-checkbox>
+                    </n-space>
+                  </n-checkbox-group>
+                </div>
+
+                <div v-if="metaCatalog.sources && metaCatalog.sources.length > 0">
+                  <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">📁 授权底层数据源：</div>
+                  <n-checkbox-group v-model:value="form.selectedSources">
+                    <n-space vertical :size="6">
+                      <n-checkbox v-for="s in metaCatalog.sources" :key="s.name" :value="s.name">
+                        <span style="font-weight: 500;">📁 {{ s.name }}</span>
+                        <n-text depth="3" style="margin-left: 8px; font-size: 12px;">({{ s.path }})</n-text>
+                      </n-checkbox>
+                    </n-space>
+                  </n-checkbox-group>
+                </div>
               </div>
             </n-space>
           </n-form-item>

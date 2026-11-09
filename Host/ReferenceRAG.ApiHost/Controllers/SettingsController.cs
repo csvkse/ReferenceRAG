@@ -1,3 +1,4 @@
+using ReferenceRAG.Core.Features.ModelManagement.Services;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -198,6 +199,9 @@ public class SettingsController : ControllerBase
     public async Task<ActionResult<SettingsSaveResult>> Save([FromBody] ObsidianRagConfig config)
     {
         var current = _configManager.Load();
+        SynchronizeModelUrnBindings(config, current);
+        if (current.Indexing.EmbeddingEnabled != config.Indexing.EmbeddingEnabled)
+            return Conflict(new { error = "向量索引启用状态不能在运行时切换；请停止服务后修改配置并重启。" });
         var embeddingIdentityChanged = !string.Equals(current.Embedding.Mode, config.Embedding.Mode, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(current.Embedding.ModelName, config.Embedding.ModelName, StringComparison.Ordinal)
             || current.Embedding.ApiDimension != config.Embedding.ApiDimension;
@@ -466,6 +470,107 @@ public class SettingsController : ControllerBase
         if (key.Length <= 4) return "****";
         return $"{key[..2]}****{key[^2..]}";
     }
+
+    private void SynchronizeModelUrnBindings(ObsidianRagConfig config, ObsidianRagConfig current)
+    {
+        var resolver = new ModelAssetResolver(_configManager, _modelManager);
+
+        // 1. Chat Model URN 同步
+        if (config.Chat != null && !string.IsNullOrEmpty(config.Chat.ActiveModelUrn))
+        {
+            var resolved = resolver.Resolve(config.Chat.ActiveModelUrn, "chat");
+            if (resolved != null)
+            {
+                if (resolved.IsLocal)
+                {
+                    config.Chat.ActiveBackend = "LocalGguf";
+                    config.Chat.LocalGguf ??= new LocalGgufChatProfile();
+                    if (string.IsNullOrWhiteSpace(config.Chat.LocalGguf.ModelName) || config.Chat.ActiveModelUrn != "local:qwen2.5-7b-instruct-q4_k_m")
+                    {
+                        config.Chat.LocalGguf.ModelName = resolved.Urn.ModelName;
+                    }
+                    if (!string.IsNullOrEmpty(resolved.LocalModelPath))
+                        config.Chat.LocalGguf.ModelPath = resolved.LocalModelPath;
+                    if (!string.IsNullOrEmpty(resolved.LocalVariant))
+                        config.Chat.LocalGguf.Variant = resolved.LocalVariant;
+                }
+                else
+                {
+                    config.Chat.ActiveBackend = "OpenAiApi";
+                    config.Chat.OpenAiApi ??= new OpenAiApiChatProfile();
+                    config.Chat.OpenAiApi.Endpoint = resolved.BaseUrl ?? "https://api.openai.com/v1";
+                    config.Chat.OpenAiApi.ApiKey = resolved.ApiKey ?? string.Empty;
+                    config.Chat.OpenAiApi.Model = resolved.RemoteModelId ?? "gpt-4o-mini";
+                }
+            }
+        }
+
+        // 2. Embedding Model URN 同步
+        if (config.Embedding != null && !string.IsNullOrEmpty(config.Embedding.ActiveModelUrn))
+        {
+            var resolved = resolver.Resolve(config.Embedding.ActiveModelUrn, "embedding");
+            if (resolved != null)
+            {
+                if (resolved.IsLocal)
+                {
+                    config.Embedding.ActiveBackend = "LocalOnnx";
+                    config.Embedding.Mode = "onnx";
+                    config.Embedding.LocalOnnx ??= new LocalOnnxEmbeddingProfile();
+                    if (string.IsNullOrWhiteSpace(config.Embedding.LocalOnnx.ModelName) || config.Embedding.ActiveModelUrn != "local:bge-small-zh-v1.5")
+                    {
+                        config.Embedding.LocalOnnx.ModelName = resolved.Urn.ModelName;
+                    }
+                    if (!string.IsNullOrEmpty(resolved.LocalModelPath))
+                        config.Embedding.LocalOnnx.ModelPath = resolved.LocalModelPath;
+                }
+                else
+                {
+                    config.Embedding.ActiveBackend = "OpenAiApi";
+                    config.Embedding.Mode = "openai";
+                    config.Embedding.OpenAiApi ??= new OpenAiApiEmbeddingProfile();
+                    config.Embedding.OpenAiApi.BaseUrl = resolved.BaseUrl;
+                    config.Embedding.OpenAiApi.ApiKey = resolved.ApiKey;
+                    config.Embedding.OpenAiApi.ModelName = resolved.RemoteModelId ?? "text-embedding-3-small";
+                    config.Embedding.ApiBaseUrl = resolved.BaseUrl;
+                    config.Embedding.ApiKey = resolved.ApiKey;
+                    config.Embedding.ApiDimension = resolved.Dimension > 0 ? resolved.Dimension : 1024;
+                }
+            }
+        }
+
+        // 3. Rerank Model URN 同步
+        if (config.Rerank != null && !string.IsNullOrEmpty(config.Rerank.ActiveModelUrn))
+        {
+            var resolved = resolver.Resolve(config.Rerank.ActiveModelUrn, "rerank");
+            if (resolved != null)
+            {
+                if (resolved.IsLocal)
+                {
+                    config.Rerank.ActiveBackend = "LocalOnnx";
+                    config.Rerank.Mode = "onnx";
+                    config.Rerank.LocalOnnx ??= new LocalOnnxRerankProfile();
+                    if (string.IsNullOrWhiteSpace(config.Rerank.LocalOnnx.ModelName) || config.Rerank.ActiveModelUrn != "local:bge-reranker-base")
+                    {
+                        config.Rerank.LocalOnnx.ModelName = resolved.Urn.ModelName;
+                        config.Rerank.LocalOnnx.CurrentModel = resolved.Urn.ModelName;
+                    }
+                    if (!string.IsNullOrEmpty(resolved.LocalModelPath))
+                        config.Rerank.LocalOnnx.ModelPath = resolved.LocalModelPath;
+                }
+                else
+                {
+                    config.Rerank.ActiveBackend = "OpenAiApi";
+                    config.Rerank.Mode = "openai";
+                    config.Rerank.OpenAiApi ??= new OpenAiApiRerankProfile();
+                    config.Rerank.OpenAiApi.BaseUrl = resolved.BaseUrl;
+                    config.Rerank.OpenAiApi.ApiKey = resolved.ApiKey;
+                    config.Rerank.OpenAiApi.ModelName = resolved.RemoteModelId ?? "bge-reranker-large";
+                    config.Rerank.ApiBaseUrl = resolved.BaseUrl;
+                    config.Rerank.ApiKey = resolved.ApiKey;
+                }
+            }
+        }
+    }
 }
 
 /// <summary>
@@ -513,4 +618,3 @@ public class SettingsSaveResult
     /// </summary>
     public bool IndexRequiresRebuild { get; set; }
 }
-

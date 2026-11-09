@@ -98,6 +98,23 @@ public class StartupSyncService : IHostedService
         try
         {
             var config = _configManager.Load();
+            if (!config.Indexing.EmbeddingEnabled)
+            {
+                if (!config.Search.EnableLexical)
+                    throw new InvalidOperationException("禁用向量索引前必须启用词法检索。");
+                var job = await _indexService.StartIndexAsync(new IndexRequest(), cancellationToken);
+                await _indexService.WaitForCompletionAsync(job, cancellationToken);
+                if (job.Status != IndexStatus.Completed)
+                    throw new InvalidOperationException(job.ErrorMessage ?? "词法启动同步未完成。");
+                sw.Stop();
+                result.EndTime = DateTime.UtcNow;
+                result.Duration = sw.Elapsed;
+                result.Success = true;
+                result.Message = $"词法索引同步完成，共处理 {job.ProcessedFiles} 个文件。";
+                LastSyncResult = result;
+                SyncCompleted?.Invoke(this, new StartupSyncCompletedEventArgs { Result = result });
+                return;
+            }
             var enabledSources = config.Sources.Where(s => s.Enabled).ToList();
             var allSourcePaths = config.Sources.Select(s => PathUtility.NormalizePath(s.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
 

@@ -54,6 +54,8 @@ public static class McpPermissionGuard
                 }
 
                 currentKey = liveKey; // 采用最新的实时权限配置进行决断
+                if (httpContextAccessor?.HttpContext != null)
+                    httpContextAccessor.HttpContext.Items["CurrentApiKey"] = liveKey;
             }
         }
 

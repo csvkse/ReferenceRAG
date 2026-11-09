@@ -1,0 +1,123 @@
+[
+  {
+    "id": "exp-vague-01",
+    "archetype": "VagueConceptual",
+    "archetypeName": "模糊概念探索",
+    "targetNovel": "越女剑",
+    "question": "知识库里有没有记载关于古代铸剑技术或者春秋时期名剑锻造工艺的篇章？",
+    "intent": "人类未知探索：不提及具体书名或角色，探索宏观主题",
+    "goldThemes": ["薛烛", "欧冶子", "纯钧", "工布", "铸剑"],
+    "mustContainAny": ["薛烛", "欧冶子", "铸剑", "纯钧", "工布"],
+    "negativeDistractors": ["倚天剑", "屠龙刀"]
+  },
+  {
+    "id": "exp-scenario-01",
+    "archetype": "ScenarioDescription",
+    "archetypeName": "场景/现象描述",
+    "targetNovel": "越女剑",
+    "question": "讲一个年轻姑娘拿一根细竹竿把几十个全副武装的敌国剑士眼睛戳瞎的武打片段在哪？",
+    "intent": "人类未知探索：只记得名场面画面，不记得人名阿青和书名",
+    "goldThemes": ["竹棒", "戳瞎", "眼睛", "吴国剑士"],
+    "mustContainAny": ["竹棒", "眼睛", "剑士", "阿青"],
+    "negativeDistractors": ["江南七怪", "打狗棒法"]
+  },
+  {
+    "id": "exp-scenario-02",
+    "archetype": "ScenarioDescription",
+    "archetypeName": "场景/现象描述",
+    "targetNovel": "雪山飞狐",
+    "question": "两位武林绝顶高手在北方雪山之巅决斗数日惺惺相惜，最后却因为兵器刃口被人暗下剧毒身亡的故事在何处？",
+    "intent": "人类未知探索：描述决斗与中毒情节，未提及胡一刀或苗人凤",
+    "goldThemes": ["胡一刀", "苗人凤", "决斗", "毒"],
+    "mustContainAny": ["胡一刀", "苗人凤", "毒", "田归农"],
+    "negativeDistractors": ["张无忌", "光明顶"]
+  },
+  {
+    "id": "exp-synonym-01",
+    "archetype": "VocabularyMismatch",
+    "archetypeName": "同义词/词汇断层",
+    "targetNovel": "雪山飞狐",
+    "question": "古代农民起义领袖留给下属四位保镖家族世代争夺的巨额私房钱埋在哪个地方？",
+    "intent": "人类未知探索：用起义领袖代李自成、保镖代侍卫、私房钱代宝藏，考验同义泛化",
+    "goldThemes": ["闯王", "李自成", "宝藏", "玉笔峰"],
+    "mustContainAny": ["闯王", "李自成", "宝藏", "玉笔峰"],
+    "negativeDistractors": ["桃花岛", "侠客岛"]
+  },
+  {
+    "id": "exp-synonym-02",
+    "archetype": "VocabularyMismatch",
+    "archetypeName": "同义词/词汇断层",
+    "targetNovel": "连城诀",
+    "question": "含冤入狱的无辜青年从同监牢的长辈身上承袭了哪门能够起死回生的神奇内家真气？",
+    "intent": "人类未知探索：用青年代狄云、长辈代丁典、真气代神功，词面无重合",
+    "goldThemes": ["丁典", "神照经", "狄云"],
+    "mustContainAny": ["丁典", "神照经", "狄云"],
+    "negativeDistractors": ["九阳真经", "易筋经"]
+  },
+  {
+    "id": "exp-typo-01",
+    "archetype": "TypoAndNoise",
+    "archetypeName": "口语与错别字噪声",
+    "targetNovel": "越女剑",
+    "question": "月女剑里头那个很厉害的放洋小姑娘到底是跟哪只猴子学打架的呀",
+    "intent": "人类未知探索：输入法同音错别字（月女/放洋）与口语化（猴子/打架）",
+    "goldThemes": ["阿青", "白公公", "白猿", "竹棒"],
+    "mustContainAny": ["阿青", "白公公", "白猿"],
+    "negativeDistractors": ["孙悟空", "花果山"]
+  },
+  {
+    "id": "exp-typo-02",
+    "archetype": "TypoAndNoise",
+    "archetypeName": "口语与错别字噪声",
+    "targetNovel": "连城诀",
+    "question": "连成决里面狄芸被坏人陷害穿了琵琶骨之后在牢房里遇到了谁传授武功",
+    "intent": "人类未知探索：书名错字（连成决）、主角错字（狄芸）",
+    "goldThemes": ["狄云", "丁典", "神照经"],
+    "mustContainAny": ["狄云", "丁典", "神照经"],
+    "negativeDistractors": ["成昆", "谢逊"]
+  },
+  {
+    "id": "exp-negation-01",
+    "archetype": "NegationDistractor",
+    "archetypeName": "反事实与否定陷阱",
+    "targetNovel": "连城诀",
+    "question": "狄云是真的背叛师门投靠血刀门作恶了吗？为什么血刀老祖会叫他好徒孙？",
+    "intent": "人类未知探索：用户带有误解提问，系统需召回澄清真相的段落（误认穿僧袍）",
+    "goldThemes": ["血刀老祖", "徒孙", "狄云", "误会"],
+    "mustContainAny": ["血刀老祖", "徒孙", "狄云"],
+    "negativeDistractors": ["狄云杀死师妹"]
+  },
+  {
+    "id": "exp-multihop-01",
+    "archetype": "MultiHopSynthesis",
+    "archetypeName": "跨章节多跳线索综合",
+    "targetNovel": "越女剑",
+    "question": "西施心口疼痛的千古名篇典故跟范蠡为越国寻找训练剑士的高手之间到底有什么因果关系？",
+    "intent": "人类未知探索：跨越范蠡遇阿青、训练剑士、最终西施捧心三个远距情节的综合因果",
+    "goldThemes": ["范蠡", "阿青", "西施", "心口", "捧心", "剑气"],
+    "mustContainAny": ["范蠡", "西施", "阿青", "捧心"],
+    "negativeDistractors": ["东施效颦无关联"]
+  },
+  {
+    "id": "exp-exact-01",
+    "archetype": "ExactVerification",
+    "archetypeName": "精准专名核验",
+    "targetNovel": "连城诀",
+    "question": "神照经在连城诀中是由谁传授给狄云的？",
+    "intent": "对照组：传统精准专名查找，作为基线对比",
+    "goldThemes": ["丁典", "神照经", "狄云"],
+    "mustContainAny": ["丁典", "神照经"],
+    "negativeDistractors": ["戚长发", "万震山"]
+  },
+  {
+    "id": "exp-exact-02",
+    "archetype": "ExactVerification",
+    "archetypeName": "精准专名核验",
+    "targetNovel": "越女剑",
+    "question": "薛烛在越王勾践面前鉴定了哪几口春秋古代名剑？",
+    "intent": "对照组：传统极度生僻专名核验（纯钧、工布）",
+    "goldThemes": ["薛烛", "纯钧", "工布", "勾践"],
+    "mustContainAny": ["薛烛", "纯钧", "工布"],
+    "negativeDistractors": ["玄铁剑"]
+  }
+]

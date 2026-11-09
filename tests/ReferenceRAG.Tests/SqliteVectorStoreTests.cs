@@ -5,6 +5,21 @@ namespace ReferenceRAG.Tests;
 
 public class SqliteVectorStoreTests : IDisposable
 {
+    [Fact]
+    public async Task BatchVectorLookupSelectsRequestedModel()
+    {
+        await _vectorStore.UpsertFileAsync(new FileRecord { Id = "multi-file", Path = "/multi.md" });
+        await _vectorStore.UpsertChunkAsync(new ChunkRecord { Id = "multi-chunk", FileId = "multi-file", Content = "text" });
+        await _vectorStore.UpsertVectorAsync(new VectorRecord { ChunkId = "multi-chunk", ModelName = "old-model", Vector = new float[384] });
+        var target = new float[384];
+        target[0] = 0.5f;
+        await _vectorStore.UpsertVectorAsync(new VectorRecord { ChunkId = "multi-chunk", ModelName = "new-model", Vector = target });
+        var found = await _vectorStore.GetVectorsByChunkIdsAsync(new[] { "multi-chunk" }, "new-model");
+        Assert.Equal("new-model", found["multi-chunk"].ModelName);
+        Assert.Equal(0.5f, found["multi-chunk"].Vector[0]);
+        Assert.Empty(await _vectorStore.GetVectorsByChunkIdsAsync(new[] { "multi-chunk" }, "missing-model"));
+    }
+
     private readonly SqliteVectorStore _vectorStore;
     private readonly string _dbPath;
 

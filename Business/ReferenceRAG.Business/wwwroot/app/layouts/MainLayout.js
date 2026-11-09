@@ -58,11 +58,6 @@ const component = /*@__PURE__*/ _defineComponent({
                         icon: renderIcon(LayersOutline)
                     },
                     {
-                        label: '源管理',
-                        key: 'Sources',
-                        icon: renderIcon(FolderOutline)
-                    },
-                    {
                         label: '模型管理',
                         key: 'Models',
                         icon: renderIcon(CubeOutline)

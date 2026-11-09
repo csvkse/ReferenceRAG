@@ -6,6 +6,8 @@ using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Features.ModelManagement.Adapters;
 using ReferenceRAG.Core.Features.ModelManagement.Runtime;
+using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services.Graph;
 
 namespace ReferenceRAG.Core.Features.KnowledgeBase.Jobs;
 
@@ -19,19 +21,23 @@ public sealed class KnowledgeBaseSyncWorker
     private readonly IModelRouter? _modelRouter;
     private readonly ILogger<KnowledgeBaseSyncWorker>? _logger;
     private readonly ILoggerFactory? _loggerFactory;
+    private readonly bool _enableEmbedding;
+    private readonly WikiLinkExtractor _linkExtractor = new();
 
     public KnowledgeBaseSyncWorker(
         ICatalogStore catalog,
         IKnowledgeBaseStorageManager storageManager,
         IModelRouter? modelRouter = null,
         ILogger<KnowledgeBaseSyncWorker>? logger = null,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        bool enableEmbedding = true)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _storageManager = storageManager ?? throw new ArgumentNullException(nameof(storageManager));
         _modelRouter = modelRouter;
         _logger = logger;
         _loggerFactory = loggerFactory;
+        _enableEmbedding = enableEmbedding;
     }
 
     public async Task<JobDefinition> ExecuteSyncAsync(
@@ -76,7 +82,9 @@ public sealed class KnowledgeBaseSyncWorker
                 if (change.Kind == ChangeKind.Delete)
                 {
                     await using var lease = await _storageManager.AcquireLeaseAsync(job.KnowledgeBaseId, StorageAccess.ReadWrite, ct);
+                    if (!_enableEmbedding) await lease.Store.EnsureLexicalIndexAsync(ct);
                     await lease.Store.DeleteDocumentAsync(connector.Id, change.SourceKey, ct);
+                    await lease.Store.GraphStore.DeleteNodeAsync(change.SourceKey, ct);
                     processed++;
                     await stateMachine.UpdateProgressAsync(processed, ct: ct);
                     continue;
@@ -96,7 +104,7 @@ public sealed class KnowledgeBaseSyncWorker
 
                     // 可选向量提取
                     List<float[]>? vectors = null;
-                    if (_modelRouter != null && chunks.Count > 0)
+                    if (_enableEmbedding && _modelRouter != null && chunks.Count > 0)
                     {
                         try
                         {
@@ -116,6 +124,7 @@ public sealed class KnowledgeBaseSyncWorker
 
                     await using var lease = await _storageManager.AcquireLeaseAsync(job.KnowledgeBaseId, StorageAccess.ReadWrite, ct);
 
+                    if (!_enableEmbedding) await lease.Store.EnsureLexicalIndexAsync(ct);
                     var batch = new IndexBatch(
                         KnowledgeBaseId: job.KnowledgeBaseId,
                         ExpectedIndexEpoch: lease.IndexEpochSnapshot,
@@ -135,6 +144,59 @@ public sealed class KnowledgeBaseSyncWorker
                     {
                         _logger?.LogWarning("[KnowledgeBaseSyncWorker] 提交文档失败: {Key}, 错误: {Err}", change.SourceKey, commitResult.ErrorMessage);
                         errors++;
+                    }
+                    else
+                    {
+                        // 提取并同步写入物理单库图谱节点与拓扑边
+                        try
+                        {
+                            var graphLinks = _linkExtractor.Extract(textContent);
+                            var fileNode = new GraphNode
+                            {
+                                Id = change.SourceKey,
+                                Title = Path.GetFileNameWithoutExtension(change.SourceKey),
+                                Type = "document",
+                                ChunkIds = chunks.Select(c => c.ChunkId).ToList()
+                            };
+                            var extraNodes = new List<GraphNode>();
+                            var edges = new List<GraphEdge>();
+                            foreach (var (target, heading, type, line) in graphLinks)
+                            {
+                                var targetId = target;
+                                if (!string.IsNullOrEmpty(heading))
+                                {
+                                    targetId = $"{target}#{heading}";
+                                    extraNodes.Add(new GraphNode
+                                    {
+                                        Id = targetId,
+                                        Title = heading,
+                                        Type = "heading"
+                                    });
+                                }
+                                else if (type == "tag")
+                                {
+                                    targetId = $"#{target}";
+                                    extraNodes.Add(new GraphNode
+                                    {
+                                        Id = targetId,
+                                        Title = target,
+                                        Type = "tag"
+                                    });
+                                }
+                                edges.Add(new GraphEdge
+                                {
+                                    FromId = change.SourceKey,
+                                    ToId = targetId,
+                                    Type = type,
+                                    LineNumber = line
+                                });
+                            }
+                            await lease.Store.GraphStore.UpsertFileGraphAsync(change.SourceKey, fileNode, extraNodes, edges, ct);
+                        }
+                        catch (Exception gEx)
+                        {
+                            _logger?.LogWarning(gEx, "[KnowledgeBaseSyncWorker] 单库图谱构建降级: {Key}", change.SourceKey);
+                        }
                     }
                 }
                 catch (Exception ex)

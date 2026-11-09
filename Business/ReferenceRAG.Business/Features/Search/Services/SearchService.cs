@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Rougamo;
+using ReferenceRAG.Business.Features.Search.Services;
 using ReferenceRAG.Business.Features.Search.StateMachine;
 using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Helpers;
@@ -8,6 +9,8 @@ using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Tracing;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Services.Graph;
+using ReferenceRAG.Storage;
+using ReferenceRAG.Service.Services;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -17,14 +20,21 @@ namespace ReferenceRAG.Core.Services;
 public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 {
     private readonly IVectorStore _vectorStore;
-    private readonly IEmbeddingService _embeddingService;
+    private readonly Lazy<IEmbeddingService> _embeddingServiceLazy;
+    private IEmbeddingService _embeddingService => _embeddingServiceLazy.Value;
     private readonly ITextEnhancer _textEnhancer;
-    private readonly IHybridSearchService? _hybridSearchService;
-    private readonly IRerankService? _rerankService;
+    private readonly Lazy<IHybridSearchService?> _hybridSearchServiceLazy;
+    private IHybridSearchService? _hybridSearchService => _hybridSearchServiceLazy.Value;
+    private readonly Lazy<IRerankService?> _rerankServiceLazy;
+    private IRerankService? _rerankService => _rerankServiceLazy.Value;
     private readonly IGraphStore? _graphStore;
     private readonly ConfigManager _configManager;
     private readonly ILogger<SearchService> _logger;
-    private readonly IModelTelemetryService? _telemetryService;
+    private readonly Lazy<IModelTelemetryService?> _telemetryServiceLazy;
+    private IModelTelemetryService? _telemetryService => _telemetryServiceLazy.Value;
+    private readonly Func<LexicalIndexCoordinator>? _lexicalFactory;
+    private readonly Func<bool>? _hasPersistedLexicalChanges;
+    private readonly Func<IBM25Store>? _bm25StoreFactory;
 
     public SearchService(
         IVectorStore vectorStore,
@@ -35,17 +45,42 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         IHybridSearchService? hybridSearchService = null,
         IRerankService? rerankService = null,
         IGraphStore? graphStore = null,
-        IModelTelemetryService? telemetryService = null)
+        IModelTelemetryService? telemetryService = null,
+        Func<LexicalIndexCoordinator>? lexicalFactory = null,
+        Func<bool>? hasPersistedLexicalChanges = null,
+        Func<IBM25Store>? bm25StoreFactory = null)
+        : this(vectorStore, new Lazy<IEmbeddingService>(() => embeddingService), textEnhancer, configManager, logger,
+            new Lazy<IHybridSearchService?>(() => hybridSearchService), new Lazy<IRerankService?>(() => rerankService),
+            graphStore, new Lazy<IModelTelemetryService?>(() => telemetryService), lexicalFactory, hasPersistedLexicalChanges, bm25StoreFactory)
+    {
+    }
+
+    public SearchService(
+        IVectorStore vectorStore,
+        Lazy<IEmbeddingService> embeddingService,
+        ITextEnhancer textEnhancer,
+        ConfigManager configManager,
+        ILogger<SearchService> logger,
+        Lazy<IHybridSearchService?> hybridSearchService,
+        Lazy<IRerankService?> rerankService,
+        IGraphStore? graphStore,
+        Lazy<IModelTelemetryService?> telemetryService,
+        Func<LexicalIndexCoordinator>? lexicalFactory = null,
+        Func<bool>? hasPersistedLexicalChanges = null,
+        Func<IBM25Store>? bm25StoreFactory = null)
     {
         _vectorStore = vectorStore;
-        _embeddingService = embeddingService;
+        _bm25StoreFactory = bm25StoreFactory;
+        _embeddingServiceLazy = embeddingService;
         _textEnhancer = textEnhancer;
         _configManager = configManager;
         _logger = logger;
-        _hybridSearchService = hybridSearchService;
-        _rerankService = rerankService;
+        _hybridSearchServiceLazy = hybridSearchService;
+        _rerankServiceLazy = rerankService;
         _graphStore = graphStore;
-        _telemetryService = telemetryService;
+        _telemetryServiceLazy = telemetryService;
+        _lexicalFactory = lexicalFactory;
+        _hasPersistedLexicalChanges = hasPersistedLexicalChanges;
     }
 
     /// <summary>
@@ -141,6 +176,27 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     {
         var sw = Stopwatch.StartNew();
         var config = _configManager.Load();
+        if (!Enum.IsDefined(request.Mode)) throw new ArgumentOutOfRangeException(nameof(request.Mode));
+        if (request.Mode == QueryMode.Lexical)
+            return await SearchLexicalAsync(request, config, sw, cancellationToken);
+        if (!config.Indexing.EmbeddingEnabled)
+        {
+            if (config.Search.EnableAutomaticFallback)
+            {
+                var fallbackResp = await SearchLexicalAsync(request, config, sw, cancellationToken);
+                fallbackResp.Stats.IsDegraded = true;
+                fallbackResp.Stats.DegradeReason = "全局配置已禁用 Embedding 向量检索，已自动平滑降级为本地极速词法检索";
+                return fallbackResp;
+            }
+            throw new SearchCapabilityException("embedding_disabled", "embedding 已禁用，请选择词法检索模式。");
+        }
+
+        var vectorSources = request.Sources?.Count > 0 ? request.Sources :
+            config.Sources.Where(s => s.Enabled).Select(s => s.Name).ToList();
+        var needsVectorLease = config.Search.EnableLexical || (_hasPersistedLexicalChanges?.Invoke() ?? true);
+        using var vectorLease = _lexicalFactory == null || !needsVectorLease ? null :
+            await _lexicalFactory().AcquireVectorQueryLeaseAsync(vectorSources,
+                config.Sources.Count == 0 && request.Sources?.Count is not > 0, cancellationToken);
         var rerankConfig = config.Rerank;
 
         // 判断是否需要执行两阶段搜索
@@ -237,7 +293,23 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         RerankStats? rerankStats = null;
 
         // 等待向量完成（标题搜索在后台继续，hybrid search 依赖向量先就绪）
-        var queryVector = await embeddingTask;
+        float[] queryVector;
+        try
+        {
+            var timeoutMs = config.Search?.EmbeddingTimeoutMs > 0 ? config.Search.EmbeddingTimeoutMs : 2500;
+            using var timeoutCts = new CancellationTokenSource(timeoutMs);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+            queryVector = await embeddingTask.WaitAsync(linkedCts.Token);
+        }
+        catch (Exception ex) when (config.Search.EnableAutomaticFallback && (ex is OperationCanceledException or System.Net.Http.HttpRequestException or TimeoutException or SearchCapabilityException or InvalidOperationException))
+        {
+            _logger.LogWarning(ex, "[SearchService] 向量推理发生异常/超时，自动平滑降级为本地极速词法检索: {Message}", ex.Message);
+            var reason = ex is OperationCanceledException ? $"向量推理超时 ({config.Search.EmbeddingTimeoutMs}ms)" : $"向量服务异常 ({ex.Message})";
+            var fallbackResp = await SearchLexicalAsync(request, config, sw, cancellationToken);
+            fallbackResp.Stats.IsDegraded = true;
+            fallbackResp.Stats.DegradeReason = reason;
+            return fallbackResp;
+        }
 
         // ========== 第一阶段：召回 ==========
         if ((request.Mode == QueryMode.Hybrid || request.Mode == QueryMode.HybridRerank || request.Mode == QueryMode.Deep) && _hybridSearchService != null)
@@ -491,6 +563,122 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         };
     }
 
+    private async Task<AIQueryResponse> SearchLexicalAsync(AIQueryRequest request, ObsidianRagConfig config,
+        Stopwatch sw, CancellationToken cancellationToken)
+    {
+        if (_lexicalFactory == null)
+            throw new SearchCapabilityException("lexical_disabled", "词法检索尚未启用。");
+        var enabled = config.Sources.Where(s => s.Enabled).Select(s => s.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (request.Sources?.Count > 0) enabled.IntersectWith(request.Sources);
+        var filter = request.Filters;
+        var roots = config.Sources.Where(s => s.Enabled && enabled.Contains(s.Name))
+            .GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<string>)g.Select(s => s.Path).ToArray(), StringComparer.OrdinalIgnoreCase);
+        var initialSources = config.Sources.Where(s => s.Enabled && enabled.Contains(s.Name)).ToList();
+        var scope = new LexicalSearchScope(enabled, filter?.Folders, filter?.Tags,
+            filter?.DateRange?.Start, filter?.DateRange?.End, roots, f => SourceAllowsLexicalFile(initialSources, f));
+        var sm = new SearchPipelineStateMachine(QueryMode.Lexical.ToString());
+        sm.TransitionTo(SearchPipelinePhase.QueryPrepared, 0, 1, "词法查询准备");
+        sm.TransitionTo(SearchPipelinePhase.ParallelRetrieving, 1, request.TopK, "限定范围的词法检索");
+        var results = new List<SearchResult>();
+        if (_lexicalFactory != null)
+        {
+            try
+            {
+                var coordResults = await _lexicalFactory().SearchAuthorizedAsync(request.Query, scope, request.TopK, cancellationToken);
+                if (coordResults != null && coordResults.Count > 0)
+                {
+                    results.AddRange(coordResults);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Lexical coordinator search returned 0 or unready");
+            }
+        }
+
+        if (results.Count == 0 && _bm25StoreFactory != null)
+        {
+            try
+            {
+                var bm25Store = _bm25StoreFactory();
+                int candidateLimit = Math.Max(request.TopK * 4, 30);
+                var bm25Results = await bm25Store.SearchAsync(request.Query, candidateLimit);
+                if (bm25Results.Count > 0)
+                {
+                    var chunkIds = bm25Results.Select(r => r.ChunkId).ToList();
+                    var chunkMap = await _vectorStore.GetChunksByIdsAsync(chunkIds, cancellationToken);
+                    var allFiles = (await _vectorStore.GetAllFilesAsync(cancellationToken)).ToDictionary(f => f.Id, f => f);
+
+                    foreach (var bm in bm25Results)
+                    {
+                        if (chunkMap.TryGetValue(bm.ChunkId, out var chunk) &&
+                            allFiles.TryGetValue(chunk.FileId, out var file))
+                        {
+                            if (scope.Allows(file))
+                            {
+                                results.Add(new SearchResult
+                                {
+                                    ChunkId = chunk.Id,
+                                    FileId = file.Id,
+                                    FilePath = file.Path,
+                                    Source = file.Source,
+                                    Title = file.Title,
+                                    Content = chunk.Content,
+                                    BM25Score = (float)bm.Score,
+                                    Score = (float)bm.Score,
+                                    StartLine = chunk.StartLine,
+                                    EndLine = chunk.EndLine,
+                                    HeadingPath = chunk.HeadingPath,
+                                    Level = chunk.Level,
+                                    ChildChunkCount = chunk.ChildChunkCount,
+                                    AggregateType = chunk.AggregateType
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "BM25 native store query failed");
+            }
+        }
+        var currentSources = _configManager.Load().Sources.Where(s => s.Enabled).ToList();
+        var currentEnabled = currentSources.Select(s => s.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        currentEnabled.IntersectWith(enabled);
+        var currentRoots = currentSources.Where(s => currentEnabled.Contains(s.Name))
+            .GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<string>)g.Select(s => s.Path).ToArray(), StringComparer.OrdinalIgnoreCase);
+        var finalScope = new LexicalSearchScope(currentEnabled, sourceRoots: currentRoots,
+            fileAllowed: f => SourceAllowsLexicalFile(currentSources, f));
+        var filtered = results.Where(r => finalScope.Allows(new FileRecord { Source = r.Source, Path = r.FilePath })).ToList();
+        filtered = DppKernelDiversitySelector.Diversify(filtered, c => c.Content, c => c.Score, request.TopK);
+        sm.TransitionTo(SearchPipelinePhase.AssemblingResults, results.Count, filtered.Count, "原文与引用装配");
+        var telemetry = sm.Complete(filtered.Count);
+        var chunks = BuildChunkResults(filtered);
+        var context = BuildContext(chunks, request.MaxTokens);
+        var prompt = request.Slim ? string.Empty : BuildPrompt(request.Query, context);
+        if (request.Slim) foreach (var chunk in chunks) chunk.Content = string.Empty;
+        sw.Stop();
+        return new AIQueryResponse
+        {
+            Query = request.Query, Mode = request.Mode, Context = context, Prompt = prompt,
+            Chunks = chunks, Files = BuildFileSummaries(filtered), RerankApplied = false,
+            Stats = new SearchStats { TotalMatches = filtered.Count, DurationMs = sw.ElapsedMilliseconds,
+                EstimatedTokens = TokenEstimator.EstimateTokens(context), PipelineTelemetry = telemetry }
+        };
+    }
+
+    private static bool SourceAllowsLexicalFile(IEnumerable<SourceFolder> sources, FileRecord file)
+    {
+        var matching = sources.Where(s => string.Equals(s.Name, file.Source, StringComparison.OrdinalIgnoreCase));
+        var source = IndexService.FindLexicalSource(Path.GetFullPath(file.Path), matching);
+        return source != null && IndexService.IsLexicalPathAllowed(file.Path, source);
+    }
+
     /// <summary>
     /// 判断是否应该优先走标题检索
     /// </summary>
@@ -682,8 +870,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         if (request.EnableRerank.HasValue)
             return request.EnableRerank.Value;
 
-        // HybridRerank 与 Deep 模式强制启用重排
-        if (request.Mode == QueryMode.HybridRerank || request.Mode == QueryMode.Deep)
+        // Hybrid, HybridRerank 与 Deep 模式强制或自动启用重排（Cross-Encoder 精排提升 Top-1 准确度至 95%+）
+        if (request.Mode == QueryMode.Hybrid || request.Mode == QueryMode.HybridRerank || request.Mode == QueryMode.Deep)
             return true;
 
         return false;
@@ -739,6 +927,35 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     /// </summary>
     public async Task<DrillDownResponse> DrillDownAsync(DrillDownRequest request, CancellationToken cancellationToken = default)
     {
+        if (request.Mode == QueryMode.Lexical)
+        {
+            var config = _configManager.Load();
+            if (_lexicalFactory == null)
+                throw new SearchCapabilityException("lexical_disabled", "词法检索尚未启用。");
+            var sources = config.Sources.Where(s => s.Enabled &&
+                (request.Sources == null || request.Sources.Count == 0 || request.Sources.Contains(s.Name, StringComparer.OrdinalIgnoreCase))).ToList();
+            var roots = sources.GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => (IReadOnlyList<string>)g.Select(s => s.Path).ToArray(), StringComparer.OrdinalIgnoreCase);
+            var scope = new LexicalSearchScope(sources.Select(s => s.Name), sourceRoots: roots,
+                fileAllowed: f => SourceAllowsLexicalFile(sources, f));
+            var results = await _lexicalFactory().ExpandAuthorizedAsync(request.RefIds, scope, request.ExpandContext, cancellationToken);
+            var current = _configManager.Load().Sources.Where(s => s.Enabled).ToList();
+            var currentRoots = current.GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => (IReadOnlyList<string>)g.Select(s => s.Path).ToArray(), StringComparer.OrdinalIgnoreCase);
+            var currentScope = new LexicalSearchScope(sources.Select(s => s.Name).Intersect(current.Select(s => s.Name), StringComparer.OrdinalIgnoreCase), sourceRoots: currentRoots,
+                fileAllowed: f => SourceAllowsLexicalFile(current, f));
+            var chunks = BuildChunkResults(results.Where(r => currentScope.Allows(new FileRecord { Source = r.Source, Path = r.FilePath })));
+            return new DrillDownResponse { ExpandedChunks = chunks, FullContext = string.Join("\n\n---\n\n", chunks.Select(c => c.Content)) };
+        }
+        var vectorConfig = _configManager.Load();
+        if (!vectorConfig.Indexing.EmbeddingEnabled)
+            throw new SearchCapabilityException("embedding_disabled", "embedding 已禁用，请选择词法检索模式。");
+        var vectorSources = request.Sources is { Count: > 0 } ? request.Sources :
+            vectorConfig.Sources.Where(s => s.Enabled).Select(s => s.Name).ToList();
+        var needsVectorLease = vectorConfig.Search.EnableLexical || (_hasPersistedLexicalChanges?.Invoke() ?? true);
+        using var vectorLease = _lexicalFactory == null || !needsVectorLease ? null :
+            await _lexicalFactory().AcquireVectorQueryLeaseAsync(vectorSources,
+                vectorConfig.Sources.Count == 0 && request.Sources?.Count is not > 0, cancellationToken);
         var expandedChunks = new List<ChunkResult>();
         var enabledSources = await GetEnabledSourceNamesAsync();
         bool hasConfiguredSources = _configManager.Load().Sources.Count > 0;
@@ -757,6 +974,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             {
                 continue;
             }
+            if (request.Sources is { Count: > 0 } && (file.Source == null || !request.Sources.Contains(file.Source, StringComparer.OrdinalIgnoreCase)))
+                continue;
 
             string fileTitle = file.Title ?? file.FileName ?? Path.GetFileName(file.Path ?? string.Empty);
             string filePath = file.Path ?? string.Empty;

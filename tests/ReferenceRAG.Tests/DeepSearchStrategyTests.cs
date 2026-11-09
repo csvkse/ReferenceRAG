@@ -20,7 +20,8 @@ public class DeepSearchStrategyTests
         var strategy = factory.GetStrategy(QueryMode.Deep);
 
         Assert.NotNull(strategy);
-        Assert.IsType<DeepSearchStrategy>(strategy);
+        var inner = strategy is FallbackResilientSearchStrategy resilient ? resilient.PrimaryStrategy : strategy;
+        Assert.IsType<DeepSearchStrategy>(inner);
         Assert.Equal(QueryMode.Deep, strategy.Mode);
     }
 

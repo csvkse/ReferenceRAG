@@ -1,0 +1,108 @@
+# ==============================================================================
+# ReferenceRAG Linux Remote Deployment & Dev Environment Configuration
+# ==============================================================================
+# Instructions:
+# 1. Copy this template file to env/.envdev (which is git-ignored):
+#    Copy-Item env/.envdev.template env/.envdev
+# 2. Fill in your remote Linux host address, SSH credentials, and target ports.
+# 3. Run: .\scripts\deploy-linux.ps1 -Mode Dev
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Remote SSH Target Configuration (Adapter Pattern: Remote SSH Executor)
+# ------------------------------------------------------------------------------
+# Target Linux server hostname or IP address (e.g. 127.0.0.1 or your server domain)
+DEPLOY_HOST="127.0.0.1"
+
+# Remote SSH service port
+DEPLOY_PORT="22"
+
+# Remote SSH login user (must have Docker permissions, e.g. root or user in docker group)
+DEPLOY_USER="root"
+
+# Remote SSH Private Key content (PEM or OpenSSH format)
+# Note: Multi-line string format enclosed in double quotes is supported.
+#       Ensure you replace this placeholder with your real private key in env/.envdev.
+DEPLOY_SSH_KEY="<PASTE_YOUR_OPENSSH_OR_RSA_PRIVATE_KEY_HERE>"
+
+# ------------------------------------------------------------------------------
+# 2. Service & Container Configuration
+# ------------------------------------------------------------------------------
+# Docker container name prefix (Official: referencerag, Dev: referencerag-dev)
+DEPLOY_CONTAINER_NAME="referencerag"
+
+# Official Docker image for production mode (-Mode Official)
+DOCKER_IMAGE="ghcr.io/csvkse/referencerag:latest"
+
+# Production Web Service Port (Host binding for -Mode Official)
+WEB_PORT="5123"
+
+# Fast Dev Pipeline Web Service Port (Host binding for -Mode Dev)
+DEV_WEB_PORT="5124"
+
+# Remote deployment workspace base directory on target Linux host
+DEPLOY_REMOTE_DIR="/opt/referencerag-dev"
+
+# ------------------------------------------------------------------------------
+# 3. Three-Volume Persistent Storage (ReferenceRAG Architecture)
+# ------------------------------------------------------------------------------
+# Volume A: Application SQLite DBs (vectors.db, bm25.db, auth.db, writer lock)
+# Named Docker volume (e.g. referencerag-data) or host absolute path
+REMOTE_DATA_DIR="referencerag-data"
+
+# Volume B: Large Model Weights Cache (bge-small-zh-v1.5.onnx, Qwen-7B.gguf, etc.)
+# Persistent host path or named volume, avoiding re-uploads across deployments
+REMOTE_MODELS_DIR="/opt/referencerag/models"
+
+# Volume C: Mounted Markdown / Obsidian Knowledge Base Vaults
+REMOTE_SOURCES_DIR="/opt/referencerag/sources"
+
+# ------------------------------------------------------------------------------
+# 4. Hardware Acceleration Strategy (Strategy Pattern)
+# ------------------------------------------------------------------------------
+# Supported values:
+#   cpu    : Universal CPU + Vulkan (Works on all CPUs, Intel Iris/Arc, AMD APU/Radeon)
+#   cuda   : NVIDIA GPU (GeForce RTX, Tesla, Quadro with NVIDIA Container Toolkit)
+#   intel  : Intel Arc & Iris Xe (Level Zero & OpenCL DRI devices)
+#   rocm   : AMD ROCm (Radeon RX 5000-8000 series, Instinct MI)
+HARDWARE_ACCELERATION="cpu"
+
+# ------------------------------------------------------------------------------
+# 5. Security & Master API Key
+# ------------------------------------------------------------------------------
+# Master API Key for system administration and headless sync workers
+# If left empty, a secure key is automatically generated upon first startup
+REFERENCERAG_MASTER_KEY=""
+
+# ------------------------------------------------------------------------------
+# 6. SiliconFlow Cloud API Fast Test & Benchmark Configuration
+# ------------------------------------------------------------------------------
+# API Key for SiliconFlow (Get from https://cloud.siliconflow.cn/)
+# Note: Keep the real secret in env/.envdev (git-ignored), never commit secrets here!
+SILICONFLOW_API_KEY="<PASTE_YOUR_SILICONFLOW_API_KEY_HERE>"
+SILICONFLOW_BASE_URL="https://api.siliconflow.cn/v1"
+SILICONFLOW_EMBEDDING_MODEL="BAAI/bge-m3"
+SILICONFLOW_EMBEDDING_DIMENSION="1024"
+SILICONFLOW_RERANK_MODEL="BAAI/bge-reranker-v2-m3"
+
+# ------------------------------------------------------------------------------
+# 7. TypeSafe AI System One (Jev) Fast Decision & Intent Routing Configuration
+# ------------------------------------------------------------------------------
+# API Key for TypeSafe AI System One (Get from https://typesafe.ai/)
+# Note: Keep the real secret in env/.envdev (git-ignored), never commit secrets here!
+TYPESAFE_API_KEY="<PASTE_YOUR_TYPESAFE_API_KEY_HERE>"
+TYPESAFE_BASE_URL="https://api.typesafe.ai/v1/systemone"
+TYPESAFE_MODEL="jev-latest"
+
+# ------------------------------------------------------------------------------
+# 8. Test Dataset Tier Strategy Configuration (Strategy Pattern)
+# ------------------------------------------------------------------------------
+# Supported values:
+#   None   : Do not sync test dataset (default for lean deploy)
+#   Smoke  : Sync 越女剑 (33KB, ~40 chunks, ~1.5s indexing) for quick E2E smoke test
+#   Core   : Sync 连城诀 + 雪山飞狐 (750KB, ~800 chunks, ~15s indexing)
+#   Full   : Sync 28 Jin Yong novels across 3 editions (35.5MB, persistent volume)
+TEST_DATASET_TIER="Smoke"
+
+
+

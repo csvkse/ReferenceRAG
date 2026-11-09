@@ -125,8 +125,7 @@ public class KnowledgeBasesControllerTests : IDisposable
         var listSpecsResult = await controller.ListEmbeddingSpecs(CancellationToken.None);
         var okSpecs = Assert.IsType<OkObjectResult>(listSpecsResult.Result);
         var specs = Assert.IsAssignableFrom<IReadOnlyList<EmbeddingSpec>>(okSpecs.Value);
-        Assert.Contains(specs, s => s.ModelName == "BAAI/bge-m3" && s.Dimension == 1024);
-        Assert.Contains(specs, s => s.ModelName == "text-embedding-3-small" && s.Dimension == 1536);
+        Assert.Contains(specs, s => s.Id == "default-spec" && s.Dimension == 512);
 
         // 2. 创建绑定自定义线上模型的知识库
         var customSpecDto = new EmbeddingSpecDto(

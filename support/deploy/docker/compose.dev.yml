@@ -1,0 +1,165 @@
+# ==============================================================================
+# ReferenceRAG Fast Development Docker Compose
+# ==============================================================================
+# Usage:
+#   Universal CPU / Vulkan : docker compose -f support/deploy/docker/compose.dev.yml up -d
+#   NVIDIA CUDA Acceleration : docker compose -f support/deploy/docker/compose.dev.yml --profile cuda up -d
+#   Intel Arc / Iris Xe      : docker compose -f support/deploy/docker/compose.dev.yml --profile intel up -d
+#   AMD ROCm Acceleration   : docker compose -f support/deploy/docker/compose.dev.yml --profile rocm up -d
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Dev Service - Universal CPU / Vulkan (Default)
+  # ----------------------------------------------------------------------------
+  referencerag-dev:
+    container_name: referencerag-dev
+    build:
+      context: ../../../
+      dockerfile: support/deploy/docker/Dockerfile.dev
+    image: referencerag:dev
+    ports:
+      - "${DEV_WEB_PORT:-5124}:5000"
+    volumes:
+      # Isolated development SQLite database & local configs
+      - ../../data-dev:/app/data
+      # Shared AI model weights cache (avoids redownload across environments)
+      - ../../models:/app/models
+      # Live frontend ESM assets bind-mount (enables 3-second zero-rebuild updates)
+      - ../../../Business/ReferenceRAG.Business/wwwroot:/app/wwwroot
+      # Dedicated dev log directory
+      - ../../artifacts/logs/docker-dev:/app/logs
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - DataPath=/app/data
+      - LogsPath=/app/logs
+      - ReferenceRAG__Service__port=5000
+      - ReferenceRAG__Service__host=0.0.0.0
+      - SwaggerEnabled=true
+      - DOTNET_USE_POLLING_FILE_WATCHER=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/api/system/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 2. Dev Service - NVIDIA CUDA Acceleration
+  # ----------------------------------------------------------------------------
+  referencerag-dev-cuda:
+    profiles: ["cuda"]
+    container_name: referencerag-dev-cuda
+    build:
+      context: ../../../
+      dockerfile: support/deploy/docker/Dockerfile.cuda
+    image: referencerag:dev-cuda
+    ports:
+      - "${DEV_WEB_PORT:-5124}:5000"
+    volumes:
+      - ../../data-dev:/app/data
+      - ../../models:/app/models
+      - ../../../Business/ReferenceRAG.Business/wwwroot:/app/wwwroot
+      - ../../artifacts/logs/docker-dev:/app/logs
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - DataPath=/app/data
+      - LogsPath=/app/logs
+      - ReferenceRAG__Service__port=5000
+      - ReferenceRAG__Service__host=0.0.0.0
+      - SwaggerEnabled=true
+      - DOTNET_USE_POLLING_FILE_WATCHER=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/api/system/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 3. Dev Service - Intel Arc & Iris Xe (Level Zero & OpenCL)
+  # ----------------------------------------------------------------------------
+  referencerag-dev-intel:
+    profiles: ["intel"]
+    container_name: referencerag-dev-intel
+    build:
+      context: ../../../
+      dockerfile: support/deploy/docker/Dockerfile.intel
+    image: referencerag:dev-intel
+    ports:
+      - "${DEV_WEB_PORT:-5124}:5000"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      - ../../data-dev:/app/data
+      - ../../models:/app/models
+      - ../../../Business/ReferenceRAG.Business/wwwroot:/app/wwwroot
+      - ../../artifacts/logs/docker-dev:/app/logs
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - DataPath=/app/data
+      - LogsPath=/app/logs
+      - ReferenceRAG__Service__port=5000
+      - ReferenceRAG__Service__host=0.0.0.0
+      - SwaggerEnabled=true
+      - DOTNET_USE_POLLING_FILE_WATCHER=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/api/system/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 4. Dev Service - AMD ROCm Acceleration
+  # ----------------------------------------------------------------------------
+  referencerag-dev-rocm:
+    profiles: ["rocm"]
+    container_name: referencerag-dev-rocm
+    build:
+      context: ../../../
+      dockerfile: support/deploy/docker/Dockerfile.rocm
+    image: referencerag:dev-rocm
+    ports:
+      - "${DEV_WEB_PORT:-5124}:5000"
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      - ../../data-dev:/app/data
+      - ../../models:/app/models
+      - ../../../Business/ReferenceRAG.Business/wwwroot:/app/wwwroot
+      - ../../artifacts/logs/docker-dev:/app/logs
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - DataPath=/app/data
+      - LogsPath=/app/logs
+      - ReferenceRAG__Service__port=5000
+      - ReferenceRAG__Service__host=0.0.0.0
+      - SwaggerEnabled=true
+      - DOTNET_USE_POLLING_FILE_WATCHER=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/api/system/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

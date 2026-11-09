@@ -209,6 +209,177 @@ public class KnowledgeBaseArchitectureGateTests : IDisposable
     }
 
     [Fact]
+    public async Task KnowledgeBaseSync_EmbeddingDisabled_DoesNotCallModelRouter()
+    {
+        var source = Path.Combine(_tempDir, "lexical-kb");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(Path.Combine(source, "guide.md"), "uniquelexical content");
+        using var catalog = new CatalogStore(Path.Combine(_tempDir, "lexical-catalog.db"));
+        await catalog.InitializeAsync();
+        using var storage = new KnowledgeBaseStorageManager(_tempDir);
+        await catalog.SaveKnowledgeBaseAsync(new KnowledgeBaseDefinition("kb_lex", "Lex", null, true,
+            1, 1, "default", DateTime.UtcNow, DateTime.UtcNow));
+        using var connector = new LocalFolderConnector("lexconn", "kb_lex", source, "*.md");
+        var job = new JobDefinition("lexjob", "sync", "kb_lex", 1, JobStatus.Queued,
+            OperationPhase.None, 0, 0, null, null, DateTime.UtcNow, null);
+        var router = new Mock<IModelRouter>(MockBehavior.Strict);
+        var worker = new KnowledgeBaseSyncWorker(catalog, storage, router.Object, enableEmbedding: false);
+        var finished = await worker.ExecuteSyncAsync(job, connector);
+        Assert.Equal(JobStatus.Succeeded, finished.Status);
+        router.VerifyNoOtherCalls();
+        await using var lease = await storage.AcquireLeaseAsync("kb_lex", StorageAccess.ReadOnly);
+        Assert.Single((await lease.Store.RecallAsync(new RecallRequest("uniquelexical"))).Items);
+    }
+
+    [Fact]
+    public async Task KnowledgeBaseVectorRecallRejectsIncompleteVectorCoverage()
+    {
+        using var store = new SqliteKnowledgeBaseStore("kb_coverage", Path.Combine(_tempDir, "coverage.db"));
+        await store.InitializeAsync();
+        var commit = await store.CommitDocumentAsync(new IndexBatch("kb_coverage", 1, 0, "conn", "doc.md",
+            null, null, "hash", new[] { new ChunkData("chunk", 0, "lexical only", 2) }));
+        Assert.True(commit.Success);
+        Assert.Equal("chunk", Assert.Single(await store.GetChunksMissingVectorsAsync()).ChunkId);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.RecallAsync(new RecallRequest("lexical", QueryVector: new float[] { 1, 0 })));
+        Assert.Single((await store.RecallAsync(new RecallRequest("lexical"))).Items);
+    }
+
+    [Fact]
+    public async Task KnowledgeBaseDocumentAuthorizationFiltersBeforeTopKAndVectorCoverage()
+    {
+        using var store = new SqliteKnowledgeBaseStore("kb_doc_scope", Path.Combine(_tempDir, "doc-scope.db"));
+        await store.InitializeAsync();
+        await store.CommitDocumentAsync(new IndexBatch("kb_doc_scope", 1, 0, "conn", "allowed.md", null, null, "a",
+            new[] { new ChunkData("allowed-doc-chunk", 0, "scopedneedle allowed", 2) }));
+        for (var i = 0; i < 8; i++)
+            await store.CommitDocumentAsync(new IndexBatch("kb_doc_scope", 1, 0, "conn", $"private/{i}.md", null, null, $"{i}",
+                new[] { new ChunkData($"hidden-doc-{i}", 0, "scopedneedle scopedneedle scopedneedle", 3) }));
+        var request = new RecallRequest("scopedneedle", TopK: 1, UseLexicalTokenizer: true)
+        { AuthorizeDocument = (connector, key, _) => connector == "conn" && key == "allowed.md" };
+        Assert.Equal("allowed-doc-chunk", Assert.Single((await store.RecallAsync(request)).Items).ChunkId);
+        var denied = request with { AuthorizeDocument = (_, _, _) => false };
+        Assert.Empty((await store.RecallAsync(denied)).Items);
+        Assert.Empty((await store.RecallAsync(denied with { QueryVector = new float[] { 1, 0 } })).Items);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.RecallAsync(request with { QueryVector = new float[] { 1, 0 } }));
+    }
+
+    [Fact]
+    public async Task KnowledgeBaseLexicalRecallFiltersConnectorBeforeTopK()
+    {
+        using var store = new SqliteKnowledgeBaseStore("kb_scope", Path.Combine(_tempDir, "scope.db"));
+        await store.InitializeAsync();
+        await store.CommitDocumentAsync(new IndexBatch("kb_scope", 1, 0, "allowed", "a.md", null, null, "a",
+            new[] { new ChunkData("allowed-chunk", 0, "needle allowed", 2) }));
+        for (var i = 0; i < 12; i++)
+            await store.CommitDocumentAsync(new IndexBatch("kb_scope", 1, 0, "other", $"{i}.md", null, null, $"{i}",
+                new[] { new ChunkData($"other-{i}", 0, "needle needle needle", 3) }));
+        var result = await store.RecallAsync(new RecallRequest("needle", TopK: 1, ConnectorId: "allowed"));
+        Assert.Equal("allowed-chunk", Assert.Single(result.Items).ChunkId);
+    }
+
+    [Fact]
+    public async Task KnowledgeBaseLexicalChineseIndexBackfillsAndTracksUpdates()
+    {
+        var path = Path.Combine(_tempDir, "chinese-legacy.db");
+        using var store = new SqliteKnowledgeBaseStore("kb_zh", path);
+        await store.InitializeAsync();
+        await store.CommitDocumentAsync(new IndexBatch("kb_zh", 1, 0, "conn", "doc.md", null, null, "v1",
+            new[] { new ChunkData("old", 0, "数据库性能优化实践", 8) }));
+        var old = await store.RecallAsync(new RecallRequest("性能优化", UseLexicalTokenizer: true));
+        Assert.Equal("old", Assert.Single(old.Items).ChunkId);
+        await store.CommitDocumentAsync(new IndexBatch("kb_zh", 1, 0, "conn", "doc.md", null, null, "v2",
+            new[] { new ChunkData("new", 0, "服务器网络配置方法", 8) }));
+        Assert.Empty((await store.RecallAsync(new RecallRequest("性能优化", UseLexicalTokenizer: true))).Items);
+        Assert.Equal("new", Assert.Single((await store.RecallAsync(new RecallRequest("网络配置", UseLexicalTokenizer: true))).Items).ChunkId);
+        await store.DeleteDocumentAsync("conn", "doc.md");
+        Assert.Empty((await store.RecallAsync(new RecallRequest("网络配置", UseLexicalTokenizer: true))).Items);
+    }
+
+    [Fact]
+    public async Task CrossKnowledgeBaseScopeUsesConnectorPathsNotKnowledgeBaseIds()
+    {
+        var parent = Path.Combine(_tempDir, "scope-root");
+        var allowedRoot = Path.Combine(parent, "allowed");
+        var privateRoot = Path.Combine(parent, "private");
+        Directory.CreateDirectory(allowedRoot);
+        Directory.CreateDirectory(privateRoot);
+        await File.WriteAllTextAsync(Path.Combine(allowedRoot, "note.md"), "scopedknowledge safe");
+        await File.WriteAllTextAsync(Path.Combine(privateRoot, "note.md"), "scopedknowledge private");
+        using var catalog = new CatalogStore(Path.Combine(_tempDir, "catalog-scope.db"));
+        await catalog.InitializeAsync();
+        using var storage = new KnowledgeBaseStorageManager(_tempDir);
+        await catalog.SaveKnowledgeBaseAsync(new KnowledgeBaseDefinition("allowed", "Name collision", null, true,
+            1, 1, "default", DateTime.UtcNow, DateTime.UtcNow));
+        await catalog.SaveConnectorAsync(new ConnectorDefinition("mixed", "allowed", "Folder", parent,
+            "*.md", 1, true, DateTime.UtcNow, DateTime.UtcNow));
+        await catalog.SaveKnowledgeBaseAsync(new KnowledgeBaseDefinition("private-kb", "Private", "private metadata", true,
+            1, 1, "default", DateTime.UtcNow, DateTime.UtcNow));
+        await catalog.SaveConnectorAsync(new ConnectorDefinition("private-connector", "private-kb", "Folder", privateRoot,
+            "*.md", 1, true, DateTime.UtcNow, DateTime.UtcNow));
+        await using (var lease = await storage.AcquireLeaseAsync("allowed", StorageAccess.ReadWrite))
+        {
+            await lease.Store.CommitDocumentAsync(new IndexBatch("allowed", 1, 0, "mixed", "allowed/note.md", Path.Combine(allowedRoot, "note.md"), null, "a",
+                new[] { new ChunkData("safe", 0, "scopedknowledge safe", 2) }));
+            await lease.Store.CommitDocumentAsync(new IndexBatch("allowed", 1, 0, "mixed", "private/note.md", Path.Combine(privateRoot, "note.md"), null, "b",
+                new[] { new ChunkData("private", 0, "scopedknowledge scopedknowledge scopedknowledge", 3) }));
+        }
+        await using (var lease = await storage.AcquireLeaseAsync("private-kb", StorageAccess.ReadWrite))
+            await lease.Store.CommitDocumentAsync(new IndexBatch("private-kb", 1, 0, "private-connector", "note.md", Path.Combine(privateRoot, "note.md"), null, "private",
+                new[] { new ChunkData("private-only", 0, "scopedknowledge secret", 2) }));
+        var config = new ReferenceRAG.Core.Models.ObsidianRagConfig { Sources = new() {
+            new ReferenceRAG.Core.Models.SourceFolder { Name = "source-allowed", Path = allowedRoot },
+            new ReferenceRAG.Core.Models.SourceFolder { Name = "source-private", Path = privateRoot } } };
+        config.Indexing.EmbeddingEnabled = false;
+        var service = new KnowledgeBaseSearchService(catalog, storage, configManager: new ReferenceRAG.Core.Services.ConfigManager(config));
+        var request = new CrossKnowledgeBaseSearchRequest("scopedknowledge", new[] { "allowed" }, TopK: 1)
+            { AuthorizedSourceNames = new[] { "source-allowed" } };
+        Assert.Equal("safe", Assert.Single((await service.SearchAsync(request)).Items).ChunkId);
+        var denied = await service.SearchAsync(request with { AuthorizedSourceNames = Array.Empty<string>() });
+        Assert.Empty(denied.Items);
+        Assert.Empty(denied.SuccessfulKnowledgeBaseIds);
+        var visible = await service.ListAccessibleKnowledgeBasesAsync(new[] { "source-allowed" });
+        Assert.Equal("allowed", Assert.Single(visible).Id);
+        Assert.Empty(await service.ListAccessibleKnowledgeBasesAsync(Array.Empty<string>()));
+        await catalog.SaveConnectorAsync(new ConnectorDefinition("private-connector", "private-kb", "Folder", allowedRoot,
+            "*.md", 2, true, DateTime.UtcNow, DateTime.UtcNow));
+        var afterRetarget = await service.SearchAsync(request with { KnowledgeBaseIds = new[] { "private-kb" } });
+        Assert.Empty(afterRetarget.Items);
+        Assert.Single(await service.ListAccessibleKnowledgeBasesAsync(new[] { "source-allowed" }));
+    }
+
+    [Fact]
+    public void ClientJsonCannotSetTrustedKnowledgeBaseScope()
+    {
+        var request = System.Text.Json.JsonSerializer.Deserialize<CrossKnowledgeBaseSearchRequest>(
+            "{\"Query\":\"q\",\"KnowledgeBaseIds\":[\"kb\"],\"AuthorizedSourceNames\":[\"*\"]}");
+        Assert.Null(request!.AuthorizedSourceNames);
+    }
+
+    [Fact]
+    public async Task CrossKnowledgeBaseSearchUsesChineseLexicalModeWhenEmbeddingDisabled()
+    {
+        using var catalog = new CatalogStore(Path.Combine(_tempDir, "cross-zh-catalog.db"));
+        await catalog.InitializeAsync();
+        using var storage = new KnowledgeBaseStorageManager(_tempDir);
+        await catalog.SaveKnowledgeBaseAsync(new KnowledgeBaseDefinition("kb_zh_cross", "ZH", null, true,
+            1, 1, "default", DateTime.UtcNow, DateTime.UtcNow));
+        await using (var lease = await storage.AcquireLeaseAsync("kb_zh_cross", StorageAccess.ReadWrite))
+            await lease.Store.CommitDocumentAsync(new IndexBatch("kb_zh_cross", 1, 0, "conn", "doc.md", null, null, "h",
+                new[] { new ChunkData("zh-cross", 0, "数据库性能优化实践", 8) }));
+        var config = new ReferenceRAG.Core.Models.ObsidianRagConfig();
+        config.Indexing.EmbeddingEnabled = false;
+        var service = new KnowledgeBaseSearchService(catalog, storage, configManager: new ReferenceRAG.Core.Services.ConfigManager(config));
+        var response = await service.SearchAsync(new CrossKnowledgeBaseSearchRequest("性能优化", new[] { "kb_zh_cross" }));
+        Assert.Equal("zh-cross", Assert.Single(response.Items).ChunkId);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.SearchAsync(
+            new CrossKnowledgeBaseSearchRequest("性能优化", new[] { "kb_zh_cross" }, QueryVector: new float[] { 1 })));
+        config.Indexing.EmbeddingEnabled = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.SearchAsync(
+            new CrossKnowledgeBaseSearchRequest("性能优化", new[] { "kb_zh_cross" }, QueryVector: new float[] { 1 })));
+    }
+
+    [Fact]
     public async Task GateG1_CrossKnowledgeBaseSearch_WithRrfFusion()
     {
         var catalogDb = Path.Combine(_tempDir, "catalog.db");

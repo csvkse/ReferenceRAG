@@ -29,6 +29,15 @@ public sealed record ConnectorDefinition(
     DateTime UpdatedAt);
 
 /// <summary>
+/// 知识库词法统计指标
+/// </summary>
+public sealed record KnowledgeBaseLexicalStats(
+    int TotalChunks,
+    int TotalDocuments,
+    int TotalVocabularySize,
+    double AverageDocumentLength);
+
+/// <summary>
 /// 逻辑嵌入模型规范契约（不可变 EmbeddingSpec，支持搜索与向量生成双通道解耦）
 /// </summary>
 public sealed record EmbeddingSpec(
@@ -108,7 +117,13 @@ public sealed record RecallRequest(
     int TopK = 10,
     IReadOnlyDictionary<string, string>? MetadataFilters = null,
     float[]? QueryVector = null,
-    string? ConnectorId = null);
+    string? ConnectorId = null,
+    bool UseLexicalTokenizer = false)
+{
+    /// <summary>Trusted server-side document filter, evaluated before candidate limits.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Func<string, string, string?, bool>? AuthorizeDocument { get; init; }
+}
 
 /// <summary>
 /// 命中结果项
@@ -121,7 +136,8 @@ public sealed record RecallItem(
     double Score,
     ScoreKind ScoreKind,
     long DocumentVersion,
-    string? ConnectorId = null);
+    string? ConnectorId = null,
+    [property: System.Text.Json.Serialization.JsonIgnore] string? Locator = null);
 
 /// <summary>
 /// 某库检索返回的快照
@@ -215,3 +231,67 @@ public sealed record ResourceDemand(
     long SteadyVramBytes,
     long SystemRamBytes,
     int DeviceId = 0);
+
+/// <summary>
+/// 知识库关联文档记录
+/// </summary>
+public sealed record KnowledgeBaseDocumentRecord(
+    string Id,
+    string ConnectorId,
+    string SourceKey,
+    string? Locator,
+    string? SourceRevision,
+    string ContentHash,
+    long DocumentVersion,
+    int ChunkCount,
+    DateTime CreatedAt,
+    DateTime UpdatedAt);
+
+/// <summary>
+/// 知识库关联切片记录
+/// </summary>
+public sealed record KnowledgeBaseChunkRecord(
+    string Id,
+    string DocumentId,
+    long DocumentVersion,
+    int Ordinal,
+    string Text,
+    int TokenCount,
+    string? EmbeddingText,
+    bool HasVector,
+    bool Enabled,
+    string? DocumentSourceKey);
+
+/// <summary>
+/// 知识库更新请求
+/// </summary>
+public sealed record UpdateKnowledgeBaseRequest(
+    string? Name = null,
+    string? Description = null,
+    bool? Enabled = null,
+    string? EmbeddingSpecId = null);
+
+/// <summary>
+/// 连接器更新请求
+/// </summary>
+public sealed record UpdateConnectorRequest(
+    string? TargetPath = null,
+    string? FilePattern = null,
+    bool? Enabled = null);
+
+/// <summary>
+/// 切片创建请求
+/// </summary>
+public sealed record CreateChunkRequest(
+    string? DocumentId,
+    string Text,
+    string? EmbeddingText = null);
+
+/// <summary>
+/// 切片更新请求
+/// </summary>
+public sealed record UpdateChunkRequest(
+    string Text,
+    string? EmbeddingText = null,
+    bool RecomputeEmbeddingImmediately = true);
+

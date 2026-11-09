@@ -8,6 +8,8 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Business.Features.KnowledgeBase.Services;
 using ReferenceRAG.Core.Interfaces;
+using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 using ReferenceRAG.Service.Services;
 
 namespace ReferenceRAG.Service.Controllers;
@@ -145,7 +147,7 @@ public class OpenAIChatController : ControllerBase
                             Query: latestUserQuery,
                             KnowledgeBaseIds: targetKbIds,
                             TopK: 5
-                        ), ct);
+                        ) { AuthorizedSourceNames = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(HttpContext.Items["CurrentApiKey"] as ApiKeyEntity) }, ct);
 
                         if (kbResult.Items.Count > 0)
                         {

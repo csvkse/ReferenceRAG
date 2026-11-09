@@ -104,7 +104,8 @@ appsettings.json
 .host-migration-*.log
 
 # Sensitive environment configuration & secrets
-env/
+env/*
+!env/*.template
 .envdev
 *.envdev
 /env/.envdev

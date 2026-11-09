@@ -22,4 +22,6 @@ public class IndexExecutionContext
     public required ConcurrentDictionary<string, byte> ActiveFiles { get; init; }
     public required ConcurrentDictionary<string, byte> HeldFiles { get; init; }
     public required ILogger Logger { get; init; }
+    /// <summary>Recovery requires complete scanning and defers completion until coverage is verified.</summary>
+    public bool StrictRecovery { get; init; }
 }

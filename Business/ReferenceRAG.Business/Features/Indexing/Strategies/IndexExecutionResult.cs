@@ -27,6 +27,7 @@ public class IndexExecutionResult
         TotalFiles = totalFiles,
         ProcessedFiles = processedFiles,
         SkippedFiles = skippedFiles,
+        ErrorsCount = errors?.Count ?? 0,
         TotalChunks = totalChunks,
         TotalVectors = totalVectors,
         Errors = errors ?? new List<string>()

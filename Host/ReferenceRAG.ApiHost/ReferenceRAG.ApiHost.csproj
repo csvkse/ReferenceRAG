@@ -26,4 +26,8 @@
     <Using Include="Microsoft.Extensions.Hosting" />
     <Using Include="Microsoft.Extensions.Logging" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ReferenceRAG.Host.Tests" />
+    <InternalsVisibleTo Include="ReferenceRAG.Tests" />
+  </ItemGroup>
 </Project>

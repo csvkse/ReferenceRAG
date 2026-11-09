@@ -4,6 +4,8 @@ using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services.Graph;
 using System.Security.Cryptography;
 using System.Text;
+using ReferenceRAG.Infrastructure.Features.Storage.Services;
+using ReferenceRAG.Storage;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -16,13 +18,18 @@ public class FileIndexPipeline : IFileIndexPipeline
     private readonly IVectorStore _vectorStore;
     private readonly IBM25Store _bm25Store;
     private readonly IMarkdownChunker _chunker;
-    private readonly IEmbeddingService _embeddingService;
+    private readonly Lazy<IEmbeddingService> _embeddingServiceLazy;
+    private IEmbeddingService _embeddingService => _embeddingServiceLazy.Value;
     private readonly ITextEnhancer _textEnhancer;
     private readonly ConfigManager _configManager;
     private readonly IGraphIndexingService? _graphIndexing;
-    private readonly IEmbeddingTokenCounter? _tokenCounter;
+    private readonly Lazy<IEmbeddingTokenCounter?> _tokenCounterLazy;
+    private IEmbeddingTokenCounter? _tokenCounter => _tokenCounterLazy.Value;
     private readonly ILogger<FileIndexPipeline>? _logger;
     private readonly IChunkGatekeeperService _gatekeeper;
+    private readonly Func<LexicalIndexCoordinator>? _lexicalFactory;
+    private readonly Func<LexicalFileIndexer>? _lexicalIndexerFactory;
+    private readonly IFileProcessingGuard? _guard;
 
     public FileIndexPipeline(
         IVectorStore vectorStore,
@@ -35,17 +42,39 @@ public class FileIndexPipeline : IFileIndexPipeline
         IEmbeddingTokenCounter? tokenCounter = null,
         ILogger<FileIndexPipeline>? logger = null,
         IChunkGatekeeperService? gatekeeper = null)
+        : this(vectorStore, bm25Store, chunker, new Lazy<IEmbeddingService>(() => embeddingService),
+            textEnhancer, configManager, graphIndexing, new Lazy<IEmbeddingTokenCounter?>(() => tokenCounter), logger, gatekeeper)
+    {
+    }
+
+    public FileIndexPipeline(
+        IVectorStore vectorStore,
+        IBM25Store bm25Store,
+        IMarkdownChunker chunker,
+        Lazy<IEmbeddingService> embeddingService,
+        ITextEnhancer textEnhancer,
+        ConfigManager configManager,
+        IGraphIndexingService? graphIndexing,
+        Lazy<IEmbeddingTokenCounter?> tokenCounter,
+        ILogger<FileIndexPipeline>? logger = null,
+        IChunkGatekeeperService? gatekeeper = null,
+        Func<LexicalIndexCoordinator>? lexicalFactory = null,
+        Func<LexicalFileIndexer>? lexicalIndexerFactory = null,
+        IFileProcessingGuard? guard = null)
     {
         _vectorStore = vectorStore;
         _bm25Store = bm25Store;
         _chunker = chunker;
-        _embeddingService = embeddingService;
+        _embeddingServiceLazy = embeddingService;
         _textEnhancer = textEnhancer;
         _configManager = configManager;
         _graphIndexing = graphIndexing;
-        _tokenCounter = tokenCounter;
+        _tokenCounterLazy = tokenCounter;
         _logger = logger;
         _gatekeeper = gatekeeper ?? new ChunkGatekeeperService(logger: null);
+        _lexicalFactory = lexicalFactory;
+        _lexicalIndexerFactory = lexicalIndexerFactory;
+        _guard = guard;
     }
 
     public async Task<FileProcessContext?> PrepareAsync(
@@ -215,7 +244,7 @@ public class FileIndexPipeline : IFileIndexPipeline
     {
         // VectorOnly：只重推向量，不改 BM25/图谱（updateBm25=false 由调用方传入）
         if (updateBm25)
-            await _bm25Store.IndexBatchAsync(ctx.Chunks.Select(c => (c.Id, c.Content)));
+            await _bm25Store.IndexBatchAsync(ctx.Chunks.Select(c => (c.Id, ctx.FileRecord.Title ?? string.Empty, c.HeadingPath ?? string.Empty, c.Content)));
 
         if (updateGraph && _graphIndexing != null)
         {
@@ -246,6 +275,24 @@ public class FileIndexPipeline : IFileIndexPipeline
         string? oldFilePath = null,
         CancellationToken ct = default)
     {
+        var config = _configManager.Load();
+        if (!config.Indexing.EmbeddingEnabled)
+        {
+            if (!config.Search.EnableLexical || _lexicalIndexerFactory == null)
+                throw new InvalidOperationException("已禁用 embedding，词法索引不可用。");
+            var path = Path.GetFullPath(filePath);
+            if (!File.Exists(path)) return false;
+            var source = ReferenceRAG.Service.Services.IndexService.FindLexicalSource(path, sources.Where(s => s.Enabled));
+            if (source == null || !ReferenceRAG.Service.Services.IndexService.IsLexicalFileAllowed(path, source)) return false;
+            var lexical = _lexicalIndexerFactory();
+            await lexical.IndexAsync(path, source.Name, ct);
+            if (!string.IsNullOrWhiteSpace(oldFilePath))
+            {
+                var oldPath = Path.GetFullPath(oldFilePath);
+                if (!File.Exists(oldPath)) await lexical.DeleteAsync(oldPath, ct);
+            }
+            return true;
+        }
         // 重命名：先清旧路径的全部索引
         if (!string.IsNullOrEmpty(oldFilePath))
             await DeleteFileByPathAsync(oldFilePath, ct);
@@ -255,7 +302,6 @@ public class FileIndexPipeline : IFileIndexPipeline
         var ctx = await PrepareAsync(filePath, sources, force: false, ct);
         if (ctx == null) return false;
 
-        var config = _configManager.Load();
         var batchSize = config.Embedding.BatchSize;
         var vectors = new List<VectorRecord>();
 
@@ -319,25 +365,59 @@ public class FileIndexPipeline : IFileIndexPipeline
 
     public async Task DeleteSourceAsync(string sourceName, CancellationToken ct = default)
     {
-        var files = (await _vectorStore.GetAllFilesAsync(ct))
-            .Where(f => f.Source == sourceName)
-            .ToList();
-
-        var chunkIds = new List<string>();
-        foreach (var file in files)
+        var config = _configManager.Load();
+        LexicalIndexCoordinator? lexical = null;
+        IReadOnlyList<FileRecord> lexicalFiles = Array.Empty<FileRecord>();
+        if (_lexicalFactory != null && (config.Search.EnableLexical ||
+            LexicalIndexCoordinator.HasPersistedLexicalIndex(Path.Combine(config.DataPath ?? "data", "vectors.db"))))
         {
-            var chunks = await _vectorStore.GetChunksByFileAsync(file.Id, ct);
-            chunkIds.AddRange(chunks.Select(c => c.Id));
+            lexical = _lexicalFactory();
         }
 
-        await _vectorStore.DeleteBySourceAsync(sourceName, ct);
+        // 1. Acquire coordinator maintenance lease FIRST (coordinator lock -> file locks order)
+        using var maintenance = lexical == null ? null : await lexical.BeginVectorRecoveryAsync(new[] { sourceName }, ct);
 
-        if (chunkIds.Count > 0)
-            await _bm25Store.DeleteDocumentsByIdsAsync(chunkIds);
+        if (maintenance != null)
+        {
+            lexicalFiles = (await maintenance.GetActiveFilesAsync(ct))
+                .Where(f => string.Equals(f.Source, sourceName, StringComparison.OrdinalIgnoreCase)).ToArray();
+        }
 
-        if (_graphIndexing != null)
+        var files = (await _vectorStore.GetAllFilesAsync(ct))
+            .Where(f => string.Equals(f.Source, sourceName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var held = new List<string>();
+        try
+        {
+            // 2. Acquire file locks SECOND
+            if (_guard != null)
+                foreach (var path in files.Concat(lexicalFiles).Select(f => Path.GetFullPath(f.Path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (!_guard.TryAcquire(path)) throw new InvalidOperationException($"数据源文件正在处理，无法删除索引: {path}");
+                    held.Add(path);
+                }
+
+            // 3. Delete lexical files under maintenance lease (no reentrant lock!)
+            if (maintenance != null)
+            {
+                foreach (var file in lexicalFiles) await maintenance.DeleteFileAsync(file.Id, ct);
+            }
+
+            var chunkIds = new List<string>();
             foreach (var file in files)
-                await _graphIndexing.RemoveAsync(file.Path, ct);
+                chunkIds.AddRange((await _vectorStore.GetChunksByFileAsync(file.Id, ct)).Select(c => c.Id));
+            await _vectorStore.DeleteBySourceAsync(sourceName, ct);
+            if (chunkIds.Count > 0) await _bm25Store.DeleteDocumentsByIdsAsync(chunkIds);
+            if (_graphIndexing != null)
+                foreach (var file in files) await _graphIndexing.RemoveAsync(file.Path, ct);
+            if (maintenance != null) await maintenance.CompleteMaintenanceAsync(ct);
+        }
+        finally
+        {
+            if (_guard != null) foreach (var path in held) _guard.Release(path);
+        }
     }
 
     private static string ComputeHash(string content)
@@ -694,24 +774,14 @@ public class FileIndexPipeline : IFileIndexPipeline
 
     private async Task<string?> SafeReadFileAsync(string path, CancellationToken ct = default)
     {
-        for (int i = 0; i < 3; i++)
+        try
         {
-            try
-            {
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                using var sr = new StreamReader(fs);
-                return await sr.ReadToEndAsync(ct);
-            }
-            catch (IOException) when (i < 2)
-            {
-                await Task.Delay(100 * (i + 1), ct);
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning(ex, "读取文件失败: {FileName}", Path.GetFileName(path));
-                return null;
-            }
+            return await TextEncodingAdapter.SafeReadFileAsync(path, ct);
         }
-        return null;
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "读取文件失败: {FileName}", Path.GetFileName(path));
+            return null;
+        }
     }
 }

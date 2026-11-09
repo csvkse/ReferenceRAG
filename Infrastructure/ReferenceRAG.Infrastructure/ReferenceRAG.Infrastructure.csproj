@@ -13,6 +13,7 @@
     <PackageReference Include="Microsoft.ML.Tokenizers" />
     <PackageReference Include="BERTTokenizers" />
     <PackageReference Include="System.Drawing.Common" />
+    <PackageReference Include="System.Numerics.Tensors" />
     <PackageReference Include="Tokenizers.HuggingFace" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <PackageReference Include="Microsoft.SemanticKernel.Connectors.SqliteVec" />

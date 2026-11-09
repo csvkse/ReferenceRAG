@@ -11,6 +11,7 @@
     <Project Path="Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/LexicalRecoveryCrashWorker/LexicalRecoveryCrashWorker.csproj" />
     <Project Path="tests/PerfTestRunner/PerfTestRunner.csproj" />
     <Project Path="tests/ReferenceRAG.Tests/ReferenceRAG.Tests.csproj" />
     <Project Path="tests/ReferenceRAG.Host.Tests/ReferenceRAG.Host.Tests.csproj" />

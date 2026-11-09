@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Storage;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -11,6 +13,8 @@ namespace ReferenceRAG.Service.Controllers;
 /// </summary>
 public class SearchStatusResponse
 {
+    public bool LexicalEnabled { get; set; }
+    public bool EmbeddingEnabled { get; set; } = true;
     /// <summary>
     /// 当前嵌入模型名称
     /// </summary>
@@ -133,14 +137,19 @@ public class AIQueryController : ControllerBase
 {
     private readonly ISearchService _searchService;
     private readonly IQueryStatsService _statsService;
-    private readonly IEmbeddingService _embeddingService;
+    private readonly Lazy<IEmbeddingService> _embeddingServiceLazy;
+    private IEmbeddingService _embeddingService => _embeddingServiceLazy.Value;
     private readonly IVectorStore _vectorStore;
     private readonly IBM25Store _bm25Store;
-    private readonly IRerankService _rerankService;
+    private readonly Lazy<IRerankService> _rerankServiceLazy;
+    private IRerankService _rerankService => _rerankServiceLazy.Value;
     private readonly ConfigManager _configManager;
     private readonly ILogger<AIQueryController> _logger;
-    private readonly IModelManager? _modelManager;
-    private readonly IModelTelemetryService? _telemetryService;
+    private readonly Lazy<IModelManager?> _modelManagerLazy;
+    private IModelManager? _modelManager => _modelManagerLazy.Value;
+    private readonly Lazy<IModelTelemetryService?> _telemetryServiceLazy;
+    private IModelTelemetryService? _telemetryService => _telemetryServiceLazy.Value;
+    private readonly IServiceProvider? _serviceProvider;
 
     public AIQueryController(
         ISearchService searchService,
@@ -156,14 +165,32 @@ public class AIQueryController : ControllerBase
     {
         _searchService = searchService;
         _statsService = statsService;
-        _embeddingService = embeddingService;
+        _embeddingServiceLazy = new Lazy<IEmbeddingService>(() => embeddingService);
         _vectorStore = vectorStore;
         _bm25Store = bm25Store;
-        _rerankService = rerankService;
+        _rerankServiceLazy = new Lazy<IRerankService>(() => rerankService);
         _configManager = configManager;
         _logger = logger;
-        _modelManager = modelManager;
-        _telemetryService = telemetryService;
+        _modelManagerLazy = new Lazy<IModelManager?>(() => modelManager);
+        _telemetryServiceLazy = new Lazy<IModelTelemetryService?>(() => telemetryService);
+    }
+
+    [ActivatorUtilitiesConstructor]
+    public AIQueryController(ISearchService searchService, IQueryStatsService statsService,
+        IVectorStore vectorStore, IBM25Store bm25Store, ConfigManager configManager,
+        ILogger<AIQueryController> logger, IServiceProvider serviceProvider)
+    {
+        _searchService = searchService;
+        _statsService = statsService;
+        _vectorStore = vectorStore;
+        _bm25Store = bm25Store;
+        _configManager = configManager;
+        _logger = logger;
+        _serviceProvider = serviceProvider;
+        _embeddingServiceLazy = new Lazy<IEmbeddingService>(() => serviceProvider.GetRequiredService<IEmbeddingService>());
+        _rerankServiceLazy = new Lazy<IRerankService>(() => serviceProvider.GetRequiredService<IRerankService>());
+        _modelManagerLazy = new Lazy<IModelManager?>(() => serviceProvider.GetService<IModelManager>());
+        _telemetryServiceLazy = new Lazy<IModelTelemetryService?>(() => serviceProvider.GetService<IModelTelemetryService>());
     }
 
     /// <summary>
@@ -179,6 +206,8 @@ public class AIQueryController : ControllerBase
             var effectiveSources = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(currentKey);
             if (effectiveSources != null)
             {
+                if (effectiveSources.Count == 0)
+                    return Ok(new AIQueryResponse { Query = request.Query, Mode = request.Mode });
                 if (request.Sources == null || request.Sources.Count == 0)
                 {
                     request.Sources = effectiveSources.ToList();
@@ -197,7 +226,7 @@ public class AIQueryController : ControllerBase
 
             var adjustedRequest = AdjustRequestByMode(request);
 
-            var response = await _searchService.SearchAsync(adjustedRequest);
+            var response = await _searchService.SearchAsync(adjustedRequest, HttpContext.RequestAborted);
 
             // 记录查询统计
             await _statsService.RecordQueryAsync(
@@ -209,6 +238,14 @@ public class AIQueryController : ControllerBase
             );
 
             return Ok(response);
+        }
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (SearchCapabilityException ex)
+        {
+            return Conflict(new { code = ex.Code, error = ex.Message, sources = ex.Sources });
         }
         catch (Exception ex)
         {
@@ -225,8 +262,26 @@ public class AIQueryController : ControllerBase
     {
         try
         {
-            var response = await _searchService.DrillDownAsync(request);
+            var currentKey = HttpContext.Items["CurrentApiKey"] as ApiKeyEntity;
+            var effectiveSources = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(currentKey);
+            if (effectiveSources != null)
+            {
+                if (effectiveSources.Count == 0) return Ok(new DrillDownResponse());
+                request.Sources = request.Sources is { Count: > 0 }
+                    ? request.Sources.Where(s => effectiveSources.Contains(s, StringComparer.OrdinalIgnoreCase)).ToList()
+                    : effectiveSources.ToList();
+                if (request.Sources.Count == 0) return Ok(new DrillDownResponse());
+            }
+            var response = await _searchService.DrillDownAsync(request, HttpContext.RequestAborted);
             return Ok(response);
+        }
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (SearchCapabilityException ex)
+        {
+            return Conflict(new { code = ex.Code, error = ex.Message, sources = ex.Sources });
         }
         catch (Exception ex)
         {
@@ -281,6 +336,15 @@ public class AIQueryController : ControllerBase
         try
         {
             var config = _configManager.Load();
+            if (!config.Indexing.EmbeddingEnabled)
+            {
+                var coordinator = _serviceProvider?.GetService<LexicalIndexCoordinator>();
+                var files = coordinator == null ? Array.Empty<FileRecord>() : await coordinator.GetActiveFilesAsync();
+                var chunks = files.Sum(f => f.ChunkCount);
+                return Ok(new SearchStatusResponse { LexicalEnabled = true,
+                    EmbeddingEnabled = false, EmbeddingState = "已禁用", RerankState = "未启用",
+                    TotalFiles = files.Count, Bm25IndexedDocuments = chunks, Bm25HasIndex = chunks > 0 });
+            }
             var rerankStatus = RerankStatusSnapshot.Create(config.Rerank.Enabled, _rerankService);
 
             // 获取 BM25 索引统计
@@ -312,6 +376,8 @@ public class AIQueryController : ControllerBase
 
             var response = new SearchStatusResponse
             {
+                LexicalEnabled = true,
+                EmbeddingEnabled = true,
                 EmbeddingModel = !string.IsNullOrEmpty(embTel?.Configuration.ModelName) ? embTel.Configuration.ModelName : _embeddingService.ModelName,
                 EmbeddingVariant = embVariant,
                 EmbeddingFormat = embFormat,

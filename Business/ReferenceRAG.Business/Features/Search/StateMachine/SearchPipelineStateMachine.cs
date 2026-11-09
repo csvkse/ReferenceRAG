@@ -17,6 +17,14 @@ public class SearchPipelineStateMachine
     public string StrategyName { get; set; } = string.Empty;
     public ModelExecutionInfo? EmbeddingModel { get; set; }
     public ModelExecutionInfo? RerankModel { get; set; }
+    public bool IsDegraded { get; private set; } = false;
+    public string? DegradeReason { get; private set; }
+
+    public void RecordDegradation(string reason)
+    {
+        IsDegraded = true;
+        DegradeReason = reason;
+    }
 
     public SearchPipelineStateMachine(string strategyName = "")
     {
@@ -120,6 +128,9 @@ public class SearchPipelineStateMachine
         SearchPipelinePhase.AssemblingResults => "结果装配",
         SearchPipelinePhase.Completed => "已完成",
         SearchPipelinePhase.Faulted => "异常终止",
+        SearchPipelinePhase.Degrading => "容灾降级",
+        SearchPipelinePhase.DegradedRetrieved => "降级召回",
+        SearchPipelinePhase.DegradedCompleted => "降级完成",
         _ => phase.ToString()
     };
 }

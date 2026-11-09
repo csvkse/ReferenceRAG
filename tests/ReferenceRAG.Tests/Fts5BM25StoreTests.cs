@@ -8,6 +8,21 @@ namespace ReferenceRAG.Tests;
 /// </summary>
 public class Fts5BM25StoreTests : IDisposable
 {
+    [Fact]
+    public async Task VerifyExactIndexDetectsMissingExtraAndChangedDocuments()
+    {
+        var expected = new Dictionary<string, string> { ["one"] = "数据库 performance", ["two"] = "second value" };
+        await _store.IndexBatchAsync(expected.Select(p => (p.Key, p.Value)));
+        Assert.True(await _store.VerifyExactIndexAsync(expected));
+        await _store.IndexDocumentAsync("one", "different words");
+        Assert.False(await _store.VerifyExactIndexAsync(expected));
+        await _store.IndexDocumentAsync("one", expected["one"]);
+        await _store.IndexDocumentAsync("extra", "unexpected");
+        Assert.False(await _store.VerifyExactIndexAsync(expected));
+        await _store.DeleteDocumentsByIdsAsync(new[] { "extra", "two" });
+        Assert.False(await _store.VerifyExactIndexAsync(expected));
+    }
+
     private readonly string _dbPath;
     private readonly Fts5BM25Store _store;
 

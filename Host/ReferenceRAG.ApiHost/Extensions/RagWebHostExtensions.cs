@@ -46,6 +46,8 @@ public static class RagWebHostExtensions
         ReferenceRAG.Business.Composition.BusinessComposition.AddRagBusiness(services, configuration);
         services.AddKnowledgeBaseStorage();
         services.AddKnowledgeBaseServices();
+        services.AddHttpContextAccessor();
+        services.AddSingleton<IRequestSourceScopeAccessor, HttpRequestSourceScopeAccessor>();
         Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<ReferenceRAG.Business.Features.App.Contracts.IPlatformActions,ReferenceRAG.Business.Features.App.Contracts.BrowserPlatformActions>(services);
         services.AddSingleton<IndexEventPublisher>();
         services.AddSingleton<ReferenceRAG.Business.Features.Indexing.Contracts.IIndexEventPublisher>(sp => sp.GetRequiredService<IndexEventPublisher>());
@@ -123,7 +125,7 @@ public static class RagWebHostExtensions
         var webRootPath = app.Environment.WebRootPath;
         if (!string.IsNullOrEmpty(webRootPath) && File.Exists(Path.Combine(webRootPath, "index.html")))
         {
-            foreach (var route in new[] { "/", "/login", "/dashboard", "/search", "/sources", "/settings", "/performance", "/api-help", "/models", "/system", "/bm25-index", "/guide", "/graph", "/chat", "/logs" })
+            foreach (var route in new[] { "/", "/login", "/dashboard", "/search", "/sources", "/knowledge-bases", "/api-keys", "/settings", "/performance", "/api-help", "/models", "/system", "/bm25-index", "/guide", "/graph", "/chat", "/logs" })
                 app.MapGet(route, () => Results.File(Path.Combine(webRootPath, "index.html"), "text/html"));
         }
         else

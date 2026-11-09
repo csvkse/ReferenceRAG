@@ -84,6 +84,21 @@ public class ObsidianRagConfig
     /// 聊天对话模型配置
     /// </summary>
     public ChatModelConfig Chat { get; set; } = new();
+
+    /// <summary>
+    /// 集中式模型服务商配置列表 (Model Providers)
+    /// </summary>
+    public List<ModelProviderConfig> ModelProviders { get; set; } = new();
+
+    /// <summary>
+    /// 被禁用的本地/已注册模型名称集合 (Disabled Models)
+    /// </summary>
+    public List<string> DisabledModels { get; set; } = new();
+
+    /// <summary>
+    /// TypeSafe AI System One (Jev) 极速认知决策引擎配置
+    /// </summary>
+    public SystemOneConfig SystemOne { get; set; } = new();
 }
 
 /// <summary>
@@ -287,6 +302,9 @@ public class OpenAiApiEmbeddingProfile
 /// </summary>
 public class EmbeddingConfig
 {
+    /// <summary>绑定的模型 URN：例如 "local:bge-small-zh-v1.5" 或 "provider:prov_sf:BAAI/bge-m3"</summary>
+    public string ActiveModelUrn { get; set; } = "local:bge-small-zh-v1.5";
+
     /// <summary>当前激活后端方案：LocalOnnx | LocalGguf | OpenAiApi</summary>
     public string ActiveBackend { get; set; } = "LocalOnnx";
 
@@ -525,6 +543,19 @@ public class ChunkingConfig
 /// </summary>
 public class SearchConfig
 {
+    /// <summary>启用词法检索入口，默认开启（开箱即用）。</summary>
+    public bool EnableLexical { get; set; } = true;
+
+    /// <summary>当向量服务不可用（断网、限流、模型崩溃、未就绪）时，是否自动降级为本地词法检索，保障服务不中断。</summary>
+    public bool EnableAutomaticFallback { get; set; } = true;
+
+    /// <summary>云端向量检索硬超时门限（毫秒），超时后立即触发极速词法降级，默认 2500ms。</summary>
+    public int EmbeddingTimeoutMs { get; set; } = 2500;
+
+    /// <summary>对话检索策略；保持旧版混合重排默认值。</summary>
+    [System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+    public QueryMode ChatQueryMode { get; set; } = QueryMode.HybridRerank;
+
     /// <summary>
     /// 默认返回数量
     /// </summary>
@@ -699,6 +730,9 @@ public class RerankConfig
     /// <summary>是否启用重排功能</summary>
     public bool Enabled { get; set; } = false;
 
+    /// <summary>绑定的重排模型 URN：例如 "local:bge-reranker-base" 或 "provider:prov_sf:BAAI/bge-reranker-large"</summary>
+    public string ActiveModelUrn { get; set; } = "local:bge-reranker-base";
+
     /// <summary>当前激活后端方案：LocalOnnx | LocalGguf | OpenAiApi</summary>
     public string ActiveBackend { get; set; } = "LocalOnnx";
 
@@ -850,6 +884,9 @@ public class RerankConfig
 /// </summary>
 public class IndexingConfig
 {
+    /// <summary>是否在索引时生成向量；关闭时使用词法索引。</summary>
+    public bool EmbeddingEnabled { get; set; } = true;
+
     /// <summary>
     /// 是否启用自动索引
     /// </summary>
@@ -983,6 +1020,9 @@ public class OpenAiApiChatProfile
 /// </summary>
 public class ChatModelConfig
 {
+    /// <summary>绑定的聊天模型 URN：例如 "local:qwen2.5-7b-instruct-q4_k_m" 或 "provider:prov_sf:deepseek-ai/DeepSeek-V3"</summary>
+    public string ActiveModelUrn { get; set; } = "local:qwen2.5-7b-instruct-q4_k_m";
+
     /// <summary>当前激活后端方案：LocalGguf | LocalOnnxGenAi | OpenAiApi</summary>
     public string ActiveBackend { get; set; } = "OpenAiApi";
 
@@ -992,6 +1032,11 @@ public class ChatModelConfig
 
     /// <summary>是否开启意图识别与语义路由（开启后自动进行意图预判与动态工具优化）</summary>
     public bool EnableIntentRouting { get; set; } = true;
+
+    /// <summary>
+    /// TypeSafe AI System One (Jev) 极速决策引擎配置
+    /// </summary>
+    public SystemOneConfig SystemOne { get; set; } = new();
 
     public string SystemPrompt { get; set; } = "你是 ReferenceRAG 智能助手。";
     public float Temperature { get; set; } = 0.7f;
@@ -1054,4 +1099,58 @@ public class ChatModelConfig
         }
     }
 }
+
+/// <summary>
+/// 集中式模型服务商配置 (Model Provider)
+/// </summary>
+public class ModelProviderConfig
+{
+    public string Id { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string ProviderType { get; set; } = "OpenAI"; // "OpenAI" | "Ollama" | "Custom"
+    public string BaseUrl { get; set; } = string.Empty;
+    public string? ApiKey { get; set; }
+    public bool Enabled { get; set; } = true;
+    public List<RegisteredModelAsset> Models { get; set; } = new();
+}
+
+/// <summary>
+/// 服务商注册模型资产 (Registered Model Asset)
+/// </summary>
+public class RegisteredModelAsset
+{
+    public string ModelId { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string ModelType { get; set; } = "embedding"; // "embedding" | "chat" | "rerank"
+    public int Dimension { get; set; } = 1024;
+    public int MaxTokens { get; set; } = 8192;
+    public bool Enabled { get; set; } = true;
+    public DateTime? LastProbedAt { get; set; }
+}
+
+/// <summary>
+/// TypeSafe AI System One (Jev) 极速认知决策引擎配置
+/// </summary>
+public class SystemOneConfig
+{
+    /// <summary>是否启用 System One 决策引擎（默认 true）</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>System One 端点地址（默认 https://api.typesafe.ai/v1/systemone）</summary>
+    public string BaseUrl { get; set; } = "https://api.typesafe.ai/v1/systemone";
+
+    /// <summary>API 访问密钥</summary>
+    public string? ApiKey { get; set; }
+
+    /// <summary>模型标识（默认 jev-latest）</summary>
+    public string Model { get; set; } = "jev-latest";
+
+    /// <summary>单次决策超时毫秒数（默认 5000ms）</summary>
+    public int TimeoutMs { get; set; } = 5000;
+
+    /// <summary>触发知识库检索的置信度阈值（默认 0.65）</summary>
+    public float RetrievalConfidenceThreshold { get; set; } = 0.65f;
+}
+
+
 

@@ -15,7 +15,21 @@ public static class IndexingExtensions
         services.AddSingleton<WikiLinkExtractor>();
         services.AddSingleton<IGraphIndexingService, GraphIndexingService>();
         services.AddSingleton<IFileProcessingGuard, FileProcessingGuard>();
-        services.AddSingleton<IFileIndexPipeline, FileIndexPipeline>();
+        services.AddSingleton<IFileIndexPipeline>(sp => new FileIndexPipeline(
+            sp.GetRequiredService<IVectorStore>(),
+            sp.GetRequiredService<IBM25Store>(),
+            sp.GetRequiredService<IMarkdownChunker>(),
+            new Lazy<IEmbeddingService>(() => sp.GetRequiredService<IEmbeddingService>()),
+            sp.GetRequiredService<ITextEnhancer>(),
+            sp.GetRequiredService<ConfigManager>(),
+            sp.GetService<IGraphIndexingService>(),
+            new Lazy<IEmbeddingTokenCounter?>(() => sp.GetService<IEmbeddingTokenCounter>()),
+            sp.GetService<Microsoft.Extensions.Logging.ILogger<FileIndexPipeline>>(),
+            sp.GetService<IChunkGatekeeperService>(),
+            () => sp.GetRequiredService<ReferenceRAG.Storage.LexicalIndexCoordinator>(),
+            () => sp.GetRequiredService<LexicalFileIndexer>(),
+            sp.GetRequiredService<IFileProcessingGuard>()));
+        services.AddSingleton<LexicalFileIndexer>();
 
         // 索引架构三剑客：存储适配器、执行策略与状态机工厂
         services.AddSingleton<IIndexStorageAdapter, SqliteIndexStorageAdapter>();

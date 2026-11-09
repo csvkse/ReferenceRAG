@@ -1,0 +1,93 @@
+# ==============================================================================
+# ReferenceRAG Fast Development Dockerfile (Debian glibc, JIT Multi-Stage Build)
+# ==============================================================================
+# Designed for rapid inner-loop iteration on remote Linux hosts.
+# Caches NuGet restore layer and prunes non-Linux runtimes to minimize image footprint.
+# ==============================================================================
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Stage 1: Restore dependencies (heavily cached; invalidates only on csproj/nuget edits)
+COPY Directory.Build.props Directory.Packages.props nuget.config ./
+COPY packages/ ./packages/
+COPY Infrastructure/ReferenceRAG.Infrastructure/ReferenceRAG.Infrastructure.csproj ./Infrastructure/ReferenceRAG.Infrastructure/
+COPY Business/ReferenceRAG.Business/ReferenceRAG.Business.csproj ./Business/ReferenceRAG.Business/
+COPY Host/ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj ./Host/ReferenceRAG.ApiHost/
+COPY Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj ./Host/ReferenceRAG.WebHost/
+RUN dotnet restore Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj -p:GpuBackend=universal
+
+# Stage 2: Fast incremental build & publish (prune Windows/macOS native runtimes)
+COPY Infrastructure/ ./Infrastructure/
+COPY Business/ ./Business/
+COPY Host/ReferenceRAG.ApiHost/ ./Host/ReferenceRAG.ApiHost/
+COPY Host/ReferenceRAG.WebHost/ ./Host/ReferenceRAG.WebHost/
+COPY support/config/appsettings.template.json ./support/config/
+RUN dotnet publish Host/ReferenceRAG.WebHost/ReferenceRAG.WebHost.csproj \
+    -c Release \
+    -o /app/publish \
+    /p:GpuBackend=universal \
+    /p:UseAppHost=false \
+    /p:DebugType=none \
+    /p:DebugSymbols=false \
+    && rm -rf /app/publish/runtimes/win* /app/publish/runtimes/osx*
+
+# ==============================================================================
+# Stage 3: Fast Dev Runtime (Universal CPU + Vulkan, glibc Bookworm-Slim)
+# ==============================================================================
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+
+# Install dev diagnosis tools & runtime native dependencies:
+# - wget & curl: HTTP health probes and remote API testing
+# - procps: ps, top, kill for in-container process management
+# - libgomp1: OpenMP runtime for ONNX Runtime & LLama.cpp CPU parallel inference
+# - libvulkan1 & mesa-vulkan-drivers: Vulkan compute drivers (AMD APU / Intel Iris)
+# - gosu: safe privilege de-escalation for non-root containers
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    curl \
+    procps \
+    libgomp1 \
+    libvulkan1 \
+    mesa-vulkan-drivers \
+    gosu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Initialize runtime directories and video/render groups for DRI acceleration
+RUN mkdir -p /app/data /app/models /app/logs /app/sources /app/wwwroot \
+    && ln -sf /app/logs /app/Logs \
+    && groupadd -r appgroup \
+    && (getent group video || groupadd -r video) \
+    && (getent group render || groupadd -r render) \
+    && useradd -r -g appgroup -G video,render appuser \
+    && chown -R appuser:appgroup /app
+
+# Copy published application and entrypoint script
+COPY --from=build /app/publish .
+COPY support/deploy/docker/docker-entrypoint.sh ./docker-entrypoint.sh
+RUN sed -i 's/\r$//' ./docker-entrypoint.sh && chmod +x ./docker-entrypoint.sh
+
+# Fallback development config
+COPY support/config/examples/appsettings.Docker.example.json ./appsettings.json
+
+# Environment variables
+ENV ASPNETCORE_URLS=http://+:5000
+ENV ASPNETCORE_ENVIRONMENT=Development
+ENV DataPath=/app/data
+ENV LogsPath=/app/logs
+ENV DOTNET_RUNNING_IN_CONTAINER=true
+ENV DOTNET_USE_POLLING_FILE_WATCHER=true
+ENV SwaggerEnabled=true
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:/app/runtimes/linux-x64/native/vulkan:${LD_LIBRARY_PATH}"
+
+# Fast health check for dev pipeline (15s interval, 10s start period)
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/system/health || exit 1
+
+EXPOSE 5000
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD ["dotnet", "ReferenceRAG.WebHost.dll"]

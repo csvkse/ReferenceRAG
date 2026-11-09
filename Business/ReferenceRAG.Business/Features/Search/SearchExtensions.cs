@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Business.Features.Search.Strategies;
@@ -18,6 +20,8 @@ public static class SearchExtensions
         services.AddSingleton<MetricsCollector>();
         services.AddSingleton<AlertService>();
 
+        services.AddSingleton<ReferenceRAG.Infrastructure.Features.Resilience.ResilienceCircuitBreaker>();
+
         var options = hybridOptions ?? new HybridSearchOptions();
         services.AddSingleton<IHybridSearchService>(sp =>
         {
@@ -32,18 +36,25 @@ public static class SearchExtensions
         });
 
         services.AddSingleton<ISearchStrategyFactory>(sp =>
-            new SearchStrategyFactory(sp.GetService<IHybridSearchService>()));
+            new SearchStrategyFactory(
+                sp.GetService<IHybridSearchService>(),
+                () => sp.GetRequiredService<IBM25Store>(),
+                sp.GetService<ReferenceRAG.Infrastructure.Features.Resilience.ResilienceCircuitBreaker>()));
 
         services.AddScoped<ISearchService>(sp => new SearchService(
             sp.GetRequiredService<IVectorStore>(),
-            sp.GetRequiredService<IEmbeddingService>(),
+            new Lazy<IEmbeddingService>(() => sp.GetRequiredService<IEmbeddingService>()),
             sp.GetRequiredService<ITextEnhancer>(),
             sp.GetRequiredService<ConfigManager>(),
             sp.GetRequiredService<ILogger<SearchService>>(),
-            sp.GetRequiredService<IHybridSearchService>(),
-            sp.GetRequiredService<IRerankService>(),
+            new Lazy<IHybridSearchService?>(() => sp.GetRequiredService<IHybridSearchService>()),
+            new Lazy<IRerankService?>(() => sp.GetRequiredService<IRerankService>()),
             sp.GetService<IGraphStore>(),
-            sp.GetService<IModelTelemetryService>()));
+            new Lazy<IModelTelemetryService?>(() => sp.GetService<IModelTelemetryService>()),
+            () => sp.GetRequiredService<ReferenceRAG.Storage.LexicalIndexCoordinator>(),
+            () => ReferenceRAG.Storage.LexicalIndexCoordinator.HasPersistedStaleVectors(
+                Path.Combine(sp.GetRequiredService<ConfigManager>().Load().DataPath ?? "data", "vectors.db")),
+            () => sp.GetRequiredService<IBM25Store>()));
 
         return services;
     }

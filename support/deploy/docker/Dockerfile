@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # ReferenceRAG: shared static ES modules, Universal CPU + Vulkan Native Acceleration.
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src

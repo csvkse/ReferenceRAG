@@ -1,6 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.AspNetCore.Mvc.Controllers;
+using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Business.Features.KnowledgeBase.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -9,6 +14,7 @@ namespace ReferenceRAG.Service.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/knowledge-bases")]
+[RestrictKnowledgeBaseToFullSourceScope]
 public class KnowledgeBasesController : ControllerBase
 {
     private readonly IKnowledgeBaseService _kbService;
@@ -25,6 +31,14 @@ public class KnowledgeBasesController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<KnowledgeBaseDefinition>>> ListKnowledgeBases(CancellationToken ct)
     {
+        var context = ControllerContext.HttpContext;
+        var allowed = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(context?.Items["CurrentApiKey"] as ApiKeyEntity);
+        if (allowed != null)
+        {
+            var search = context?.RequestServices.GetService<IKnowledgeBaseSearchService>();
+            if (search == null) return StatusCode(403, new { message = "无法验证独立知识库的数据源权限。" });
+            return Ok(await search.ListAccessibleKnowledgeBasesAsync(allowed, ct));
+        }
         var list = await _kbService.ListKnowledgeBasesAsync(ct);
         return Ok(list);
     }
@@ -143,6 +157,207 @@ public class KnowledgeBasesController : ControllerBase
         return NoContent();
     }
 
+    [HttpPut("{id}")]
+    public async Task<ActionResult<KnowledgeBaseDefinition>> UpdateKnowledgeBase(
+        string id,
+        [FromBody] UpdateKnowledgeBaseRequest request,
+        CancellationToken ct)
+    {
+        try
+        {
+            var updated = await _kbService.UpdateKnowledgeBaseAsync(id, request, ct);
+            return Ok(updated);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "更新知识库失败: {Id}", id);
+            return StatusCode(500, new { message = ex.Message });
+        }
+    }
+
+    [HttpPatch("{id}/toggle")]
+    public async Task<IActionResult> ToggleKnowledgeBase(
+        string id,
+        [FromBody] ToggleKnowledgeBaseRequest request,
+        CancellationToken ct)
+    {
+        var success = await _kbService.ToggleKnowledgeBaseAsync(id, request.Enabled, ct);
+        if (!success) return NotFound(new { message = $"知识库不存在: {id}" });
+        return Ok(new { success = true, id, enabled = request.Enabled });
+    }
+
+    [HttpPut("{id}/connectors/{connectorId}")]
+    public async Task<ActionResult<ConnectorDefinition>> UpdateConnector(
+        string id,
+        string connectorId,
+        [FromBody] UpdateConnectorRequest request,
+        CancellationToken ct)
+    {
+        try
+        {
+            var updated = await _kbService.UpdateConnectorAsync(id, connectorId, request, ct);
+            return Ok(updated);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "更新连接器失败: {ConnectorId}", connectorId);
+            return StatusCode(500, new { message = ex.Message });
+        }
+    }
+
+    [HttpPost("embedding-specs")]
+    public async Task<ActionResult<EmbeddingSpec>> CreateEmbeddingSpec(
+        [FromBody] EmbeddingSpec spec,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(spec.ModelName))
+            return BadRequest(new { message = "ModelName 不能为空" });
+        var id = string.IsNullOrWhiteSpace(spec.Id) ? $"spec_{Guid.NewGuid():N}"[..16] : spec.Id.Trim();
+        var target = spec with { Id = id };
+        await _kbService.SaveEmbeddingSpecAsync(target, ct);
+        return Ok(target);
+    }
+
+    [HttpPut("embedding-specs/{specId}")]
+    public async Task<ActionResult<EmbeddingSpec>> UpdateEmbeddingSpec(
+        string specId,
+        [FromBody] EmbeddingSpec spec,
+        CancellationToken ct)
+    {
+        var target = spec with { Id = specId };
+        await _kbService.SaveEmbeddingSpecAsync(target, ct);
+        return Ok(target);
+    }
+
+    [HttpDelete("embedding-specs/{specId}")]
+    public async Task<IActionResult> DeleteEmbeddingSpec(
+        string specId,
+        CancellationToken ct)
+    {
+        var success = await _kbService.DeleteEmbeddingSpecAsync(specId, ct);
+        if (!success) return NotFound(new { message = $"规格不存在: {specId}" });
+        return NoContent();
+    }
+
+    // ==================== 文档增删改查 ====================
+    [HttpGet("{id}/documents")]
+    public async Task<IActionResult> GetDocuments(
+        string id,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 50,
+        [FromQuery] string? search = null,
+        [FromQuery] string? connectorId = null,
+        CancellationToken ct = default)
+    {
+        var (docs, total) = await _kbService.GetDocumentsAsync(id, page, pageSize, search, connectorId, ct);
+        return Ok(new { items = docs, total, page, pageSize });
+    }
+
+    [HttpGet("{id}/documents/{docId}")]
+    public async Task<ActionResult<KnowledgeBaseDocumentRecord>> GetDocument(
+        string id,
+        string docId,
+        CancellationToken ct)
+    {
+        var doc = await _kbService.GetDocumentByIdAsync(id, docId, ct);
+        if (doc == null) return NotFound(new { message = $"文档不存在: {docId}" });
+        return Ok(doc);
+    }
+
+    [HttpDelete("{id}/documents/{docId}")]
+    public async Task<IActionResult> DeleteDocument(
+        string id,
+        string docId,
+        CancellationToken ct)
+    {
+        var deleted = await _kbService.DeleteDocumentByIdAsync(id, docId, ct);
+        if (!deleted) return NotFound(new { message = $"文档不存在: {docId}" });
+        return NoContent();
+    }
+
+    // ==================== 切片增删改查 (HITL) ====================
+    [HttpGet("{id}/chunks")]
+    public async Task<IActionResult> GetChunks(
+        string id,
+        [FromQuery] string? documentId = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 50,
+        [FromQuery] string? search = null,
+        [FromQuery] bool? enabledOnly = null,
+        CancellationToken ct = default)
+    {
+        var (chunks, total) = await _kbService.GetChunksAsync(id, documentId, page, pageSize, search, enabledOnly, ct);
+        return Ok(new { items = chunks, total, page, pageSize });
+    }
+
+    [HttpGet("{id}/chunks/{chunkId}")]
+    public async Task<ActionResult<KnowledgeBaseChunkRecord>> GetChunk(
+        string id,
+        string chunkId,
+        CancellationToken ct)
+    {
+        var chunk = await _kbService.GetChunkByIdAsync(id, chunkId, ct);
+        if (chunk == null) return NotFound(new { message = $"切片不存在: {chunkId}" });
+        return Ok(chunk);
+    }
+
+    [HttpPost("{id}/chunks")]
+    public async Task<ActionResult<KnowledgeBaseChunkRecord>> CreateChunk(
+        string id,
+        [FromBody] CreateChunkRequest request,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request?.Text))
+            return BadRequest(new { message = "切片文本不能为空" });
+        var created = await _kbService.CreateChunkAsync(id, request, ct);
+        return CreatedAtAction(nameof(GetChunk), new { id, chunkId = created.Id }, created);
+    }
+
+    [HttpPut("{id}/chunks/{chunkId}")]
+    public async Task<ActionResult<KnowledgeBaseChunkRecord>> UpdateChunk(
+        string id,
+        string chunkId,
+        [FromBody] UpdateChunkRequest request,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request?.Text))
+            return BadRequest(new { message = "切片文本不能为空" });
+        var updated = await _kbService.UpdateChunkAsync(id, chunkId, request, ct);
+        if (updated == null) return NotFound(new { message = $"切片不存在: {chunkId}" });
+        return Ok(updated);
+    }
+
+    [HttpPatch("{id}/chunks/{chunkId}/toggle")]
+    public async Task<IActionResult> ToggleChunk(
+        string id,
+        string chunkId,
+        [FromBody] ToggleChunkRequest request,
+        CancellationToken ct)
+    {
+        var success = await _kbService.ToggleChunkAsync(id, chunkId, request.Enabled, ct);
+        if (!success) return NotFound(new { message = $"切片不存在: {chunkId}" });
+        return Ok(new { success = true, chunkId, enabled = request.Enabled });
+    }
+
+    [HttpDelete("{id}/chunks/{chunkId}")]
+    public async Task<IActionResult> DeleteChunk(
+        string id,
+        string chunkId,
+        CancellationToken ct)
+    {
+        var success = await _kbService.DeleteChunkAsync(id, chunkId, ct);
+        if (!success) return NotFound(new { message = $"切片不存在: {chunkId}" });
+        return NoContent();
+    }
+
     [HttpPost("{id}/jobs")]
     public async Task<ActionResult<JobDefinition>> TriggerSyncJob(
         string id,
@@ -161,11 +376,27 @@ public class KnowledgeBasesController : ControllerBase
     }
 }
 
+/// <summary>Source names are not grants for independent knowledge-base connectors.</summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class RestrictKnowledgeBaseToFullSourceScopeAttribute : Attribute, IAuthorizationFilter
+{
+    public void OnAuthorization(AuthorizationFilterContext context)
+    {
+        if (context.ActionDescriptor is ControllerActionDescriptor action &&
+            action.ControllerTypeInfo.AsType() == typeof(KnowledgeBasesController) &&
+            action.MethodInfo.Name == nameof(KnowledgeBasesController.ListKnowledgeBases)) return;
+        var key = context.HttpContext.Items["CurrentApiKey"] as ApiKeyEntity;
+        if (ApiKeyPermissionMatrix.GetEffectiveAllowedSources(key) != null)
+            context.Result = new ObjectResult(new { message = "当前密钥的数据源权限尚未映射到独立知识库连接器。" }) { StatusCode = 403 };
+    }
+}
+
 /// <summary>
 /// 异步作业管理 API 控制器
 /// </summary>
 [ApiController]
 [Route("api/jobs")]
+[RestrictKnowledgeBaseToFullSourceScope]
 public class JobsController : ControllerBase
 {
     private readonly IKnowledgeBaseService _kbService;
@@ -227,6 +458,9 @@ public class KnowledgeBaseSearchController : ControllerBase
 
         try
         {
+            var key = ControllerContext.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+            var allowed = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(key);
+            request = request with { AuthorizedSourceNames = allowed };
             var response = await _searchService.SearchAsync(request, ct);
             return Ok(response);
         }
@@ -258,3 +492,6 @@ public sealed record CreateKnowledgeBaseRequest(
     EmbeddingSpecDto? EmbeddingSpec = null);
 public sealed record AddConnectorRequest(string? Kind, string TargetPath, string? FilePattern = null);
 public sealed record TriggerJobRequest(string ConnectorId);
+
+public sealed record ToggleKnowledgeBaseRequest(bool Enabled);
+public sealed record ToggleChunkRequest(bool Enabled);

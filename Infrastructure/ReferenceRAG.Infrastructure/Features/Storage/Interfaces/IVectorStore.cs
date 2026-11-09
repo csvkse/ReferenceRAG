@@ -90,6 +90,7 @@ public interface IVectorStore
     /// 获取分段记录
     /// </summary>
     Task<ChunkRecord?> GetChunkAsync(string id, CancellationToken cancellationToken = default);
+    Task<IReadOnlyDictionary<string, ChunkRecord>> GetChunksByIdsAsync(IReadOnlyCollection<string> ids, CancellationToken cancellationToken = default);
     
     /// <summary>
     /// 获取文件的所有分段
@@ -148,6 +149,9 @@ public interface IVectorStore
     Task<IReadOnlyDictionary<string, VectorRecord>> GetVectorsByChunkIdsAsync(
         IEnumerable<string> chunkIds,
         CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyDictionary<string, VectorRecord>> GetVectorsByChunkIdsAsync(
+        IEnumerable<string> chunkIds, string modelName, CancellationToken cancellationToken = default);
     
     /// <summary>
     /// 删除向量

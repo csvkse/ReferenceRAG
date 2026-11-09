@@ -6,6 +6,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
+using ReferenceRAG.Business.Features.Indexing.Services;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -24,6 +26,7 @@ public class AutoIndexService : IHostedService, IDisposable
     private readonly IFileProcessingGuard _guard;
     private readonly ConfigManager _configManager;
     private readonly ILogger<AutoIndexService>? _logger;
+    private readonly IServiceProvider? _serviceProvider;
 
     private readonly object _lock = new();
     private readonly Dictionary<string, PendingChange> _pendingChanges = new(StringComparer.OrdinalIgnoreCase);
@@ -54,13 +57,15 @@ public class AutoIndexService : IHostedService, IDisposable
         IFileIndexPipeline pipeline,
         IFileProcessingGuard guard,
         ConfigManager configManager,
-        ILogger<AutoIndexService>? logger = null)
+        ILogger<AutoIndexService>? logger = null,
+        IServiceProvider? serviceProvider = null)
     {
         _fileMonitor = fileMonitor;
         _pipeline = pipeline;
         _guard = guard;
         _configManager = configManager;
         _logger = logger;
+        _serviceProvider = serviceProvider;
         _processTimer = new Timer(ProcessQueue, null, Timeout.Infinite, Timeout.Infinite);
     }
 
@@ -219,6 +224,8 @@ public class AutoIndexService : IHostedService, IDisposable
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "处理文件变更失败: {FilePath}", change.FilePath);
+                if (!_configManager.Load().Indexing.EmbeddingEnabled)
+                    Requeue(change);
             }
         }
 
@@ -229,6 +236,35 @@ public class AutoIndexService : IHostedService, IDisposable
     {
         _logger?.LogInformation("开始处理: {FileName} ({ChangeType})",
             Path.GetFileName(change.FilePath), change.ChangeType);
+
+        var configSnapshot = _configManager.Load();
+        if (!configSnapshot.Indexing.EmbeddingEnabled)
+        {
+            if (!configSnapshot.Search.EnableLexical || _serviceProvider == null)
+                throw new InvalidOperationException("词法索引不可用，文件变更未处理。");
+            var lexical = _serviceProvider.GetRequiredService<LexicalFileIndexer>();
+            var target = Path.GetFullPath(change.FilePath);
+            if (!_guard.TryAcquire(target)) { Requeue(change); return; }
+            try
+            {
+                if (change.ChangeType == ChangeType.Deleted)
+                {
+                    if (!File.Exists(target)) await lexical.DeleteAsync(target);
+                    return;
+                }
+                var sources = configSnapshot.Sources.Where(s => s.Enabled).ToList();
+                var source = IndexService.FindLexicalSource(target, sources);
+                if (source != null && File.Exists(target) && IndexService.IsLexicalFileAllowed(target, source))
+                    await lexical.IndexAsync(target, source.Name);
+                if (!string.IsNullOrEmpty(change.OldFilePath))
+                {
+                    var oldPath = Path.GetFullPath(change.OldFilePath);
+                    if (!File.Exists(oldPath)) await lexical.DeleteAsync(oldPath);
+                }
+            }
+            finally { _guard.Release(target); }
+            return;
+        }
 
         if (change.ChangeType == ChangeType.Deleted)
         {

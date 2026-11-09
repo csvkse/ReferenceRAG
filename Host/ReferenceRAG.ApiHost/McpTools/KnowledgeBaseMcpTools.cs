@@ -1,9 +1,12 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
 using ReferenceRAG.Business.Features.KnowledgeBase.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Service.McpTools;
 
@@ -27,11 +30,14 @@ public class KnowledgeBaseMcpTools
     public async Task<string> KnowledgeBaseList()
     {
         using var scope = _serviceProvider.CreateScope();
-        var kbService = scope.ServiceProvider.GetRequiredService<IKnowledgeBaseService>();
-
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(KnowledgeBaseList), out var error))
+            return error ?? JsonSerializer.Serialize(new { success = false, error = "权限检查失败" });
         try
         {
-            var kbs = await kbService.ListKnowledgeBasesAsync();
+            var allowed = GetAllowedSources(scope.ServiceProvider);
+            var kbs = allowed == null
+                ? await scope.ServiceProvider.GetRequiredService<IKnowledgeBaseService>().ListKnowledgeBasesAsync()
+                : await scope.ServiceProvider.GetRequiredService<IKnowledgeBaseSearchService>().ListAccessibleKnowledgeBasesAsync(allowed);
             return JsonSerializer.Serialize(new
             {
                 success = true,
@@ -62,9 +68,12 @@ public class KnowledgeBaseMcpTools
     public async Task<string> KnowledgeBaseSearch(
         [Description("检索查询文本（必填）。使用完整的问题或查询短语")] string query,
         [Description("目标知识库 ID 列表（可选，JSON 字符串如 [\"kb_1\",\"kb_2\"]）。若留空则自动查询所有已启用的知识库")] string? knowledgeBaseIds = null,
-        [Description("返回候选条数，默认 5")] int topK = 5)
+        [Description("返回候选条数，默认 5")] int topK = 5,
+        [Description("使用免向量词法检索")] bool useLexicalTokenizer = false)
     {
         using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(KnowledgeBaseSearch), out var error))
+            return error ?? JsonSerializer.Serialize(new { success = false, error = "权限检查失败" });
         var kbService = scope.ServiceProvider.GetRequiredService<IKnowledgeBaseService>();
         var searchService = scope.ServiceProvider.GetRequiredService<IKnowledgeBaseSearchService>();
 
@@ -94,8 +103,9 @@ public class KnowledgeBaseMcpTools
                 Query: query,
                 KnowledgeBaseIds: targetIds,
                 TopK: topK,
-                FailurePolicy: FailurePolicy.AllowPartial
-            );
+                FailurePolicy: FailurePolicy.AllowPartial,
+                UseLexicalTokenizer: useLexicalTokenizer
+            ) { AuthorizedSourceNames = GetAllowedSources(scope.ServiceProvider) };
 
             var response = await searchService.SearchAsync(request);
 
@@ -130,5 +140,11 @@ public class KnowledgeBaseMcpTools
                 error = ex.Message
             });
         }
+    }
+
+    private static IReadOnlyList<string>? GetAllowedSources(IServiceProvider serviceProvider)
+    {
+        var context = serviceProvider.GetService<IHttpContextAccessor>()?.HttpContext;
+        return ApiKeyPermissionMatrix.GetEffectiveAllowedSources(context?.Items["CurrentApiKey"] as ApiKeyEntity);
     }
 }

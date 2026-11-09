@@ -172,6 +172,21 @@ public class ModelInfo
     /// </summary>
     public string? ActiveVariantFileName { get; set; }
 
+    /// <summary>
+    /// 是否启用该模型 (运营状态)
+    /// </summary>
+    public bool IsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// 物理文件是否真实完整存在 (物理门禁)
+    /// </summary>
+    public bool PhysicalExists { get; set; } = false;
+
+    /// <summary>
+    /// 物理健康状态: "ready" | "missing_files" | "corrupted"
+    /// </summary>
+    public string PhysicalStatus { get; set; } = "ready";
+
     public ModelInfo Clone() => new ModelInfo
     {
         Name = Name,
@@ -206,7 +221,10 @@ public class ModelInfo
         OnnxFormat = OnnxFormat,
         CanConvertFormat = CanConvertFormat,
         InstalledVariants = InstalledVariants != null ? new List<ModelVariantInfo>(InstalledVariants) : new(),
-        ActiveVariantFileName = ActiveVariantFileName
+        ActiveVariantFileName = ActiveVariantFileName,
+        IsEnabled = IsEnabled,
+        PhysicalExists = PhysicalExists,
+        PhysicalStatus = PhysicalStatus
     };
 }
 
@@ -249,6 +267,8 @@ public interface IModelManager
 {
     Task<List<ModelInfo>> GetAvailableModelsAsync(string modelType = "");
     List<ModelInfo> GetDownloadedModels();
+    List<ModelInfo> GetEmbeddingModels();
+    List<ModelInfo> GetDownloadedEmbeddingModels();
     ModelInfo? GetCurrentModel();
     Task<bool> SwitchModelAsync(string modelName);
     Task<(bool Success, string? Error)> DownloadModelAsync(string modelName, IProgress<float>? progress = null, string? targetFormat = null, string? onnxVariantPath = null, string? repository = null);
@@ -355,6 +375,11 @@ public interface IModelManager
     List<ModelInfo> GetDownloadedChatModels();
 
     // ========== 模型变更事件 ==========
+
+    /// <summary>
+    /// 切换模型启用/禁用运营状态
+    /// </summary>
+    bool ToggleModelEnabled(string modelName, bool? enabled = null);
 
     /// <summary>
     /// 当模型路径变更时触发（需要外部服务重新加载模型）
@@ -1611,6 +1636,11 @@ public class ModelManager : IModelManager, IDisposable
                 string? localMmprojName = hasLocalMmproj ? Path.GetFileName(localMmprojPath) : null;
                 long localMmprojSize = hasLocalMmproj ? new FileInfo(localMmprojPath!).Length : 0;
 
+                var disabledList = _configManager?.Load()?.DisabledModels ?? new List<string>();
+                var isEnabled = !disabledList.Contains(modelName, StringComparer.OrdinalIgnoreCase);
+                var isPhysicallyValid = hasValidOnnx && variants.Count > 0;
+                var physicalStatus = isPhysicallyValid ? "ready" : (variants.Count == 0 ? "missing_files" : "corrupted");
+
                 if (_modelRegistry.TryGetValue(modelName, out var model))
                 {
                     model.IsDownloaded = hasValidOnnx;
@@ -1621,6 +1651,9 @@ public class ModelManager : IModelManager, IDisposable
                     model.CanConvertFormat = canConvert;
                     model.InstalledVariants = variants;
                     model.ActiveVariantFileName = activeVariant.FileName;
+                    model.IsEnabled = isEnabled;
+                    model.PhysicalExists = isPhysicallyValid;
+                    model.PhysicalStatus = physicalStatus;
 
                     var isMulti = model.IsMultimodal || hasLocalMmproj || GgufMultimodalCompanionStrategy.IsLikelyVisionModel(modelName);
                     model.IsMultimodal = isMulti;
@@ -1648,6 +1681,9 @@ public class ModelManager : IModelManager, IDisposable
                         CanConvertFormat = canConvert,
                         InstalledVariants = variants,
                         ActiveVariantFileName = activeVariant.FileName,
+                        IsEnabled = isEnabled,
+                        PhysicalExists = isPhysicallyValid,
+                        PhysicalStatus = physicalStatus,
                         IsMultimodal = isMulti,
                         HasMmprojLocally = hasLocalMmproj,
                         LocalMmprojFileName = localMmprojName,
@@ -1741,6 +1777,16 @@ public class ModelManager : IModelManager, IDisposable
     public List<ModelInfo> GetDownloadedModels()
     {
         return _modelRegistry.Values.Where(m => m.IsDownloaded).ToList();
+    }
+
+    public List<ModelInfo> GetEmbeddingModels()
+    {
+        return _modelRegistry.Values.Where(m => m.ModelType == "embedding").ToList();
+    }
+
+    public List<ModelInfo> GetDownloadedEmbeddingModels()
+    {
+        return _modelRegistry.Values.Where(m => m.ModelType == "embedding" && m.IsDownloaded).ToList();
     }
 
     public ModelInfo? GetCurrentModel()
@@ -3331,6 +3377,44 @@ public class ModelManager : IModelManager, IDisposable
         }
 
         return models;
+    }
+
+    /// <summary>
+    /// 切换模型启用/禁用运营状态
+    /// </summary>
+    public bool ToggleModelEnabled(string modelName, bool? enabled = null)
+    {
+        var config = _configManager.Load();
+        var disabledList = new HashSet<string>(config.DisabledModels ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+
+        bool newEnabledState;
+        if (enabled.HasValue)
+        {
+            newEnabledState = enabled.Value;
+        }
+        else
+        {
+            newEnabledState = disabledList.Contains(modelName);
+        }
+
+        if (newEnabledState)
+        {
+            disabledList.Remove(modelName);
+        }
+        else
+        {
+            disabledList.Add(modelName);
+        }
+
+        config.DisabledModels = disabledList.ToList();
+        _configManager.Save(config);
+
+        if (_modelRegistry.TryGetValue(modelName, out var model))
+        {
+            model.IsEnabled = newEnabledState;
+        }
+
+        return newEnabledState;
     }
 
     public void Dispose()

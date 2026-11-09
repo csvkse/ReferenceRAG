@@ -30,5 +30,14 @@ public enum SearchPipelinePhase
     Completed = 7,
 
     /// <summary>流水线执行异常终止</summary>
-    Faulted = 8
+    Faulted = 8,
+
+    /// <summary>主检索异常或禁用，触发容灾降级流</summary>
+    Degrading = 9,
+
+    /// <summary>降级词法备选检索完毕</summary>
+    DegradedRetrieved = 10,
+
+    /// <summary>降级装配完成</summary>
+    DegradedCompleted = 11
 }

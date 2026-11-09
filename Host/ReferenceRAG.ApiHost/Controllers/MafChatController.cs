@@ -13,7 +13,7 @@ using System.Text.Json.Serialization;
 
 namespace ReferenceRAG.Service.Controllers;
 
-public record ChatStreamRequest(string SessionId, string Message, IReadOnlyList<string>? Images = null);
+public record ChatStreamRequest(string SessionId, string Message, IReadOnlyList<string>? Images = null, IReadOnlyList<string>? KnowledgeBaseIds = null);
 public record CreateSessionResponse(string SessionId, int UsedTokens = 0, int MaxTokens = 8192, double Percent = 0.0);
 
 public class ChatConfig
@@ -113,7 +113,7 @@ public class MafChatController : ControllerBase
 
         try
         {
-            await foreach (var evt in _chatService.StreamAsync(request.SessionId, request.Message, request.Images, ct))
+            await foreach (var evt in _chatService.StreamAsync(request.SessionId, request.Message, request.Images, request.KnowledgeBaseIds, ct))
             {
                 var json = JsonSerializer.Serialize(evt, _sseOptions);
                 await Response.WriteAsync($"data: {json}\n\n", ct);

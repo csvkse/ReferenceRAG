@@ -289,6 +289,26 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
         }
     }
 
+    public async Task<ConnectorDefinition?> GetConnectorAsync(string connectorId, CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        using var conn = CreateConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT id, knowledge_base_id, kind, target_path, file_pattern,
+                   config_revision, enabled, created_at, updated_at
+            FROM connectors
+            WHERE id = @id;
+        ";
+        cmd.Parameters.AddWithValue("@id", connectorId);
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+        {
+            return ReadConnector(reader);
+        }
+        return null;
+    }
+
     public async Task<IReadOnlyList<ConnectorDefinition>> GetConnectorsByKnowledgeBaseAsync(string kbId, CancellationToken ct = default)
     {
         await InitializeAsync(ct);
@@ -600,6 +620,25 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             ));
         }
         return list;
+    }
+
+    public async Task<bool> DeleteEmbeddingSpecAsync(string specId, CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        await _gate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM embedding_specs WHERE id = @id;";
+            cmd.Parameters.AddWithValue("@id", specId);
+            var affected = await cmd.ExecuteNonQueryAsync(ct);
+            return affected > 0;
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     public void Dispose()

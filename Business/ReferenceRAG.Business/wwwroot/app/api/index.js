@@ -176,7 +176,18 @@ export const modelsApi = {
     // 动态拉取远程模型列表
     discoverRemoteModels: (data) => api.post('/Models/remote-models', data),
     // 探针测试并探测模型输出维度
-    probeDimension: (data) => api.post('/Models/probe-dimension', data)
+    probeDimension: (data) => api.post('/Models/probe-dimension', data),
+    // 模型启用/停用运营状态切换
+    toggleEnabled: (modelName, enabled) => api.post(`/Models/${encodeURIComponent(modelName)}/toggle-enabled`, { enabled }),
+    // 集中式模型服务商管理 (Model Providers)
+    getProviders: () => api.get('/Models/providers'),
+    saveProvider: (data) => api.post('/Models/providers', data),
+    deleteProvider: (id) => api.delete(`/Models/providers/${encodeURIComponent(id)}`),
+    toggleProvider: (id) => api.post(`/Models/providers/${encodeURIComponent(id)}/toggle`),
+    probeProviderModels: (id) => api.post(`/Models/providers/${encodeURIComponent(id)}/probe-models`),
+    toggleProviderModel: (id, modelId, enabled) => api.post(`/Models/providers/${encodeURIComponent(id)}/toggle-model`, { modelId, enabled }),
+    // 统一模型 URN Catalog 检索 (type = chat | embedding | rerank)
+    getCatalog: (type) => api.get('/Models/catalog', { params: { type } })
 };
 // vectorsApi / vectorIndexApi removed — use indexJobsApi + indexApi
 // System
@@ -194,13 +205,13 @@ export const systemApi = {
 // BM25 Index
 export const bm25IndexApi = {
     // 索引操作
-    indexAll: () => api.post('/bm25index/index'),
+    indexAll: (kbId) => api.post('/bm25index/index', null, { params: { kbId } }),
     indexDocument: (chunkId, content) => api.post(`/bm25index/documents/${chunkId}`, { content }),
-    clearIndex: () => api.delete('/bm25index/index'),
+    clearIndex: (kbId) => api.delete('/bm25index/index', { params: { kbId } }),
     // 搜索
-    search: (query, topK) => api.get('/bm25index/search', { params: { query, topK } }),
+    search: (query, topK, kbId) => api.get('/bm25index/search', { params: { query, topK, kbId } }),
     // 统计
-    getSummary: () => api.get('/bm25index/summary')
+    getSummary: (kbId) => api.get('/bm25index/summary', { params: { kbId } })
 };
 // Rerank Test
 export const rerankTestApi = {
@@ -218,13 +229,17 @@ export const pathsApi = {
 };
 // Knowledge Graph
 export const graphApi = {
-    stats: () => api.get('/graph/stats'),
-    node: (nodeId) => api.get('/graph/node', { params: { nodeId } }),
-    neighbors: (nodeId, depth = 1, edgeTypes) => api.get('/graph/neighbors', { params: { nodeId, depth, edgeTypes } }),
-    search: (q, limit = 10) => api.get('/graph/search', { params: { q, limit } }),
-    subgraph: (rootIds, depth = 1) => api.post('/graph/subgraph', { rootIds, depth }),
-    rebuild: () => api.post('/graph/rebuild'),
-    rebuildStatus: () => api.get('/graph/rebuild/status')
+    stats: (kbId) => api.get('/graph/stats', { params: { kbId } }),
+    node: (nodeId, kbId) => api.get('/graph/node', { params: { nodeId, kbId } }),
+    neighbors: (nodeId, depth = 1, edgeTypes, kbId) => api.get('/graph/neighbors', { params: { nodeId, depth, edgeTypes, kbId } }),
+    search: (q, limit = 10, kbId) => api.get('/graph/search', { params: { q, limit, kbId } }),
+    subgraph: (rootIds, depth = 1, kbId) => api.post('/graph/subgraph', { rootIds, depth }, { params: { kbId } }),
+    rebuild: (kbId) => api.post('/graph/rebuild', null, { params: { kbId } }),
+    rebuildStatus: () => api.get('/graph/rebuild/status'),
+    createOrUpdateNode: (node, kbId) => api.post('/graph/nodes', node, { params: { kbId } }),
+    deleteNode: (nodeId, kbId) => api.delete(`/graph/nodes/${encodeURIComponent(nodeId)}`, { params: { kbId } }),
+    createEdge: (edge, kbId) => api.post('/graph/edges', edge, { params: { kbId } }),
+    deleteEdge: (fromId, toId, type, kbId) => api.delete('/graph/edges', { params: { fromId, toId, type, kbId } })
 };
 // Chat
 export const chatApi = {
@@ -277,15 +292,31 @@ export const knowledgeBasesApi = {
     getAll: () => api.get('/knowledge-bases'),
     getById: (id) => api.get(`/knowledge-bases/${encodeURIComponent(id)}`),
     create: (data) => api.post('/knowledge-bases', data),
+    update: (id, data) => api.put(`/knowledge-bases/${encodeURIComponent(id)}`, data),
+    toggle: (id, enabled) => api.patch(`/knowledge-bases/${encodeURIComponent(id)}/toggle`, { enabled }),
     delete: (id) => api.delete(`/knowledge-bases/${encodeURIComponent(id)}`),
     getConnectors: (id) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/connectors`),
     addConnector: (id, data) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/connectors`, data),
+    updateConnector: (id, connectorId, data) => api.put(`/knowledge-bases/${encodeURIComponent(id)}/connectors/${encodeURIComponent(connectorId)}`, data),
     deleteConnector: (id, connectorId) => api.delete(`/knowledge-bases/${encodeURIComponent(id)}/connectors/${encodeURIComponent(connectorId)}`),
     triggerSync: (id, connectorId) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/jobs`, { connectorId }),
     getEmbeddingSpecs: () => api.get('/knowledge-bases/embedding-specs'),
+    createEmbeddingSpec: (spec) => api.post('/knowledge-bases/embedding-specs', spec),
+    updateEmbeddingSpec: (specId, spec) => api.put(`/knowledge-bases/embedding-specs/${encodeURIComponent(specId)}`, spec),
+    deleteEmbeddingSpec: (specId) => api.delete(`/knowledge-bases/embedding-specs/${encodeURIComponent(specId)}`),
     getJob: (jobId) => api.get(`/jobs/${encodeURIComponent(jobId)}`),
     listJobs: (kbId = null) => api.get('/jobs', { params: { knowledgeBaseId: kbId } }),
-    cancelJob: (jobId) => api.post(`/jobs/${encodeURIComponent(jobId)}/cancel`)
+    cancelJob: (jobId) => api.post(`/jobs/${encodeURIComponent(jobId)}/cancel`),
+    // Documents & Chunks CRUD
+    getDocuments: (id, params) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/documents`, { params }),
+    getDocument: (id, docId) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/documents/${encodeURIComponent(docId)}`),
+    deleteDocument: (id, docId) => api.delete(`/knowledge-bases/${encodeURIComponent(id)}/documents/${encodeURIComponent(docId)}`),
+    getChunks: (id, params) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/chunks`, { params }),
+    getChunk: (id, chunkId) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}`),
+    createChunk: (id, data) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/chunks`, data),
+    updateChunk: (id, chunkId, data) => api.put(`/knowledge-bases/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}`, data),
+    toggleChunk: (id, chunkId, enabled) => api.patch(`/knowledge-bases/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}/toggle`, { enabled }),
+    deleteChunk: (id, chunkId) => api.delete(`/knowledge-bases/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}`)
 };
 
 // 跨知识库受控检索 API

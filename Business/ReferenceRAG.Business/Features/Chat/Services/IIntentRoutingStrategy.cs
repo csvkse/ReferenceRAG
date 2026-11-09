@@ -461,11 +461,15 @@ public class CompositeIntentRouter
 {
     private readonly List<IIntentRoutingStrategy> _strategies;
 
-    public static CompositeIntentRouter Default { get; } = new(new IIntentRoutingStrategy[]
-    {
-        new ExactPrefixRoutingStrategy(),
-        new SemanticEmbeddingRoutingStrategy()
-    });
+    public static CompositeIntentRouter Default { get; } = CreateDefault();
+
+    public static CompositeIntentRouter CreateDefault(ReferenceRAG.Infrastructure.Features.Cognitive.IJevDecisionEngine? jevEngine = null) =>
+        new(new IIntentRoutingStrategy[]
+        {
+            new ExactPrefixRoutingStrategy(),
+            new JevSystemOneRoutingStrategy(jevEngine),
+            new SemanticEmbeddingRoutingStrategy()
+        });
 
     public CompositeIntentRouter(IEnumerable<IIntentRoutingStrategy> strategies)
     {

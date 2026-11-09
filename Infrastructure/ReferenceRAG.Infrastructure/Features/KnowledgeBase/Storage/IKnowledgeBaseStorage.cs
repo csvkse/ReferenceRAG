@@ -1,4 +1,5 @@
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.Core.Interfaces;
 
 namespace ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 
@@ -20,7 +21,14 @@ public interface IKnowledgeBaseStore
 {
     string KnowledgeBaseId { get; }
 
+    /// <summary>
+    /// 获取当前知识库物理内嵌的知识图谱存储契约
+    /// </summary>
+    IGraphStore GraphStore { get; }
+
     Task InitializeAsync(CancellationToken ct = default);
+
+    Task EnsureLexicalIndexAsync(CancellationToken ct = default);
 
     Task<IndexManifest> GetManifestAsync(CancellationToken ct = default);
 
@@ -28,13 +36,61 @@ public interface IKnowledgeBaseStore
 
     Task<RecallSnapshot> RecallAsync(RecallRequest request, CancellationToken ct = default);
 
+    Task<bool> HasAuthorizedDocumentsAsync(Func<string, string, string?, bool> authorizeDocument, CancellationToken ct = default);
+
     Task<bool> DeleteDocumentAsync(string connectorId, string sourceKey, CancellationToken ct = default);
 
     Task<long> RebuildFtsIndexAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// 获取当前知识库真实的物理词法与切片统计指标
+    /// </summary>
+    Task<KnowledgeBaseLexicalStats> GetLexicalStatsAsync(CancellationToken ct = default);
+
     Task<IReadOnlyList<ChunkData>> GetChunksMissingVectorsAsync(int limit = 100, CancellationToken ct = default);
 
     Task CloseAsync(CancellationToken ct = default);
+
+    // ==================== 文档增删改查 ====================
+    Task<(IReadOnlyList<KnowledgeBaseDocumentRecord> Documents, int TotalCount)> GetDocumentsAsync(
+        int page = 1,
+        int pageSize = 50,
+        string? search = null,
+        string? connectorId = null,
+        CancellationToken ct = default);
+
+    Task<KnowledgeBaseDocumentRecord?> GetDocumentByIdAsync(string documentId, CancellationToken ct = default);
+
+    Task<bool> DeleteDocumentByIdAsync(string documentId, CancellationToken ct = default);
+
+    // ==================== 切片增删改查 (HITL) ====================
+    Task<(IReadOnlyList<KnowledgeBaseChunkRecord> Chunks, int TotalCount)> GetChunksAsync(
+        string? documentId = null,
+        int page = 1,
+        int pageSize = 50,
+        string? search = null,
+        bool? enabledOnly = null,
+        CancellationToken ct = default);
+
+    Task<KnowledgeBaseChunkRecord?> GetChunkByIdAsync(string chunkId, CancellationToken ct = default);
+
+    Task<KnowledgeBaseChunkRecord> CreateChunkAsync(
+        string? documentId,
+        string text,
+        string? embeddingText = null,
+        float[]? vector = null,
+        CancellationToken ct = default);
+
+    Task<KnowledgeBaseChunkRecord?> UpdateChunkAtomicAsync(
+        string chunkId,
+        string newText,
+        string? embeddingText = null,
+        float[]? newVector = null,
+        CancellationToken ct = default);
+
+    Task<bool> ToggleChunkAsync(string chunkId, bool enabled, CancellationToken ct = default);
+
+    Task<bool> DeleteChunkByIdAsync(string chunkId, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -73,6 +129,8 @@ public interface ICatalogStore
 
     Task<ConnectorDefinition> SaveConnectorAsync(ConnectorDefinition connector, CancellationToken ct = default);
 
+    Task<ConnectorDefinition?> GetConnectorAsync(string connectorId, CancellationToken ct = default);
+
     Task<IReadOnlyList<ConnectorDefinition>> GetConnectorsByKnowledgeBaseAsync(string kbId, CancellationToken ct = default);
 
     Task<bool> DeleteConnectorAsync(string connectorId, CancellationToken ct = default);
@@ -88,4 +146,6 @@ public interface ICatalogStore
     Task<EmbeddingSpec?> GetEmbeddingSpecAsync(string id, CancellationToken ct = default);
 
     Task<IReadOnlyList<EmbeddingSpec>> ListEmbeddingSpecsAsync(CancellationToken ct = default);
+
+    Task<bool> DeleteEmbeddingSpecAsync(string specId, CancellationToken ct = default);
 }

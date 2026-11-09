@@ -1,6 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {notifyDesktopReady} from '../shared/desktop-startup.js';
+import { enableLexicalSearchTemplate, knowledgeBaseRequest, knowledgeBaseResponse } from '../app/views/lexical-search-template.js';
+
+test('Lexical mode appears in the search template and does not render a percentage score', async () => {
+    const fs = await import('node:fs');
+    const source = fs.readFileSync(new URL('../app/views/Search.js', import.meta.url), 'utf8');
+    const literal = source.match(/component\.template = ("(?:\\.|[^"\\])*");/s);
+    assert.ok(literal, 'search template literal exists');
+    const template = enableLexicalSearchTemplate(JSON.parse(literal[1]));
+    assert.match(template, /value="Lexical"/);
+    assert.match(template, /v-if="searchResponse\.mode !== 'Lexical' && searchResponse\.mode !== 5"/);
+});
+
+test('Cross-knowledge-base search preserves selected scope and lexical mode', () => {
+    assert.deepEqual(knowledgeBaseRequest('needle', ['allowed'], 5, 'Lexical'), {
+        query: 'needle', knowledgeBaseIds: ['allowed'], topK: 5, useLexicalTokenizer: true
+    });
+    const mapped = knowledgeBaseResponse({ items: [{ chunkId: 'c', documentId: 'd', sourceKey: 'a.md', text: 'text', score: 0.1 }], elapsed: '00:00:00.1' }, 'Lexical');
+    assert.equal(mapped.chunks[0].refId, 'c');
+    assert.equal(mapped.chunks[0].content, 'text');
+    assert.equal(mapped.knowledgeBase, true);
+});
 
 test('Desktop readiness waits for DOM commit and uses the native Post envelope', async () => {
     const messages = [];

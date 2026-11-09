@@ -60,6 +60,7 @@ public enum ChunkType
 /// <summary>
 /// 查询模式
 /// </summary>
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
 public enum QueryMode
 {
     /// <summary>
@@ -85,7 +86,10 @@ public enum QueryMode
     /// <summary>
     /// 混合重排：BM25 + Embedding 召回 + Rerank 精排
     /// </summary>
-    HybridRerank = 4
+    HybridRerank = 4,
+
+    /// <summary>本地词法检索，不执行向量或重排推理。</summary>
+    Lexical = 5
 }
 
 /// <summary>

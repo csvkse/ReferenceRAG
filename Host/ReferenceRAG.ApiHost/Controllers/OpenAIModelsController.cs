@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
+using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Service.Services;
 
@@ -68,7 +69,8 @@ public class OpenAIModelsController : ControllerBase
         };
 
         // 活跃知识库虚拟模型（支持 kb:<kbId> 直接路由）
-        if (_catalogStore != null)
+        if (_catalogStore != null && ApiKeyPermissionMatrix.GetEffectiveAllowedSources(
+                HttpContext.Items["CurrentApiKey"] as ApiKeyEntity) == null)
         {
             try
             {

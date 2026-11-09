@@ -76,7 +76,8 @@ public class SearchPipelineStrategyTests
         var strategy = factory.GetStrategy(mode);
 
         Assert.NotNull(strategy);
-        Assert.IsType(expectedType, strategy);
+        var inner = strategy is FallbackResilientSearchStrategy resilient ? resilient.PrimaryStrategy : strategy;
+        Assert.IsType(expectedType, inner);
     }
 
     [Fact]

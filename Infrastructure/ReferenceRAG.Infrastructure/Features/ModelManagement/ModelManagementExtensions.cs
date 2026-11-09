@@ -6,6 +6,7 @@ using ReferenceRAG.Core.Services.Rerank;
 using ReferenceRAG.Core.Features.HardwareAcceleration;
 using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Features.ModelManagement.Telemetry.Strategies;
+using ReferenceRAG.Core.Features.ModelManagement.Services;
 
 namespace ReferenceRAG.Core.Extensions;
 
@@ -44,6 +45,8 @@ public static class ModelManagementExtensions
             return new ModelManager(modelsPath, configManager);
         });
 
+        services.AddSingleton<IModelAssetResolver, ModelAssetResolver>();
+
         services.AddSingleton<IEmbeddingService>(sp =>
         {
             var configManager = sp.GetRequiredService<ConfigManager>();
@@ -62,7 +65,8 @@ public static class ModelManagementExtensions
                 CudaLibraryPath = cfg.Embedding.CudaLibraryPath,
                 IdleTimeoutSeconds = cfg.ModelIdleTimeoutSeconds
             };
-            return new LazyEmbeddingService(options, memoryManager, () => new EmbeddingService(options, null), windowState, configManager);
+            var lazyService = new LazyEmbeddingService(options, memoryManager, () => new EmbeddingService(options, null), windowState, configManager);
+            return new QueryEmbeddingCacheProxy(lazyService);
         });
 
         services.AddSingleton<IEmbeddingTokenCounter>(sp =>

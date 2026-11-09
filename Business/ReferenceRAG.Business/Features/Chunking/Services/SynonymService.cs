@@ -1,7 +1,7 @@
 namespace ReferenceRAG.Core.Services;
 
 /// <summary>
-/// 同义词服务 - 提供查询同义词扩展
+/// 同义词服务 - 提供查询同义词与音近错字扩展
 /// </summary>
 public class SynonymService
 {
@@ -21,16 +21,23 @@ public class SynonymService
     }
 
     /// <summary>
-    /// 扩展查询 - 添加同义词
+    /// 扩展查询 - 添加同义词与近音错字纠正词
     /// </summary>
     public string ExpandQuery(string query)
     {
         if (string.IsNullOrWhiteSpace(query))
             return query;
 
-        var words = Tokenize(query);
         var expandedWords = new List<string>();
 
+        // 1. 优先提取音近错别字与领域泛化词（如 月女剑 -> 越女剑，放洋 -> 放羊）
+        var phoneticExpansions = ReferenceRAG.Core.Features.Search.PhoneticQueryExpander.GetExpansionTerms(query);
+        if (phoneticExpansions.Count > 0)
+        {
+            expandedWords.AddRange(phoneticExpansions);
+        }
+
+        var words = Tokenize(query);
         foreach (var word in words)
         {
             expandedWords.Add(word);
@@ -46,7 +53,7 @@ public class SynonymService
             }
         }
 
-        return string.Join(" ", expandedWords);
+        return string.Join(" ", expandedWords.Distinct(StringComparer.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -148,7 +155,7 @@ public class SynonymService
             ["模块"] = new List<string> { "module", "组件", "component" },
             ["接口"] = new List<string> { "api", "interface", "端口" },
 
-            // 系统相关（P6: 删除重复的 "系统" 键）
+            // 系统相关
             ["平台"] = new List<string> { "platform" },
             ["环境"] = new List<string> { "environment", "env" },
             ["版本"] = new List<string> { "version", "版本号" },

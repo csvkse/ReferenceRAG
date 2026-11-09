@@ -1,20 +1,19 @@
-using JiebaNet.Segmenter;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Interfaces;
-using System.Text;
 
 namespace ReferenceRAG.Storage;
 
 /// <summary>
-/// FTS5 BM25 存储实现 - 单一索引模式，支持中英文混合搜索
-///
-/// 特点：
-/// 1. 中文按字符分词，英文按单词分词
-/// 2. 预处理内容后再存入 FTS5 索引
-/// 3. 使用 FTS5 内置 bm25() 排名函数
+/// FTS5 BM25 存储实现 - 支持多字段加权 (Title 5.0, Heading 2.0, Body 1.0) 与分词 LRU 缓存加速
 /// </summary>
-public class Fts5BM25Store : IBM25Store, IDisposable
+public class Fts5BM25Store : IBM25Store, IScopedLexicalStore, IDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly SemaphoreSlim _lock;
@@ -24,29 +23,6 @@ public class Fts5BM25Store : IBM25Store, IDisposable
 
     // FTS5 表名
     private const string FtsTableName = "bm25_fts";
-
-    private static readonly JiebaSegmenter _segmenter = new JiebaSegmenter();
-
-    private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
-    {
-        // 英文停用词
-        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-        "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
-        "being", "have", "has", "had", "do", "does", "did", "will", "would",
-        "could", "should", "may", "might", "must", "shall", "can", "need",
-        "it", "its", "this", "that", "these", "those", "i", "you", "he",
-        "she", "we", "they", "what", "which", "who", "when", "where", "why",
-        "how", "all", "each", "every", "both", "few", "more", "most", "other",
-        "some", "such", "no", "not", "only", "same", "so", "than", "too",
-        "very", "just", "as", "if", "then", "because", "while", "although",
-        // 中文停用词
-        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都",
-        "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会",
-        "着", "没有", "看", "好", "自己", "这", "那", "里", "以", "来",
-        "对", "与", "或", "但", "因为", "所以", "如果", "虽然", "但是",
-        "然后", "而且", "而", "及", "等", "被", "把", "让", "使", "为",
-        "将", "于", "之", "其", "此", "该", "各", "某", "哪", "什么", "怎么"
-    };
 
     /// <summary>生产用：接受共享连接，与其他 Store 共用同一连接和锁。</summary>
     public Fts5BM25Store(SharedSqliteConnection sharedDb, ILogger<Fts5BM25Store>? logger = null)
@@ -76,14 +52,46 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     }
 
     /// <summary>
-    /// 初始化数据库表
+    /// 初始化数据库表 (多字段加权模式)
     /// </summary>
     private void InitializeDatabase()
     {
-        // 创建 FTS5 虚拟表
+        bool needsUpgrade = false;
+        try
+        {
+            using var pragma = _connection.CreateCommand();
+            pragma.CommandText = $"PRAGMA table_info({FtsTableName})";
+            using var reader = pragma.ExecuteReader();
+            var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (reader.Read())
+            {
+                cols.Add(reader.GetString(1));
+            }
+            if (cols.Count > 0 && (!cols.Contains("title") || !cols.Contains("heading")))
+            {
+                needsUpgrade = true;
+            }
+        }
+        catch
+        {
+            // 表可能尚未创建
+        }
+
+        if (needsUpgrade)
+        {
+            try
+            {
+                ExecuteNonQuery($"DROP TABLE IF EXISTS {FtsTableName}");
+            }
+            catch { }
+        }
+
+        // 创建多字段加权 FTS5 虚拟表
         var createFts = $@"
             CREATE VIRTUAL TABLE IF NOT EXISTS {FtsTableName} USING fts5(
                 id UNINDEXED,
+                title,
+                heading,
                 content,
                 tokenize='unicode61 remove_diacritics 1'
             );
@@ -103,9 +111,16 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     #region IBM25Store Interface Implementation
 
     /// <inheritdoc />
-    public async Task IndexDocumentAsync(string chunkId, string content)
+    public Task IndexDocumentAsync(string chunkId, string content) =>
+        IndexDocumentAsync(chunkId, string.Empty, string.Empty, content);
+
+    /// <inheritdoc />
+    public async Task IndexDocumentAsync(string chunkId, string title, string heading, string content)
     {
+        var tokenizedTitle = TokenizeForIndex(title);
+        var tokenizedHeading = TokenizeForIndex(heading);
         var tokenizedContent = TokenizeForIndex(content);
+
         await _lock.WaitAsync();
         try
         {
@@ -115,8 +130,10 @@ public class Fts5BM25Store : IBM25Store, IDisposable
             await deleteCmd.ExecuteNonQueryAsync();
 
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = $"INSERT INTO {FtsTableName}(id, content) VALUES (@id, @content)";
+            cmd.CommandText = $"INSERT INTO {FtsTableName}(id, title, heading, content) VALUES (@id, @title, @heading, @content)";
             cmd.Parameters.AddWithValue("@id", chunkId);
+            cmd.Parameters.AddWithValue("@title", tokenizedTitle);
+            cmd.Parameters.AddWithValue("@heading", tokenizedHeading);
             cmd.Parameters.AddWithValue("@content", tokenizedContent);
             await cmd.ExecuteNonQueryAsync();
         }
@@ -124,7 +141,11 @@ public class Fts5BM25Store : IBM25Store, IDisposable
     }
 
     /// <inheritdoc />
-    public async Task IndexBatchAsync(IEnumerable<(string chunkId, string content)> documents, IProgress<int>? progress = null)
+    public Task IndexBatchAsync(IEnumerable<(string chunkId, string content)> documents, IProgress<int>? progress = null) =>
+        IndexBatchAsync(documents.Select(d => (d.chunkId, string.Empty, string.Empty, d.content)), progress);
+
+    /// <inheritdoc />
+    public async Task IndexBatchAsync(IEnumerable<(string chunkId, string title, string heading, string content)> documents, IProgress<int>? progress = null)
     {
         progress?.Report(10);
         var docsList = documents.ToList();
@@ -135,8 +156,10 @@ public class Fts5BM25Store : IBM25Store, IDisposable
             using var transaction = _connection.BeginTransaction();
             try
             {
-                foreach (var (chunkId, content) in docsList)
+                foreach (var (chunkId, title, heading, content) in docsList)
                 {
+                    var tokenizedTitle = TokenizeForIndex(title);
+                    var tokenizedHeading = TokenizeForIndex(heading);
                     var tokenizedContent = TokenizeForIndex(content);
 
                     using var deleteCmd = _connection.CreateCommand();
@@ -146,8 +169,10 @@ public class Fts5BM25Store : IBM25Store, IDisposable
                     await deleteCmd.ExecuteNonQueryAsync();
 
                     using var cmd = _connection.CreateCommand();
-                    cmd.CommandText = $"INSERT INTO {FtsTableName}(id, content) VALUES (@id, @content)";
+                    cmd.CommandText = $"INSERT INTO {FtsTableName}(id, title, heading, content) VALUES (@id, @title, @heading, @content)";
                     cmd.Parameters.AddWithValue("@id", chunkId);
+                    cmd.Parameters.AddWithValue("@title", tokenizedTitle);
+                    cmd.Parameters.AddWithValue("@heading", tokenizedHeading);
                     cmd.Parameters.AddWithValue("@content", tokenizedContent);
                     cmd.Transaction = transaction;
                     await cmd.ExecuteNonQueryAsync();
@@ -157,7 +182,6 @@ public class Fts5BM25Store : IBM25Store, IDisposable
             catch { transaction.Rollback(); throw; }
         }
         finally { _lock.Release(); }
-
         progress?.Report(100);
     }
 
@@ -172,6 +196,26 @@ public class Fts5BM25Store : IBM25Store, IDisposable
             cmd.ExecuteNonQuery();
         }
         catch (Exception ex) { _logger?.LogError(ex, "清空索引失败"); throw; }
+        finally { _lock.Release(); }
+    }
+
+    public async Task<bool> VerifyExactIndexAsync(IReadOnlyDictionary<string, string> expectedDocuments, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expectedDocuments);
+        var remaining = expectedDocuments.ToDictionary(pair => pair.Key, pair => TokenizeForIndex(pair.Value), StringComparer.Ordinal);
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = $"SELECT id, content FROM {FtsTableName}";
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var id = reader.GetString(0);
+                if (!remaining.Remove(id, out var expected) || reader.GetString(1) != expected) return false;
+            }
+            return remaining.Count == 0;
+        }
         finally { _lock.Release(); }
     }
 
@@ -210,11 +254,12 @@ public class Fts5BM25Store : IBM25Store, IDisposable
         await _lock.WaitAsync();
         try
         {
+            // SQLite FTS5 多字段加权: Title 5.0, Heading 2.0, Body 1.0
             var sql = $@"
-                SELECT id, content, bm25({FtsTableName}, {k1}, {b}) as score
+                SELECT id, content, bm25({FtsTableName}, 5.0, 2.0, 1.0) as score
                 FROM {FtsTableName}
                 WHERE {FtsTableName} MATCH @query
-                ORDER BY bm25({FtsTableName}, {k1}, {b})
+                ORDER BY bm25({FtsTableName}, 5.0, 2.0, 1.0)
                 LIMIT @topK";
 
             var results = new List<BM25SearchResult>();
@@ -243,6 +288,61 @@ public class Fts5BM25Store : IBM25Store, IDisposable
             return new List<BM25SearchResult>();
         }
         finally { _lock.Release(); }
+    }
+
+    public async Task<List<BM25SearchResult>> SearchScopedAsync(
+        string query, IReadOnlyCollection<string> allowedChunkIds, int topK,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(allowedChunkIds);
+        if (query.Length > 4096) throw new ArgumentOutOfRangeException(nameof(query));
+        if (topK is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(topK));
+        cancellationToken.ThrowIfCancellationRequested();
+        var tokens = Tokenize(query).Where(t => t.Any(char.IsLetterOrDigit))
+            .Distinct(StringComparer.Ordinal).Take(64).ToArray();
+        if (allowedChunkIds.Count == 0 || tokens.Length == 0) return new();
+        var match = string.Join(" OR ", tokens.Select(t => $"\"{t.Replace("\"", "\"\"")}\""));
+
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            using (var setup = _connection.CreateCommand())
+            {
+                setup.CommandText = "CREATE TEMP TABLE IF NOT EXISTS lexical_allowed_ids (id TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM lexical_allowed_ids;";
+                await setup.ExecuteNonQueryAsync(cancellationToken);
+            }
+            using (var insert = _connection.CreateCommand())
+            {
+                insert.CommandText = "INSERT OR IGNORE INTO lexical_allowed_ids(id) VALUES (@id)";
+                var parameter = insert.Parameters.Add("@id", SqliteType.Text);
+                foreach (var id in allowedChunkIds)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    parameter.Value = id;
+                    await insert.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = $@"SELECT f.id, f.content, bm25({FtsTableName}, 5.0, 2.0, 1.0) AS score
+                FROM {FtsTableName} AS f INNER JOIN lexical_allowed_ids AS a ON a.id = f.id
+                WHERE {FtsTableName} MATCH @query ORDER BY score, f.id LIMIT @topK";
+            cmd.Parameters.AddWithValue("@query", match);
+            cmd.Parameters.AddWithValue("@topK", topK);
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            var results = new List<BM25SearchResult>();
+            while (await reader.ReadAsync(cancellationToken))
+                results.Add(new BM25SearchResult { ChunkId = reader.GetString(0), Content = reader.GetString(1),
+                    Score = Math.Abs(reader.GetDouble(2)), Rank = results.Count + 1 });
+            return results;
+        }
+        finally
+        {
+            using var cleanup = _connection.CreateCommand();
+            cleanup.CommandText = "DROP TABLE IF EXISTS temp.lexical_allowed_ids";
+            try { cleanup.ExecuteNonQuery(); }
+            finally { _lock.Release(); }
+        }
     }
 
     /// <inheritdoc />
@@ -338,13 +438,12 @@ public class Fts5BM25Store : IBM25Store, IDisposable
 
     #region 分词方法
 
-    private string TokenizeForIndex(string text)
+    private static string TokenizeForIndex(string text)
     {
-        var tokens = Tokenize(text);
-        return string.Join(" ", tokens);
+        return TokenizationCacheProxy.Default.TokenizeForIndex(text);
     }
 
-    private string EscapeFtsQuery(string query)
+    private static string EscapeFtsQuery(string query)
     {
         if (string.IsNullOrWhiteSpace(query))
             return query;
@@ -357,18 +456,9 @@ public class Fts5BM25Store : IBM25Store, IDisposable
         return string.Join(" OR ", tokens.Select(t => $"\"{t.Replace("\"", "\"\"")}\""));
     }
 
-    /// <summary>
-    /// jieba CutForSearch 模式：中文词语级切割，英文整词保留。
-    /// 索引和查询共用同一分词，保证 token 空间一致。
-    /// </summary>
     private static List<string> Tokenize(string text)
     {
-        if (string.IsNullOrWhiteSpace(text)) return new List<string>();
-
-        return _segmenter.CutForSearch(text)
-            .Select(t => t.Trim().ToLowerInvariant())
-            .Where(t => t.Length > 0 && !string.IsNullOrWhiteSpace(t) && !StopWords.Contains(t))
-            .ToList();
+        return TokenizationCacheProxy.Default.Tokenize(text).ToList();
     }
 
     #endregion

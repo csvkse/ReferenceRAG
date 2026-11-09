@@ -323,6 +323,12 @@ public class OpenAICompatControllersTests
         var modelIds = data.Select(m => m.GetProperty("id").GetString()).ToList();
 
         Assert.Contains("kb:kb-legal", modelIds);
+        controller.HttpContext.Items["CurrentApiKey"] = new ReferenceRAG.Core.Models.ApiKeyEntity
+            { SourceScopeMode = "custom", AllowedSources = "[\"allowed\"]" };
+        var scopedResult = Assert.IsType<ContentResult>(controller.GetModels());
+        using var scopedDoc = JsonDocument.Parse(scopedResult.Content!);
+        Assert.DoesNotContain(scopedDoc.RootElement.GetProperty("data").EnumerateArray(),
+            item => item.GetProperty("id").GetString() == "kb:kb-legal");
     }
 
     [Fact]
@@ -356,6 +362,9 @@ public class OpenAICompatControllersTests
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
         };
 
+        controller.HttpContext.Items["CurrentApiKey"] = new ReferenceRAG.Core.Models.ApiKeyEntity
+            { SourceScopeMode = "custom", AllowedSources = "[\"allowed\"]" };
+
         var requestJson = """
         {
             "model": "kb:kb-legal",
@@ -372,7 +381,8 @@ public class OpenAICompatControllersTests
         // 验证确实调用了知识库检索，且传递了目标知识库 kb-legal
         kbSearchMock.Verify(s => s.SearchAsync(
             It.Is<ReferenceRAG.Business.Features.KnowledgeBase.Services.CrossKnowledgeBaseSearchRequest>(r =>
-                r.Query == "What is clause 5?" && r.KnowledgeBaseIds.Contains("kb-legal")),
+                r.Query == "What is clause 5?" && r.KnowledgeBaseIds.Contains("kb-legal") &&
+                r.AuthorizedSourceNames != null && r.AuthorizedSourceNames.SequenceEqual(new[] { "allowed" })),
             It.IsAny<CancellationToken>()), Times.Once);
     }
 }

@@ -22,6 +22,34 @@ public class RagSearchTools
         _serviceProvider = serviceProvider;
     }
 
+    [McpServerTool, Description("在已授权的知识源中执行免向量词法检索，返回原文及来源。")]
+    public async Task<string> LexicalSearch(
+        [Description("关键词或查询文本")] string query,
+        [Description("返回结果数量，默认 5")] int topK = 5,
+        [Description("可选的知识源名称 JSON 数组")] string? sources = null)
+    {
+        using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(LexicalSearch), out var error))
+            return error ?? JsonSerializer.Serialize(new { success = false, error = "权限检查失败" });
+        try
+        {
+            var request = new AIQueryRequest { Query = query, TopK = topK, Mode = QueryMode.Lexical, EnableRerank = false };
+            if (!string.IsNullOrWhiteSpace(sources)) request.Sources = JsonSerializer.Deserialize<List<string>>(sources);
+            if (!ApplyApiKeySourceIsolation(scope.ServiceProvider, request))
+                return JsonSerializer.Serialize(new { success = true, query, count = 0, chunks = Array.Empty<object>() });
+            var search = scope.ServiceProvider.GetRequiredService<ISearchService>();
+            var response = await search.SearchAsync(request);
+            return JsonSerializer.Serialize(new { success = true, query, mode = "Lexical", count = response.Chunks.Count,
+                chunks = response.Chunks.Select(c => new { refId = c.RefId, c.FilePath, c.Title, c.Content,
+                    c.StartLine, c.EndLine, c.Source, c.BM25Score }) },
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        }
+        catch (Exception ex)
+        {
+            return JsonSerializer.Serialize(new { success = false, error = ex.Message, query });
+        }
+    }
+
     /// <summary>
     /// 执行语义搜索，使用向量相似度在知识库中查找相关内容。
     /// 当用户提出问题或需要从知识库获取信息时使用此工具。
@@ -58,7 +86,8 @@ public class RagSearchTools
                 request.Sources = JsonSerializer.Deserialize<List<string>>(sources);
             }
 
-            ApplyApiKeySourceIsolation(scope.ServiceProvider, request);
+            if (!ApplyApiKeySourceIsolation(scope.ServiceProvider, request))
+                return JsonSerializer.Serialize(new { success = true, query, count = 0, chunks = Array.Empty<object>() });
 
             var response = await searchService.SearchAsync(request);
 
@@ -133,7 +162,8 @@ public class RagSearchTools
                 EnableRerank = enableRerank
             };
 
-            ApplyApiKeySourceIsolation(scope.ServiceProvider, request);
+            if (!ApplyApiKeySourceIsolation(scope.ServiceProvider, request))
+                return JsonSerializer.Serialize(new { success = true, query, count = 0, chunks = Array.Empty<object>() });
 
             var response = await searchService.SearchAsync(request);
 
@@ -249,13 +279,14 @@ public class RagSearchTools
         return true;
     }
 
-    private static void ApplyApiKeySourceIsolation(IServiceProvider sp, AIQueryRequest request)
+    private static bool ApplyApiKeySourceIsolation(IServiceProvider sp, AIQueryRequest request)
     {
         var httpContextAccessor = sp.GetService<IHttpContextAccessor>();
         var currentKey = httpContextAccessor?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
         var effectiveSources = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(currentKey);
         if (effectiveSources != null)
         {
+            if (effectiveSources.Count == 0) return false;
             if (request.Sources == null || request.Sources.Count == 0)
             {
                 request.Sources = effectiveSources.ToList();
@@ -271,5 +302,6 @@ public class RagSearchTools
                 }
             }
         }
+        return true;
     }
 }

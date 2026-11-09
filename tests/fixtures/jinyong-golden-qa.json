@@ -1,0 +1,92 @@
+[
+  {
+    "id": "qa-smoke-01",
+    "tier": "Smoke",
+    "targetNovel": "越女剑",
+    "category": "CharacterRelationship",
+    "question": "越女剑中阿青的武功师傅是谁？",
+    "expectedAnswer": "阿青并没有真正的人类师傅，她的剑术是跟一只白猿（白公公）在山林嬉戏竹棒相搏中练成的。",
+    "mustContainKeywords": ["白猿", "白公公", "竹棒"],
+    "negativeKeywords": ["江南七怪", "风清扬", "洪七公"]
+  },
+  {
+    "id": "qa-smoke-02",
+    "tier": "Smoke",
+    "targetNovel": "越女剑",
+    "category": "PlotFact",
+    "question": "越女剑结尾处，阿青本想刺杀西施，为什么最后停手了？并留下了什么历史典故？",
+    "expectedAnswer": "阿青见到西施绝美无双的容颜后自惭形秽，不忍伤害，纵身飘然离去。但剑气震伤了西施心脉，西施皱眉捧心，留下'西子捧心'的千古美名典故。",
+    "mustContainKeywords": ["西施", "捧心", "容貌", "美"],
+    "negativeKeywords": ["杀了西施", "嫁给范蠡"]
+  },
+  {
+    "id": "qa-smoke-03",
+    "tier": "Smoke",
+    "targetNovel": "越女剑",
+    "category": "HistoricalSetting",
+    "question": "越王勾践为了击败吴国，派遣谁寻找并训练剑士？",
+    "expectedAnswer": "越王勾践派遣大夫范蠡寻找高手训练越国剑士，最终范蠡遇见了身负绝世剑法的越女阿青。",
+    "mustContainKeywords": ["范蠡", "勾践", "吴国", "越国"],
+    "negativeKeywords": ["文种", "伍子胥"]
+  },
+  {
+    "id": "qa-core-01",
+    "tier": "Core",
+    "targetNovel": "雪山飞狐",
+    "category": "CharacterRelationship",
+    "question": "雪山飞狐中胡斐的生父是谁？他与苗人凤决战的结局如何？",
+    "expectedAnswer": "胡斐的生父是'辽东大侠'胡一刀。胡一刀与苗人凤激战数日惺惺相惜，但最终因刀口被田归农暗下剧毒，胡一刀被划伤后毒发身亡。",
+    "mustContainKeywords": ["胡一刀", "苗人凤", "田归农", "毒"],
+    "negativeKeywords": ["胡斐杀了苗人凤"]
+  },
+  {
+    "id": "qa-core-02",
+    "tier": "Core",
+    "targetNovel": "连城诀",
+    "category": "MartialArtsSource",
+    "question": "连城诀中狄云在狱中向谁习得了什么神功，并在狱外被血刀老祖误认为什么徒孙？",
+    "expectedAnswer": "狄云在狱中向丁典习得了'神照经'内功绝技，后来被血刀老祖误认为是血刀门的徒孙小和尚。",
+    "mustContainKeywords": ["丁典", "神照经", "血刀老祖"],
+    "negativeKeywords": ["九阳真经", "降龙十八掌"]
+  },
+  {
+    "id": "qa-core-03",
+    "tier": "Core",
+    "targetNovel": "雪山飞狐",
+    "category": "PlotFact",
+    "question": "闯王李自成留下的巨额宝藏埋藏在何处？",
+    "expectedAnswer": "闯王李自成的宝藏埋藏在玉笔峰山庄悬崖下的石洞/雪山宝藏之中，由四大家族后人世代纷争抢夺。",
+    "mustContainKeywords": ["闯王", "李自成", "宝藏", "玉笔峰"],
+    "negativeKeywords": ["桃花岛", "侠客岛"]
+  },
+  {
+    "id": "qa-hard-01",
+    "tier": "Full",
+    "targetNovel": "天龙八部",
+    "category": "VersionDisambiguation",
+    "question": "在金庸小说新修版中，萧峰所使的掌法最初是多少掌？后来如何传给虚竹并演变成降龙十八掌？",
+    "expectedAnswer": "在新修版中，掌法最初名为'降龙廿八掌'（二十八掌）。萧峰在雁门关自尽前，与虚竹共同去芜存菁，将廿八掌精简为威力更强的降龙十八掌，并由虚竹代传丐帮后世帮主。",
+    "mustContainKeywords": ["降龙廿八掌", "二十八掌", "虚竹", "去芜存菁"],
+    "negativeKeywords": ["郭靖自创", "洪七公发明"]
+  },
+  {
+    "id": "qa-hard-02",
+    "tier": "Full",
+    "targetNovel": "倚天屠龙记",
+    "category": "WeaponOrigin",
+    "question": "倚天剑与屠龙刀是用什么兵刃熔铸而成的？内部藏有什么秘密？",
+    "expectedAnswer": "倚天剑与屠龙刀是郭靖、黄蓉夫妇用杨过的玄铁重剑以及君子剑、淑女剑熔化掺和西方精金铸造而成。屠龙刀内藏《武穆遗书》，倚天剑内藏《九阴真经》与《降龙十八掌掌法精义》（或刀剑铁片藏地图）。",
+    "mustContainKeywords": ["玄铁重剑", "杨过", "武穆遗书", "九阴真经"],
+    "negativeKeywords": ["独孤求败生前铸造", "张三丰打造"]
+  },
+  {
+    "id": "qa-hard-03",
+    "tier": "Full",
+    "targetNovel": "笑傲江湖",
+    "category": "CrossDisambiguation",
+    "question": "独孤九剑与辟邪剑法在剑理上有何本质区别？令狐冲学习的是哪一种？",
+    "expectedAnswer": "独孤九剑讲究'无招胜有招'，顺其自然破尽天下武功，无需自宫；而辟邪剑法源自葵花宝典，讲究奇诡迅捷、出手如电，修习前必须'引刀自宫'。令狐冲在思过崖蒙风清扬传授的是独孤九剑。",
+    "mustContainKeywords": ["独孤九剑", "风清扬", "无招胜有招", "令狐冲", "辟邪剑法"],
+    "negativeKeywords": ["令狐冲自宫", "岳不群传授令狐冲独孤九剑"]
+  }
+]

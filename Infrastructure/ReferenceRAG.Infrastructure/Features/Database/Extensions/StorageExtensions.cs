@@ -23,6 +23,28 @@ public static class StorageExtensions
         services.AddSingleton<IVectorStore>(sp =>
             new SqliteVectorStore(sp.GetRequiredService<SharedSqliteConnection>()));
 
+        services.AddSingleton<IDocumentStore>(sp =>
+            (IDocumentStore)sp.GetRequiredService<IVectorStore>());
+
+        services.AddSingleton<LexicalIndexCoordinator>(sp =>
+        {
+            var cfg = sp.GetRequiredService<ConfigManager>().Load();
+            var dataPath = cfg.DataPath ?? "data";
+            Directory.CreateDirectory(dataPath);
+            var coordinator = new LexicalIndexCoordinator(
+                Path.Combine(dataPath, "vectors.db"), Path.Combine(dataPath, "bm25.db"));
+            try
+            {
+                coordinator.RecoverAsync().GetAwaiter().GetResult();
+                return coordinator;
+            }
+            catch
+            {
+                coordinator.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                throw;
+            }
+        });
+
         // BM25Store: bm25.db（独立连接+锁，重建时不阻塞向量检索）
         services.AddSingleton<IBM25Store>(sp =>
         {
@@ -31,6 +53,9 @@ public static class StorageExtensions
             Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
             return new Fts5BM25Store(dbPath);
         });
+
+        services.AddSingleton<IScopedLexicalStore>(sp =>
+            (IScopedLexicalStore)sp.GetRequiredService<IBM25Store>());
 
         // GraphStore: graph.db（独立连接+锁，图谱重建时不阻塞向量检索）
         services.AddSingleton<IGraphStore>(sp =>

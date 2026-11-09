@@ -32,7 +32,9 @@ public class IncrementalIndexStrategy : IIndexExecutionStrategy
         stateMachine.TransitionTo(IndexJobPhase.Scanning, "扫描源文件夹及文件变动");
 
         var sources = request.Sources?.Count > 0
-            ? config.Sources.Where(s => request.Sources.Contains(s.Name)).ToList()
+            ? config.Sources.Where(s => context.StrictRecovery
+                ? s.Enabled && request.Sources.Contains(s.Name, StringComparer.OrdinalIgnoreCase)
+                : request.Sources.Contains(s.Name)).ToList()
             : config.Sources.Where(s => s.Enabled).ToList();
 
         var allFiles = request.Files?.ToList() ?? new List<string>();
@@ -40,6 +42,11 @@ public class IncrementalIndexStrategy : IIndexExecutionStrategy
         {
             foreach (var source in sources)
             {
+                if (context.StrictRecovery)
+                {
+                    allFiles.AddRange(IndexService.EnumerateLexicalFiles(source, ct));
+                    continue;
+                }
                 var normalizedSourcePath = context.StorageAdapter.NormalizePath(source.Path);
                 if (!Directory.Exists(normalizedSourcePath) && !Directory.Exists(source.Path))
                 {
@@ -144,6 +151,12 @@ public class IncrementalIndexStrategy : IIndexExecutionStrategy
         var contexts = prepResults.Where(c => c != null).ToList()!;
         stateMachine.SkippedFiles = skippedCount;
         stateMachine.ErrorsCount = errorsCount;
+        if (context.StrictRecovery)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (skippedCount != 0 || errorsCount != 0)
+                throw new InvalidOperationException($"向量恢复重建存在跳过或失败的文件: skipped={skippedCount}, errors={errorsCount}");
+        }
 
         // ── 2.5 磁盘已删文件安全清理 ──
         if (request.Files is null && !ct.IsCancellationRequested)
@@ -254,6 +267,12 @@ public class IncrementalIndexStrategy : IIndexExecutionStrategy
         }).ToList();
 
         await Task.WhenAll(finalizeTasks);
+        if (context.StrictRecovery)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (errorsCount != 0 || processedCount != contexts.Count)
+                throw new InvalidOperationException($"向量恢复重建收尾不完整: processed={processedCount}, expected={contexts.Count}, errors={errorsCount}");
+        }
 
         // 自愈收尾：自动清理全库历史遗留的任何孤立向量，确保存储与统计 100% 绝对一致
         try
@@ -262,12 +281,14 @@ public class IncrementalIndexStrategy : IIndexExecutionStrategy
         }
         catch (Exception ex)
         {
+            if (context.StrictRecovery) throw;
             context.Logger.LogWarning(ex, "收尾自愈孤立向量清理提示: {Message}", ex.Message);
         }
 
         sw.Stop();
         stateMachine.ProcessedFiles = processedCount;
-        stateMachine.ReportCompleted(sw.Elapsed);
+        stateMachine.ErrorsCount = errorsCount;
+        if (!context.StrictRecovery) stateMachine.ReportCompleted(sw.Elapsed);
 
         return IndexExecutionResult.Ok(
             stateMachine.TotalFiles,

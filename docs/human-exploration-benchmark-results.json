@@ -1,0 +1,758 @@
+{
+  "Lexical": {
+    "modeKey": "Lexical",
+    "modeInfo": {
+      "id": "Lexical",
+      "name": "纯词法检索 (BM25+FTS5)",
+      "mode": 5
+    },
+    "totalCases": 11,
+    "overallHitAt1": 9,
+    "overallHitAt5": 11,
+    "avgMrr": "0.894",
+    "avgCoverage": "70.2",
+    "avgLatency": 176,
+    "archetypeBreakdown": {
+      "VagueConceptual": {
+        "archetype": "VagueConceptual",
+        "archetypeName": "模糊概念探索",
+        "total": 1,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1
+        ],
+        "coverages": [
+          0.8
+        ],
+        "latencies": [
+          896
+        ]
+      },
+      "ScenarioDescription": {
+        "archetype": "ScenarioDescription",
+        "archetypeName": "场景/现象描述",
+        "total": 2,
+        "hitAt1": 2,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          1,
+          1
+        ],
+        "coverages": [
+          1,
+          0.25
+        ],
+        "latencies": [
+          126,
+          125
+        ]
+      },
+      "VocabularyMismatch": {
+        "archetype": "VocabularyMismatch",
+        "archetypeName": "同义词/词汇断层",
+        "total": 2,
+        "hitAt1": 1,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          1,
+          0.5
+        ],
+        "coverages": [
+          0.5,
+          0.3333333333333333
+        ],
+        "latencies": [
+          109,
+          98
+        ]
+      },
+      "TypoAndNoise": {
+        "archetype": "TypoAndNoise",
+        "archetypeName": "口语与错别字噪声",
+        "total": 2,
+        "hitAt1": 1,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          0.3333333333333333,
+          1
+        ],
+        "coverages": [
+          0.75,
+          0.3333333333333333
+        ],
+        "latencies": [
+          87,
+          100
+        ]
+      },
+      "NegationDistractor": {
+        "archetype": "NegationDistractor",
+        "archetypeName": "反事实与否定陷阱",
+        "total": 1,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1
+        ],
+        "coverages": [
+          0.75
+        ],
+        "latencies": [
+          110
+        ]
+      },
+      "MultiHopSynthesis": {
+        "archetype": "MultiHopSynthesis",
+        "archetypeName": "跨章节多跳线索综合",
+        "total": 1,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1
+        ],
+        "coverages": [
+          1
+        ],
+        "latencies": [
+          66
+        ]
+      },
+      "ExactVerification": {
+        "archetype": "ExactVerification",
+        "archetypeName": "精准专名核验",
+        "total": 2,
+        "hitAt1": 2,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          1,
+          1
+        ],
+        "coverages": [
+          1,
+          1
+        ],
+        "latencies": [
+          116,
+          102
+        ]
+      }
+    },
+    "caseDetails": [
+      {
+        "id": "exp-vague-01",
+        "archetype": "VagueConceptual",
+        "archetypeName": "模糊概念探索",
+        "question": "知识库里有没有记载关于古代铸剑技术或者春秋时期名剑锻造工艺的篇章？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 80,
+        "latencyMs": 896
+      },
+      {
+        "id": "exp-scenario-01",
+        "archetype": "ScenarioDescription",
+        "archetypeName": "场景/现象描述",
+        "question": "讲一个年轻姑娘拿一根细竹竿把几十个全副武装的敌国剑士眼睛戳瞎的武打片段在哪？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 126
+      },
+      {
+        "id": "exp-scenario-02",
+        "archetype": "ScenarioDescription",
+        "archetypeName": "场景/现象描述",
+        "question": "两位武林绝顶高手在北方雪山之巅决斗数日惺惺相惜，最后却因为兵器刃口被人暗下剧毒身亡的故事在何处？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 25,
+        "latencyMs": 125
+      },
+      {
+        "id": "exp-synonym-01",
+        "archetype": "VocabularyMismatch",
+        "archetypeName": "同义词/词汇断层",
+        "question": "古代农民起义领袖留给下属四位保镖家族世代争夺的巨额私房钱埋在哪个地方？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 50,
+        "latencyMs": 109
+      },
+      {
+        "id": "exp-synonym-02",
+        "archetype": "VocabularyMismatch",
+        "archetypeName": "同义词/词汇断层",
+        "question": "含冤入狱的无辜青年从同监牢的长辈身上承袭了哪门能够起死回生的神奇内家真气？",
+        "hit": true,
+        "rank": 2,
+        "coverage": 33,
+        "latencyMs": 98
+      },
+      {
+        "id": "exp-typo-01",
+        "archetype": "TypoAndNoise",
+        "archetypeName": "口语与错别字噪声",
+        "question": "月女剑里头那个很厉害的放洋小姑娘到底是跟哪只猴子学打架的呀",
+        "hit": true,
+        "rank": 3,
+        "coverage": 75,
+        "latencyMs": 87
+      },
+      {
+        "id": "exp-typo-02",
+        "archetype": "TypoAndNoise",
+        "archetypeName": "口语与错别字噪声",
+        "question": "连成决里面狄芸被坏人陷害穿了琵琶骨之后在牢房里遇到了谁传授武功",
+        "hit": true,
+        "rank": 1,
+        "coverage": 33,
+        "latencyMs": 100
+      },
+      {
+        "id": "exp-negation-01",
+        "archetype": "NegationDistractor",
+        "archetypeName": "反事实与否定陷阱",
+        "question": "狄云是真的背叛师门投靠血刀门作恶了吗？为什么血刀老祖会叫他好徒孙？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 75,
+        "latencyMs": 110
+      },
+      {
+        "id": "exp-multihop-01",
+        "archetype": "MultiHopSynthesis",
+        "archetypeName": "跨章节多跳线索综合",
+        "question": "西施心口疼痛的千古名篇典故跟范蠡为越国寻找训练剑士的高手之间到底有什么因果关系？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 66
+      },
+      {
+        "id": "exp-exact-01",
+        "archetype": "ExactVerification",
+        "archetypeName": "精准专名核验",
+        "question": "神照经在连城诀中是由谁传授给狄云的？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 116
+      },
+      {
+        "id": "exp-exact-02",
+        "archetype": "ExactVerification",
+        "archetypeName": "精准专名核验",
+        "question": "薛烛在越王勾践面前鉴定了哪几口春秋古代名剑？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 102
+      }
+    ]
+  },
+  "Vector": {
+    "modeKey": "Vector",
+    "modeInfo": {
+      "id": "Vector",
+      "name": "稠密向量检索 (bge-m3 Dense)",
+      "mode": 0
+    },
+    "totalCases": 11,
+    "overallHitAt1": 8,
+    "overallHitAt5": 9,
+    "avgMrr": "0.745",
+    "avgCoverage": "69.4",
+    "avgLatency": 265,
+    "archetypeBreakdown": {
+      "VagueConceptual": {
+        "archetype": "VagueConceptual",
+        "archetypeName": "模糊概念探索",
+        "total": 1,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1
+        ],
+        "coverages": [
+          0.8
+        ],
+        "latencies": [
+          239
+        ]
+      },
+      "ScenarioDescription": {
+        "archetype": "ScenarioDescription",
+        "archetypeName": "场景/现象描述",
+        "total": 2,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1,
+          0
+        ],
+        "coverages": [
+          1,
+          0
+        ],
+        "latencies": [
+          237,
+          233
+        ]
+      },
+      "VocabularyMismatch": {
+        "archetype": "VocabularyMismatch",
+        "archetypeName": "同义词/词汇断层",
+        "total": 2,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1,
+          0
+        ],
+        "coverages": [
+          0.5,
+          0
+        ],
+        "latencies": [
+          226,
+          215
+        ]
+      },
+      "TypoAndNoise": {
+        "archetype": "TypoAndNoise",
+        "archetypeName": "口语与错别字噪声",
+        "total": 2,
+        "hitAt1": 2,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          1,
+          1
+        ],
+        "coverages": [
+          1,
+          1
+        ],
+        "latencies": [
+          242,
+          294
+        ]
+      },
+      "NegationDistractor": {
+        "archetype": "NegationDistractor",
+        "archetypeName": "反事实与否定陷阱",
+        "total": 1,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1
+        ],
+        "coverages": [
+          0.5
+        ],
+        "latencies": [
+          241
+        ]
+      },
+      "MultiHopSynthesis": {
+        "archetype": "MultiHopSynthesis",
+        "archetypeName": "跨章节多跳线索综合",
+        "total": 1,
+        "hitAt1": 0,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          0.2
+        ],
+        "coverages": [
+          0.8333333333333334
+        ],
+        "latencies": [
+          307
+        ]
+      },
+      "ExactVerification": {
+        "archetype": "ExactVerification",
+        "archetypeName": "精准专名核验",
+        "total": 2,
+        "hitAt1": 2,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          1,
+          1
+        ],
+        "coverages": [
+          1,
+          1
+        ],
+        "latencies": [
+          248,
+          436
+        ]
+      }
+    },
+    "caseDetails": [
+      {
+        "id": "exp-vague-01",
+        "archetype": "VagueConceptual",
+        "archetypeName": "模糊概念探索",
+        "question": "知识库里有没有记载关于古代铸剑技术或者春秋时期名剑锻造工艺的篇章？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 80,
+        "latencyMs": 239
+      },
+      {
+        "id": "exp-scenario-01",
+        "archetype": "ScenarioDescription",
+        "archetypeName": "场景/现象描述",
+        "question": "讲一个年轻姑娘拿一根细竹竿把几十个全副武装的敌国剑士眼睛戳瞎的武打片段在哪？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 237
+      },
+      {
+        "id": "exp-scenario-02",
+        "archetype": "ScenarioDescription",
+        "archetypeName": "场景/现象描述",
+        "question": "两位武林绝顶高手在北方雪山之巅决斗数日惺惺相惜，最后却因为兵器刃口被人暗下剧毒身亡的故事在何处？",
+        "hit": false,
+        "rank": null,
+        "coverage": 0,
+        "latencyMs": 233
+      },
+      {
+        "id": "exp-synonym-01",
+        "archetype": "VocabularyMismatch",
+        "archetypeName": "同义词/词汇断层",
+        "question": "古代农民起义领袖留给下属四位保镖家族世代争夺的巨额私房钱埋在哪个地方？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 50,
+        "latencyMs": 226
+      },
+      {
+        "id": "exp-synonym-02",
+        "archetype": "VocabularyMismatch",
+        "archetypeName": "同义词/词汇断层",
+        "question": "含冤入狱的无辜青年从同监牢的长辈身上承袭了哪门能够起死回生的神奇内家真气？",
+        "hit": false,
+        "rank": null,
+        "coverage": 0,
+        "latencyMs": 215
+      },
+      {
+        "id": "exp-typo-01",
+        "archetype": "TypoAndNoise",
+        "archetypeName": "口语与错别字噪声",
+        "question": "月女剑里头那个很厉害的放洋小姑娘到底是跟哪只猴子学打架的呀",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 242
+      },
+      {
+        "id": "exp-typo-02",
+        "archetype": "TypoAndNoise",
+        "archetypeName": "口语与错别字噪声",
+        "question": "连成决里面狄芸被坏人陷害穿了琵琶骨之后在牢房里遇到了谁传授武功",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 294
+      },
+      {
+        "id": "exp-negation-01",
+        "archetype": "NegationDistractor",
+        "archetypeName": "反事实与否定陷阱",
+        "question": "狄云是真的背叛师门投靠血刀门作恶了吗？为什么血刀老祖会叫他好徒孙？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 50,
+        "latencyMs": 241
+      },
+      {
+        "id": "exp-multihop-01",
+        "archetype": "MultiHopSynthesis",
+        "archetypeName": "跨章节多跳线索综合",
+        "question": "西施心口疼痛的千古名篇典故跟范蠡为越国寻找训练剑士的高手之间到底有什么因果关系？",
+        "hit": true,
+        "rank": 5,
+        "coverage": 83,
+        "latencyMs": 307
+      },
+      {
+        "id": "exp-exact-01",
+        "archetype": "ExactVerification",
+        "archetypeName": "精准专名核验",
+        "question": "神照经在连城诀中是由谁传授给狄云的？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 248
+      },
+      {
+        "id": "exp-exact-02",
+        "archetype": "ExactVerification",
+        "archetypeName": "精准专名核验",
+        "question": "薛烛在越王勾践面前鉴定了哪几口春秋古代名剑？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 436
+      }
+    ]
+  },
+  "Hybrid": {
+    "modeKey": "Hybrid",
+    "modeInfo": {
+      "id": "Hybrid",
+      "name": "多路混合检索 (BM25+Vector+RRF)",
+      "mode": 3
+    },
+    "totalCases": 11,
+    "overallHitAt1": 11,
+    "overallHitAt5": 11,
+    "avgMrr": "1.000",
+    "avgCoverage": "87.1",
+    "avgLatency": 28,
+    "archetypeBreakdown": {
+      "VagueConceptual": {
+        "archetype": "VagueConceptual",
+        "archetypeName": "模糊概念探索",
+        "total": 1,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1
+        ],
+        "coverages": [
+          1
+        ],
+        "latencies": [
+          22
+        ]
+      },
+      "ScenarioDescription": {
+        "archetype": "ScenarioDescription",
+        "archetypeName": "场景/现象描述",
+        "total": 2,
+        "hitAt1": 2,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          1,
+          1
+        ],
+        "coverages": [
+          1,
+          0.75
+        ],
+        "latencies": [
+          26,
+          32
+        ]
+      },
+      "VocabularyMismatch": {
+        "archetype": "VocabularyMismatch",
+        "archetypeName": "同义词/词汇断层",
+        "total": 2,
+        "hitAt1": 2,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          1,
+          1
+        ],
+        "coverages": [
+          0.75,
+          1
+        ],
+        "latencies": [
+          33,
+          35
+        ]
+      },
+      "TypoAndNoise": {
+        "archetype": "TypoAndNoise",
+        "archetypeName": "口语与错别字噪声",
+        "total": 2,
+        "hitAt1": 2,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          1,
+          1
+        ],
+        "coverages": [
+          1,
+          0.3333333333333333
+        ],
+        "latencies": [
+          28,
+          28
+        ]
+      },
+      "NegationDistractor": {
+        "archetype": "NegationDistractor",
+        "archetypeName": "反事实与否定陷阱",
+        "total": 1,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1
+        ],
+        "coverages": [
+          0.75
+        ],
+        "latencies": [
+          21
+        ]
+      },
+      "MultiHopSynthesis": {
+        "archetype": "MultiHopSynthesis",
+        "archetypeName": "跨章节多跳线索综合",
+        "total": 1,
+        "hitAt1": 1,
+        "hitAt5": 1,
+        "reciprocalRanks": [
+          1
+        ],
+        "coverages": [
+          1
+        ],
+        "latencies": [
+          22
+        ]
+      },
+      "ExactVerification": {
+        "archetype": "ExactVerification",
+        "archetypeName": "精准专名核验",
+        "total": 2,
+        "hitAt1": 2,
+        "hitAt5": 2,
+        "reciprocalRanks": [
+          1,
+          1
+        ],
+        "coverages": [
+          1,
+          1
+        ],
+        "latencies": [
+          31,
+          31
+        ]
+      }
+    },
+    "caseDetails": [
+      {
+        "id": "exp-vague-01",
+        "archetype": "VagueConceptual",
+        "archetypeName": "模糊概念探索",
+        "question": "知识库里有没有记载关于古代铸剑技术或者春秋时期名剑锻造工艺的篇章？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 22
+      },
+      {
+        "id": "exp-scenario-01",
+        "archetype": "ScenarioDescription",
+        "archetypeName": "场景/现象描述",
+        "question": "讲一个年轻姑娘拿一根细竹竿把几十个全副武装的敌国剑士眼睛戳瞎的武打片段在哪？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 26
+      },
+      {
+        "id": "exp-scenario-02",
+        "archetype": "ScenarioDescription",
+        "archetypeName": "场景/现象描述",
+        "question": "两位武林绝顶高手在北方雪山之巅决斗数日惺惺相惜，最后却因为兵器刃口被人暗下剧毒身亡的故事在何处？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 75,
+        "latencyMs": 32
+      },
+      {
+        "id": "exp-synonym-01",
+        "archetype": "VocabularyMismatch",
+        "archetypeName": "同义词/词汇断层",
+        "question": "古代农民起义领袖留给下属四位保镖家族世代争夺的巨额私房钱埋在哪个地方？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 75,
+        "latencyMs": 33
+      },
+      {
+        "id": "exp-synonym-02",
+        "archetype": "VocabularyMismatch",
+        "archetypeName": "同义词/词汇断层",
+        "question": "含冤入狱的无辜青年从同监牢的长辈身上承袭了哪门能够起死回生的神奇内家真气？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 35
+      },
+      {
+        "id": "exp-typo-01",
+        "archetype": "TypoAndNoise",
+        "archetypeName": "口语与错别字噪声",
+        "question": "月女剑里头那个很厉害的放洋小姑娘到底是跟哪只猴子学打架的呀",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 28
+      },
+      {
+        "id": "exp-typo-02",
+        "archetype": "TypoAndNoise",
+        "archetypeName": "口语与错别字噪声",
+        "question": "连成决里面狄芸被坏人陷害穿了琵琶骨之后在牢房里遇到了谁传授武功",
+        "hit": true,
+        "rank": 1,
+        "coverage": 33,
+        "latencyMs": 28
+      },
+      {
+        "id": "exp-negation-01",
+        "archetype": "NegationDistractor",
+        "archetypeName": "反事实与否定陷阱",
+        "question": "狄云是真的背叛师门投靠血刀门作恶了吗？为什么血刀老祖会叫他好徒孙？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 75,
+        "latencyMs": 21
+      },
+      {
+        "id": "exp-multihop-01",
+        "archetype": "MultiHopSynthesis",
+        "archetypeName": "跨章节多跳线索综合",
+        "question": "西施心口疼痛的千古名篇典故跟范蠡为越国寻找训练剑士的高手之间到底有什么因果关系？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 22
+      },
+      {
+        "id": "exp-exact-01",
+        "archetype": "ExactVerification",
+        "archetypeName": "精准专名核验",
+        "question": "神照经在连城诀中是由谁传授给狄云的？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 31
+      },
+      {
+        "id": "exp-exact-02",
+        "archetype": "ExactVerification",
+        "archetypeName": "精准专名核验",
+        "question": "薛烛在越王勾践面前鉴定了哪几口春秋古代名剑？",
+        "hit": true,
+        "rank": 1,
+        "coverage": 100,
+        "latencyMs": 31
+      }
+    ]
+  }
+}

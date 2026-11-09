@@ -17,5 +17,6 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="ReferenceRAG.Tests" />
+    <InternalsVisibleTo Include="ReferenceRAG.Host.Tests" />
   </ItemGroup>
 </Project>

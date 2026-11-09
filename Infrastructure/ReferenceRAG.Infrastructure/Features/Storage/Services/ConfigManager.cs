@@ -24,6 +24,10 @@ public class ConfigManager
     {
         _config = initialConfig;
         _customConfigPath = customConfigPath;
+        if (_config != null)
+        {
+            ApplyEnvironmentVariables(_config);
+        }
     }
 
     /// <summary>
@@ -244,6 +248,8 @@ public class ConfigManager
     /// </summary>
     private void ApplyEnvironmentVariables(ObsidianRagConfig config)
     {
+        LoadDotEnvDevIfPresent();
+
         var sourcePath = Environment.GetEnvironmentVariable("OBSIDIAN_RAG_SOURCE_PATH");
         if (!string.IsNullOrEmpty(sourcePath))
         {
@@ -354,10 +360,178 @@ public class ConfigManager
             config.Service.Port = portNum;
         }
 
+        // SiliconFlow (硅基流动) 集中式服务商自动识别与注册
+        var sfApiKey = Environment.GetEnvironmentVariable("SILICONFLOW_API_KEY");
+        if (!string.IsNullOrWhiteSpace(sfApiKey) && !sfApiKey.StartsWith("<", StringComparison.Ordinal))
+        {
+            var sfBaseUrl = Environment.GetEnvironmentVariable("SILICONFLOW_BASE_URL") ?? "https://api.siliconflow.cn/v1";
+            config.ModelProviders ??= new List<ModelProviderConfig>();
+
+            var sfProvider = config.ModelProviders.FirstOrDefault(p => string.Equals(p.Id, "prov_sf", StringComparison.OrdinalIgnoreCase));
+            if (sfProvider == null)
+            {
+                sfProvider = new ModelProviderConfig
+                {
+                    Id = "prov_sf",
+                    Name = "SiliconFlow",
+                    ProviderType = "OpenAI",
+                    BaseUrl = sfBaseUrl,
+                    ApiKey = sfApiKey,
+                    Enabled = true
+                };
+                config.ModelProviders.Add(sfProvider);
+            }
+            else
+            {
+                sfProvider.BaseUrl = sfBaseUrl;
+                sfProvider.ApiKey = sfApiKey;
+                sfProvider.Enabled = true;
+            }
+
+            sfProvider.Models ??= new List<RegisteredModelAsset>();
+            if (!sfProvider.Models.Any(m => m.ModelId.Equals("BAAI/bge-m3", StringComparison.OrdinalIgnoreCase)))
+            {
+                sfProvider.Models.Add(new RegisteredModelAsset
+                {
+                    ModelId = "BAAI/bge-m3",
+                    DisplayName = "BAAI / BGE-M3 (1024d)",
+                    ModelType = "embedding",
+                    Dimension = 1024,
+                    MaxTokens = 8192,
+                    Enabled = true
+                });
+            }
+
+            if (!sfProvider.Models.Any(m => m.ModelId.Equals("BAAI/bge-reranker-v2-m3", StringComparison.OrdinalIgnoreCase)))
+            {
+                sfProvider.Models.Add(new RegisteredModelAsset
+                {
+                    ModelId = "BAAI/bge-reranker-v2-m3",
+                    DisplayName = "BAAI / BGE-Reranker-v2-m3",
+                    ModelType = "rerank",
+                    Dimension = 0,
+                    MaxTokens = 8192,
+                    Enabled = true
+                });
+            }
+
+            if (!sfProvider.Models.Any(m => m.ModelId.Equals("deepseek-ai/DeepSeek-V3", StringComparison.OrdinalIgnoreCase)))
+            {
+                sfProvider.Models.Add(new RegisteredModelAsset
+                {
+                    ModelId = "deepseek-ai/DeepSeek-V3",
+                    DisplayName = "DeepSeek V3 (SiliconFlow)",
+                    ModelType = "chat",
+                    Dimension = 0,
+                    MaxTokens = 8192,
+                    Enabled = true
+                });
+            }
+
+            if (config.Chat != null && (string.IsNullOrEmpty(config.Chat.OpenAiApi?.ApiKey) ||
+                                       config.Chat.OpenAiApi.ApiKey.StartsWith("sk-mock", StringComparison.OrdinalIgnoreCase) ||
+                                       config.Chat.ActiveModelUrn?.Contains("prov_13882dbaa", StringComparison.OrdinalIgnoreCase) == true))
+            {
+                config.Chat.ActiveModelUrn = "provider:prov_sf:deepseek-ai/DeepSeek-V3";
+                config.Chat.ActiveBackend = "OpenAiApi";
+                config.Chat.OpenAiApi ??= new OpenAiApiChatProfile();
+                config.Chat.OpenAiApi.Endpoint = sfBaseUrl;
+                config.Chat.OpenAiApi.ApiKey = sfApiKey;
+                config.Chat.OpenAiApi.Model = "deepseek-ai/DeepSeek-V3";
+                config.Chat.OpenAiApi.ApiKeyConfigured = true;
+            }
+
+            if (config.Embedding != null && (config.Embedding.ActiveModelUrn?.Contains("prov_13882dbaa", StringComparison.OrdinalIgnoreCase) == true ||
+                                            config.Embedding.ApiKey?.StartsWith("sk-mock", StringComparison.OrdinalIgnoreCase) == true))
+            {
+                config.Embedding.ActiveModelUrn = "provider:prov_sf:BAAI/bge-m3";
+                config.Embedding.ActiveBackend = "OpenAiApi";
+                config.Embedding.Mode = "openai";
+                config.Embedding.ApiBaseUrl = sfBaseUrl;
+                config.Embedding.ApiKey = sfApiKey;
+                config.Embedding.ModelName = "BAAI/bge-m3";
+                config.Embedding.ApiDimension = 1024;
+            }
+
+            if (config.Rerank != null && (config.Rerank.ActiveModelUrn?.Contains("prov_13882dbaa", StringComparison.OrdinalIgnoreCase) == true ||
+                                         config.Rerank.OpenAiApi?.ApiKey?.StartsWith("sk-mock", StringComparison.OrdinalIgnoreCase) == true))
+            {
+                config.Rerank.ActiveModelUrn = "provider:prov_sf:BAAI/bge-reranker-v2-m3";
+                config.Rerank.ActiveBackend = "OpenAiApi";
+                config.Rerank.ModelName = "BAAI/bge-reranker-v2-m3";
+                config.Rerank.Mode = "openai";
+                config.Rerank.ApiBaseUrl = sfBaseUrl;
+                config.Rerank.OpenAiApi ??= new OpenAiApiRerankProfile();
+                config.Rerank.OpenAiApi.BaseUrl = sfBaseUrl;
+                config.Rerank.OpenAiApi.ApiKey = sfApiKey;
+                config.Rerank.OpenAiApi.ModelName = "BAAI/bge-reranker-v2-m3";
+            }
+        }
+
+        // TypeSafe AI System One (Jev) 极速认知决策引擎自动识别与注册
+        var typeSafeKey = Environment.GetEnvironmentVariable("TYPESAFE_API_KEY");
+        if (!string.IsNullOrWhiteSpace(typeSafeKey) && !typeSafeKey.StartsWith("<", StringComparison.Ordinal))
+        {
+            config.SystemOne ??= new SystemOneConfig();
+            config.SystemOne.ApiKey = typeSafeKey;
+            config.SystemOne.BaseUrl = Environment.GetEnvironmentVariable("TYPESAFE_BASE_URL") ?? "https://api.typesafe.ai/v1/systemone";
+            config.SystemOne.Model = Environment.GetEnvironmentVariable("TYPESAFE_MODEL") ?? "jev-latest";
+            config.SystemOne.Enabled = true;
+
+            config.Chat.SystemOne = config.SystemOne;
+        }
+
         static void ApplyString(string name, Action<string> apply)
         {
             var value = Environment.GetEnvironmentVariable(name);
             if (!string.IsNullOrWhiteSpace(value)) apply(value);
+        }
+    }
+
+    /// <summary>
+    /// 从 env/.envdev（如果存在）提取配置键值并注入进程环境变量（仅当当前环境变量未设置时）
+    /// </summary>
+    public static void LoadDotEnvDevIfPresent()
+    {
+        try
+        {
+            var candidates = new[]
+            {
+                Path.Combine(Directory.GetCurrentDirectory(), "env", ".envdev"),
+                Path.Combine(Directory.GetCurrentDirectory(), "..", "env", ".envdev"),
+                Path.Combine(AppContext.BaseDirectory, "env", ".envdev"),
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "env", ".envdev"),
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "env", ".envdev")
+            };
+
+            foreach (var file in candidates)
+            {
+                if (File.Exists(file))
+                {
+                    foreach (var line in File.ReadAllLines(file))
+                    {
+                        var trimmed = line.Trim();
+                        if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("#")) continue;
+
+                        var eqIdx = trimmed.IndexOf('=');
+                        if (eqIdx > 0)
+                        {
+                            var key = trimmed.Substring(0, eqIdx).Trim();
+                            var val = trimmed.Substring(eqIdx + 1).Trim().Trim('"');
+
+                            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(key)))
+                            {
+                                Environment.SetEnvironmentVariable(key, val);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            // 静默容错，避免文件权限等引发启动故障
         }
     }
 

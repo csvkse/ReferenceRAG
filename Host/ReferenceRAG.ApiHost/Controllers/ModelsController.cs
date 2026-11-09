@@ -1,3 +1,4 @@
+using ReferenceRAG.Core.Features.ModelManagement.Services;
 using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Business.Features.Chat.Services;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Detection;
@@ -27,6 +28,7 @@ public class ModelsController : ControllerBase
     private readonly IHardwareDetector _hardwareDetector;
     private readonly IVectorStore _vectorStore;
     private readonly ILogger<ModelsController> _logger;
+    private readonly IModelAssetResolver? _assetResolver;
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DownloadProgress> _downloadProgress = new();
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _downloadCts = new();
     private static readonly SemaphoreSlim _modelSwitchLock = new(1, 1);
@@ -40,7 +42,8 @@ public class ModelsController : ControllerBase
         IRerankService? rerankService = null,
         IModelTelemetryService? telemetryService = null,
         MafChatService? chatService = null,
-        IHardwareDetector? hardwareDetector = null)
+        IHardwareDetector? hardwareDetector = null,
+        IModelAssetResolver? assetResolver = null)
     {
         _configManager = configManager;
         _modelManager = modelManager;
@@ -51,6 +54,7 @@ public class ModelsController : ControllerBase
         _telemetryService = telemetryService;
         _chatService = chatService;
         _hardwareDetector = hardwareDetector ?? new HardwareDetector();
+        _assetResolver = assetResolver;
     }
 
     /// <summary>
@@ -1597,6 +1601,279 @@ public async Task<ActionResult<ModelDownloadOptions>> GetRerankDownloadOptions(s
             return StatusCode(500, new { error = $"探针连接失败: {ex.Message}" });
         }
     }
+
+    /// <summary>
+    /// 切换模型启用/禁用状态
+    /// </summary>
+    [HttpPost("{modelName}/toggle-enabled")]
+    public ActionResult ToggleModelEnabled(string modelName, [FromBody] ToggleModelEnabledRequest? request)
+    {
+        var isEnabled = _modelManager.ToggleModelEnabled(modelName, request?.Enabled);
+        return Ok(new
+        {
+            success = true,
+            modelName = modelName,
+            enabled = isEnabled
+        });
+    }
+
+    /// <summary>
+    /// 获取所有集中式模型供应商列表（API Key 已脱敏）
+    /// </summary>
+    [HttpGet("providers")]
+    public ActionResult GetModelProviders()
+    {
+        var config = _configManager.Load();
+        var providers = (config.ModelProviders ?? new List<ModelProviderConfig>())
+            .Select(p => new
+            {
+                id = p.Id,
+                name = p.Name,
+                providerType = p.ProviderType,
+                baseUrl = p.BaseUrl,
+                enabled = p.Enabled,
+                hasApiKey = !string.IsNullOrWhiteSpace(p.ApiKey),
+                apiKeyMasked = string.IsNullOrWhiteSpace(p.ApiKey) 
+                    ? "" 
+                    : (p.ApiKey.Length > 8 ? $"{p.ApiKey[..4]}****{p.ApiKey[^4..]}" : "********"),
+                models = p.Models ?? new List<RegisteredModelAsset>()
+            })
+            .ToList();
+
+        return Ok(providers);
+    }
+
+    /// <summary>
+    /// 添加或更新集中式模型供应商
+    /// </summary>
+    [HttpPost("providers")]
+    public ActionResult SaveModelProvider([FromBody] SaveModelProviderRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name))
+            return BadRequest(new { error = "供应商名称不能为空" });
+        if (string.IsNullOrWhiteSpace(request.BaseUrl))
+            return BadRequest(new { error = "API 基础地址不能为空" });
+
+        var config = _configManager.Load();
+        config.ModelProviders ??= new List<ModelProviderConfig>();
+
+        var id = string.IsNullOrWhiteSpace(request.Id) ? $"prov_{Guid.NewGuid():N}"[..14] : request.Id;
+        var existing = config.ModelProviders.FirstOrDefault(p => p.Id == id);
+
+        string? apiKeyToSave = request.ApiKey;
+        if (string.IsNullOrWhiteSpace(apiKeyToSave) || apiKeyToSave == "__KEEP__" || apiKeyToSave.Contains("****"))
+        {
+            apiKeyToSave = existing?.ApiKey;
+        }
+
+        if (existing != null)
+        {
+            existing.Name = request.Name.Trim();
+            existing.ProviderType = string.IsNullOrWhiteSpace(request.ProviderType) ? "OpenAI" : request.ProviderType;
+            existing.BaseUrl = request.BaseUrl.Trim().TrimEnd('/');
+            existing.ApiKey = apiKeyToSave;
+            if (request.Enabled.HasValue) existing.Enabled = request.Enabled.Value;
+        }
+        else
+        {
+            config.ModelProviders.Add(new ModelProviderConfig
+            {
+                Id = id,
+                Name = request.Name.Trim(),
+                ProviderType = string.IsNullOrWhiteSpace(request.ProviderType) ? "OpenAI" : request.ProviderType,
+                BaseUrl = request.BaseUrl.Trim().TrimEnd('/'),
+                ApiKey = apiKeyToSave,
+                Enabled = request.Enabled ?? true,
+                Models = new List<RegisteredModelAsset>()
+            });
+        }
+
+        _configManager.Save(config);
+        return Ok(new { success = true, id = id });
+    }
+
+    /// <summary>
+    /// 删除指定集中式模型供应商
+    /// </summary>
+    [HttpDelete("providers/{id}")]
+    public ActionResult DeleteModelProvider(string id)
+    {
+        var config = _configManager.Load();
+        if (config.ModelProviders != null)
+        {
+            config.ModelProviders.RemoveAll(p => p.Id == id);
+            _configManager.Save(config);
+        }
+        return Ok(new { success = true });
+    }
+
+    /// <summary>
+    /// 切换供应商启用/停用状态
+    /// </summary>
+    [HttpPost("providers/{id}/toggle")]
+    public ActionResult ToggleProviderEnabled(string id)
+    {
+        var config = _configManager.Load();
+        var provider = config.ModelProviders?.FirstOrDefault(p => p.Id == id);
+        if (provider == null) return NotFound(new { error = "供应商不存在" });
+
+        provider.Enabled = !provider.Enabled;
+        _configManager.Save(config);
+        return Ok(new { success = true, enabled = provider.Enabled });
+    }
+
+    /// <summary>
+    /// 自动从远端拉取模型并探测向量维度，更新供应商注册模型
+    /// </summary>
+    [HttpPost("providers/{id}/probe-models")]
+    public async Task<ActionResult> ProbeProviderModels(string id, CancellationToken ct)
+    {
+        var config = _configManager.Load();
+        var provider = config.ModelProviders?.FirstOrDefault(p => p.Id == id);
+        if (provider == null) return NotFound(new { error = "供应商不存在" });
+
+        var baseUrl = provider.BaseUrl.Trim().TrimEnd('/');
+        var url = baseUrl.EndsWith("/models", StringComparison.OrdinalIgnoreCase)
+            ? baseUrl
+            : $"{baseUrl}/models";
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        if (!string.IsNullOrWhiteSpace(provider.ApiKey))
+        {
+            http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", provider.ApiKey.Trim());
+        }
+
+        List<string> remoteModelIds = new();
+        try
+        {
+            var resp = await http.GetAsync(url, ct);
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = await resp.Content.ReadAsStringAsync(ct);
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    foreach (var item in dataEl.EnumerateArray())
+                    {
+                        if (item.TryGetProperty("id", out var idProp) && !string.IsNullOrWhiteSpace(idProp.GetString()))
+                            remoteModelIds.Add(idProp.GetString()!);
+                    }
+                }
+                else if (doc.RootElement.TryGetProperty("models", out var modelsEl) && modelsEl.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    foreach (var item in modelsEl.EnumerateArray())
+                    {
+                        if (item.TryGetProperty("name", out var nameProp) && !string.IsNullOrWhiteSpace(nameProp.GetString()))
+                            remoteModelIds.Add(nameProp.GetString()!);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "拉取供应商模型列表失败: {Id}", id);
+        }
+
+        provider.Models ??= new List<RegisteredModelAsset>();
+        var existingMap = provider.Models.ToDictionary(m => m.ModelId, m => m, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var remoteId in remoteModelIds)
+        {
+            if (!existingMap.ContainsKey(remoteId))
+            {
+                var isLikelyEmbedding = remoteId.Contains("embed", StringComparison.OrdinalIgnoreCase) || 
+                                       remoteId.Contains("bge", StringComparison.OrdinalIgnoreCase);
+                var isLikelyRerank = remoteId.Contains("rerank", StringComparison.OrdinalIgnoreCase);
+                var modelType = isLikelyEmbedding ? "embedding" : (isLikelyRerank ? "rerank" : "chat");
+
+                provider.Models.Add(new RegisteredModelAsset
+                {
+                    ModelId = remoteId,
+                    DisplayName = remoteId,
+                    ModelType = modelType,
+                    Dimension = 1024,
+                    Enabled = true,
+                    LastProbedAt = DateTime.UtcNow
+                });
+            }
+        }
+
+        var embModels = provider.Models.Where(m => m.ModelType == "embedding").Take(5).ToList();
+        foreach (var emb in embModels)
+        {
+            try
+            {
+                var embUrl = baseUrl.EndsWith("/embeddings", StringComparison.OrdinalIgnoreCase)
+                    ? baseUrl
+                    : $"{baseUrl}/embeddings";
+                var payload = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    model = emb.ModelId,
+                    input = new[] { "probe test" }
+                });
+                using var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+                var embResp = await http.PostAsync(embUrl, content, ct);
+                if (embResp.IsSuccessStatusCode)
+                {
+                    var embBody = await embResp.Content.ReadAsStringAsync(ct);
+                    using var doc = System.Text.Json.JsonDocument.Parse(embBody);
+                    if (doc.RootElement.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var first = dataEl.EnumerateArray().FirstOrDefault();
+                        if (first.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                            first.TryGetProperty("embedding", out var embEl) &&
+                            embEl.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            var dim = embEl.GetArrayLength();
+                            if (dim > 0)
+                            {
+                                emb.Dimension = dim;
+                                emb.LastProbedAt = DateTime.UtcNow;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { /* probe failure is non-fatal */ }
+        }
+
+        _configManager.Save(config);
+        return Ok(new
+        {
+            success = true,
+            count = provider.Models.Count,
+            models = provider.Models
+        });
+    }
+
+    /// <summary>
+    /// 切换供应商下某个特定模型的启用/停用状态
+    /// </summary>
+    [HttpPost("providers/{id}/toggle-model")]
+    public ActionResult ToggleProviderModel(string id, [FromBody] ToggleProviderModelRequest request)
+    {
+        var config = _configManager.Load();
+        var provider = config.ModelProviders?.FirstOrDefault(p => p.Id == id);
+        if (provider == null) return NotFound(new { error = "供应商不存在" });
+
+        var model = provider.Models?.FirstOrDefault(m => m.ModelId.Equals(request.ModelId, StringComparison.OrdinalIgnoreCase));
+        if (model == null) return NotFound(new { error = "模型不存在" });
+
+        model.Enabled = request.Enabled ?? !model.Enabled;
+        _configManager.Save(config);
+        return Ok(new { success = true, enabled = model.Enabled });
+    }
+
+    /// <summary>
+    /// 获取统一模型资源选项目录（供系统设置、应用级模型选择器使用）
+    /// </summary>
+    [HttpGet("catalog")]
+    public ActionResult<ModelCatalogResponse> GetCatalog([FromQuery] string? type = null)
+    {
+        var resolver = _assetResolver ?? new ModelAssetResolver(_configManager, _modelManager);
+        var catalog = resolver.GetCatalog(type);
+        return Ok(catalog);
+    }
 }
 
 /// <summary>
@@ -1739,5 +2016,11 @@ public class DownloadProjectorRequest
 public sealed record DiscoverRemoteModelsRequest(string BaseUrl, string? ApiKey = null);
 
 public sealed record ProbeDimensionRequest(string BaseUrl, string ModelName, string? ApiKey = null);
+
+public sealed record ToggleModelEnabledRequest(bool? Enabled = null);
+
+public sealed record SaveModelProviderRequest(string? Id, string Name, string? ProviderType, string BaseUrl, string? ApiKey = null, bool? Enabled = null);
+
+public sealed record ToggleProviderModelRequest(string ModelId, bool? Enabled = null);
 
 

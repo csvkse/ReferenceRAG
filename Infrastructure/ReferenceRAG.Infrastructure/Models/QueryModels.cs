@@ -36,6 +36,11 @@ public class AIQueryRequest
     public List<string>? Sources { get; set; }
 
     /// <summary>
+    /// 限定搜索的知识库 ID 列表（空=自动检索全部已启用的知识库）
+    /// </summary>
+    public List<string>? KnowledgeBaseIds { get; set; }
+
+    /// <summary>
     /// 过滤条件
     /// </summary>
     public SearchFilter? Filters { get; set; }
@@ -193,6 +198,8 @@ public class SearchStats
     public SearchPhaseStats? Phases { get; set; }
     /// <summary>搜索流水线状态机与模型遥测信息</summary>
     public SearchPipelineTelemetry? PipelineTelemetry { get; set; }
+    public bool IsDegraded { get; set; } = false;
+    public string? DegradeReason { get; set; }
 }
 
 /// <summary>
@@ -317,6 +324,13 @@ public class DrillDownRequest
     public string Query { get; set; } = string.Empty;
     public List<string> RefIds { get; set; } = new();
     public int ExpandContext { get; set; } = 2;
+    public QueryMode? Mode { get; set; }
+    public List<string>? Sources { get; set; }
+
+    /// <summary>
+    /// 限定搜索的知识库 ID 列表（空=自动检索全部已启用的知识库）
+    /// </summary>
+    public List<string>? KnowledgeBaseIds { get; set; }
 }
 
 /// <summary>

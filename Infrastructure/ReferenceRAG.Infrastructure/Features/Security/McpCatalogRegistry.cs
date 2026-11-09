@@ -56,6 +56,8 @@ public static class McpCatalogRegistry
             new List<McpToolCatalogItem>
             {
                 new("SemanticSearch", "在知识库中执行向量语义搜索，基于自然语言查找相关文档片段", "Read", "search"),
+                new("LexicalSearch", "在知识库中执行免向量词法搜索", "Read", "search"),
+                new("KnowledgeBaseSearch", "在授权的隔离知识库中搜索", "Read", "search"),
                 new("HybridSearch", "混合搜索（BM25 关键词精确匹配 + 向量双路语义融合检索）", "Read", "search"),
                 new("RerankResults", "对搜索候选文档进行深度交叉注意力语义重排与打分", "Read", "search"),
                 new("EmbedText", "将单段文本转换为高维向量表示（Embedding）", "Read", "search"),
@@ -93,6 +95,7 @@ public static class McpCatalogRegistry
             new List<McpToolCatalogItem>
             {
                 new("ListSources", "列出系统中所有已配置的知识库数据源及其索引统计", "Read", "sources"),
+                new("KnowledgeBaseList", "列出已授权的隔离知识库", "Read", "sources"),
                 new("GetSourceInfo", "获取指定数据源的物理路径、文件数量与详细索引健康度", "Read", "sources"),
                 new("GetSystemStats", "获取整体系统宏观配置概览、模型参数与全局统计指标", "Read", "sources")
             },

@@ -3,6 +3,7 @@ using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Service.Services;
+using ReferenceRAG.Storage;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -15,7 +16,8 @@ namespace ReferenceRAG.Service.Controllers;
 public class IndexController : ControllerBase
 {
     private readonly IVectorStore _vectorStore;
-    private readonly IEmbeddingService _embeddingService;
+    private readonly Lazy<IEmbeddingService> _embeddingServiceLazy;
+    private IEmbeddingService _embeddingService => _embeddingServiceLazy.Value;
     private readonly IBM25Store _bm25Store;
     private readonly IGraphStore _graphStore;
     private readonly IFileIndexPipeline _pipeline;
@@ -24,6 +26,9 @@ public class IndexController : ControllerBase
     private readonly IndexService _indexService;
     private readonly IQueryStatsService _queryStats;
     private readonly ILogger<IndexController> _logger;
+    private readonly IServiceProvider? _serviceProvider;
+
+    internal static Func<Task>? BeforePreCleanupHook { get; set; }
 
     public IndexController(
         IVectorStore vectorStore,
@@ -35,10 +40,11 @@ public class IndexController : ControllerBase
         ConfigManager configManager,
         IndexService indexService,
         IQueryStatsService queryStats,
-        ILogger<IndexController> logger)
+        ILogger<IndexController> logger,
+        IServiceProvider? serviceProvider = null)
     {
         _vectorStore = vectorStore;
-        _embeddingService = embeddingService;
+        _embeddingServiceLazy = new Lazy<IEmbeddingService>(() => embeddingService);
         _bm25Store = bm25Store;
         _graphStore = graphStore;
         _pipeline = pipeline;
@@ -47,6 +53,26 @@ public class IndexController : ControllerBase
         _indexService = indexService;
         _queryStats = queryStats;
         _logger = logger;
+        _serviceProvider = serviceProvider;
+    }
+
+    [ActivatorUtilitiesConstructor]
+    public IndexController(IVectorStore vectorStore, IBM25Store bm25Store, IGraphStore graphStore,
+        IFileIndexPipeline pipeline, IModelManager modelManager, ConfigManager configManager,
+        IndexService indexService, IQueryStatsService queryStats, ILogger<IndexController> logger,
+        IServiceProvider serviceProvider)
+    {
+        _vectorStore = vectorStore;
+        _embeddingServiceLazy = new Lazy<IEmbeddingService>(() => serviceProvider.GetRequiredService<IEmbeddingService>());
+        _bm25Store = bm25Store;
+        _graphStore = graphStore;
+        _pipeline = pipeline;
+        _modelManager = modelManager;
+        _configManager = configManager;
+        _indexService = indexService;
+        _queryStats = queryStats;
+        _logger = logger;
+        _serviceProvider = serviceProvider;
     }
 
     // ==================== 统计 ====================
@@ -154,6 +180,8 @@ public class IndexController : ControllerBase
     public async Task<ActionResult<DeleteResult>> DeleteModel(string modelName)
     {
         _logger.LogInformation("删除模型向量: {Model}", modelName);
+        var coordinator = _serviceProvider?.GetService<LexicalIndexCoordinator>();
+        using var lease = coordinator == null ? null : await coordinator.BeginVectorRecoveryAsync(new[] { "*" }, HttpContext.RequestAborted);
         var deletedCount = await _vectorStore.DeleteVectorsByModelAsync(modelName);
         return Ok(new DeleteResult
         {
@@ -168,6 +196,8 @@ public class IndexController : ControllerBase
     public async Task<ActionResult<BulkDeleteResult>> DeleteAllModels()
     {
         _logger.LogWarning("删除所有模型向量索引");
+        var coordinator = _serviceProvider?.GetService<LexicalIndexCoordinator>();
+        using var lease = coordinator == null ? null : await coordinator.BeginVectorRecoveryAsync(new[] { "*" }, HttpContext.RequestAborted);
         var stats = await _vectorStore.GetVectorStatsAsync();
         var results = new List<DeleteResult>();
         var total = 0;
@@ -205,6 +235,8 @@ public class IndexController : ControllerBase
             processed.Add(source);
         }
 
+        var coordinator = _serviceProvider?.GetService<LexicalIndexCoordinator>();
+        using var lease = coordinator == null ? null : await coordinator.BeginVectorRecoveryAsync(new[] { "*" }, HttpContext.RequestAborted);
         await _bm25Store.ClearIndexAsync();
         await _graphStore.ClearAllAsync();
 
@@ -217,23 +249,34 @@ public class IndexController : ControllerBase
     [HttpPost("rebuild")]
     public async Task<ActionResult<RebuildJob>> Rebuild([FromBody] RebuildRequest? request = null)
     {
+        var config = _configManager.Load();
+        if (!config.Indexing.EmbeddingEnabled)
+            return Conflict(new { code = "embedding_disabled", error = "当前已禁用 embedding，不能重建向量索引。" });
+        var sources = request?.Sources ?? config.Sources.Where(s => s.Enabled).Select(s => s.Name).ToList();
+        if (sources.Count == 0) return BadRequest(new { error = "没有可用的源" });
+        var stale = LexicalIndexCoordinator.HasPersistedStaleVectors(Path.Combine(config.DataPath ?? "data", "vectors.db"));
+        if (stale && !IndexService.IsFullSourceSelection(config, sources))
+            return Conflict(new { code = "vector_index_incomplete", error = "恢复向量检索需要重建所有已启用的数据源。" });
         var currentModel = _embeddingService.ModelName;
         var currentDimension = _embeddingService.Dimension;
 
         _logger.LogInformation("全量重建: 模型={Model}", currentModel);
 
-        if (request?.DeleteExisting ?? true)
+        var coordinator = _serviceProvider?.GetService<LexicalIndexCoordinator>();
+        if (!stale && (request?.DeleteExisting ?? true))
         {
-            await _vectorStore.DeleteVectorsByModelAsync(currentModel);
-            await _bm25Store.ClearIndexAsync();
-            await _graphStore.ClearAllAsync();
+            if (BeforePreCleanupHook != null)
+                await BeforePreCleanupHook();
+
+            using var lease = coordinator == null ? null : await coordinator.AcquireWriteLeaseAsync(HttpContext.RequestAborted);
+            var staleNow = LexicalIndexCoordinator.HasPersistedStaleVectors(Path.Combine(config.DataPath ?? "data", "vectors.db"));
+            if (!staleNow)
+            {
+                await _vectorStore.DeleteVectorsByModelAsync(currentModel);
+                await _bm25Store.ClearIndexAsync();
+                await _graphStore.ClearAllAsync();
+            }
         }
-
-        var config = _configManager.Load();
-        var sources = request?.Sources ?? config.Sources.Where(s => s.Enabled).Select(s => s.Name).ToList();
-
-        if (sources.Count == 0)
-            return BadRequest(new { error = "没有可用的源" });
 
         var job = await _indexService.StartIndexAsync(new IndexRequest { Sources = sources, Force = true });
 
@@ -349,6 +392,8 @@ public class IndexController : ControllerBase
     public async Task<ActionResult<CleanupResult>> Cleanup()
     {
         _logger.LogInformation("清理孤立索引");
+        var coordinator = _serviceProvider?.GetService<LexicalIndexCoordinator>();
+        using var lease = coordinator == null ? null : await coordinator.AcquireWriteLeaseAsync(HttpContext.RequestAborted);
 
         var existingModels = new List<string> { _embeddingService.ModelName };
         var modelDeleted = await _vectorStore.DeleteOrphanedVectorsAsync(existingModels);

@@ -575,10 +575,10 @@ public sealed class ChatPerformanceModeAndSettingsQualityGateTests : IDisposable
         Assert.Contains("检索与分段", jsContent);
         Assert.Contains("系统与存储", jsContent);
 
-        // 3. 验证聊天模型与嵌入重排名称统一
-        Assert.Contains("推理模式", jsContent);
-        Assert.Contains("本地 GGUF", jsContent);
-        Assert.Contains("OpenAI 兼容 API", jsContent);
+        // 3. 验证聊天模型与嵌入重排名称统一关联设计
+        Assert.Contains("本地模型", jsContent);
+        Assert.Contains("在线服务商模型", jsContent);
+        Assert.Contains("chatCatalogOptions", jsContent);
         Assert.DoesNotContain("后端方案", jsContent);
         Assert.DoesNotContain("本地 GGUF 大模型 (Local GGUF)", jsContent);
         Assert.DoesNotContain("OpenAI 兼容 API (Online/API)", jsContent);
