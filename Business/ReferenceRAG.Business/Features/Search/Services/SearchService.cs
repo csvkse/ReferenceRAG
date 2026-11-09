@@ -11,6 +11,9 @@ using Microsoft.Extensions.Logging;
 using ReferenceRAG.Core.Services.Graph;
 using ReferenceRAG.Storage;
 using ReferenceRAG.Service.Services;
+using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
+using ReferenceRAG.Business.Features.KnowledgeBase.Services;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -35,6 +38,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     private readonly Func<LexicalIndexCoordinator>? _lexicalFactory;
     private readonly Func<bool>? _hasPersistedLexicalChanges;
     private readonly Func<IBM25Store>? _bm25StoreFactory;
+    private readonly IKnowledgeBaseSearchService? _kbSearchService;
+    private readonly ICatalogStore? _catalogStore;
 
     public SearchService(
         IVectorStore vectorStore,
@@ -48,10 +53,13 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         IModelTelemetryService? telemetryService = null,
         Func<LexicalIndexCoordinator>? lexicalFactory = null,
         Func<bool>? hasPersistedLexicalChanges = null,
-        Func<IBM25Store>? bm25StoreFactory = null)
+        Func<IBM25Store>? bm25StoreFactory = null,
+        IKnowledgeBaseSearchService? kbSearchService = null,
+        ICatalogStore? catalogStore = null)
         : this(vectorStore, new Lazy<IEmbeddingService>(() => embeddingService), textEnhancer, configManager, logger,
             new Lazy<IHybridSearchService?>(() => hybridSearchService), new Lazy<IRerankService?>(() => rerankService),
-            graphStore, new Lazy<IModelTelemetryService?>(() => telemetryService), lexicalFactory, hasPersistedLexicalChanges, bm25StoreFactory)
+            graphStore, new Lazy<IModelTelemetryService?>(() => telemetryService), lexicalFactory, hasPersistedLexicalChanges, bm25StoreFactory,
+            kbSearchService, catalogStore)
     {
     }
 
@@ -67,7 +75,9 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         Lazy<IModelTelemetryService?> telemetryService,
         Func<LexicalIndexCoordinator>? lexicalFactory = null,
         Func<bool>? hasPersistedLexicalChanges = null,
-        Func<IBM25Store>? bm25StoreFactory = null)
+        Func<IBM25Store>? bm25StoreFactory = null,
+        IKnowledgeBaseSearchService? kbSearchService = null,
+        ICatalogStore? catalogStore = null)
     {
         _vectorStore = vectorStore;
         _bm25StoreFactory = bm25StoreFactory;
@@ -81,6 +91,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         _telemetryServiceLazy = telemetryService;
         _lexicalFactory = lexicalFactory;
         _hasPersistedLexicalChanges = hasPersistedLexicalChanges;
+        _kbSearchService = kbSearchService;
+        _catalogStore = catalogStore;
     }
 
     /// <summary>

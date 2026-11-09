@@ -316,6 +316,7 @@ public class AIQueryController : ControllerBase
             ContextWindow = request.ContextWindow >= 0 ? request.ContextWindow : defaultContextWindow,
             MaxTokens = request.MaxTokens > 0 ? request.MaxTokens : defaultMaxTokens,
             Sources = request.Sources,
+            KnowledgeBaseIds = request.KnowledgeBaseIds,
             Filters = request.Filters,
             Options = request.Options,
             K1 = request.K1,

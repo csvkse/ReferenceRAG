@@ -7,6 +7,9 @@ using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
 
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
+using ReferenceRAG.Business.Features.KnowledgeBase.Services;
+
 namespace ReferenceRAG.Core.Extensions;
 
 public static class SearchExtensions
@@ -54,7 +57,9 @@ public static class SearchExtensions
             () => sp.GetRequiredService<ReferenceRAG.Storage.LexicalIndexCoordinator>(),
             () => ReferenceRAG.Storage.LexicalIndexCoordinator.HasPersistedStaleVectors(
                 Path.Combine(sp.GetRequiredService<ConfigManager>().Load().DataPath ?? "data", "vectors.db")),
-            () => sp.GetRequiredService<IBM25Store>()));
+            () => sp.GetRequiredService<IBM25Store>(),
+            sp.GetService<IKnowledgeBaseSearchService>(),
+            sp.GetService<ICatalogStore>()));
 
         return services;
     }
