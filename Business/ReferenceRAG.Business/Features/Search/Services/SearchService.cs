@@ -272,8 +272,19 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var enabledSources = await GetEnabledSourceNamesAsync();
         bool hasConfiguredSources = config.Sources.Count > 0;
 
-        // 门禁检查 1：如果系统没有任何已启用的源，立即短路返回空结果，避免昂贵的 Embedding 计算与检索
-        if (enabledSources.Count == 0)
+        bool hasKbAvailable = false;
+        if (_catalogStore != null)
+        {
+            try
+            {
+                var kbs = await _catalogStore.ListKnowledgeBasesAsync(cancellationToken);
+                hasKbAvailable = kbs.Any(k => k.Enabled);
+            }
+            catch { }
+        }
+
+        // 门禁检查 1：如果系统没有任何已启用的源且无可用知识库，立即短路返回空结果，避免昂贵的 Embedding 计算与检索
+        if (enabledSources.Count == 0 && !hasKbAvailable && (request.KnowledgeBaseIds == null || request.KnowledgeBaseIds.Count == 0))
         {
             sw.Stop();
             var emptyTelemetry = stateMachine.Complete(0);
@@ -287,7 +298,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                 .Where(m => request.Sources.Contains(m, StringComparer.OrdinalIgnoreCase))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            if (enabledSources.Count == 0)
+            if (enabledSources.Count == 0 && !hasKbAvailable && (request.KnowledgeBaseIds == null || request.KnowledgeBaseIds.Count == 0))
             {
                 sw.Stop();
                 var emptyTelemetry = stateMachine.Complete(0);
@@ -408,6 +419,19 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             {
                 topResults.InsertRange(0, newFromTitle);
                 _logger.LogDebug("标题候选合并: +{Count} 条（总候选 {Total}）", newFromTitle.Count, topResults.Count);
+            }
+        }
+
+        // ========== 知识库跨库候选合并 ==========
+        var kbCandidates = await SearchKnowledgeBasesAsync(request, queryVector, useLexical: false, cancellationToken);
+        if (kbCandidates.Count > 0)
+        {
+            var existingIds = topResults.Select(r => r.ChunkId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var newFromKb = kbCandidates.Where(r => existingIds.Add(r.ChunkId)).ToList();
+            if (newFromKb.Count > 0)
+            {
+                topResults.AddRange(newFromKb);
+                _logger.LogDebug("[SearchService] 知识库候选合并: +{Count} 条（总候选 {Total}）", newFromKb.Count, topResults.Count);
             }
         }
 
@@ -578,7 +602,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     private async Task<AIQueryResponse> SearchLexicalAsync(AIQueryRequest request, ObsidianRagConfig config,
         Stopwatch sw, CancellationToken cancellationToken)
     {
-        if (_lexicalFactory == null)
+        if (_lexicalFactory == null && _kbSearchService == null)
             throw new SearchCapabilityException("lexical_disabled", "词法检索尚未启用。");
         var enabled = config.Sources.Where(s => s.Enabled).Select(s => s.Name)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -657,6 +681,19 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                 _logger.LogWarning(ex, "BM25 native store query failed");
             }
         }
+        // 知识库词法结果召回与合并
+        var kbLexicalCandidates = await SearchKnowledgeBasesAsync(request, null, useLexical: true, cancellationToken);
+        if (kbLexicalCandidates.Count > 0)
+        {
+            var existingIds = results.Select(r => r.ChunkId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var newFromKb = kbLexicalCandidates.Where(r => existingIds.Add(r.ChunkId)).ToList();
+            if (newFromKb.Count > 0)
+            {
+                results.AddRange(newFromKb);
+                _logger.LogDebug("[SearchService] 词法检索知识库候选合并: +{Count} 条（总候选 {Total}）", newFromKb.Count, results.Count);
+            }
+        }
+
         var currentSources = _configManager.Load().Sources.Where(s => s.Enabled).ToList();
         var currentEnabled = currentSources.Select(s => s.Name)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -666,7 +703,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             .ToDictionary(g => g.Key, g => (IReadOnlyList<string>)g.Select(s => s.Path).ToArray(), StringComparer.OrdinalIgnoreCase);
         var finalScope = new LexicalSearchScope(currentEnabled, sourceRoots: currentRoots,
             fileAllowed: f => SourceAllowsLexicalFile(currentSources, f));
-        var filtered = results.Where(r => finalScope.Allows(new FileRecord { Source = r.Source, Path = r.FilePath })).ToList();
+        var kbChunkIdSet = kbLexicalCandidates.Select(k => k.ChunkId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var filtered = results.Where(r => kbChunkIdSet.Contains(r.ChunkId) || finalScope.Allows(new FileRecord { Source = r.Source, Path = r.FilePath })).ToList();
         filtered = DppKernelDiversitySelector.Diversify(filtered, c => c.Content, c => c.Score, request.TopK);
         sm.TransitionTo(SearchPipelinePhase.AssemblingResults, results.Count, filtered.Count, "原文与引用装配");
         var telemetry = sm.Complete(filtered.Count);
@@ -682,6 +720,68 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             Stats = new SearchStats { TotalMatches = filtered.Count, DurationMs = sw.ElapsedMilliseconds,
                 EstimatedTokens = TokenEstimator.EstimateTokens(context), PipelineTelemetry = telemetry }
         };
+    }
+
+    private async Task<List<SearchResult>> SearchKnowledgeBasesAsync(
+        AIQueryRequest request,
+        float[]? queryVector,
+        bool useLexical,
+        CancellationToken cancellationToken)
+    {
+        var kbResults = new List<SearchResult>();
+        if (_kbSearchService == null || _catalogStore == null)
+            return kbResults;
+
+        try
+        {
+            List<string> targetKbIds;
+            if (request.KnowledgeBaseIds != null && request.KnowledgeBaseIds.Count > 0)
+            {
+                targetKbIds = request.KnowledgeBaseIds;
+            }
+            else
+            {
+                var allKbs = await _catalogStore.ListKnowledgeBasesAsync(cancellationToken);
+                targetKbIds = allKbs.Where(k => k.Enabled).Select(k => k.Id).ToList();
+            }
+
+            if (targetKbIds.Count == 0)
+                return kbResults;
+
+            var kbResponse = await _kbSearchService.SearchAsync(new CrossKnowledgeBaseSearchRequest(
+                Query: request.Query,
+                TopK: request.TopK,
+                KnowledgeBaseIds: targetKbIds,
+                QueryVector: queryVector,
+                UseLexicalTokenizer: useLexical,
+                FailurePolicy: FailurePolicy.AllowPartial
+            ), cancellationToken);
+
+            if (kbResponse.Items != null && kbResponse.Items.Count > 0)
+            {
+                foreach (var item in kbResponse.Items)
+                {
+                    var title = System.IO.Path.GetFileNameWithoutExtension(item.SourceKey);
+                    kbResults.Add(new SearchResult
+                    {
+                        ChunkId = item.ChunkId,
+                        FileId = item.DocumentId,
+                        FilePath = item.SourceKey,
+                        Source = item.ConnectorId ?? "knowledge-base",
+                        Title = title,
+                        Content = item.Text,
+                        Score = (float)item.Score,
+                        BM25Score = (float)item.Score
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[SearchService] 知识库跨库检索异常: {Message}", ex.Message);
+        }
+
+        return kbResults;
     }
 
     private static bool SourceAllowsLexicalFile(IEnumerable<SourceFolder> sources, FileRecord file)
