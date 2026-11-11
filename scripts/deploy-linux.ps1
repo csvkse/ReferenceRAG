@@ -47,6 +47,8 @@ param(
 
     [switch]$NoHealthCheck,
 
+    [string]$Image = "",
+
     [ValidateSet("None", "Smoke", "Core", "Full")]
     [string]$SyncDataset = "None"
 )
@@ -135,7 +137,7 @@ $deployPort = if ($envMap["DEPLOY_PORT"]) { [int]$envMap["DEPLOY_PORT"] } else {
 $deployUser = if ($envMap["DEPLOY_USER"]) { $envMap["DEPLOY_USER"] } else { "root" }
 $sshKeyContent = $envMap["DEPLOY_SSH_KEY"]
 $containerBaseName = if ($envMap["DEPLOY_CONTAINER_NAME"]) { $envMap["DEPLOY_CONTAINER_NAME"] } else { "referencerag" }
-$dockerImage = if ($envMap["DOCKER_IMAGE"]) { $envMap["DOCKER_IMAGE"] } else { "ghcr.io/csvkse/referencerag:latest" }
+$dockerImage = if ($Image) { $Image } elseif ($envMap["DOCKER_IMAGE"]) { $envMap["DOCKER_IMAGE"] } else { "ghcr.io/csvkse/referencerag:latest" }
 $prodPort = if ($envMap["WEB_PORT"]) { [int]$envMap["WEB_PORT"] } else { 5123 }
 $devPort = if ($envMap["DEV_WEB_PORT"]) { [int]$envMap["DEV_WEB_PORT"] } else { 5124 }
 $remoteWorkdir = if ($envMap["DEPLOY_REMOTE_DIR"]) { $envMap["DEPLOY_REMOTE_DIR"] } else { "/opt/referencerag-dev" }
@@ -580,9 +582,13 @@ docker run -d \
     # Strategy 3: Official Production Pipeline (GHCR Multi-Arch Image Pull)
     # ==========================================================================
     if ($Mode -eq "Official") {
-        Write-Step "1/4 [Pull] Pulling official image ($dockerImage)..."
-        Invoke-RemoteSsh "docker pull $dockerImage"
-        Write-Success "Docker pull finished!"
+        if (-not $Image) {
+            Write-Step "1/4 [Pull] Pulling official image ($dockerImage)..."
+            Invoke-RemoteSsh "docker pull $dockerImage"
+            Write-Success "Docker pull finished!"
+        } else {
+            Write-Step "1/4 [Image] Using local/custom image '$dockerImage' (-Image specified, skipping pull)..."
+        }
 
         Write-Step "2/4 [Deploy] Recreating production container ($effectiveContainer on port $prodPort)..."
         Invoke-RemoteSsh "mkdir -p $remoteModelsDir $remoteSourcesDir"
