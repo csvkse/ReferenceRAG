@@ -339,9 +339,10 @@ public class LexicalAuthorizationTests
         config.Indexing.EmbeddingEnabled = false;
         config.Search.EnableLexical = true;
         var graph = new Mock<IGraphStore>(MockBehavior.Strict);
-        var controller = new GraphController(graph.Object, new Mock<IVectorStore>().Object,
+        var controller = new GraphController(graph.Object,
             new Mock<IGraphIndexingService>().Object,
-            new ConfigManager(config), NullLogger<GraphController>.Instance);
+            new ConfigManager(config), NullLogger<GraphController>.Instance,
+            new Mock<IVectorStore>().Object);
         Assert.IsType<ConflictObjectResult>((await controller.GetNode("note.md")).Result);
         Assert.IsType<ConflictObjectResult>(controller.StartRebuild().Result);
         graph.VerifyNoOtherCalls();

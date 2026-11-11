@@ -1,4 +1,22 @@
+using System.Text.Json.Serialization;
+
 namespace ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+
+/// <summary>
+/// 知识库运行模式分类
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum KnowledgeBaseMode
+{
+    /// <summary>纯词法知识库：未绑定向量模型，0 显存占用，全量 SQLite FTS5 BM25F 倒排索引</summary>
+    PureLexical,
+
+    /// <summary>混合知识库：绑定了向量模型，具备向量余弦检索与 FTS5 倒排混合检索及 Rerank</summary>
+    Hybrid,
+
+    /// <summary>纯向量知识库（预留扩展）</summary>
+    VectorOnly
+}
 
 /// <summary>
 /// 知识库定义实体（保存在全局 Catalog）
@@ -12,12 +30,73 @@ public sealed record KnowledgeBaseDefinition(
     long EffectiveConfigRevision,
     string EmbeddingSpecId,
     DateTime CreatedAt,
-    DateTime UpdatedAt);
+    DateTime UpdatedAt,
+    string ChunkingSpecId = "spec_chunk_default")
+{
+    [JsonIgnore]
+    public bool IsPureLexical => string.Equals(EmbeddingSpecId, "spec_lexical_only", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(EmbeddingSpecId);
+
+    public KnowledgeBaseMode Mode => IsPureLexical ? KnowledgeBaseMode.PureLexical : KnowledgeBaseMode.Hybrid;
+}
+
+/// <summary>
+/// 分段配置规范契约（不可变 ChunkingSpec，支持按知识库独立配置与自适应策略）
+/// </summary>
+public sealed record ChunkingSpec(
+    string Id,
+    string Mode = "Adaptive",
+    string StrategyType = "Balanced",
+    string AdaptiveLevel = "Level2",
+    int MaxTokens = 512,
+    int MinTokens = 50,
+    int OverlapTokens = 50,
+    int TargetWindowUtilizationPercent = 70,
+    bool PreserveCodeBlocks = true,
+    bool PreserveTables = true,
+    bool PreserveHeadings = true);
+
+/// <summary>
+/// 知识库配置偏离状态
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum DriftStatus
+{
+    Aligned,
+    Drifted,
+    Customized
+}
+
+/// <summary>
+/// 知识库配置偏离与升级诊断报告
+/// </summary>
+public sealed record ConfigDriftResult(
+    string KnowledgeBaseId,
+    DriftStatus Status,
+    string? CurrentEmbeddingModel,
+    string? GlobalDefaultEmbeddingModel,
+    string? CurrentChunkingStrategy,
+    string? GlobalChunkingStrategy,
+    bool CanUpgrade,
+    string? UpgradeRecommendation = null);
+
+/// <summary>
+/// 连接器目标物理路径探测状态
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ConnectorReachabilityState
+{
+    Reachable,
+    Unreachable,
+    AccessDenied,
+    Unknown
+}
 
 /// <summary>
 /// 连接器定义实体（保存在全局 Catalog）
 /// </summary>
-public sealed record ConnectorDefinition(
+[JsonDerivedType(typeof(ConnectorDefinition))]
+[JsonDerivedType(typeof(ConnectorDetailDto))]
+public record ConnectorDefinition(
     string Id,
     string KnowledgeBaseId,
     string Kind,
@@ -27,6 +106,25 @@ public sealed record ConnectorDefinition(
     bool Enabled,
     DateTime CreatedAt,
     DateTime UpdatedAt);
+
+/// <summary>
+/// 连接器综合详情（含物理切片统计与可达性及诊断）
+/// </summary>
+public sealed record ConnectorDetailDto(
+    string Id,
+    string KnowledgeBaseId,
+    string Kind,
+    string TargetPath,
+    string? FilePattern,
+    long ConfigRevision,
+    bool Enabled,
+    DateTime CreatedAt,
+    DateTime UpdatedAt,
+    int DocumentCount,
+    int ChunkCount,
+    bool IsReachable,
+    ConnectorReachabilityState Reachability = ConnectorReachabilityState.Reachable,
+    string? DiagnosticMessage = null) : ConnectorDefinition(Id, KnowledgeBaseId, Kind, TargetPath, FilePattern, ConfigRevision, Enabled, CreatedAt, UpdatedAt);
 
 /// <summary>
 /// 知识库词法统计指标
@@ -44,7 +142,7 @@ public sealed record EmbeddingSpec(
     string Id,
     string ModelName,
     int Dimension,
-    string Metric,
+    string Metric = "cosine",
     string? QueryPrefix = null,
     string? DocumentPrefix = null,
     int MaxTokens = 512,
@@ -81,7 +179,10 @@ public sealed record ChunkData(
     int Ordinal,
     string Text,
     int TokenCount,
-    string? EmbeddingText = null);
+    string? EmbeddingText = null,
+    int StartLine = 0,
+    int EndLine = 0,
+    string? HeadingPath = null);
 
 /// <summary>
 /// 事务性提交文档批次
@@ -118,7 +219,9 @@ public sealed record RecallRequest(
     IReadOnlyDictionary<string, string>? MetadataFilters = null,
     float[]? QueryVector = null,
     string? ConnectorId = null,
-    bool UseLexicalTokenizer = false)
+    bool UseLexicalTokenizer = false,
+    bool AllowDegrade = false,
+    IReadOnlyList<string>? Folders = null)
 {
     /// <summary>Trusted server-side document filter, evaluated before candidate limits.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
@@ -137,7 +240,10 @@ public sealed record RecallItem(
     ScoreKind ScoreKind,
     long DocumentVersion,
     string? ConnectorId = null,
-    [property: System.Text.Json.Serialization.JsonIgnore] string? Locator = null);
+    string? Locator = null,
+    int StartLine = 0,
+    int EndLine = 0,
+    string? HeadingPath = null);
 
 /// <summary>
 /// 某库检索返回的快照
@@ -149,7 +255,8 @@ public sealed record RecallSnapshot(
     long VectorGeneration,
     IReadOnlyList<RecallItem> Items,
     bool Degraded = false,
-    string? DegradationReason = null);
+    string? DegradationReason = null,
+    bool EarlyPruned = false);
 
 /// <summary>
 /// 知识库索引 Manifest（保存在 kb.db 内部）
@@ -260,7 +367,10 @@ public sealed record KnowledgeBaseChunkRecord(
     string? EmbeddingText,
     bool HasVector,
     bool Enabled,
-    string? DocumentSourceKey);
+    string? DocumentSourceKey,
+    int StartLine = 0,
+    int EndLine = 0,
+    string? HeadingPath = null);
 
 /// <summary>
 /// 知识库更新请求
@@ -269,7 +379,35 @@ public sealed record UpdateKnowledgeBaseRequest(
     string? Name = null,
     string? Description = null,
     bool? Enabled = null,
-    string? EmbeddingSpecId = null);
+    string? EmbeddingSpecId = null,
+    string? ChunkingSpecId = null);
+
+/// <summary>
+/// 知识库模型蓝绿影子重构索引结果
+/// </summary>
+public sealed record ModelReindexResult(
+    string KnowledgeBaseId,
+    string TargetEmbeddingSpecId,
+    int ProcessedChunks,
+    bool Success,
+    string Message);
+
+/// <summary>
+/// 知识库重新分段请求
+/// </summary>
+public sealed record RechunkKnowledgeBaseRequest(
+    string? TargetChunkingSpecId = null);
+
+/// <summary>
+/// 知识库重新分段与索引结果
+/// </summary>
+public sealed record RechunkResult(
+    string KnowledgeBaseId,
+    string TargetChunkingSpecId,
+    int ProcessedDocuments,
+    int ProcessedChunks,
+    bool Success,
+    string Message);
 
 /// <summary>
 /// 连接器更新请求

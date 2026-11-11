@@ -428,9 +428,13 @@ public class ConfigManager
                 });
             }
 
-            if (config.Chat != null && (string.IsNullOrEmpty(config.Chat.OpenAiApi?.ApiKey) ||
-                                       config.Chat.OpenAiApi.ApiKey.StartsWith("sk-mock", StringComparison.OrdinalIgnoreCase) ||
-                                       config.Chat.ActiveModelUrn?.Contains("prov_13882dbaa", StringComparison.OrdinalIgnoreCase) == true))
+            if (config.Chat != null &&
+                !string.Equals(config.Chat.ActiveBackend, "LocalGguf", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(config.Chat.ActiveBackend, "LocalOnnxGenAi", StringComparison.OrdinalIgnoreCase) &&
+                config.Chat.ActiveModelUrn?.StartsWith("local:", StringComparison.OrdinalIgnoreCase) != true &&
+                (string.IsNullOrEmpty(config.Chat.OpenAiApi?.ApiKey) ||
+                 config.Chat.OpenAiApi.ApiKey.StartsWith("sk-mock", StringComparison.OrdinalIgnoreCase) ||
+                 config.Chat.ActiveModelUrn?.Contains("prov_13882dbaa", StringComparison.OrdinalIgnoreCase) == true))
             {
                 config.Chat.ActiveModelUrn = "provider:prov_sf:deepseek-ai/DeepSeek-V3";
                 config.Chat.ActiveBackend = "OpenAiApi";

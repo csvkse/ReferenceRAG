@@ -72,6 +72,7 @@ public class ChatToolCallingE2EAcceptanceTests
             });
 
         var config = new ObsidianRagConfig();
+        config.Chat.ActiveModelUrn = "local:qwen3.5-0.8b";
         config.Chat.ActiveBackend = "LocalGguf";
         config.Chat.LocalGguf.ModelName = "Qwen3.5-0.8B-Instruct-GGUF";
         config.Chat.LocalGguf.ModelPath = @"C:\models\dummy-qwen3.5-0.8b.gguf";

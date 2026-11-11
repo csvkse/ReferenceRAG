@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
+using ReferenceRAG.Business.Features.KnowledgeBase.Services;
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -18,19 +20,25 @@ public class SourcesController : ControllerBase
     private readonly IFileIndexPipeline _pipeline;
     private readonly IFileMonitorService _fileMonitor;
     private readonly ILogger<SourcesController> _logger;
+    private readonly ICatalogStore? _catalogStore;
+    private readonly IKnowledgeBaseService? _kbService;
 
     public SourcesController(
         ConfigManager configManager,
         IVectorStore vectorStore,
         IFileIndexPipeline pipeline,
         IFileMonitorService fileMonitor,
-        ILogger<SourcesController> logger)
+        ILogger<SourcesController> logger,
+        ICatalogStore? catalogStore = null,
+        IKnowledgeBaseService? kbService = null)
     {
         _configManager = configManager;
         _vectorStore = vectorStore;
         _pipeline = pipeline;
         _fileMonitor = fileMonitor;
         _logger = logger;
+        _catalogStore = catalogStore;
+        _kbService = kbService;
     }
 
     /// <summary>
@@ -59,6 +67,39 @@ public class SourcesController : ControllerBase
             };
         }).ToList();
 
+        if (_catalogStore != null)
+        {
+            try
+            {
+                var kbs = await _catalogStore.ListKnowledgeBasesAsync();
+                foreach (var kb in kbs)
+                {
+                    var connectors = await _catalogStore.GetConnectorsByKnowledgeBaseAsync(kb.Id);
+                    foreach (var conn in connectors)
+                    {
+                        if (!sources.Any(s => s.Path.Equals(conn.TargetPath, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            sources.Add(new SourceDetail
+                            {
+                                Name = $"{kb.Name} - {Path.GetFileName(conn.TargetPath)}",
+                                Path = conn.TargetPath,
+                                Type = "KnowledgeBaseConnector",
+                                Enabled = conn.Enabled,
+                                FilePatterns = string.IsNullOrEmpty(conn.FilePattern) ? new List<string> { "*.md", "*.txt" } : conn.FilePattern.Split(';').ToList(),
+                                FileCount = 0,
+                                ChunkCount = 0,
+                                LastIndexed = conn.UpdatedAt
+                            });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[SourcesController] 从 CatalogStore 获取连接器列表异常");
+            }
+        }
+
         return Ok(sources);
     }
 
@@ -69,8 +110,34 @@ public class SourcesController : ControllerBase
     /// 返回所有已配置的源及其包含的文件夹路径列表
     /// </remarks>
     [HttpGet("~/api/paths")]
-    public async Task<ActionResult<PathsResponse>> GetPaths([FromQuery] bool enabledOnly = true)
+    public async Task<ActionResult<PathsResponse>> GetPaths(
+        [FromQuery] bool enabledOnly = true,
+        [FromQuery] string? kbId = null,
+        [FromQuery] string? kbIds = null)
     {
+        if (_kbService != null)
+        {
+            var requestedKbIds = new List<string>();
+            if (!string.IsNullOrWhiteSpace(kbId)) requestedKbIds.Add(kbId);
+            if (!string.IsNullOrWhiteSpace(kbIds))
+            {
+                requestedKbIds.AddRange(kbIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            }
+
+            if (requestedKbIds.Count > 0)
+            {
+                var kbPaths = await _kbService.GetPathsAsync(requestedKbIds);
+                return Ok(kbPaths);
+            }
+
+            var allKbs = await _kbService.ListKnowledgeBasesAsync();
+            if (allKbs.Any(k => k.Enabled))
+            {
+                var allKbPaths = await _kbService.GetPathsAsync(Array.Empty<string>());
+                return Ok(allKbPaths);
+            }
+        }
+
         var config = _configManager.Load();
         var files = await _vectorStore.GetAllFilesAsync();
         var fileList = files.ToList();
@@ -232,6 +299,38 @@ public class SourcesController : ControllerBase
             _configManager.AddSource(source);
             if (source.Enabled)
                 _fileMonitor.AddSource(source.Path, source.Name, source.FilePatterns);
+
+            if (_catalogStore != null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var kbs = await _catalogStore.ListKnowledgeBasesAsync();
+                        var targetKb = kbs.FirstOrDefault(k => k.Enabled) ?? kbs.FirstOrDefault();
+                        if (targetKb != null)
+                        {
+                            var connector = new ReferenceRAG.Core.Features.KnowledgeBase.Domain.ConnectorDefinition(
+                                Id: Guid.NewGuid().ToString("N")[..16],
+                                KnowledgeBaseId: targetKb.Id,
+                                Kind: "LocalFolder",
+                                TargetPath: source.Path,
+                                FilePattern: string.Join(";", source.FilePatterns),
+                                ConfigRevision: 1,
+                                Enabled: source.Enabled,
+                                CreatedAt: DateTime.UtcNow,
+                                UpdatedAt: DateTime.UtcNow
+                            );
+                            await _catalogStore.SaveConnectorAsync(connector);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[SourcesController] 同步创建知识库连接器异常");
+                    }
+                });
+            }
+
             _logger.LogInformation("已添加源: {Name} ({Path})", source.Name, source.Path);
             return CreatedAtAction(nameof(Get), new { name = source.Name }, source);
         }
@@ -709,39 +808,6 @@ public class FileItem
     public long Size { get; set; }
     public DateTime Modified { get; set; }
 }
-
-/// <summary>
-/// 路径查询响应
-/// </summary>
-public class PathsResponse
-{
-    /// <summary>
-    /// 源列表
-    /// </summary>
-    public List<SourcePathInfo> Sources { get; set; } = new();
-}
-
-/// <summary>
-/// 源路径信息
-/// </summary>
-public class SourcePathInfo
-{
-    /// <summary>
-    /// 源名称
-    /// </summary>
-    public string Name { get; set; } = "";
-
-    /// <summary>
-    /// 源根路径
-    /// </summary>
-    public string RootPath { get; set; } = "";
-
-    /// <summary>
-    /// 该源下的文件夹路径列表
-    /// </summary>
-    public List<string> Folders { get; set; } = new();
-}
-
 
 /// <summary>
 /// 文件分段项

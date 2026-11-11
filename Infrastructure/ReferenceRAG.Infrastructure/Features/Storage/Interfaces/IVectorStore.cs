@@ -285,4 +285,9 @@ public class SearchResult
     /// 重排分数（启用重排时有效）
     /// </summary>
     public double? RerankScore { get; set; }
+
+    /// <summary>
+    /// 统一资源定位标识（如 file:///... 或 manual://...）
+    /// </summary>
+    public string? Locator { get; set; }
 }

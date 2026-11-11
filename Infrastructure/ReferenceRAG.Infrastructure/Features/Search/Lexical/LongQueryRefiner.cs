@@ -43,10 +43,17 @@ public sealed class LongQueryRefiner
         // 1. 提取领域音近错字与泛化同义词
         var phoneticExpansions = PhoneticQueryExpander.GetExpansionTerms(rawQuery);
 
-        // 2. 词性标注与信息熵分析
+        // 2. 词性标注与信息熵分析 (保留原句时序)
         var weightedTokens = _posAdapter.AnalyzeAndWeight(rawQuery);
 
-        // 3. 提取高权重词项 (名词与动作)
+        // 3. 提取原句自然顺序的高权重词元序列 (用于短语滑动窗口)
+        var orderedWords = weightedTokens
+            .Where(t => t.Weight >= 1.2 && t.Word.Length >= 2)
+            .Select(t => t.Word)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // 提取按信息熵加权降序排序的高权重词项 (用于 Tier 2 加权检索与 PRF 反馈)
         var highEntropyTerms = weightedTokens
             .OrderByDescending(t => t.Weight)
             .Select(t => t.Word)
@@ -55,24 +62,48 @@ public sealed class LongQueryRefiner
             .Take(12)
             .ToList();
 
-        // 4. 构建 Tier 1: 物理短语邻近度约束 (NEAR & AND)
+        // 4. 构建 Tier 1: 物理短语邻近度与复合约束 (保持原句自然时序，消除权重倒置)
         string? tier1NearQuery = null;
-        if (highEntropyTerms.Count >= 2)
+        if (orderedWords.Count >= 2)
         {
-            var nearClauses = new List<string>();
+            var adjacentBiGrams = new List<string>();
 
-            // 对最高权重的 2~4 个实体短语，构造两两邻近约束 NEAR("w1" "w2", 20)
-            var coreNouns = highEntropyTerms.Take(4).ToList();
-            for (int i = 0; i < coreNouns.Count - 1; i++)
+            // 4.1 提取原句相邻紧邻词偶 (Slop <= 5)
+            for (int i = 0; i < orderedWords.Count - 1; i++)
             {
-                var w1 = EscapeFts(coreNouns[i]);
-                var w2 = EscapeFts(coreNouns[i + 1]);
-                nearClauses.Add($"NEAR(\"{w1}\" \"{w2}\", 25)");
+                var w1 = EscapeFts(orderedWords[i]);
+                var w2 = EscapeFts(orderedWords[i + 1]);
+                adjacentBiGrams.Add($"NEAR(\"{w1}\" \"{w2}\", 5)");
             }
 
-            if (nearClauses.Count > 0)
+            // 4.2 提取首尾跨距实体词对 (Slop <= 25)
+            var spanClauses = new List<string>();
+            if (orderedWords.Count >= 3)
             {
-                tier1NearQuery = string.Join(" OR ", nearClauses);
+                var wFirst = EscapeFts(orderedWords[0]);
+                var wMid = EscapeFts(orderedWords[Math.Min(2, orderedWords.Count - 1)]);
+                spanClauses.Add($"NEAR(\"{wFirst}\" \"{wMid}\", 20)");
+            }
+            if (orderedWords.Count >= 4)
+            {
+                var wFirst = EscapeFts(orderedWords[0]);
+                var wLast = EscapeFts(orderedWords[^1]);
+                spanClauses.Add($"NEAR(\"{wFirst}\" \"{wLast}\", 30)");
+            }
+
+            // 4.3 构造强复合检索表达式：多词偶 AND 优选，两两词偶 OR 兜底
+            var tier1Parts = new List<string>();
+            if (adjacentBiGrams.Count >= 2)
+            {
+                // 组合前两个相邻短语形成联合约束，如 (NEAR("未婚" "夫妻", 5) AND NEAR("公主" "闺房", 5))
+                tier1Parts.Add($"({adjacentBiGrams[0]} AND {adjacentBiGrams[1]})");
+            }
+            tier1Parts.AddRange(adjacentBiGrams);
+            tier1Parts.AddRange(spanClauses);
+
+            if (tier1Parts.Count > 0)
+            {
+                tier1NearQuery = string.Join(" OR ", tier1Parts.Distinct());
             }
         }
 
@@ -85,7 +116,7 @@ public sealed class LongQueryRefiner
             .Where(t => t.Length >= 2)
             .Concat(phoneticExpansions)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(32);
+            .Take(64);
         var tier3FallbackQuery = string.Join(" OR ", allTokens.Select(t => $"\"{EscapeFts(t)}\""));
 
         if (string.IsNullOrWhiteSpace(tier3FallbackQuery))

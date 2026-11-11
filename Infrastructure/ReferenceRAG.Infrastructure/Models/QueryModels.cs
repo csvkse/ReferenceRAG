@@ -79,6 +79,31 @@ public class AIQueryRequest
     /// 适合 Agent 直接使用 context 字段时使用。
     /// </summary>
     public bool Slim { get; set; } = false;
+
+    /// <summary>
+    /// 上下文与 Prompt 格式化策略（Standard / Obsidian / StructuredXml / Compact）
+    /// </summary>
+    public ContextFormat ContextFormat { get; set; } = ContextFormat.Standard;
+
+    /// <summary>
+    /// 是否在装配上下文时自动合并同文件的连续相邻分块（默认启用）
+    /// </summary>
+    public bool MergeAdjacentChunks { get; set; } = true;
+}
+
+/// <summary>
+/// 上下文格式化策略枚举
+/// </summary>
+public enum ContextFormat
+{
+    /// <summary>标准 Markdown：包含编号、文件名、路径、行号与章节元数据，兼顾人类与 LLM 阅读</summary>
+    Standard = 0,
+    /// <summary>Obsidian 增强：侧重双链与笔记跳转，格式友好</summary>
+    Obsidian = 1,
+    /// <summary>结构化 XML：专为 Agent 规划与严格工具抽取定制</summary>
+    StructuredXml = 2,
+    /// <summary>紧凑极简：去除冗余标签，适用于窄上下文预算</summary>
+    Compact = 3
 }
 
 /// <summary>
@@ -160,6 +185,18 @@ public class ChunkResult
     public string ObsidianLink { get; set; } = string.Empty;
 
     /// <summary>
+    /// 统一资源定位标识（如 file:///... 或 manual://...）
+    /// </summary>
+    public string? Locator { get; set; }
+
+    /// <summary>
+    /// 行号区间简写（如 L10-L45 或 L10），若无有效行号则为 null
+    /// </summary>
+    public string? LineRange => (StartLine > 0 && EndLine >= StartLine)
+        ? (StartLine == EndLine ? $"L{StartLine}" : $"L{StartLine}-L{EndLine}")
+        : null;
+
+    /// <summary>
     /// BM25 分数（混合搜索模式有效）
     /// </summary>
     public float? BM25Score { get; set; }
@@ -200,6 +237,7 @@ public class SearchStats
     public SearchPipelineTelemetry? PipelineTelemetry { get; set; }
     public bool IsDegraded { get; set; } = false;
     public string? DegradeReason { get; set; }
+    public bool IsEarlyPruned { get; set; } = false;
 }
 
 /// <summary>
@@ -341,3 +379,36 @@ public class DrillDownResponse
     public List<ChunkResult> ExpandedChunks { get; set; } = new();
     public string FullContext { get; set; } = string.Empty;
 }
+
+/// <summary>
+/// 路径查询响应
+/// </summary>
+public class PathsResponse
+{
+    /// <summary>
+    /// 源列表
+    /// </summary>
+    public List<SourcePathInfo> Sources { get; set; } = new();
+}
+
+/// <summary>
+/// 源路径信息
+/// </summary>
+public class SourcePathInfo
+{
+    /// <summary>
+    /// 源名称
+    /// </summary>
+    public string Name { get; set; } = "";
+
+    /// <summary>
+    /// 源根路径
+    /// </summary>
+    public string RootPath { get; set; } = "";
+
+    /// <summary>
+    /// 该源下的文件夹路径列表
+    /// </summary>
+    public List<string> Folders { get; set; } = new();
+}
+

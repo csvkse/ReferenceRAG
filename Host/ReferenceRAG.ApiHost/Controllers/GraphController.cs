@@ -17,7 +17,7 @@ namespace ReferenceRAG.Service.Controllers;
 public class GraphController : ControllerBase
 {
     private readonly IGraphStore _graphStore;
-    private readonly IVectorStore _vectorStore;
+    private readonly IVectorStore? _vectorStore;
     private readonly IGraphIndexingService _graphIndexingService;
     private readonly ConfigManager _configManager;
     private readonly ILogger<GraphController> _logger;
@@ -34,16 +34,16 @@ public class GraphController : ControllerBase
 
     public GraphController(
         IGraphStore graphStore,
-        IVectorStore vectorStore,
         IGraphIndexingService graphIndexingService,
         ConfigManager configManager,
         ILogger<GraphController> logger,
+        IVectorStore? vectorStore = null,
         IServiceProvider? serviceProvider = null,
         IKnowledgeBaseStorageManager? kbStorageManager = null,
         ICatalogStore? catalogStore = null)
     {
         _graphStore = graphStore;
-        _vectorStore = vectorStore;
+        _vectorStore = vectorStore ?? serviceProvider?.GetService<IVectorStore>();
         _graphIndexingService = graphIndexingService;
         _configManager = configManager;
         _logger = logger;
@@ -198,9 +198,9 @@ public class GraphController : ControllerBase
                 }
 
                 // 回退到旧全局重建
-                if (LegacyGraphUnavailable())
+                if (_vectorStore == null || LegacyGraphUnavailable())
                 {
-                    _logger.LogWarning("图谱重建被中止：图谱处于不可用状态或已过期");
+                    _logger.LogWarning("图谱重建被中止：未配置旧存储或图谱处于不可用状态");
                     return;
                 }
 

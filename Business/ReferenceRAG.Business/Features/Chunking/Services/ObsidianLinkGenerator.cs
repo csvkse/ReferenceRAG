@@ -20,17 +20,7 @@ public class ObsidianLinkGenerator
     /// </summary>
     public string GenerateLink(string filePath, int startLine, int endLine, string? text = null)
     {
-        var fileName = Path.GetFileNameWithoutExtension(filePath);
-        var link = startLine == endLine
-            ? $"[[{fileName}#L{startLine}]]"
-            : $"[[{fileName}#L{startLine}-L{endLine}]]";
-
-        if (!string.IsNullOrEmpty(text))
-        {
-            link = $"[[{fileName}#L{startLine}-L{endLine}|{text}]]";
-        }
-
-        return link;
+        return ReferenceRAG.Infrastructure.Features.Search.Adapters.SearchResultAdapter.FormatObsidianLink(filePath, startLine, endLine, text);
     }
 
     /// <summary>

@@ -9,6 +9,9 @@ using ReferenceRAG.Core.Services;
 
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Business.Features.KnowledgeBase.Services;
+using ReferenceRAG.Business.Features.Search.Cognitive;
+using ReferenceRAG.Business.Features.Search.Adapters;
+using ReferenceRAG.Infrastructure.Features.Cognitive;
 
 namespace ReferenceRAG.Core.Extensions;
 
@@ -24,6 +27,36 @@ public static class SearchExtensions
         services.AddSingleton<AlertService>();
 
         services.AddSingleton<ReferenceRAG.Infrastructure.Features.Resilience.ResilienceCircuitBreaker>();
+
+        services.AddSingleton<ICognitiveEvidenceEvaluatorFactory>(sp =>
+        {
+            var loggerFactory = sp.GetService<ILoggerFactory>();
+            return new CognitiveEvidenceEvaluatorFactory(
+                rerankAdapterFactory: () => sp.GetService<IRerankExecutionAdapter>()
+                    ?? new RerankExecutionAdapter(sp.GetService<IRerankService>(), sp.GetService<IModelTelemetryService>()),
+                jevClientFactory: () =>
+                {
+                    var existing = sp.GetService<ReferenceRAG.Infrastructure.Features.Cognitive.ISystemOneClient>();
+                    if (existing != null) return existing;
+                    var cfgMgr = sp.GetService<ConfigManager>();
+                    var config = cfgMgr?.Load();
+                    if (config?.SystemOne != null && !string.IsNullOrWhiteSpace(config.SystemOne.ApiKey))
+                    {
+                        var proxy = ReferenceRAG.Infrastructure.Features.Network.DynamicWebProxyAdapter.ResolveProxy(
+                            config,
+                            config.SystemOne.ProxyPolicy,
+                            config.SystemOne.CustomProxyUrl);
+                        return new ReferenceRAG.Infrastructure.Features.Cognitive.JevSystemOneClient(
+                            apiKey: config.SystemOne.ApiKey,
+                            baseUrl: config.SystemOne.BaseUrl,
+                            model: config.SystemOne.Model,
+                            timeoutSeconds: config.SystemOne.TimeoutMs > 0 ? (int)Math.Ceiling(config.SystemOne.TimeoutMs / 1000.0) : 15,
+                            proxy: proxy);
+                    }
+                    return null;
+                },
+                loggerFactory: loggerFactory);
+        });
 
         var options = hybridOptions ?? new HybridSearchOptions();
         services.AddSingleton<IHybridSearchService>(sp =>
@@ -42,7 +75,11 @@ public static class SearchExtensions
             new SearchStrategyFactory(
                 sp.GetService<IHybridSearchService>(),
                 () => sp.GetRequiredService<IBM25Store>(),
-                sp.GetService<ReferenceRAG.Infrastructure.Features.Resilience.ResilienceCircuitBreaker>()));
+                sp.GetService<ReferenceRAG.Infrastructure.Features.Resilience.ResilienceCircuitBreaker>(),
+                sp.GetService<IKnowledgeBaseSearchService>(),
+                sp.GetService<ICatalogStore>(),
+                sp.GetService<ICognitiveEvidenceEvaluatorFactory>(),
+                sp.GetService<ConfigManager>()));
 
         services.AddScoped<ISearchService>(sp => new SearchService(
             sp.GetRequiredService<IVectorStore>(),
@@ -59,7 +96,8 @@ public static class SearchExtensions
                 Path.Combine(sp.GetRequiredService<ConfigManager>().Load().DataPath ?? "data", "vectors.db")),
             () => sp.GetRequiredService<IBM25Store>(),
             sp.GetService<IKnowledgeBaseSearchService>(),
-            sp.GetService<ICatalogStore>()));
+            sp.GetService<ICatalogStore>(),
+            sp.GetService<ICognitiveEvidenceEvaluatorFactory>()));
 
         return services;
     }

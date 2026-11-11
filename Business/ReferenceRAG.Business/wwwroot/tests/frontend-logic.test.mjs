@@ -17,10 +17,21 @@ test('Cross-knowledge-base search preserves selected scope and lexical mode', ()
     assert.deepEqual(knowledgeBaseRequest('needle', ['allowed'], 5, 'Lexical'), {
         query: 'needle', knowledgeBaseIds: ['allowed'], topK: 5, useLexicalTokenizer: true
     });
-    const mapped = knowledgeBaseResponse({ items: [{ chunkId: 'c', documentId: 'd', sourceKey: 'a.md', text: 'text', score: 0.1 }], elapsed: '00:00:00.1' }, 'Lexical');
+    const mapped = knowledgeBaseResponse({ items: [{ chunkId: 'c', documentId: 'd', sourceKey: 'a.md', text: 'text', score: 12.34, scoreKind: 'BM25' }], elapsed: '00:00:00.004', earlyPruned: true }, 'Lexical');
     assert.equal(mapped.chunks[0].refId, 'c');
     assert.equal(mapped.chunks[0].content, 'text');
+    assert.equal(mapped.chunks[0].scoreKind, 'BM25');
     assert.equal(mapped.knowledgeBase, true);
+    assert.equal(mapped.stats.isEarlyPruned, true);
+    assert.equal(mapped.stats.durationMs, 4);
+});
+
+test('Search.js template includes early pruning badge and scoreKind rendering', async () => {
+    const fs = await import('node:fs');
+    const source = fs.readFileSync(new URL('../app/views/Search.js', import.meta.url), 'utf8');
+    assert.match(source, /⚡ 级联极速早停 \(跳过向量推理\)/);
+    assert.match(source, /getScoreKindBadge\(chunk\.scoreKind\)/);
+    assert.match(source, /formatScore\(chunk\)/);
 });
 
 test('Desktop readiness waits for DOM commit and uses the native Post envelope', async () => {
@@ -1059,6 +1070,110 @@ test('Flex scroll container rules guardrail: checkFlexScrollContainerRules detec
     const apiKeysSrc = fs.readFileSync(apiKeysFile, 'utf8');
     assert.equal(checkFlexScrollContainerRules(apiKeysSrc, 'ApiKeys.js').length, 0, 'ApiKeys.js must have zero flex scroll shrink hazards');
 });
+
+test('Settings.js and KnowledgeBases.js SystemOne, resilience, and connector purge guardrail', async () => {
+    const fs = await import('node:fs');
+    const settingsFile = new URL('../app/views/Settings.js', import.meta.url);
+    const settingsSrc = fs.readFileSync(settingsFile, 'utf8');
+
+    // 1. Settings.js System One & Resilience validations
+    assert.ok(settingsSrc.includes('systemOne'), 'Settings.js must include systemOne configuration');
+    assert.ok(settingsSrc.includes('handleTestSystemOne'), 'Settings.js must export handleTestSystemOne');
+    assert.ok(settingsSrc.includes('enableAutomaticFallback'), 'Settings.js must include search fallback switch');
+    assert.ok(settingsSrc.includes('enableDppDiversity'), 'Settings.js must include DPP diversity switch');
+    assert.ok(settingsSrc.includes('enableStatisticalPrf'), 'Settings.js must include statistical PRF switch');
+
+    // 2. KnowledgeBases.js Connector Purge & Document CRUD validations
+    const kbFile = new URL('../app/views/KnowledgeBases.js', import.meta.url);
+    const kbSrc = fs.readFileSync(kbFile, 'utf8');
+    assert.ok(kbSrc.includes('cascade'), 'KnowledgeBases.js must support cascade connector purge');
+    assert.ok(kbSrc.includes('conn.documentCount'), 'KnowledgeBases.js must render connector document count');
+    assert.ok(kbSrc.includes('conn.chunkCount'), 'KnowledgeBases.js must render connector chunk count');
+    assert.ok(kbSrc.includes('conn.isReachable'), 'KnowledgeBases.js must render connector reachability');
+    assert.ok(kbSrc.includes('getReachabilityTagType'), 'KnowledgeBases.js must include 3-state reachability tag helper');
+    assert.ok(kbSrc.includes('getReachabilityText'), 'KnowledgeBases.js must include 3-state reachability text helper');
+    assert.ok(kbSrc.includes('diagnosticMessage'), 'KnowledgeBases.js must include diagnosticMessage tooltip');
+    assert.ok(kbSrc.includes('showAddDocModal'), 'KnowledgeBases.js must include manual document modal');
+    assert.ok(kbSrc.includes('handleAddDoc'), 'KnowledgeBases.js must include handleAddDoc implementation');
+});
+
+test('KnowledgeBases.js and api/index.js: independent model switching, chunking specs, drift detection, and line ranges guardrail', async () => {
+    const fs = await import('node:fs');
+    
+    // 1. 验证 api/index.js 中的 API 契约
+    const apiFile = new URL('../app/api/index.js', import.meta.url);
+    const apiSrc = fs.readFileSync(apiFile, 'utf8');
+    assert.ok(apiSrc.includes('reindex:'), 'api/index.js must export reindex API');
+    assert.ok(apiSrc.includes('rechunk:'), 'api/index.js must export rechunk API');
+    assert.ok(apiSrc.includes('checkDrift:'), 'api/index.js must export checkDrift API');
+    assert.ok(apiSrc.includes('getChunkingSpecs:'), 'api/index.js must export getChunkingSpecs API');
+    assert.ok(apiSrc.includes('createChunkingSpec:'), 'api/index.js must export createChunkingSpec API');
+
+    // 2. 验证 KnowledgeBases.js 中的响应式状态、交互弹窗与契约字段
+    const kbFile = new URL('../app/views/KnowledgeBases.js', import.meta.url);
+    const kbSrc = fs.readFileSync(kbFile, 'utf8');
+    assert.ok(kbSrc.includes('showSwitchModelModal'), 'KnowledgeBases.js must include switch model modal state');
+    assert.ok(kbSrc.includes('handleTriggerReindex'), 'KnowledgeBases.js must implement handleTriggerReindex');
+    assert.ok(kbSrc.includes('openSwitchModelModal'), 'KnowledgeBases.js must implement openSwitchModelModal');
+    assert.ok(kbSrc.includes('showRechunkModal'), 'KnowledgeBases.js must include showRechunkModal');
+    assert.ok(kbSrc.includes('openRechunkModal'), 'KnowledgeBases.js must implement openRechunkModal');
+    assert.ok(kbSrc.includes('handleTriggerRechunk'), 'KnowledgeBases.js must implement handleTriggerRechunk');
+    assert.ok(kbSrc.includes('chunkingSpecOptions'), 'KnowledgeBases.js must compute chunkingSpecOptions');
+    assert.ok(kbSrc.includes('driftMap'), 'KnowledgeBases.js must track driftMap state');
+    assert.ok(kbSrc.includes('chk.startLine'), 'KnowledgeBases.js must display chk.startLine in chunk cards');
+    assert.ok(kbSrc.includes('chk.headingPath'), 'KnowledgeBases.js must display chk.headingPath in chunk cards');
+});
+
+test('KnowledgeBases.js and api/index.js: pure lexical mode, unbind model, and model-free chunking options', async () => {
+    const fs = await import('node:fs');
+    
+    // 1. 验证 api/index.js 中的 unbindModel API
+    const apiFile = new URL('../app/api/index.js', import.meta.url);
+    const apiSrc = fs.readFileSync(apiFile, 'utf8');
+    assert.ok(apiSrc.includes('unbindModel:'), 'api/index.js must export unbindModel API');
+
+    // 2. 验证 KnowledgeBases.js 纯词法检索模式逻辑
+    const kbFile = new URL('../app/views/KnowledgeBases.js', import.meta.url);
+    const kbSrc = fs.readFileSync(kbFile, 'utf8');
+    assert.ok(kbSrc.includes("createForm.value.bindingMode === 'lexical'"), 'KnowledgeBases.js must support lexical binding mode');
+    assert.ok(kbSrc.includes("spec_lexical_only"), 'KnowledgeBases.js must reference spec_lexical_only');
+    assert.ok(kbSrc.includes("spec_chunk_lexical_paragraph"), 'KnowledgeBases.js must reference spec_chunk_lexical_paragraph');
+    assert.ok(kbSrc.includes("纯词法 (FTS5 BM25)"), 'KnowledgeBases.js must render pure lexical badge text');
+    assert.ok(kbSrc.includes("免模型/0显存"), 'KnowledgeBases.js must display model-free 0 VRAM badge');
+    assert.ok(kbSrc.includes("handleUnbindModel"), 'KnowledgeBases.js must implement handleUnbindModel');
+    assert.ok(kbSrc.includes("解绑模型 (降级为纯词法)"), 'KnowledgeBases.js must render unbind model button text');
+});
+
+test('Search.js, api/index.js and lexical-search-template.js: knowledge base dynamic path routing and folder filter guardrail', async () => {
+    const fs = await import('node:fs');
+    const { knowledgeBaseRequest } = await import('../app/views/lexical-search-template.js');
+
+    // 1. 验证 knowledgeBaseRequest 序列化 folders 参数
+    const reqWithFolders = knowledgeBaseRequest('天龙八部', ['kb_123'], 10, 'Lexical', ['三联版', '新修版']);
+    assert.deepEqual(reqWithFolders.folders, ['三联版', '新修版'], 'knowledgeBaseRequest must preserve folders array');
+    assert.equal(reqWithFolders.query, '天龙八部');
+    assert.equal(reqWithFolders.useLexicalTokenizer, true);
+
+    const reqWithoutFolders = knowledgeBaseRequest('天龙八部', ['kb_123'], 10, 'Standard');
+    assert.equal(reqWithoutFolders.folders, undefined, 'knowledgeBaseRequest must not inject empty folders');
+
+    // 2. 验证 api/index.js 中的 knowledgeBasesApi.getPaths & getBatchPaths
+    const apiFile = new URL('../app/api/index.js', import.meta.url);
+    const apiSrc = fs.readFileSync(apiFile, 'utf8');
+    assert.ok(apiSrc.includes('getPaths: (id) => api.get(`/knowledge-bases/'), 'api/index.js must export getPaths API');
+    assert.ok(apiSrc.includes('getBatchPaths: (kbIds) => api.post(\'/knowledge-bases/paths\''), 'api/index.js must export getBatchPaths API');
+
+    // 3. 验证 Search.js 响应式知识库路径联动与阻断异常彻底解除
+    const searchFile = new URL('../app/views/Search.js', import.meta.url);
+    const searchSrc = fs.readFileSync(searchFile, 'utf8');
+    assert.ok(searchSrc.includes('watch(() => selectedKbIds.value'), 'Search.js must watch selectedKbIds for reactive path tree loading');
+    assert.ok(searchSrc.includes('knowledgeBasesApi.getBatchPaths(selectedKbIds.value)'), 'Search.js must fetch KB paths when KB is selected');
+    assert.ok(!searchSrc.includes('知识库检索不支持源或路径筛选'), 'Search.js must NOT block path or source filtering for knowledge bases');
+    assert.ok(searchSrc.includes('effectiveFolders'), 'Search.js must compute effectiveFolders from folders and sources');
+});
+
+
+
 
 
 

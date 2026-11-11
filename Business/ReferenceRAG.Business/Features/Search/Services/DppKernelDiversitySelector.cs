@@ -36,7 +36,7 @@ public static class DppKernelDiversitySelector
         }
 
         // 为保证响应在 <1ms 内完成，截取前 N 个候选进行核投影计算 (通常取前 15~20 条)
-        int n = Math.Min(items.Count, 20);
+        int n = Math.Min(items.Count, Math.Max(targetK * 3, 50));
         var subList = items.Take(n).ToList();
 
         // 1. 构建每个候选分块的稀疏 TF 向量并 L2 归一化

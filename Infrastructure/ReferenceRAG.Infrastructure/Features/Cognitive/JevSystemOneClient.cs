@@ -40,7 +40,8 @@ public sealed class JevSystemOneClient : ISystemOneClient
         string? baseUrl = "https://api.typesafe.ai/v1/systemone",
         string? model = "jev-latest",
         HttpMessageHandler? customHandler = null,
-        int timeoutSeconds = 15)
+        int timeoutSeconds = 15,
+        IWebProxy? proxy = null)
     {
         _baseUrl = (baseUrl ?? "https://api.typesafe.ai/v1/systemone").TrimEnd('/');
         _model = string.IsNullOrWhiteSpace(model) ? "jev-latest" : model.Trim();
@@ -57,7 +58,7 @@ public sealed class JevSystemOneClient : ISystemOneClient
         }
         else
         {
-            var handler = CreateResilientSocketsHandler();
+            var handler = CreateResilientSocketsHandler(proxy);
             _httpClient = new HttpClient(handler)
             {
                 Timeout = TimeSpan.FromSeconds(Math.Max(5, timeoutSeconds))
@@ -71,15 +72,25 @@ public sealed class JevSystemOneClient : ISystemOneClient
         }
     }
 
-    private static SocketsHttpHandler CreateResilientSocketsHandler()
+    private static SocketsHttpHandler CreateResilientSocketsHandler(IWebProxy? proxy = null)
     {
-        return new SocketsHttpHandler
+        var handler = new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(15),
             PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
-            ConnectTimeout = TimeSpan.FromSeconds(6),
-            // Windows 环境下优先解析与连接 IPv4，解决 Cloudflare 国际节点 IPv6 路由空洞引发的 15s 握手超时
-            ConnectCallback = async (context, cancellationToken) =>
+            ConnectTimeout = TimeSpan.FromSeconds(6)
+        };
+
+        if (proxy != null)
+        {
+            handler.Proxy = proxy;
+            handler.UseProxy = true;
+        }
+        else
+        {
+            handler.UseProxy = false;
+            // 直连模式：Windows 环境下优先解析与连接 IPv4，解决 Cloudflare 国际节点 IPv6 路由空洞引发的 15s 握手超时
+            handler.ConnectCallback = async (context, cancellationToken) =>
             {
                 IPAddress[] targetAddresses;
                 try
@@ -106,8 +117,10 @@ public sealed class JevSystemOneClient : ISystemOneClient
                     socket.Dispose();
                     throw;
                 }
-            }
-        };
+            };
+        }
+
+        return handler;
     }
 
     public async Task<SystemOneResponse> EvaluateAsync(

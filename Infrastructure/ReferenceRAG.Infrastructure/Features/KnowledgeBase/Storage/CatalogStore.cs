@@ -63,8 +63,34 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
                     effective_config_revision INTEGER NOT NULL DEFAULT 0,
                     embedding_spec_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    chunking_spec_id TEXT NOT NULL DEFAULT 'spec_chunk_default'
                 );
+
+                CREATE TABLE IF NOT EXISTS chunking_specs (
+                    id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL DEFAULT 'Adaptive',
+                    strategy_type TEXT NOT NULL DEFAULT 'Balanced',
+                    adaptive_level TEXT NOT NULL DEFAULT 'Level2',
+                    max_tokens INTEGER NOT NULL DEFAULT 512,
+                    min_tokens INTEGER NOT NULL DEFAULT 50,
+                    overlap_tokens INTEGER NOT NULL DEFAULT 50,
+                    target_window_utilization_percent INTEGER NOT NULL DEFAULT 70,
+                    preserve_code_blocks INTEGER NOT NULL DEFAULT 1,
+                    preserve_tables INTEGER NOT NULL DEFAULT 1,
+                    preserve_headings INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                );
+
+                INSERT OR IGNORE INTO chunking_specs (id, mode, strategy_type, adaptive_level, max_tokens, min_tokens, overlap_tokens, target_window_utilization_percent, preserve_code_blocks, preserve_tables, preserve_headings, created_at)
+                VALUES 
+                    ('spec_chunk_default', 'Adaptive', 'Balanced', 'Level2', 512, 50, 50, 70, 1, 1, 1, datetime('now')),
+                    ('spec_chunk_code_first', 'Adaptive', 'CodeFirst', 'Level2', 1024, 60, 80, 75, 1, 1, 1, datetime('now')),
+                    ('spec_chunk_precision_dense', 'Adaptive', 'PrecisionDense', 'Level2', 256, 30, 30, 80, 1, 1, 1, datetime('now')),
+                    ('spec_chunk_narrative', 'Adaptive', 'DeepNarrative', 'Level2', 1500, 100, 150, 70, 1, 1, 1, datetime('now')),
+                    ('spec_chunk_lexical_paragraph', 'Adaptive', 'DiscourseParagraph', 'Level2', 800, 80, 0, 80, 1, 1, 1, datetime('now')),
+                    ('spec_chunk_lexical_dense', 'Adaptive', 'SlidingWindow', 'Level2', 400, 50, 40, 75, 1, 1, 1, datetime('now')),
+                    ('spec_chunk_lexical_code', 'Adaptive', 'CodeFirst', 'Level2', 1200, 100, 0, 85, 1, 1, 1, datetime('now'));
 
                 CREATE TABLE IF NOT EXISTS connectors (
                     id TEXT PRIMARY KEY,
@@ -129,9 +155,19 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
                     ('bge-m3-default', 'BAAI/bge-m3', 1024, 'cosine', 'query: ', '', 8192, datetime('now')),
                     ('bge-small-zh-default', 'bge-small-zh-v1.5', 512, 'cosine', '', '', 512, datetime('now')),
                     ('openai-small-default', 'text-embedding-3-small', 1536, 'cosine', '', '', 8191, datetime('now')),
-                    ('minilm-default', 'all-MiniLM-L6-v2', 384, 'cosine', '', '', 512, datetime('now'));
+                    ('minilm-default', 'all-MiniLM-L6-v2', 384, 'cosine', '', '', 512, datetime('now')),
+                    ('spec_lexical_only', 'Pure Lexical (FTS5 BM25)', 0, 'bm25', '', '', 2048, datetime('now'));
             ";
             await cmd.ExecuteNonQueryAsync(ct);
+
+            try
+            {
+                using var alterCmd = conn.CreateCommand();
+                alterCmd.CommandText = "ALTER TABLE knowledge_bases ADD COLUMN chunking_spec_id TEXT NOT NULL DEFAULT 'spec_chunk_default';";
+                await alterCmd.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException) { /* column exists */ }
+
             _initialized = true;
             _logger?.LogInformation("[CatalogStore] catalog.db 数据库架构初始化成功: {DbPath}", _dbPath);
         }
@@ -148,7 +184,7 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT id, name, description, enabled, desired_config_revision,
-                   effective_config_revision, embedding_spec_id, created_at, updated_at
+                   effective_config_revision, embedding_spec_id, created_at, updated_at, chunking_spec_id
             FROM knowledge_bases
             WHERE id = @id;
         ";
@@ -169,7 +205,7 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT id, name, description, enabled, desired_config_revision,
-                   effective_config_revision, embedding_spec_id, created_at, updated_at
+                   effective_config_revision, embedding_spec_id, created_at, updated_at, chunking_spec_id
             FROM knowledge_bases
             ORDER BY created_at DESC;
         ";
@@ -192,11 +228,11 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             cmd.CommandText = @"
                 INSERT INTO knowledge_bases (
                     id, name, description, enabled, desired_config_revision,
-                    effective_config_revision, embedding_spec_id, created_at, updated_at
+                    effective_config_revision, embedding_spec_id, created_at, updated_at, chunking_spec_id
                 )
                 VALUES (
                     @id, @name, @description, @enabled, @desired_rev,
-                    @effective_rev, @spec_id, @created_at, @updated_at
+                    @effective_rev, @spec_id, @created_at, @updated_at, @chunking_spec_id
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
@@ -205,7 +241,8 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
                     desired_config_revision = excluded.desired_config_revision,
                     effective_config_revision = excluded.effective_config_revision,
                     embedding_spec_id = excluded.embedding_spec_id,
-                    updated_at = excluded.updated_at;
+                    updated_at = excluded.updated_at,
+                    chunking_spec_id = excluded.chunking_spec_id;
             ";
             cmd.Parameters.AddWithValue("@id", kb.Id);
             cmd.Parameters.AddWithValue("@name", kb.Name);
@@ -216,6 +253,7 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             cmd.Parameters.AddWithValue("@spec_id", kb.EmbeddingSpecId);
             cmd.Parameters.AddWithValue("@created_at", kb.CreatedAt.ToString("O"));
             cmd.Parameters.AddWithValue("@updated_at", kb.UpdatedAt.ToString("O"));
+            cmd.Parameters.AddWithValue("@chunking_spec_id", string.IsNullOrWhiteSpace(kb.ChunkingSpecId) ? "spec_chunk_default" : kb.ChunkingSpecId);
 
             await cmd.ExecuteNonQueryAsync(ct);
             return kb;
@@ -456,6 +494,54 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
         return list;
     }
 
+    public async Task<bool> DeleteJobAsync(string jobId, CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        await _gate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM job_attempts WHERE job_id = @id; DELETE FROM jobs WHERE id = @id;";
+            cmd.Parameters.AddWithValue("@id", jobId);
+            var affected = await cmd.ExecuteNonQueryAsync(ct);
+            return affected > 0;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<int> PruneJobsAsync(string? kbId = null, TimeSpan? olderThan = null, CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        await _gate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var cmd = conn.CreateCommand();
+            var cutoff = (DateTime.UtcNow - (olderThan ?? TimeSpan.FromDays(7))).ToString("O");
+            var whereKb = !string.IsNullOrEmpty(kbId) ? " AND knowledge_base_id = @kb_id" : "";
+            cmd.CommandText = $@"
+                DELETE FROM job_attempts WHERE job_id IN (
+                    SELECT id FROM jobs WHERE status IN ('Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled') AND created_at < @cutoff{whereKb}
+                );
+                DELETE FROM jobs WHERE status IN ('Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled') AND created_at < @cutoff{whereKb};
+            ";
+            cmd.Parameters.AddWithValue("@cutoff", cutoff);
+            if (!string.IsNullOrEmpty(kbId))
+            {
+                cmd.Parameters.AddWithValue("@kb_id", kbId);
+            }
+            return await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     private static KnowledgeBaseDefinition ReadKnowledgeBase(SqliteDataReader reader)
     {
         return new KnowledgeBaseDefinition(
@@ -467,7 +553,8 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             EffectiveConfigRevision: reader.GetInt64(5),
             EmbeddingSpecId: reader.GetString(6),
             CreatedAt: DateTime.Parse(reader.GetString(7)),
-            UpdatedAt: DateTime.Parse(reader.GetString(8))
+            UpdatedAt: DateTime.Parse(reader.GetString(8)),
+            ChunkingSpecId: reader.FieldCount > 9 && !reader.IsDBNull(9) ? reader.GetString(9) : "spec_chunk_default"
         );
     }
 
@@ -631,6 +718,140 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             using var conn = CreateConnection();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "DELETE FROM embedding_specs WHERE id = @id;";
+            cmd.Parameters.AddWithValue("@id", specId);
+            var affected = await cmd.ExecuteNonQueryAsync(ct);
+            return affected > 0;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task SaveChunkingSpecAsync(ChunkingSpec spec, CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        await _gate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO chunking_specs (
+                    id, mode, strategy_type, adaptive_level, max_tokens, min_tokens,
+                    overlap_tokens, target_window_utilization_percent, preserve_code_blocks,
+                    preserve_tables, preserve_headings, created_at
+                )
+                VALUES (
+                    @id, @mode, @strategy_type, @adaptive_level, @max_tokens, @min_tokens,
+                    @overlap_tokens, @util_pct, @code_blocks, @tables, @headings, datetime('now')
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    mode = excluded.mode,
+                    strategy_type = excluded.strategy_type,
+                    adaptive_level = excluded.adaptive_level,
+                    max_tokens = excluded.max_tokens,
+                    min_tokens = excluded.min_tokens,
+                    overlap_tokens = excluded.overlap_tokens,
+                    target_window_utilization_percent = excluded.target_window_utilization_percent,
+                    preserve_code_blocks = excluded.preserve_code_blocks,
+                    preserve_tables = excluded.preserve_tables,
+                    preserve_headings = excluded.preserve_headings;
+            ";
+            cmd.Parameters.AddWithValue("@id", spec.Id);
+            cmd.Parameters.AddWithValue("@mode", spec.Mode);
+            cmd.Parameters.AddWithValue("@strategy_type", spec.StrategyType);
+            cmd.Parameters.AddWithValue("@adaptive_level", spec.AdaptiveLevel);
+            cmd.Parameters.AddWithValue("@max_tokens", spec.MaxTokens);
+            cmd.Parameters.AddWithValue("@min_tokens", spec.MinTokens);
+            cmd.Parameters.AddWithValue("@overlap_tokens", spec.OverlapTokens);
+            cmd.Parameters.AddWithValue("@util_pct", spec.TargetWindowUtilizationPercent);
+            cmd.Parameters.AddWithValue("@code_blocks", spec.PreserveCodeBlocks ? 1 : 0);
+            cmd.Parameters.AddWithValue("@tables", spec.PreserveTables ? 1 : 0);
+            cmd.Parameters.AddWithValue("@headings", spec.PreserveHeadings ? 1 : 0);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<ChunkingSpec?> GetChunkingSpecAsync(string id, CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        using var conn = CreateConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT id, mode, strategy_type, adaptive_level, max_tokens, min_tokens,
+                   overlap_tokens, target_window_utilization_percent, preserve_code_blocks,
+                   preserve_tables, preserve_headings
+            FROM chunking_specs
+            WHERE id = @id;
+        ";
+        cmd.Parameters.AddWithValue("@id", id);
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+        {
+            return new ChunkingSpec(
+                Id: reader.GetString(0),
+                Mode: reader.GetString(1),
+                StrategyType: reader.GetString(2),
+                AdaptiveLevel: reader.GetString(3),
+                MaxTokens: reader.GetInt32(4),
+                MinTokens: reader.GetInt32(5),
+                OverlapTokens: reader.GetInt32(6),
+                TargetWindowUtilizationPercent: reader.GetInt32(7),
+                PreserveCodeBlocks: reader.GetInt32(8) == 1,
+                PreserveTables: reader.GetInt32(9) == 1,
+                PreserveHeadings: reader.GetInt32(10) == 1
+            );
+        }
+        return null;
+    }
+
+    public async Task<IReadOnlyList<ChunkingSpec>> ListChunkingSpecsAsync(CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        using var conn = CreateConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT id, mode, strategy_type, adaptive_level, max_tokens, min_tokens,
+                   overlap_tokens, target_window_utilization_percent, preserve_code_blocks,
+                   preserve_tables, preserve_headings
+            FROM chunking_specs
+            ORDER BY id ASC;
+        ";
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        var list = new List<ChunkingSpec>();
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new ChunkingSpec(
+                Id: reader.GetString(0),
+                Mode: reader.GetString(1),
+                StrategyType: reader.GetString(2),
+                AdaptiveLevel: reader.GetString(3),
+                MaxTokens: reader.GetInt32(4),
+                MinTokens: reader.GetInt32(5),
+                OverlapTokens: reader.GetInt32(6),
+                TargetWindowUtilizationPercent: reader.GetInt32(7),
+                PreserveCodeBlocks: reader.GetInt32(8) == 1,
+                PreserveTables: reader.GetInt32(9) == 1,
+                PreserveHeadings: reader.GetInt32(10) == 1
+            ));
+        }
+        return list;
+    }
+
+    public async Task<bool> DeleteChunkingSpecAsync(string specId, CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        await _gate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM chunking_specs WHERE id = @id;";
             cmd.Parameters.AddWithValue("@id", specId);
             var affected = await cmd.ExecuteNonQueryAsync(ct);
             return affected > 0;

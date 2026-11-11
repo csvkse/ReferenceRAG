@@ -1,5 +1,6 @@
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Interfaces;
+using ReferenceRAG.Core.Models;
 
 namespace ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 
@@ -47,6 +48,11 @@ public interface IKnowledgeBaseStore
     /// </summary>
     Task<KnowledgeBaseLexicalStats> GetLexicalStatsAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// 获取当前知识库所有连接器与其下文档的路径树信息
+    /// </summary>
+    Task<IReadOnlyList<SourcePathInfo>> GetPathsAsync(IReadOnlyList<ConnectorDefinition> connectors, CancellationToken ct = default);
+
     Task<IReadOnlyList<ChunkData>> GetChunksMissingVectorsAsync(int limit = 100, CancellationToken ct = default);
 
     Task CloseAsync(CancellationToken ct = default);
@@ -62,6 +68,27 @@ public interface IKnowledgeBaseStore
     Task<KnowledgeBaseDocumentRecord?> GetDocumentByIdAsync(string documentId, CancellationToken ct = default);
 
     Task<bool> DeleteDocumentByIdAsync(string documentId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 级联物理清空指定连接器在当前知识库下的所有文档、分块、向量与词法索引
+    /// </summary>
+    Task<int> PurgeConnectorDataAsync(string connectorId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 获取指定连接器在当前知识库下的物理文档与分块统计
+    /// </summary>
+    Task<(int DocumentCount, int ChunkCount)> GetConnectorStatsAsync(string connectorId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 手动录入单篇文档并自动分块索引（支持指定 ChunkingSpec）
+    /// </summary>
+    Task<KnowledgeBaseDocumentRecord> CreateDocumentAsync(
+        string connectorId,
+        string sourceKey,
+        string? title,
+        string content,
+        ChunkingSpec? chunkingSpec = null,
+        CancellationToken ct = default);
 
     // ==================== 切片增删改查 (HITL) ====================
     Task<(IReadOnlyList<KnowledgeBaseChunkRecord> Chunks, int TotalCount)> GetChunksAsync(
@@ -91,6 +118,15 @@ public interface IKnowledgeBaseStore
     Task<bool> ToggleChunkAsync(string chunkId, bool enabled, CancellationToken ct = default);
 
     Task<bool> DeleteChunkByIdAsync(string chunkId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 蓝绿影子重构索引：在保持当前向量检索零停机的情况下，在影子表中重算所有向量并原子切换
+    /// </summary>
+    Task<int> ExecuteShadowModelReindexAsync(
+        Func<IReadOnlyList<string>, Task<IReadOnlyList<float[]>>> vectorProvider,
+        string newSpecHash,
+        int newDimension,
+        CancellationToken ct = default);
 }
 
 /// <summary>
@@ -141,6 +177,10 @@ public interface ICatalogStore
 
     Task<IReadOnlyList<JobDefinition>> ListJobsAsync(string? kbId = null, CancellationToken ct = default);
 
+    Task<bool> DeleteJobAsync(string jobId, CancellationToken ct = default);
+
+    Task<int> PruneJobsAsync(string? kbId = null, TimeSpan? olderThan = null, CancellationToken ct = default);
+
     Task SaveEmbeddingSpecAsync(EmbeddingSpec spec, CancellationToken ct = default);
 
     Task<EmbeddingSpec?> GetEmbeddingSpecAsync(string id, CancellationToken ct = default);
@@ -148,4 +188,12 @@ public interface ICatalogStore
     Task<IReadOnlyList<EmbeddingSpec>> ListEmbeddingSpecsAsync(CancellationToken ct = default);
 
     Task<bool> DeleteEmbeddingSpecAsync(string specId, CancellationToken ct = default);
+
+    Task SaveChunkingSpecAsync(ChunkingSpec spec, CancellationToken ct = default);
+
+    Task<ChunkingSpec?> GetChunkingSpecAsync(string id, CancellationToken ct = default);
+
+    Task<IReadOnlyList<ChunkingSpec>> ListChunkingSpecsAsync(CancellationToken ct = default);
+
+    Task<bool> DeleteChunkingSpecAsync(string specId, CancellationToken ct = default);
 }

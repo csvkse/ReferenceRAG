@@ -1,4 +1,5 @@
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.Core.Models;
 
 namespace ReferenceRAG.Business.Features.KnowledgeBase.Services;
 
@@ -10,8 +11,10 @@ public interface IKnowledgeBaseService
     Task<KnowledgeBaseDefinition> CreateKnowledgeBaseAsync(
         string name,
         string? description,
-        string embeddingSpecId = "default-spec",
+        string? embeddingSpecId = null,
         EmbeddingSpec? customSpec = null,
+        string? chunkingSpecId = null,
+        ChunkingSpec? customChunkingSpec = null,
         CancellationToken ct = default);
 
     Task<KnowledgeBaseDefinition> UpdateKnowledgeBaseAsync(
@@ -28,6 +31,22 @@ public interface IKnowledgeBaseService
     Task SaveEmbeddingSpecAsync(EmbeddingSpec spec, CancellationToken ct = default);
 
     Task<bool> DeleteEmbeddingSpecAsync(string specId, CancellationToken ct = default);
+
+    Task<IReadOnlyList<ChunkingSpec>> ListChunkingSpecsAsync(CancellationToken ct = default);
+
+    Task<ChunkingSpec?> GetChunkingSpecAsync(string id, CancellationToken ct = default);
+
+    Task SaveChunkingSpecAsync(ChunkingSpec spec, CancellationToken ct = default);
+
+    Task<bool> DeleteChunkingSpecAsync(string specId, CancellationToken ct = default);
+
+    Task<ConfigDriftResult> CheckConfigDriftAsync(string knowledgeBaseId, CancellationToken ct = default);
+
+    Task<ModelReindexResult> TriggerModelReindexAsync(string knowledgeBaseId, string? targetSpecId = null, CancellationToken ct = default);
+
+    Task<KnowledgeBaseDefinition> UnbindModelAsync(string knowledgeBaseId, CancellationToken ct = default);
+
+    Task<RechunkResult> TriggerRechunkAsync(string knowledgeBaseId, string? targetChunkingSpecId = null, CancellationToken ct = default);
 
     Task<KnowledgeBaseDefinition?> GetKnowledgeBaseAsync(string id, CancellationToken ct = default);
 
@@ -50,9 +69,9 @@ public interface IKnowledgeBaseService
 
     Task<ConnectorDefinition?> GetConnectorAsync(string connectorId, CancellationToken ct = default);
 
-    Task<IReadOnlyList<ConnectorDefinition>> GetConnectorsAsync(string knowledgeBaseId, CancellationToken ct = default);
+    Task<IReadOnlyList<ConnectorDetailDto>> GetConnectorsAsync(string knowledgeBaseId, CancellationToken ct = default);
 
-    Task<bool> DeleteConnectorAsync(string connectorId, CancellationToken ct = default);
+    Task<bool> DeleteConnectorAsync(string knowledgeBaseId, string connectorId, bool cascade = true, CancellationToken ct = default);
 
     Task<JobDefinition> TriggerSyncJobAsync(string knowledgeBaseId, string connectorId, CancellationToken ct = default);
 
@@ -61,6 +80,10 @@ public interface IKnowledgeBaseService
     Task<IReadOnlyList<JobDefinition>> ListJobsAsync(string? knowledgeBaseId = null, CancellationToken ct = default);
 
     Task<bool> CancelJobAsync(string jobId, CancellationToken ct = default);
+
+    Task<bool> DeleteJobAsync(string jobId, CancellationToken ct = default);
+
+    Task<int> PruneJobsAsync(string? knowledgeBaseId = null, TimeSpan? olderThan = null, CancellationToken ct = default);
 
     // ==================== 文档增删改查 ====================
     Task<(IReadOnlyList<KnowledgeBaseDocumentRecord> Documents, int TotalCount)> GetDocumentsAsync(
@@ -79,6 +102,14 @@ public interface IKnowledgeBaseService
     Task<bool> DeleteDocumentByIdAsync(
         string knowledgeBaseId,
         string documentId,
+        CancellationToken ct = default);
+
+    Task<KnowledgeBaseDocumentRecord> CreateDocumentAsync(
+        string knowledgeBaseId,
+        string? connectorId,
+        string? title,
+        string content,
+        string? sourceKey = null,
         CancellationToken ct = default);
 
     // ==================== 切片增删改查 (HITL) ====================
@@ -117,6 +148,11 @@ public interface IKnowledgeBaseService
         string knowledgeBaseId,
         string chunkId,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// 获取指定知识库或批量知识库的连接器路由与目录树
+    /// </summary>
+    Task<PathsResponse> GetPathsAsync(IReadOnlyList<string> knowledgeBaseIds, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -139,7 +175,9 @@ public sealed record CrossKnowledgeBaseSearchRequest(
     FailurePolicy FailurePolicy = FailurePolicy.AllowPartial,
     TimeSpan? Timeout = null,
     float[]? QueryVector = null,
-    bool UseLexicalTokenizer = false)
+    bool UseLexicalTokenizer = false,
+    bool AllowDegrade = false,
+    IReadOnlyList<string>? Folders = null)
 {
     /// <summary>Trusted server-side API-key scope; null means unrestricted.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
@@ -153,4 +191,6 @@ public sealed record CrossKnowledgeBaseSearchResponse(
     IReadOnlyList<string> FailedKnowledgeBaseIds,
     bool PartialSuccess,
     ScoreKind ScoreKind,
-    TimeSpan Elapsed);
+    TimeSpan Elapsed,
+    bool EarlyPruned = false,
+    bool Degraded = false);

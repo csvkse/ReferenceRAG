@@ -192,6 +192,8 @@ public class BM25IndexController : ControllerBase
             return BadRequest(new { error = "查询语句不能为空" });
         }
 
+        if (LegacyIndexUnavailable()) return Conflict(new { error = "词法模式下旧 BM25 索引不可用。" });
+
         var startTime = DateTime.UtcNow;
         var targetKbId = await ResolveKbIdAsync(kbId);
         if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)

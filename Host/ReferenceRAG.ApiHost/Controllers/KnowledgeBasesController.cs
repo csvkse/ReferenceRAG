@@ -87,10 +87,16 @@ public class KnowledgeBasesController : ControllerBase
             var kb = await _kbService.CreateKnowledgeBaseAsync(
                 request.Name,
                 request.Description,
-                request.EmbeddingSpecId ?? customSpec?.Id ?? "default-spec",
+                request.EmbeddingSpecId ?? customSpec?.Id,
                 customSpec,
+                request.ChunkingSpecId ?? request.ChunkingSpec?.Id,
+                request.ChunkingSpec,
                 ct);
             return CreatedAtAction(nameof(GetKnowledgeBase), new { id = kb.Id }, kb);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
         }
         catch (Exception ex)
         {
@@ -115,8 +121,24 @@ public class KnowledgeBasesController : ControllerBase
         return NoContent();
     }
 
+    [HttpGet("{id}/paths")]
+    public async Task<ActionResult<PathsResponse>> GetPaths(string id, CancellationToken ct)
+    {
+        var response = await _kbService.GetPathsAsync(new[] { id }, ct);
+        return Ok(response);
+    }
+
+    [HttpPost("paths")]
+    public async Task<ActionResult<PathsResponse>> GetBatchPaths(
+        [FromBody] GetKnowledgeBasePathsRequest request,
+        CancellationToken ct)
+    {
+        var response = await _kbService.GetPathsAsync(request.KnowledgeBaseIds ?? Array.Empty<string>(), ct);
+        return Ok(response);
+    }
+
     [HttpGet("{id}/connectors")]
-    public async Task<ActionResult<IReadOnlyList<ConnectorDefinition>>> GetConnectors(string id, CancellationToken ct)
+    public async Task<ActionResult<IReadOnlyList<ConnectorDetailDto>>> GetConnectors(string id, CancellationToken ct)
     {
         var connectors = await _kbService.GetConnectorsAsync(id, ct);
         return Ok(connectors);
@@ -150,9 +172,13 @@ public class KnowledgeBasesController : ControllerBase
     }
 
     [HttpDelete("{id}/connectors/{connectorId}")]
-    public async Task<IActionResult> DeleteConnector(string id, string connectorId, CancellationToken ct)
+    public async Task<IActionResult> DeleteConnector(
+        string id,
+        string connectorId,
+        [FromQuery] bool cascade = true,
+        CancellationToken ct = default)
     {
-        var success = await _kbService.DeleteConnectorAsync(connectorId, ct);
+        var success = await _kbService.DeleteConnectorAsync(id, connectorId, cascade, ct);
         if (!success) return NotFound(new { message = $"连接器不存在: {connectorId}" });
         return NoContent();
     }
@@ -171,6 +197,10 @@ public class KnowledgeBasesController : ControllerBase
         catch (KeyNotFoundException ex)
         {
             return NotFound(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
         }
         catch (Exception ex)
         {
@@ -205,6 +235,10 @@ public class KnowledgeBasesController : ControllerBase
         catch (KeyNotFoundException ex)
         {
             return NotFound(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
         }
         catch (Exception ex)
         {
@@ -247,6 +281,144 @@ public class KnowledgeBasesController : ControllerBase
         return NoContent();
     }
 
+    // ==================== ChunkingSpec 分段规格管理 ====================
+    [HttpGet("chunking-specs")]
+    public async Task<ActionResult<IReadOnlyList<ChunkingSpec>>> ListChunkingSpecs(CancellationToken ct)
+    {
+        var list = await _kbService.ListChunkingSpecsAsync(ct);
+        return Ok(list);
+    }
+
+    [HttpGet("chunking-specs/{specId}")]
+    public async Task<ActionResult<ChunkingSpec>> GetChunkingSpec(string specId, CancellationToken ct)
+    {
+        var spec = await _kbService.GetChunkingSpecAsync(specId, ct);
+        if (spec == null) return NotFound(new { message = $"分段规格不存在: {specId}" });
+        return Ok(spec);
+    }
+
+    [HttpPost("chunking-specs")]
+    public async Task<ActionResult<ChunkingSpec>> CreateChunkingSpec(
+        [FromBody] ChunkingSpec spec,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(spec.StrategyType))
+            return BadRequest(new { message = "StrategyType 不能为空" });
+        var id = string.IsNullOrWhiteSpace(spec.Id) ? $"spec_chunk_{Guid.NewGuid():N}"[..18] : spec.Id.Trim();
+        var target = spec with { Id = id };
+        await _kbService.SaveChunkingSpecAsync(target, ct);
+        return Ok(target);
+    }
+
+    [HttpPut("chunking-specs/{specId}")]
+    public async Task<ActionResult<ChunkingSpec>> UpdateChunkingSpec(
+        string specId,
+        [FromBody] ChunkingSpec spec,
+        CancellationToken ct)
+    {
+        var target = spec with { Id = specId };
+        await _kbService.SaveChunkingSpecAsync(target, ct);
+        return Ok(target);
+    }
+
+    [HttpDelete("chunking-specs/{specId}")]
+    public async Task<IActionResult> DeleteChunkingSpec(
+        string specId,
+        CancellationToken ct)
+    {
+        var success = await _kbService.DeleteChunkingSpecAsync(specId, ct);
+        if (!success) return NotFound(new { message = $"分段规格不存在: {specId}" });
+        return NoContent();
+    }
+
+    // ==================== 配置偏离诊断与蓝绿影子重构索引 ====================
+    [HttpGet("{id}/drift")]
+    public async Task<ActionResult<ConfigDriftResult>> CheckConfigDrift(string id, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _kbService.CheckConfigDriftAsync(id, ct);
+            return Ok(result);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+    }
+
+    [HttpPost("{id}/reindex")]
+    public async Task<ActionResult<ModelReindexResult>> TriggerModelReindex(
+        string id,
+        [FromBody] TriggerReindexRequest? request,
+        CancellationToken ct)
+    {
+        try
+        {
+            var result = await _kbService.TriggerModelReindexAsync(id, request?.TargetEmbeddingSpecId, ct);
+            return Ok(result);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "知识库 {Id} 蓝绿影子重构索引失败", id);
+            return StatusCode(500, new { message = ex.Message });
+        }
+    }
+
+    [HttpPost("{id}/rechunk")]
+    public async Task<ActionResult<RechunkResult>> TriggerRechunk(
+        string id,
+        [FromBody] RechunkKnowledgeBaseRequest? request,
+        CancellationToken ct)
+    {
+        try
+        {
+            var result = await _kbService.TriggerRechunkAsync(id, request?.TargetChunkingSpecId, ct);
+            return Ok(result);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "知识库 {Id} 重新分段执行异常", id);
+            return StatusCode(500, new { message = $"重新分段执行异常: {ex.Message}" });
+        }
+    }
+
+    [HttpPost("{id}/unbind-model")]
+    public async Task<ActionResult<KnowledgeBaseDefinition>> UnbindModel(
+        string id,
+        CancellationToken ct)
+    {
+        try
+        {
+            var result = await _kbService.UnbindModelAsync(id, ct);
+            return Ok(result);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "知识库 {Id} 解绑模型执行异常", id);
+            return StatusCode(500, new { message = $"解绑模型执行异常: {ex.Message}" });
+        }
+    }
+
     // ==================== 文档增删改查 ====================
     [HttpGet("{id}/documents")]
     public async Task<IActionResult> GetDocuments(
@@ -281,6 +453,28 @@ public class KnowledgeBasesController : ControllerBase
         var deleted = await _kbService.DeleteDocumentByIdAsync(id, docId, ct);
         if (!deleted) return NotFound(new { message = $"文档不存在: {docId}" });
         return NoContent();
+    }
+
+    [HttpPost("{id}/documents")]
+    public async Task<ActionResult<KnowledgeBaseDocumentRecord>> CreateDocument(
+        string id,
+        [FromBody] CreateDocumentRequest request,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.Content))
+        {
+            return BadRequest(new { message = "文档内容 Content 不能为空" });
+        }
+
+        var doc = await _kbService.CreateDocumentAsync(
+            id,
+            request.ConnectorId,
+            request.Title,
+            request.Content,
+            request.SourceKey,
+            ct);
+
+        return Created($"/api/knowledge-bases/{id}/documents/{doc.Id}", doc);
     }
 
     // ==================== 切片增删改查 (HITL) ====================
@@ -430,6 +624,25 @@ public class JobsController : ControllerBase
         if (!success) return NotFound(new { message = $"任务不可取消或不存在: {id}" });
         return Ok(new { message = "已发送取消请求", jobId = id });
     }
+
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> DeleteJob(string id, CancellationToken ct)
+    {
+        var success = await _kbService.DeleteJobAsync(id, ct);
+        if (!success) return NotFound(new { message = $"任务不存在: {id}" });
+        return NoContent();
+    }
+
+    [HttpPost("prune")]
+    public async Task<ActionResult> PruneJobs(
+        [FromQuery] string? knowledgeBaseId,
+        [FromQuery] int? daysOlderThan,
+        CancellationToken ct)
+    {
+        var span = daysOlderThan.HasValue ? TimeSpan.FromDays(daysOlderThan.Value) : (TimeSpan?)null;
+        var pruned = await _kbService.PruneJobsAsync(knowledgeBaseId, span, ct);
+        return Ok(new { success = true, prunedCount = pruned });
+    }
 }
 
 /// <summary>
@@ -489,9 +702,14 @@ public sealed record CreateKnowledgeBaseRequest(
     string Name,
     string? Description = null,
     string? EmbeddingSpecId = null,
-    EmbeddingSpecDto? EmbeddingSpec = null);
+    EmbeddingSpecDto? EmbeddingSpec = null,
+    string? ChunkingSpecId = null,
+    ChunkingSpec? ChunkingSpec = null);
+public sealed record TriggerReindexRequest(string? TargetEmbeddingSpecId = null);
 public sealed record AddConnectorRequest(string? Kind, string TargetPath, string? FilePattern = null);
 public sealed record TriggerJobRequest(string ConnectorId);
 
 public sealed record ToggleKnowledgeBaseRequest(bool Enabled);
 public sealed record ToggleChunkRequest(bool Enabled);
+public sealed record CreateDocumentRequest(string? ConnectorId, string? Title, string Content, string? SourceKey);
+public sealed record GetKnowledgeBasePathsRequest(IReadOnlyList<string>? KnowledgeBaseIds);

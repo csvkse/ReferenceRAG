@@ -12,6 +12,7 @@ using ReferenceRAG.Core.Features.HardwareAcceleration.Models;
 using ReferenceRAG.Core.Features.HardwareAcceleration.Probing;
 using ReferenceRAG.Core.Features.HardwareAcceleration;
 using ReferenceRAG.Service.Services;
+using ReferenceRAG.Business.Features.Search.Cognitive;
 
 namespace ReferenceRAG.Service.Controllers;
 
@@ -29,6 +30,7 @@ public class SettingsController : ControllerBase
     private readonly MafChatService? _chatService;
     private readonly ILogger<SettingsController> _logger;
     private readonly IHardwareAccelerationProbeService _probeService;
+    private readonly ICognitiveEvidenceEvaluatorFactory? _cognitiveFactory;
 
     public SettingsController(
         ConfigManager configManager,
@@ -37,7 +39,8 @@ public class SettingsController : ControllerBase
         IEmbeddingService? embeddingService = null,
         IRerankService? rerankService = null,
         MafChatService? chatService = null,
-        IHardwareAccelerationProbeService? probeService = null)
+        IHardwareAccelerationProbeService? probeService = null,
+        ICognitiveEvidenceEvaluatorFactory? cognitiveFactory = null)
     {
         _configManager = configManager;
         _modelManager = modelManager;
@@ -46,6 +49,7 @@ public class SettingsController : ControllerBase
         _rerankService = rerankService;
         _chatService = chatService;
         _probeService = probeService ?? new HardwareAccelerationProbeService();
+        _cognitiveFactory = cognitiveFactory;
     }
 
     /// <summary>
@@ -80,6 +84,18 @@ public class SettingsController : ControllerBase
         if (config.Rerank != null && !string.IsNullOrWhiteSpace(config.Rerank.ApiKey))
         {
             config.Rerank.ApiKey = MaskKey(config.Rerank.ApiKey);
+        }
+
+        if (config.SystemOne != null)
+        {
+            config.SystemOne.ApiKeyConfigured = !string.IsNullOrWhiteSpace(rawConfig.SystemOne?.ApiKey);
+            config.SystemOne.ApiKey = MaskKey(config.SystemOne.ApiKey);
+        }
+
+        if (config.Chat?.SystemOne != null)
+        {
+            config.Chat.SystemOne.ApiKeyConfigured = !string.IsNullOrWhiteSpace(rawConfig.Chat?.SystemOne?.ApiKey);
+            config.Chat.SystemOne.ApiKey = MaskKey(config.Chat.SystemOne.ApiKey);
         }
 
         // 获取模型根目录（优先使用顶层配置）
@@ -267,6 +283,40 @@ public class SettingsController : ControllerBase
         if (config.Rerank != null && current.Rerank != null && config.Rerank.ApiKey?.Contains("****") == true)
         {
             config.Rerank.ApiKey = current.Rerank.ApiKey;
+        }
+
+        if (config.SystemOne != null && current.SystemOne != null)
+        {
+            if (string.Equals(config.SystemOne.ApiKey, "__CLEAR__", StringComparison.OrdinalIgnoreCase))
+            {
+                config.SystemOne.ApiKey = string.Empty;
+            }
+            else if ((string.IsNullOrWhiteSpace(config.SystemOne.ApiKey) || config.SystemOne.ApiKey.Contains("****")) && !string.IsNullOrWhiteSpace(current.SystemOne.ApiKey))
+            {
+                config.SystemOne.ApiKey = current.SystemOne.ApiKey;
+            }
+        }
+
+        if (config.Chat?.SystemOne != null && current.Chat?.SystemOne != null)
+        {
+            if (string.Equals(config.Chat.SystemOne.ApiKey, "__CLEAR__", StringComparison.OrdinalIgnoreCase))
+            {
+                config.Chat.SystemOne.ApiKey = string.Empty;
+            }
+            else if ((string.IsNullOrWhiteSpace(config.Chat.SystemOne.ApiKey) || config.Chat.SystemOne.ApiKey.Contains("****")) && !string.IsNullOrWhiteSpace(current.Chat.SystemOne.ApiKey))
+            {
+                config.Chat.SystemOne.ApiKey = current.Chat.SystemOne.ApiKey;
+            }
+        }
+
+        if (config.SystemOne != null)
+        {
+            config.Chat ??= new ChatModelConfig();
+            config.Chat.SystemOne = config.SystemOne;
+        }
+        else if (config.Chat?.SystemOne != null)
+        {
+            config.SystemOne = config.Chat.SystemOne;
         }
 
         _configManager.Save(config);
@@ -571,6 +621,273 @@ public class SettingsController : ControllerBase
             }
         }
     }
+
+    /// <summary>
+    /// 测试 TypeSafe AI System One 极速决策引擎连通性与意图识别
+    /// </summary>
+    [HttpPost("test-systemone")]
+    public async Task<ActionResult> TestSystemOne([FromBody] TestSystemOneRequest request, CancellationToken ct)
+    {
+        var current = _configManager.Load();
+        var baseUrl = !string.IsNullOrWhiteSpace(request.BaseUrl) ? request.BaseUrl.Trim() : (current.SystemOne?.BaseUrl ?? "https://api.typesafe.ai/v1/systemone");
+        var model = !string.IsNullOrWhiteSpace(request.Model) ? request.Model.Trim() : (current.SystemOne?.Model ?? "jev-latest");
+        var apiKey = request.ApiKey?.Trim();
+        if (string.IsNullOrWhiteSpace(apiKey) || apiKey.Contains("****"))
+        {
+            apiKey = current.SystemOne?.ApiKey ?? current.Chat?.SystemOne?.ApiKey;
+        }
+
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            return BadRequest(new { success = false, message = "未提供或未配置有效 API Key" });
+        }
+
+        var query = !string.IsNullOrWhiteSpace(request.Query) ? request.Query.Trim() : "帮我查一下知识库里的技术架构设计规范";
+        var threshold = request.Threshold ?? current.SystemOne?.RetrievalConfidenceThreshold ?? 0.65f;
+        var proxyPolicy = request.ProxyPolicy ?? current.SystemOne?.ProxyPolicy ?? ProxyPolicy.Inherit;
+        var customProxyUrl = !string.IsNullOrWhiteSpace(request.CustomProxyUrl) ? request.CustomProxyUrl : current.SystemOne?.CustomProxyUrl;
+        var proxy = ReferenceRAG.Infrastructure.Features.Network.DynamicWebProxyAdapter.ResolveProxy(current, proxyPolicy, customProxyUrl);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            using var client = new ReferenceRAG.Infrastructure.Features.Cognitive.JevSystemOneClient(
+                apiKey: apiKey,
+                baseUrl: baseUrl,
+                model: model,
+                timeoutSeconds: 8,
+                proxy: proxy);
+
+            var engine = new ReferenceRAG.Infrastructure.Features.Cognitive.JevDecisionEngine(
+                client: client,
+                enabled: true,
+                retrievalThreshold: threshold);
+
+            var classification = await engine.ClassifyIntentAsync(query, ct);
+            sw.Stop();
+
+            if (classification.Rationale != null && classification.Rationale.StartsWith("决策异常兜底:"))
+            {
+                return Ok(new
+                {
+                    success = false,
+                    latencyMs = sw.ElapsedMilliseconds,
+                    error = classification.Rationale
+                });
+            }
+
+            return Ok(new
+            {
+                success = true,
+                latencyMs = sw.ElapsedMilliseconds,
+                intent = classification.PrimaryIntent,
+                requiresRetrieval = classification.RequiresRetrieval,
+                confidence = classification.Confidence,
+                retrievalProbability = classification.RetrievalProbability,
+                rationale = classification.Rationale,
+                model = client.ModelName
+            });
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            _logger.LogWarning(ex, "[SettingsController] System One 连通性测试失败: {Message}", ex.Message);
+            return Ok(new
+            {
+                success = false,
+                latencyMs = sw.ElapsedMilliseconds,
+                error = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
+    /// 测试代理服务器连通性
+    /// </summary>
+    [HttpPost("test-proxy")]
+    public async Task<ActionResult> TestProxy([FromBody] TestProxyRequest request, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.ProxyUrl))
+        {
+            return BadRequest(new { success = false, message = "未提供代理服务器地址" });
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var proxyConfig = new ProxyConfig
+            {
+                Enabled = true,
+                ProxyUrl = request.ProxyUrl.Trim(),
+                Username = request.Username,
+                Password = request.Password
+            };
+            var proxy = new ReferenceRAG.Infrastructure.Features.Network.DynamicWebProxyAdapter(() => proxyConfig);
+            using var handler = new SocketsHttpHandler
+            {
+                Proxy = proxy,
+                UseProxy = true,
+                ConnectTimeout = TimeSpan.FromSeconds(5)
+            };
+            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+
+            var testTarget = !string.IsNullOrWhiteSpace(request.TestUrl) ? request.TestUrl.Trim() : "https://api.typesafe.ai/health";
+            using var resp = await client.GetAsync(testTarget, HttpCompletionOption.ResponseHeadersRead, ct);
+            sw.Stop();
+            return Ok(new
+            {
+                success = true,
+                statusCode = (int)resp.StatusCode,
+                latencyMs = sw.ElapsedMilliseconds,
+                message = $"代理连通成功，目标响应: {(int)resp.StatusCode} {resp.ReasonPhrase}"
+            });
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            return Ok(new
+            {
+                success = false,
+                latencyMs = sw.ElapsedMilliseconds,
+                error = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
+    /// 测试认知增强词法检索后端连通性与评估打分
+    /// </summary>
+    [HttpPost("test-cognitive-backend")]
+    public async Task<ActionResult> TestCognitiveBackend(
+        [FromBody] TestCognitiveBackendRequest request,
+        CancellationToken ct)
+    {
+        if (request.Backend == CognitiveLexicalBackend.Disabled)
+        {
+            return Ok(new
+            {
+                success = true,
+                backend = "Disabled",
+                message = "认知增强已禁用，当前使用纯本地 FTS5 BM25 + DPP 检索",
+                isAvailable = true,
+                durationMs = 0
+            });
+        }
+
+        if (_cognitiveFactory == null)
+        {
+            return Ok(new
+            {
+                success = false,
+                backend = request.Backend.ToString(),
+                message = "认知证据评估器工厂未注册",
+                isAvailable = false
+            });
+        }
+
+        var config = new CognitiveLexicalConfig
+        {
+            Backend = request.Backend,
+            AcceptanceThreshold = request.AcceptanceThreshold,
+            EnableFallback = false
+        };
+
+        var evaluator = _cognitiveFactory.GetEvaluator(config);
+        if (evaluator == null || !evaluator.IsAvailable)
+        {
+            return Ok(new
+            {
+                success = false,
+                backend = request.Backend.ToString(),
+                message = $"后端 {request.Backend} 当前未就绪或未配置有效模型/密钥",
+                isAvailable = false
+            });
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var testQuery = "金庸武侠小说代表作品与主要人物";
+            var testCandidates = new List<CandidateEvaluationItem>
+            {
+                new("chunk-probe-1", "射雕英雄传", "", "金庸创作了十四部经典的武侠小说，包括《射雕英雄传》《天龙八部》等。", 12.5),
+                new("chunk-probe-2", "今日天气预报", "", "今天全国多地晴转多云，气温适宜，外出游玩请注意防晒。", 1.2)
+            };
+
+            var evals = await evaluator.EvaluateBatchAsync(testQuery, testCandidates, Array.Empty<CandidateEvaluationItem>(), ct);
+            sw.Stop();
+
+            var sampleResults = testCandidates.Select(c =>
+            {
+                evals.TryGetValue(c.ChunkId, out var r);
+                return new
+                {
+                    chunkId = c.ChunkId,
+                    title = c.Title,
+                    score = r?.NormalizedScore ?? 0.0,
+                    isAccepted = r?.IsAccepted ?? false,
+                    reason = r?.Reason ?? "无评估结果"
+                };
+            }).ToList();
+
+            return Ok(new
+            {
+                success = true,
+                backend = evaluator.BackendName,
+                message = $"后端 {evaluator.BackendName} 运行正常 (耗时 {sw.ElapsedMilliseconds}ms)",
+                isAvailable = true,
+                durationMs = sw.ElapsedMilliseconds,
+                sampleResults
+            });
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            _logger.LogWarning(ex, "[SettingsController] 认知后端 {Backend} 测试异常: {Message}", request.Backend, ex.Message);
+            return Ok(new
+            {
+                success = false,
+                backend = evaluator.BackendName,
+                message = $"认知后端测试失败: {ex.Message}",
+                isAvailable = false,
+                durationMs = sw.ElapsedMilliseconds
+            });
+        }
+    }
+}
+
+/// <summary>
+/// 测试认知增强后端请求参数
+/// </summary>
+public class TestCognitiveBackendRequest
+{
+    public CognitiveLexicalBackend Backend { get; set; } = CognitiveLexicalBackend.Disabled;
+    public float AcceptanceThreshold { get; set; } = 0.50f;
+}
+
+/// <summary>
+/// 测试 TypeSafe AI System One 请求参数
+/// </summary>
+public class TestSystemOneRequest
+{
+    public string? BaseUrl { get; set; }
+    public string? ApiKey { get; set; }
+    public string? Model { get; set; }
+    public string? Query { get; set; }
+    public float? Threshold { get; set; }
+    public ProxyPolicy? ProxyPolicy { get; set; }
+    public string? CustomProxyUrl { get; set; }
+}
+
+/// <summary>
+/// 测试代理请求参数
+/// </summary>
+public class TestProxyRequest
+{
+    public string? ProxyUrl { get; set; }
+    public string? TestUrl { get; set; }
+    public string? Username { get; set; }
+    public string? Password { get; set; }
 }
 
 /// <summary>

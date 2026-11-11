@@ -14,6 +14,11 @@ using ReferenceRAG.Service.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Business.Features.KnowledgeBase.Services;
+using ReferenceRAG.Business.Features.Search.Cognitive;
+using ReferenceRAG.Business.Features.Search.Strategies;
+using ReferenceRAG.Infrastructure.Features.Search.Adapters;
+using ReferenceRAG.Business.Features.Search.Strategies.ContextFormat;
+using ReferenceRAG.Business.Features.Search.Compaction;
 
 namespace ReferenceRAG.Core.Services;
 
@@ -40,6 +45,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     private readonly Func<IBM25Store>? _bm25StoreFactory;
     private readonly IKnowledgeBaseSearchService? _kbSearchService;
     private readonly ICatalogStore? _catalogStore;
+    private readonly ICognitiveEvidenceEvaluatorFactory? _cognitiveFactory;
 
     public SearchService(
         IVectorStore vectorStore,
@@ -55,11 +61,12 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         Func<bool>? hasPersistedLexicalChanges = null,
         Func<IBM25Store>? bm25StoreFactory = null,
         IKnowledgeBaseSearchService? kbSearchService = null,
-        ICatalogStore? catalogStore = null)
+        ICatalogStore? catalogStore = null,
+        ICognitiveEvidenceEvaluatorFactory? cognitiveFactory = null)
         : this(vectorStore, new Lazy<IEmbeddingService>(() => embeddingService), textEnhancer, configManager, logger,
             new Lazy<IHybridSearchService?>(() => hybridSearchService), new Lazy<IRerankService?>(() => rerankService),
             graphStore, new Lazy<IModelTelemetryService?>(() => telemetryService), lexicalFactory, hasPersistedLexicalChanges, bm25StoreFactory,
-            kbSearchService, catalogStore)
+            kbSearchService, catalogStore, cognitiveFactory)
     {
     }
 
@@ -77,7 +84,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         Func<bool>? hasPersistedLexicalChanges = null,
         Func<IBM25Store>? bm25StoreFactory = null,
         IKnowledgeBaseSearchService? kbSearchService = null,
-        ICatalogStore? catalogStore = null)
+        ICatalogStore? catalogStore = null,
+        ICognitiveEvidenceEvaluatorFactory? cognitiveFactory = null)
     {
         _vectorStore = vectorStore;
         _bm25StoreFactory = bm25StoreFactory;
@@ -93,6 +101,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         _hasPersistedLexicalChanges = hasPersistedLexicalChanges;
         _kbSearchService = kbSearchService;
         _catalogStore = catalogStore;
+        _cognitiveFactory = cognitiveFactory;
     }
 
     /// <summary>
@@ -306,8 +315,16 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             }
         }
 
-        // 并行启动：embedding 推理（CPU/GPU）与标题搜索（SQLite）互不依赖，同时进行
-        var embeddingTask = _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
+        // 并行启动：embedding 推理（支持两级 LRU 零推理缓存）与标题搜索（SQLite）互不依赖，同时进行
+        Task<float[]> embeddingTask;
+        if (ReferenceRAG.Infrastructure.Features.KnowledgeBase.Storage.QueryVectorCacheProxy.Default.TryGetVector(request.Query, null, out var cachedVector) && cachedVector != null)
+        {
+            embeddingTask = Task.FromResult(cachedVector);
+        }
+        else
+        {
+            embeddingTask = _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, cancellationToken);
+        }
         var titleTask = ShouldPreferTitleSearch(request.Query)
             ? TryTitleFirstSearchAsync(request, enabledSources, cancellationToken)
             : Task.FromResult<List<SearchResult>>(new());
@@ -323,6 +340,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             using var timeoutCts = new CancellationTokenSource(timeoutMs);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
             queryVector = await embeddingTask.WaitAsync(linkedCts.Token);
+            ReferenceRAG.Infrastructure.Features.KnowledgeBase.Storage.QueryVectorCacheProxy.Default.SetVector(request.Query, null, queryVector);
         }
         catch (Exception ex) when (config.Search.EnableAutomaticFallback && (ex is OperationCanceledException or System.Net.Http.HttpRequestException or TimeoutException or SearchCapabilityException or InvalidOperationException))
         {
@@ -430,19 +448,22 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             var newFromKb = kbCandidates.Where(r => existingIds.Add(r.ChunkId)).ToList();
             if (newFromKb.Count > 0)
             {
-                topResults.AddRange(newFromKb);
+                topResults.InsertRange(0, newFromKb);
                 _logger.LogDebug("[SearchService] 知识库候选合并: +{Count} 条（总候选 {Total}）", newFromKb.Count, topResults.Count);
             }
         }
 
         // ========== 图扩展：补充 wiki-link 邻居节点 ==========
-        var searchConfig = config.Search;
-        if (searchConfig.EnableGraphExpansion && _graphStore != null && topResults.Count > 0)
+        var searchConfig = config?.Search;
+        if (searchConfig?.EnableGraphExpansion == true && _graphStore != null && topResults.Count > 0)
         {
             int beforeGraphCount = topResults.Count;
             topResults = await ExpandWithGraphAsync(topResults, queryVector, searchConfig, enabledSources, request.Filters, cancellationToken);
             stateMachine.TransitionTo(SearchPipelinePhase.GraphExpanding, beforeGraphCount, topResults.Count, "图谱实体与关联文档扩展");
         }
+
+        // 候选全局分数降序排序，确保精排与截断窗口准确覆盖最优结果
+        topResults = topResults.OrderByDescending(r => r.Score).ToList();
 
         // ========== 第二阶段：精排 ==========
         if (shouldRerank && _rerankService != null && topResults.Count > 0)
@@ -549,8 +570,10 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         }
         else
         {
-            // 无重排：RecallFactor 扩大了候选池，最终 trim 回 TopK
-            topResults = topResults.Take(request.TopK).ToList();
+            // 无重排：RecallFactor 扩大了候选池，结合 DPP 多样性去重或 TopK 截断
+            topResults = (config.Search?.EnableDppDiversity ?? false)
+                ? DppKernelDiversitySelector.Diversify(topResults, c => c.Content, c => c.Score, request.TopK)
+                : topResults.Take(request.TopK).ToList();
         }
 
         // 过滤无意义噪音与纯分隔符分块（彻底避免返回空行/纯分隔符分块）
@@ -565,8 +588,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         // 构建响应
         var chunks = BuildChunkResults(topResults);
         var files = BuildFileSummaries(topResults);
-        var context = BuildContext(chunks, request.MaxTokens);
-        var prompt = BuildPrompt(request.Query, context);
+        var context = BuildContext(chunks, request.MaxTokens, request.ContextFormat, request.MergeAdjacentChunks);
+        var prompt = request.Slim ? string.Empty : BuildPrompt(request.Query, context, request.ContextFormat);
 
         sw.Stop();
 
@@ -618,79 +641,111 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         sm.TransitionTo(SearchPipelinePhase.QueryPrepared, 0, 1, "词法查询准备");
         sm.TransitionTo(SearchPipelinePhase.ParallelRetrieving, 1, request.TopK, "限定范围的词法检索");
         var results = new List<SearchResult>();
-        if (_lexicalFactory != null)
+        var kbLexicalCandidates = new List<SearchResult>();
+        bool rerankApplied = false;
+        string? rerankModel = null;
+
+        var cognitiveEvaluator = config.Search.CognitiveLexical?.Backend != CognitiveLexicalBackend.Disabled && _cognitiveFactory != null
+            ? _cognitiveFactory.GetEvaluator(config.Search.CognitiveLexical!)
+            : null;
+
+        if (cognitiveEvaluator != null)
         {
-            try
+            var cognitiveStrategy = new CognitiveEnhancedLexicalStrategy(
+                _kbSearchService,
+                _catalogStore,
+                cognitiveEvaluator,
+                config.Search.CognitiveLexical!,
+                _bm25StoreFactory);
+
+            var execContext = new SearchExecutionContext
             {
-                var coordResults = await _lexicalFactory().SearchAuthorizedAsync(request.Query, scope, request.TopK, cancellationToken);
-                if (coordResults != null && coordResults.Count > 0)
-                {
-                    results.AddRange(coordResults);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Lexical coordinator search returned 0 or unready");
-            }
+                Request = request,
+                Config = config,
+                StateMachine = sm,
+                EnabledSources = enabled
+            };
+
+            var stratResult = await cognitiveStrategy.ExecuteAsync(execContext, cancellationToken);
+            results.AddRange(stratResult.Results);
+            kbLexicalCandidates.AddRange(stratResult.Results);
+            rerankApplied = stratResult.RerankApplied;
+            rerankModel = stratResult.RerankStats?.ModelName;
         }
-
-        if (results.Count == 0 && _bm25StoreFactory != null)
+        else
         {
-            try
+            // 知识库统一词法检索：知识库为权威数据底座
+            var kbRetrieved = await SearchKnowledgeBasesAsync(request, null, useLexical: true, cancellationToken);
+            if (kbRetrieved.Count > 0)
             {
-                var bm25Store = _bm25StoreFactory();
-                int candidateLimit = Math.Max(request.TopK * 4, 30);
-                var bm25Results = await bm25Store.SearchAsync(request.Query, candidateLimit);
-                if (bm25Results.Count > 0)
+                kbLexicalCandidates.AddRange(kbRetrieved);
+                results.AddRange(kbRetrieved);
+            }
+            else
+            {
+                if (_lexicalFactory != null)
                 {
-                    var chunkIds = bm25Results.Select(r => r.ChunkId).ToList();
-                    var chunkMap = await _vectorStore.GetChunksByIdsAsync(chunkIds, cancellationToken);
-                    var allFiles = (await _vectorStore.GetAllFilesAsync(cancellationToken)).ToDictionary(f => f.Id, f => f);
-
-                    foreach (var bm in bm25Results)
+                    try
                     {
-                        if (chunkMap.TryGetValue(bm.ChunkId, out var chunk) &&
-                            allFiles.TryGetValue(chunk.FileId, out var file))
+                        var coordResults = await _lexicalFactory().SearchAuthorizedAsync(request.Query, scope, request.TopK, cancellationToken);
+                        if (coordResults != null && coordResults.Count > 0)
                         {
-                            if (scope.Allows(file))
+                            results.AddRange(coordResults);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Lexical coordinator search returned 0 or unready");
+                    }
+                }
+
+                if (results.Count == 0 && _bm25StoreFactory != null)
+                {
+                    try
+                    {
+                        var bm25Store = _bm25StoreFactory();
+                        int candidateLimit = Math.Max(request.TopK * 4, 30);
+                        var bm25Results = await bm25Store.SearchAsync(request.Query, candidateLimit);
+                        if (bm25Results.Count > 0)
+                        {
+                            var chunkIds = bm25Results.Select(r => r.ChunkId).ToList();
+                            var chunkMap = await _vectorStore.GetChunksByIdsAsync(chunkIds, cancellationToken);
+                            var allFiles = (await _vectorStore.GetAllFilesAsync(cancellationToken)).ToDictionary(f => f.Id, f => f);
+
+                            foreach (var bm in bm25Results)
                             {
-                                results.Add(new SearchResult
+                                if (chunkMap.TryGetValue(bm.ChunkId, out var chunk) &&
+                                    allFiles.TryGetValue(chunk.FileId, out var file))
                                 {
-                                    ChunkId = chunk.Id,
-                                    FileId = file.Id,
-                                    FilePath = file.Path,
-                                    Source = file.Source,
-                                    Title = file.Title,
-                                    Content = chunk.Content,
-                                    BM25Score = (float)bm.Score,
-                                    Score = (float)bm.Score,
-                                    StartLine = chunk.StartLine,
-                                    EndLine = chunk.EndLine,
-                                    HeadingPath = chunk.HeadingPath,
-                                    Level = chunk.Level,
-                                    ChildChunkCount = chunk.ChildChunkCount,
-                                    AggregateType = chunk.AggregateType
-                                });
+                                    if (scope.Allows(file))
+                                    {
+                                        results.Add(new SearchResult
+                                        {
+                                            ChunkId = chunk.Id,
+                                            FileId = file.Id,
+                                            FilePath = file.Path,
+                                            Source = file.Source,
+                                            Title = file.Title,
+                                            Content = chunk.Content,
+                                            BM25Score = (float)bm.Score,
+                                            Score = (float)bm.Score,
+                                            StartLine = chunk.StartLine,
+                                            EndLine = chunk.EndLine,
+                                            HeadingPath = chunk.HeadingPath,
+                                            Level = chunk.Level,
+                                            ChildChunkCount = chunk.ChildChunkCount,
+                                            AggregateType = chunk.AggregateType
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "BM25 native store query failed");
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "BM25 native store query failed");
-            }
-        }
-        // 知识库词法结果召回与合并
-        var kbLexicalCandidates = await SearchKnowledgeBasesAsync(request, null, useLexical: true, cancellationToken);
-        if (kbLexicalCandidates.Count > 0)
-        {
-            var existingIds = results.Select(r => r.ChunkId).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var newFromKb = kbLexicalCandidates.Where(r => existingIds.Add(r.ChunkId)).ToList();
-            if (newFromKb.Count > 0)
-            {
-                results.AddRange(newFromKb);
-                _logger.LogDebug("[SearchService] 词法检索知识库候选合并: +{Count} 条（总候选 {Total}）", newFromKb.Count, results.Count);
             }
         }
 
@@ -704,19 +759,29 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var finalScope = new LexicalSearchScope(currentEnabled, sourceRoots: currentRoots,
             fileAllowed: f => SourceAllowsLexicalFile(currentSources, f));
         var kbChunkIdSet = kbLexicalCandidates.Select(k => k.ChunkId).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var filtered = results.Where(r => kbChunkIdSet.Contains(r.ChunkId) || finalScope.Allows(new FileRecord { Source = r.Source, Path = r.FilePath })).ToList();
-        filtered = DppKernelDiversitySelector.Diversify(filtered, c => c.Content, c => c.Score, request.TopK);
+        var filtered = results.Where(r => kbChunkIdSet.Contains(r.ChunkId) || finalScope.Allows(new FileRecord { Source = r.Source, Path = r.FilePath }))
+            .OrderByDescending(r => r.Score)
+            .ToList();
+        if (!rerankApplied)
+        {
+            filtered = DppKernelDiversitySelector.Diversify(filtered, c => c.Content, c => c.Score, request.TopK);
+        }
+        else
+        {
+            filtered = filtered.Take(request.TopK).ToList();
+        }
         sm.TransitionTo(SearchPipelinePhase.AssemblingResults, results.Count, filtered.Count, "原文与引用装配");
         var telemetry = sm.Complete(filtered.Count);
         var chunks = BuildChunkResults(filtered);
-        var context = BuildContext(chunks, request.MaxTokens);
-        var prompt = request.Slim ? string.Empty : BuildPrompt(request.Query, context);
+        var context = BuildContext(chunks, request.MaxTokens, request.ContextFormat, request.MergeAdjacentChunks);
+        var prompt = request.Slim ? string.Empty : BuildPrompt(request.Query, context, request.ContextFormat);
         if (request.Slim) foreach (var chunk in chunks) chunk.Content = string.Empty;
         sw.Stop();
         return new AIQueryResponse
         {
             Query = request.Query, Mode = request.Mode, Context = context, Prompt = prompt,
-            Chunks = chunks, Files = BuildFileSummaries(filtered), RerankApplied = false,
+            Chunks = chunks, Files = BuildFileSummaries(filtered), RerankApplied = rerankApplied,
+            RerankStats = rerankApplied ? new RerankStats { ModelName = rerankModel ?? "Cognitive", RerankDurationMs = sw.ElapsedMilliseconds } : null,
             Stats = new SearchStats { TotalMatches = filtered.Count, DurationMs = sw.ElapsedMilliseconds,
                 EstimatedTokens = TokenEstimator.EstimateTokens(context), PipelineTelemetry = telemetry }
         };
@@ -748,31 +813,27 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             if (targetKbIds.Count == 0)
                 return kbResults;
 
+            var candidateTopK = Math.Max(request.TopK * 3, 30);
             var kbResponse = await _kbSearchService.SearchAsync(new CrossKnowledgeBaseSearchRequest(
                 Query: request.Query,
-                TopK: request.TopK,
+                TopK: candidateTopK,
                 KnowledgeBaseIds: targetKbIds,
                 QueryVector: queryVector,
                 UseLexicalTokenizer: useLexical,
-                FailurePolicy: FailurePolicy.AllowPartial
+                FailurePolicy: FailurePolicy.AllowPartial,
+                AllowDegrade: true
             ), cancellationToken);
 
             if (kbResponse.Items != null && kbResponse.Items.Count > 0)
             {
+                double maxRrf = kbResponse.Items.Max(i => i.Score);
                 foreach (var item in kbResponse.Items)
                 {
-                    var title = System.IO.Path.GetFileNameWithoutExtension(item.SourceKey);
-                    kbResults.Add(new SearchResult
-                    {
-                        ChunkId = item.ChunkId,
-                        FileId = item.DocumentId,
-                        FilePath = item.SourceKey,
-                        Source = item.ConnectorId ?? "knowledge-base",
-                        Title = title,
-                        Content = item.Text,
-                        Score = (float)item.Score,
-                        BM25Score = (float)item.Score
-                    });
+                    var score = item.ScoreKind == ReferenceRAG.Core.Features.KnowledgeBase.Domain.ScoreKind.RRF
+                        ? (float)(10.0 * (item.Score / (maxRrf > 0 ? maxRrf : 1.0)))
+                        : (float)item.Score;
+
+                    kbResults.Add(SearchResultAdapter.FromRecallItem(item, score));
                 }
             }
         }
@@ -1157,23 +1218,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     /// </summary>
     private List<ChunkResult> BuildChunkResults(IEnumerable<SearchResult> results)
     {
-        return results.Select((r, i) => new ChunkResult
-        {
-            RefId = r.ChunkId,
-            FileId = r.FileId,
-            FilePath = r.FilePath,
-            Source = r.Source,
-            Title = r.Title,
-            Content = r.Content,
-            Score = r.Score,
-            BM25Score = r.BM25Score > 0 ? r.BM25Score : null,
-            EmbeddingScore = r.EmbeddingScore > 0 ? r.EmbeddingScore : null,
-            RerankScore = r.RerankScore,
-            StartLine = r.StartLine,
-            EndLine = r.EndLine,
-            HeadingPath = r.HeadingPath,
-            ObsidianLink = $"[[{Path.GetFileNameWithoutExtension(r.FilePath)}#L{r.StartLine}-L{r.EndLine}]]"
-        }).ToList();
+        return results.Select(r => SearchResultAdapter.ToChunkResult(r)).ToList();
     }
 
     /// <summary>
@@ -1194,47 +1239,32 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     }
 
     /// <summary>
-    /// 构建上下文
+    /// 构建上下文（委托策略模式，并支持连续分块压缩）
     /// </summary>
-    private string BuildContext(List<ChunkResult> chunks, int maxTokens)
+    private string BuildContext(
+        List<ChunkResult> chunks,
+        int maxTokens,
+        ContextFormat format = ContextFormat.Standard,
+        bool mergeAdjacent = true)
     {
-        var context = new System.Text.StringBuilder();
-        context.AppendLine("# 相关内容\n");
+        var chunksForContext = mergeAdjacent
+            ? AdjacentChunkCompactor.CompactAdjacentChunks(chunks)
+            : chunks;
 
-        var currentTokens = 0;
-
-        foreach (var chunk in chunks)
-        {
-            var chunkTokens = TokenEstimator.EstimateTokens(chunk.Content);
-            if (currentTokens + chunkTokens > maxTokens) break;
-
-            context.AppendLine($"## {chunk.Title ?? Path.GetFileNameWithoutExtension(chunk.FilePath)}");
-            if (!string.IsNullOrEmpty(chunk.HeadingPath))
-            {
-                context.AppendLine($"章节: {chunk.HeadingPath}");
-            }
-            context.AppendLine($"\n{chunk.Content}\n");
-            context.AppendLine($"来源: {chunk.ObsidianLink}\n");
-            context.AppendLine("---\n");
-
-            currentTokens += chunkTokens;
-        }
-
-        return context.ToString();
+        var strategy = ContextFormatStrategyFactory.GetStrategy(format);
+        return strategy.FormatContext(chunksForContext, maxTokens);
     }
 
     /// <summary>
-    /// 构建 Prompt
+    /// 构建 Prompt（委托策略模式）
     /// </summary>
-    private string BuildPrompt(string query, string context)
+    private string BuildPrompt(
+        string query,
+        string context,
+        ContextFormat format = ContextFormat.Standard)
     {
-        return $@"基于以下知识库内容回答问题：
-
-{context}
-
-问题：{query}
-
-请根据上述内容提供准确、详细的回答，并在回答中引用来源。";
+        var strategy = ContextFormatStrategyFactory.GetStrategy(format);
+        return strategy.FormatPrompt(query, context);
     }
 
     /// <summary>
@@ -1276,7 +1306,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                     EndLine = c.EndLine,
                     HeadingPath = c.HeadingPath,
                     Score = isCenter ? 1.0f : 0.0f,
-                    ObsidianLink = $"[[#L{c.StartLine}-L{c.EndLine}]]"
+                    ObsidianLink = SearchResultAdapter.FormatObsidianLink(filePath, c.StartLine, c.EndLine, title)
                 };
             })
             .ToList();

@@ -245,7 +245,7 @@ component.template = `
           />
         </n-space>
         <n-tag type="info" size="small" round secondary>
-          SQLite FTS5 + jieba.NET 中文精确断词
+          SQLite FTS5 + SAG-Wiki 多列加权 (标题 5.0x / 章节 2.5x / 正文 1.0x)
         </n-tag>
       </n-space>
     </n-card>
@@ -273,6 +273,13 @@ component.template = `
                 <n-descriptions-item label="总分块数">
                   <n-text strong>{{ summary.totalChunks }}</n-text>
                 </n-descriptions-item>
+                <n-descriptions-item label="BM25F 多列权重">
+                  <n-space :size="4">
+                    <n-tag size="small" type="primary" :bordered="false">标题 5.0x</n-tag>
+                    <n-tag size="small" type="info" :bordered="false">章节 2.5x</n-tag>
+                    <n-tag size="small" type="default" :bordered="false">正文 1.0x</n-tag>
+                  </n-space>
+                </n-descriptions-item>
               </n-descriptions>
             </n-spin>
           </n-space>
@@ -282,10 +289,10 @@ component.template = `
         <n-tab-pane name="operations" tab="词法索引操作">
           <n-space vertical :size="16">
             <n-alert type="info">
-              <template #header>架构说明</template>
+              <template #header>SAG-Wiki 风格多列 BM25F 倒排索引架构</template>
               <n-space vertical>
-                <n-text>在多知识库物理隔离架构下，每个知识库在内部独立构建 FTS5 全文索引，结合 jieba.NET 完成中文精确断词。</n-text>
-                <n-text>词法索引无需调用昂贵的嵌入模型，具备亚毫秒级检索响应，适合精准匹配产品型号、函数名与专业术语。</n-text>
+                <n-text>在多知识库物理隔离架构下，每个知识库在内部独立构建 FTS5 结构化多列全文索引（标题 5.0x / 章节 2.5x / 正文 1.0x），结合 jieba.NET 中文精确断词与专有名词/短语增强。</n-text>
+                <n-text>词法索引无需调用昂贵的嵌入模型，具备亚毫秒级检索响应，并在 Top-1 优势比 > 0.55 时支持级联极速早停短路。</n-text>
               </n-space>
             </n-alert>
 
@@ -369,6 +376,7 @@ component.template = `
                       <n-space align="center">
                         <n-tag type="info" size="small">#{{ result.rank }}</n-tag>
                         <n-text code>{{ result.chunkId }}</n-text>
+                        <n-tag size="small" type="primary" :bordered="false">BM25F</n-tag>
                         <n-tag type="success" size="small">Score: {{ typeof result.score === 'number' ? result.score.toFixed(4) : result.score }}</n-tag>
                         <n-tag v-if="result.source" size="small" secondary>{{ result.source }}</n-tag>
                       </n-space>

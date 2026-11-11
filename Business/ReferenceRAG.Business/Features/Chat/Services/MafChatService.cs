@@ -33,8 +33,8 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
     private volatile string _systemPrompt;
     private volatile string _model = "gpt-4o-mini";
     private volatile bool _enableIntentRouting = true;
-    private readonly ReferenceRAG.Infrastructure.Features.Cognitive.IJevDecisionEngine? _jevDecisionEngine;
-    private readonly CompositeIntentRouter _intentRouter;
+    private ReferenceRAG.Infrastructure.Features.Cognitive.IJevDecisionEngine? _jevDecisionEngine;
+    private CompositeIntentRouter _intentRouter;
     private readonly AITool[] _tools;
     private readonly ConcurrentDictionary<string, ChatSession> _sessions = new();
     private readonly ILogger<MafChatService> _logger;
@@ -208,32 +208,15 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         _modelManager = modelManager;
         _multimodalAdapter = multimodalAdapter ?? new MultimodalMessageAdapter(logger);
 
-        _jevDecisionEngine = jevDecisionEngine;
-        if (_jevDecisionEngine == null && _configManager != null)
+        if (jevDecisionEngine != null)
         {
-            try
-            {
-                var ragCfg = _configManager.Load();
-                if (ragCfg.SystemOne != null && ragCfg.SystemOne.Enabled &&
-                    !string.IsNullOrWhiteSpace(ragCfg.SystemOne.ApiKey) &&
-                    !ragCfg.SystemOne.ApiKey.StartsWith("<", StringComparison.Ordinal))
-                {
-                    var client = new ReferenceRAG.Infrastructure.Features.Cognitive.JevSystemOneClient(
-                        ragCfg.SystemOne.ApiKey,
-                        ragCfg.SystemOne.BaseUrl,
-                        ragCfg.SystemOne.Model,
-                        _httpMessageHandler,
-                        timeoutSeconds: Math.Max(3, ragCfg.SystemOne.TimeoutMs / 1000));
-                    _jevDecisionEngine = new ReferenceRAG.Infrastructure.Features.Cognitive.JevDecisionEngine(
-                        client, enabled: true, retrievalThreshold: ragCfg.SystemOne.RetrievalConfidenceThreshold);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[MafChatService] 自动初始化 Jev 决策引擎失败: {Message}", ex.Message);
-            }
+            _jevDecisionEngine = jevDecisionEngine;
+            _intentRouter = CompositeIntentRouter.CreateDefault(_jevDecisionEngine);
         }
-        _intentRouter = CompositeIntentRouter.CreateDefault(_jevDecisionEngine);
+        else
+        {
+            ReloadSystemOne();
+        }
 
         var section = config.GetSection("Chat");
         var endpoint = section["Endpoint"] ?? "https://api.openai.com/v1";
@@ -612,6 +595,50 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                 }
             }
         }
+
+        // 热重载 System One (Jev) 极速决策引擎
+        ReloadSystemOne(config.SystemOne);
+    }
+
+    /// <summary>
+    /// 热重载 TypeSafe AI System One (Jev) 极速认知决策引擎
+    /// </summary>
+    public void ReloadSystemOne(SystemOneConfig? systemOneConfig = null)
+    {
+        try
+        {
+            var fullConfig = _configManager?.Load();
+            var cfg = systemOneConfig ?? fullConfig?.SystemOne;
+            if (cfg != null && cfg.Enabled &&
+                !string.IsNullOrWhiteSpace(cfg.ApiKey) &&
+                !cfg.ApiKey.StartsWith("<", StringComparison.Ordinal))
+            {
+                var proxy = ReferenceRAG.Infrastructure.Features.Network.DynamicWebProxyAdapter.ResolveProxy(
+                    fullConfig, cfg.ProxyPolicy, cfg.CustomProxyUrl);
+                var client = new ReferenceRAG.Infrastructure.Features.Cognitive.JevSystemOneClient(
+                    cfg.ApiKey,
+                    cfg.BaseUrl,
+                    cfg.Model,
+                    _httpMessageHandler,
+                    timeoutSeconds: Math.Max(3, cfg.TimeoutMs / 1000),
+                    proxy: proxy);
+                _jevDecisionEngine = new ReferenceRAG.Infrastructure.Features.Cognitive.JevDecisionEngine(
+                    client, enabled: true, retrievalThreshold: cfg.RetrievalConfidenceThreshold);
+                _logger.LogInformation("[MafChatService] Jev 决策引擎热激活成功: Endpoint={Endpoint}, Model={Model}, ProxyPolicy={ProxyPolicy}", cfg.BaseUrl, cfg.Model, cfg.ProxyPolicy);
+            }
+            else
+            {
+                _jevDecisionEngine = null;
+                _logger.LogInformation("[MafChatService] Jev 决策引擎已停用或未配置 Key，降级使用基础规则路由");
+            }
+            _intentRouter = CompositeIntentRouter.CreateDefault(_jevDecisionEngine);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[MafChatService] 热重载 Jev 决策引擎失败: {Message}", ex.Message);
+            _jevDecisionEngine = null;
+            _intentRouter = CompositeIntentRouter.CreateDefault(null);
+        }
     }
 
     /// <summary>
@@ -884,10 +911,7 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                 var output = string.Join("\n\n", entries);
                 return output.Length > 5000 ? output[..5000] : output;
             }
-            if (!config.Indexing.EmbeddingEnabled)
-                return "当前已禁用向量索引，请将对话检索模式设置为词法检索。";
-            if (config.Search.EnableLexical || LexicalIndexCoordinator.HasPersistedStaleVectors(Path.Combine(config.DataPath ?? "data", "vectors.db")))
-                return "旧 BM25 索引可能过期，请使用词法检索。";
+
             var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
             var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
             var enabledSources = config.Sources

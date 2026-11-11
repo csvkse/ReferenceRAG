@@ -39,5 +39,20 @@ public enum SearchPipelinePhase
     DegradedRetrieved = 10,
 
     /// <summary>降级装配完成</summary>
-    DegradedCompleted = 11
+    DegradedCompleted = 11,
+
+    /// <summary>Hop 0 初步候选认知判定 (Jev/Cross-Encoder)</summary>
+    CognitiveScoringHop0 = 12,
+
+    /// <summary>专有名词与高上下文词项提取</summary>
+    MultiHopExpanding = 13,
+
+    /// <summary>Hop 1 联合先验证据深化评估</summary>
+    CognitiveScoringHop1 = 14,
+
+    /// <summary>多路候选证据池精化</summary>
+    EvidencePoolRefining = 15,
+
+    /// <summary>免向量 DPP 核多样性去重</summary>
+    DppDiversitySelecting = 16
 }

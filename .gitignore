@@ -106,6 +106,8 @@ appsettings.json
 # Sensitive environment configuration & secrets
 env/*
 !env/*.template
+env/data/
+/env/data/
 .envdev
 *.envdev
 /env/.envdev

@@ -99,6 +99,11 @@ public class ObsidianRagConfig
     /// TypeSafe AI System One (Jev) 极速认知决策引擎配置
     /// </summary>
     public SystemOneConfig SystemOne { get; set; } = new();
+
+    /// <summary>
+    /// 全局统一网络与代理配置
+    /// </summary>
+    public NetworkConfig Network { get; set; } = new();
 }
 
 /// <summary>
@@ -605,6 +610,79 @@ public class SearchConfig
     /// 每个结果最多扩展的邻居节点数（默认 3）
     /// </summary>
     public int GraphExpansionMaxNodes { get; set; } = 3;
+
+    /// <summary>
+    /// 连续故障熔断阈值（默认 3 次）
+    /// </summary>
+    public int CircuitBreakerThreshold { get; set; } = 3;
+
+    /// <summary>
+    /// 熔断恢复试探时长（秒，默认 30s）
+    /// </summary>
+    public int CircuitBreakerDurationSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// 是否启用行列式点过程 (DPP) 免向量核去重多样性重排
+    /// </summary>
+    public bool EnableDppDiversity { get; set; } = true;
+
+    /// <summary>
+    /// 是否在长句词法检索时启用统计伪相关反馈 (PRF) 扩展
+    /// </summary>
+    public bool EnableStatisticalPrf { get; set; } = true;
+
+    /// <summary>
+    /// 统计伪相关反馈 (PRF) 最大扩展词项数（默认 3）
+    /// </summary>
+    public int PrfMaxExpansionTerms { get; set; } = 3;
+
+    /// <summary>
+    /// 认知增强词法检索配置
+    /// </summary>
+    public CognitiveLexicalConfig CognitiveLexical { get; set; } = new();
+}
+
+/// <summary>
+/// 认知增强词法检索的后端提供者
+/// </summary>
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+public enum CognitiveLexicalBackend
+{
+    /// <summary>关闭认知增强，仅使用纯本地 BM25 + DPP（超轻量离线模式）</summary>
+    Disabled = 0,
+
+    /// <summary>Cross-Encoder 重排模型（本地 ONNX/GGUF 或在线 API）</summary>
+    CrossEncoder = 1,
+
+    /// <summary>TypeSafe AI Jev (System One) 极速概率决策引擎</summary>
+    Jev = 2,
+
+    /// <summary>启发式规则与统计增强（零模型离线保底）</summary>
+    Statistical = 3
+}
+
+/// <summary>
+/// 认知增强词法检索配置详情
+/// </summary>
+public class CognitiveLexicalConfig
+{
+    /// <summary>当前选定的认知增强后端（默认 Disabled）</summary>
+    public CognitiveLexicalBackend Backend { get; set; } = CognitiveLexicalBackend.Disabled;
+
+    /// <summary>多跳推理最大深度（1-3，默认 2）</summary>
+    public int MaxHops { get; set; } = 2;
+
+    /// <summary>认知判别通过门限（默认 0.50）</summary>
+    public float AcceptanceThreshold { get; set; } = 0.50f;
+
+    /// <summary>触发单跳早期截断的强置信门限（默认 0.85）</summary>
+    public float EarlyExitThreshold { get; set; } = 0.85f;
+
+    /// <summary>单批评估候选上限（默认 10）</summary>
+    public int BatchSize { get; set; } = 10;
+
+    /// <summary>是否在后端异常或超时时无缝回退至纯 BM25 检索（默认 true）</summary>
+    public bool EnableFallback { get; set; } = true;
 }
 
 /// <summary>
@@ -1142,6 +1220,9 @@ public class SystemOneConfig
     /// <summary>API 访问密钥</summary>
     public string? ApiKey { get; set; }
 
+    /// <summary>API Key 是否已配置（仅用于前端安全感知，不暴露明文）</summary>
+    public bool ApiKeyConfigured { get; set; }
+
     /// <summary>模型标识（默认 jev-latest）</summary>
     public string Model { get; set; } = "jev-latest";
 
@@ -1150,6 +1231,58 @@ public class SystemOneConfig
 
     /// <summary>触发知识库检索的置信度阈值（默认 0.65）</summary>
     public float RetrievalConfidenceThreshold { get; set; } = 0.65f;
+
+    /// <summary>代理路由策略（Inherit: 继承统一代理; Direct: 强制直连; Custom: 自定义专属代理）</summary>
+    public ProxyPolicy ProxyPolicy { get; set; } = ProxyPolicy.Inherit;
+
+    /// <summary>专属代理地址（仅当 ProxyPolicy == Custom 时生效）</summary>
+    public string? CustomProxyUrl { get; set; }
+}
+
+/// <summary>
+/// 功能级代理路由策略
+/// </summary>
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+public enum ProxyPolicy
+{
+    /// <summary>继承系统统一代理设置（推荐）</summary>
+    Inherit = 0,
+
+    /// <summary>强制直连（不走代理）</summary>
+    Direct = 1,
+
+    /// <summary>自定义专属代理</summary>
+    Custom = 2
+}
+
+/// <summary>
+/// 统一网络配置
+/// </summary>
+public class NetworkConfig
+{
+    /// <summary>全局代理配置</summary>
+    public ProxyConfig Proxy { get; set; } = new();
+}
+
+/// <summary>
+/// 全局代理配置
+/// </summary>
+public class ProxyConfig
+{
+    /// <summary>是否启用全局代理</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>代理服务器地址（支持 http://, https://, socks5://）</summary>
+    public string ProxyUrl { get; set; } = string.Empty;
+
+    /// <summary>免代理白名单（分号分隔）</summary>
+    public string BypassHosts { get; set; } = "localhost;127.0.0.1;*.local;api.siliconflow.cn;dashscope.aliyuncs.com";
+
+    /// <summary>可选代理认证用户名</summary>
+    public string? Username { get; set; }
+
+    /// <summary>可选代理认证密码</summary>
+    public string? Password { get; set; }
 }
 
 

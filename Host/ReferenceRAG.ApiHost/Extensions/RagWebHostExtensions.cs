@@ -147,6 +147,20 @@ public static class RagWebHostExtensions
         if (!string.IsNullOrEmpty(modelDir) && !Directory.Exists(modelDir))
             Directory.CreateDirectory(modelDir);
 
+        var catalogStore = app.Services.GetService<ReferenceRAG.Core.Features.KnowledgeBase.Storage.ICatalogStore>();
+        if (catalogStore != null)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ReferenceRAG.Infrastructure.Features.KnowledgeBase.Storage.LegacySourceMigrator.MigrateLegacySourcesAsync(
+                        catalogStore, configManager, app.Logger);
+                }
+                catch { }
+            });
+        }
+
         return app;
     }
 

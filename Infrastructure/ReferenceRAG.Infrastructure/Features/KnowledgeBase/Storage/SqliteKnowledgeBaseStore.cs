@@ -3,6 +3,9 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Infrastructure.Features.KnowledgeBase.Storage;
+using ReferenceRAG.Infrastructure.Features.Search.Lexical;
+using ReferenceRAG.Infrastructure.Features.Search.Fusion;
 using JiebaNet.Segmenter;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Interfaces;
@@ -110,6 +113,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     text TEXT NOT NULL,
                     token_count INTEGER NOT NULL,
                     embedding_text TEXT,
+                    start_line INTEGER NOT NULL DEFAULT 0,
+                    end_line INTEGER NOT NULL DEFAULT 0,
+                    heading_path TEXT,
                     FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(document_id);
@@ -169,6 +175,25 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 cmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
                 await cmd.ExecuteNonQueryAsync(ct);
             }
+
+            // 升级与兼容性探测：为历史已有数据库平滑补全 start_line, end_line, heading_path 字段
+            try {
+                using var alterLine1 = conn.CreateCommand();
+                alterLine1.CommandText = "ALTER TABLE chunks ADD COLUMN start_line INTEGER NOT NULL DEFAULT 0;";
+                await alterLine1.ExecuteNonQueryAsync(ct);
+            } catch (SqliteException) { }
+
+            try {
+                using var alterLine2 = conn.CreateCommand();
+                alterLine2.CommandText = "ALTER TABLE chunks ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0;";
+                await alterLine2.ExecuteNonQueryAsync(ct);
+            } catch (SqliteException) { }
+
+            try {
+                using var alterHeading = conn.CreateCommand();
+                alterHeading.CommandText = "ALTER TABLE chunks ADD COLUMN heading_path TEXT;";
+                await alterHeading.ExecuteNonQueryAsync(ct);
+            } catch (SqliteException) { }
 
             // 确保 chunks 表包含 enabled 字段与索引
             try
@@ -237,7 +262,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         double avgLength = 200.0;
         using (var cmd = conn.CreateCommand())
         {
-            cmd.CommandText = "SELECT COUNT(*), COALESCE(AVG(LENGTH(content)), 200.0) FROM chunks WHERE enabled = 1;";
+            cmd.CommandText = "SELECT COUNT(*), COALESCE(AVG(LENGTH(text)), 200.0) FROM chunks WHERE enabled = 1;";
             using var reader = await cmd.ExecuteReaderAsync(ct);
             if (await reader.ReadAsync(ct))
             {
@@ -279,7 +304,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             {
                 using var create = conn.CreateCommand();
                 create.Transaction = tx;
-                create.CommandText = "CREATE VIRTUAL TABLE fts_chunks_lexical USING fts5(chunk_id UNINDEXED, document_id UNINDEXED, text)";
+                create.CommandText = "CREATE VIRTUAL TABLE fts_chunks_lexical USING fts5(chunk_id UNINDEXED, document_id UNINDEXED, title, heading, text)";
                 await create.ExecuteNonQueryAsync(ct);
                 await PopulateLexicalIndexAsync(conn, tx, ct);
             }
@@ -292,8 +317,57 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
     {
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fts_chunks_lexical'";
-        return await cmd.ExecuteScalarAsync(ct) != null;
+        cmd.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name='fts_chunks_lexical'";
+        var sql = (string?)await cmd.ExecuteScalarAsync(ct);
+        if (sql == null) return false;
+        // Clean-Break: 必须包含 title 与 heading 列，若为旧版 3 列结构则立即重建
+        if (!sql.Contains("title", StringComparison.OrdinalIgnoreCase) || !sql.Contains("heading", StringComparison.OrdinalIgnoreCase))
+        {
+            using var dropCmd = conn.CreateCommand();
+            dropCmd.Transaction = tx;
+            dropCmd.CommandText = "DROP TABLE IF EXISTS fts_chunks_lexical;";
+            await dropCmd.ExecuteNonQueryAsync(ct);
+            return false;
+        }
+        return true;
+    }
+
+    private static string ExtractTitle(string sourceKey, string text)
+    {
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            var lines = text.Split('\n', 5);
+            foreach (var l in lines)
+            {
+                var trimmed = l.Trim();
+                if (trimmed.StartsWith("# ") && trimmed.Length > 2)
+                    return trimmed.Substring(2).Trim();
+            }
+        }
+        if (!string.IsNullOrWhiteSpace(sourceKey))
+        {
+            try
+            {
+                var name = System.IO.Path.GetFileNameWithoutExtension(sourceKey);
+                if (!string.IsNullOrWhiteSpace(name)) return name;
+            }
+            catch { }
+            return sourceKey;
+        }
+        return string.Empty;
+    }
+
+    private static string ExtractHeading(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+        var lines = text.Split('\n');
+        foreach (var l in lines)
+        {
+            var trimmed = l.Trim();
+            if ((trimmed.StartsWith("## ") || trimmed.StartsWith("### ")) && trimmed.Length > 3)
+                return trimmed.TrimStart('#', ' ');
+        }
+        return string.Empty;
     }
 
     private static string TokenizeLexical(string text) => string.Join(' ', LexicalSegmenter.CutForSearch(text));
@@ -315,27 +389,42 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         long lastRowId = 0;
         while (true)
         {
-            var rows = new List<(long RowId, string ChunkId, string DocumentId, string Text)>();
+            var rows = new List<(long RowId, string ChunkId, string DocumentId, string SourceKey, string Text)>();
             using (var select = conn.CreateCommand())
             {
                 select.Transaction = tx;
-                select.CommandText = "SELECT rowid,id,document_id,text FROM chunks WHERE rowid>@last ORDER BY rowid LIMIT 500";
+                select.CommandText = @"
+                    SELECT c.rowid, c.id, c.document_id, d.source_key, c.text 
+                    FROM chunks c 
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE c.rowid > @last 
+                    ORDER BY c.rowid LIMIT 500";
                 select.Parameters.AddWithValue("@last", lastRowId);
                 using var reader = await select.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct)) rows.Add((reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
+                while (await reader.ReadAsync(ct))
+                {
+                    rows.Add((reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)));
+                }
             }
             if (rows.Count == 0) break;
             using var insert = conn.CreateCommand();
             insert.Transaction = tx;
-            insert.CommandText = "INSERT INTO fts_chunks_lexical(chunk_id,document_id,text) VALUES(@chunk,@doc,@text)";
+            insert.CommandText = "INSERT INTO fts_chunks_lexical(chunk_id, document_id, title, heading, text) VALUES(@chunk, @doc, @title, @heading, @text)";
             var chunk = insert.Parameters.Add("@chunk", SqliteType.Text);
             var document = insert.Parameters.Add("@doc", SqliteType.Text);
+            var titleParam = insert.Parameters.Add("@title", SqliteType.Text);
+            var headingParam = insert.Parameters.Add("@heading", SqliteType.Text);
             var text = insert.Parameters.Add("@text", SqliteType.Text);
             foreach (var row in rows)
             {
                 ct.ThrowIfCancellationRequested();
+                var title = ExtractTitle(row.SourceKey, row.Text);
+                var heading = ExtractHeading(row.Text);
+
                 chunk.Value = row.ChunkId;
                 document.Value = row.DocumentId;
+                titleParam.Value = TokenizeLexical(title);
+                headingParam.Value = TokenizeLexical(heading);
                 text.Value = TokenizeLexical(row.Text);
                 await insert.ExecuteNonQueryAsync(ct);
             }
@@ -452,10 +541,12 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 insertChunkCmd.CommandText = @"
                     INSERT INTO chunks (
                         id, document_id, document_version, ordinal,
-                        text, token_count, embedding_text
+                        text, token_count, embedding_text,
+                        start_line, end_line, heading_path
                     ) VALUES (
                         @id, @doc_id, @ver, @ordinal,
-                        @text, @tokens, @emb_text
+                        @text, @tokens, @emb_text,
+                        @start_line, @end_line, @heading_path
                     );
                     INSERT INTO fts_chunks (chunk_id, document_id, text)
                     VALUES (@id, @doc_id, @text);
@@ -467,15 +558,22 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 insertChunkCmd.Parameters.AddWithValue("@text", chunk.Text);
                 insertChunkCmd.Parameters.AddWithValue("@tokens", chunk.TokenCount);
                 insertChunkCmd.Parameters.AddWithValue("@emb_text", (object?)chunk.EmbeddingText ?? DBNull.Value);
+                insertChunkCmd.Parameters.AddWithValue("@start_line", chunk.StartLine);
+                insertChunkCmd.Parameters.AddWithValue("@end_line", chunk.EndLine);
+                insertChunkCmd.Parameters.AddWithValue("@heading_path", (object?)chunk.HeadingPath ?? DBNull.Value);
                 await insertChunkCmd.ExecuteNonQueryAsync(ct);
 
                 if (hasLexicalIndex)
                 {
+                    var title = ExtractTitle(batch.SourceKey, chunk.Text);
+                    var heading = ExtractHeading(chunk.Text);
                     using var lexical = conn.CreateCommand();
                     lexical.Transaction = tx;
-                    lexical.CommandText = "INSERT INTO fts_chunks_lexical(chunk_id,document_id,text) VALUES(@id,@doc,@text)";
+                    lexical.CommandText = "INSERT INTO fts_chunks_lexical(chunk_id, document_id, title, heading, text) VALUES(@id, @doc, @title, @heading, @text);";
                     lexical.Parameters.AddWithValue("@id", chunk.ChunkId);
                     lexical.Parameters.AddWithValue("@doc", docId);
+                    lexical.Parameters.AddWithValue("@title", TokenizeLexical(title));
+                    lexical.Parameters.AddWithValue("@heading", TokenizeLexical(heading));
                     lexical.Parameters.AddWithValue("@text", TokenizeLexical(chunk.Text));
                     await lexical.ExecuteNonQueryAsync(ct);
                 }
@@ -517,6 +615,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             }
 
             tx.Commit();
+            InMemoryTensorProjectionPool.GetOrCreate(KnowledgeBaseId).Invalidate();
             return new CommitResult(true, nextDocVersion, nextReadRevision);
         }
         finally
@@ -541,10 +640,185 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         return false;
     }
 
+        private async Task EnsureTensorProjectionPoolLoadedAsync(
+        SqliteConnection conn,
+        SqliteTransaction tx,
+        long vectorGeneration,
+        CancellationToken ct)
+    {
+        var pool = InMemoryTensorProjectionPool.GetOrCreate(KnowledgeBaseId);
+        if (pool.CurrentGeneration == vectorGeneration && pool.IsLoaded)
+        {
+            return;
+        }
+
+        var items = new List<(string ChunkId, string DocumentId, string SourceKey, string Text, float[] Vector, long DocVersion, string ConnectorId, string? Locator, int StartLine, int EndLine, string? HeadingPath)>();
+        int dimension = 0;
+
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = @"
+            SELECT v.chunk_id, v.document_id, d.source_key, c.text,
+                   v.vector_blob, c.document_version, d.connector_id, d.locator, v.dimension,
+                   c.start_line, c.end_line, c.heading_path
+            FROM chunk_vectors v
+            JOIN chunks c ON c.id = v.chunk_id
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.enabled = 1";
+
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var chunkId = reader.GetString(0);
+            var docId = reader.GetString(1);
+            var sourceKey = reader.GetString(2);
+            var text = reader.GetString(3);
+            var blob = (byte[])reader.GetValue(4);
+            var docVer = reader.GetInt64(5);
+            var connId = reader.GetString(6);
+            var locator = reader.IsDBNull(7) ? null : reader.GetString(7);
+            var dim = reader.GetInt32(8);
+            if (dimension == 0) dimension = dim;
+            var startLine = reader.IsDBNull(9) ? 0 : reader.GetInt32(9);
+            var endLine = reader.IsDBNull(10) ? 0 : reader.GetInt32(10);
+            var headingPath = reader.IsDBNull(11) ? null : reader.GetString(11);
+
+            var floatSpan = MemoryMarshal.Cast<byte, float>(blob.AsSpan());
+            var vectorArray = floatSpan.ToArray();
+            items.Add((chunkId, docId, sourceKey, text, vectorArray, docVer, connId, locator, startLine, endLine, headingPath));
+        }
+
+        pool.SwapSnapshot(vectorGeneration, dimension, items);
+    }
+
+    private static (string Clause, List<SqliteParameter> Parameters) BuildFolderFilter(IReadOnlyList<string>? folders)
+    {
+        if (folders == null || folders.Count == 0)
+            return (string.Empty, new List<SqliteParameter>());
+
+        var validFolders = folders
+            .Where(f => !string.IsNullOrWhiteSpace(f))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (validFolders.Count == 0)
+            return (" AND 1=0 ", new List<SqliteParameter>());
+
+        var clauses = new List<string>();
+        var parameters = new List<SqliteParameter>();
+
+        for (int i = 0; i < validFolders.Count; i++)
+        {
+            var folder = validFolders[i];
+            var normSlash = folder.Replace('\\', '/').TrimEnd('/');
+            var normBackslash = folder.Replace('/', '\\').TrimEnd('\\');
+
+            var pName = $"@fld_{i}";
+            var pPreSlash = $"@fld_ps_{i}";
+            var pBackslash = $"@fld_bs_{i}";
+            var pPreBackslash = $"@fld_pbs_{i}";
+
+            clauses.Add($@"(
+                d.source_key = {pName} OR d.source_key LIKE {pPreSlash}
+                OR d.locator = {pName} OR d.locator LIKE {pPreSlash}
+                OR d.locator = {pBackslash} OR d.locator LIKE {pPreBackslash}
+                OR d.connector_id = {pName}
+            )");
+
+            parameters.Add(new SqliteParameter(pName, normSlash));
+            parameters.Add(new SqliteParameter(pPreSlash, normSlash + "/%"));
+            parameters.Add(new SqliteParameter(pBackslash, normBackslash));
+            parameters.Add(new SqliteParameter(pPreBackslash, normBackslash + "\\%"));
+        }
+
+        return (" AND (" + string.Join(" OR ", clauses) + ") ", parameters);
+    }
+
+    private async Task<List<RecallItem>> ExecuteLexicalQueryInternalAsync(
+        SqliteConnection conn,
+        SqliteTransaction tx,
+        string table,
+        string ftsQuery,
+        RecallRequest request,
+        string scopeClause,
+        string folderClause,
+        IReadOnlyList<SqliteParameter> folderParams,
+        HashSet<string> seenChunkIds,
+        CancellationToken ct)
+    {
+        var resultList = new List<RecallItem>();
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            var scoreExpr = table == "fts_chunks_lexical"
+                ? "bm25(fts_chunks_lexical, 0.0, 0.0, 5.0, 2.5, 1.0)"
+                : $"bm25({table})";
+
+            cmd.CommandText = $@"
+                SELECT c.id, c.document_id, d.source_key, c.text,
+                       {scoreExpr} AS score, c.document_version, d.connector_id, d.locator,
+                       c.start_line, c.end_line, c.heading_path
+                FROM {table} f
+                JOIN chunks c ON c.id = f.chunk_id
+                JOIN documents d ON d.id = c.document_id
+                WHERE {table} MATCH @match AND c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}
+                ORDER BY score ASC
+                LIMIT @topK;
+            ";
+            cmd.Parameters.AddWithValue("@match", ftsQuery);
+            cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@topK", Math.Clamp(request.TopK, 1, 100));
+            foreach (var p in folderParams)
+            {
+                cmd.Parameters.AddWithValue(p.ParameterName, p.Value);
+            }
+
+            using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var chunkId = reader.GetString(0);
+                if (!seenChunkIds.Add(chunkId)) continue;
+
+                var docId = reader.GetString(1);
+                var sourceKey = reader.GetString(2);
+                var text = reader.GetString(3);
+                var bm25Raw = reader.GetDouble(4);
+                var docVer = reader.GetInt64(5);
+                var connId = reader.GetString(6);
+                var startLine = reader.IsDBNull(8) ? 0 : reader.GetInt32(8);
+                var endLine = reader.IsDBNull(9) ? 0 : reader.GetInt32(9);
+                var headingPath = reader.IsDBNull(10) ? null : reader.GetString(10);
+
+                var score = request.UseLexicalTokenizer ? Math.Abs(bm25Raw) : 1.0 / (1.0 + Math.Max(0, bm25Raw));
+
+                resultList.Add(new RecallItem(
+                    ChunkId: chunkId,
+                    DocumentId: docId,
+                    SourceKey: sourceKey,
+                    Text: text,
+                    Score: score,
+                    ScoreKind: ScoreKind.BM25,
+                    DocumentVersion: docVer,
+                    ConnectorId: connId,
+                    Locator: reader.IsDBNull(7) ? null : reader.GetString(7),
+                    StartLine: startLine,
+                    EndLine: endLine,
+                    HeadingPath: headingPath
+                ));
+            }
+        }
+        catch (SqliteException ex)
+        {
+            _logger?.LogDebug(ex, "[SqliteKnowledgeBaseStore] FTS 查询回退: {Query}", ftsQuery);
+        }
+        return resultList;
+    }
+
     public async Task<RecallSnapshot> RecallAsync(RecallRequest request, CancellationToken ct = default)
     {
         await InitializeAsync(ct);
-        if (request.UseLexicalTokenizer) await EnsureLexicalIndexAsync(ct);
+        await EnsureLexicalIndexAsync(ct);
         var bm25Items = new List<RecallItem>();
         var vectorItems = new List<RecallItem>();
 
@@ -562,11 +836,55 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             contentGeneration = manifestReader.GetInt64(1);
             vectorGeneration = manifestReader.GetInt64(2);
         }
-        if (request.MetadataFilters is { Count: > 0 })
-            throw new NotSupportedException("知识库检索尚不支持元数据过滤。");
+
+        var effectiveFolders = request.Folders;
+        if ((effectiveFolders == null || effectiveFolders.Count == 0) && request.MetadataFilters != null)
+        {
+            if (request.MetadataFilters.TryGetValue("folders", out var flds) && !string.IsNullOrWhiteSpace(flds))
+                effectiveFolders = flds.Split([';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            else if (request.MetadataFilters.TryGetValue("folder", out var fld) && !string.IsNullOrWhiteSpace(fld))
+                effectiveFolders = [fld];
+            else if (request.MetadataFilters.TryGetValue("path", out var pth) && !string.IsNullOrWhiteSpace(pth))
+                effectiveFolders = [pth];
+        }
+
+        var (folderClause, folderParams) = BuildFolderFilter(effectiveFolders);
+
         var scopeClause = "";
+        Func<string, string, string?, bool>? effectiveSimdAuth = null;
+        if (effectiveFolders != null && effectiveFolders.Count > 0)
+        {
+            var validFolders = effectiveFolders.Where(f => !string.IsNullOrWhiteSpace(f))
+                .Select(f => f.Replace('\\', '/').TrimEnd('/')).ToList();
+            if (validFolders.Count == 0)
+            {
+                effectiveSimdAuth = (_, _, _) => false;
+            }
+            else
+            {
+                effectiveSimdAuth = (connId, srcKey, loc) =>
+                {
+                    var sk = srcKey?.Replace('\\', '/');
+                    var lp = loc?.Replace('\\', '/');
+                    foreach (var fld in validFolders)
+                    {
+                        if (string.Equals(connId, fld, StringComparison.OrdinalIgnoreCase)) return true;
+                        if (!string.IsNullOrEmpty(sk) && (string.Equals(sk, fld, StringComparison.OrdinalIgnoreCase) || sk.StartsWith(fld + "/", StringComparison.OrdinalIgnoreCase))) return true;
+                        if (!string.IsNullOrEmpty(lp) && (string.Equals(lp, fld, StringComparison.OrdinalIgnoreCase) || lp.StartsWith(fld + "/", StringComparison.OrdinalIgnoreCase))) return true;
+                    }
+                    return false;
+                };
+            }
+        }
+
         if (request.AuthorizeDocument != null)
         {
+            var baseAuth = request.AuthorizeDocument;
+            var prevFolderAuth = effectiveSimdAuth;
+            effectiveSimdAuth = prevFolderAuth == null
+                ? baseAuth
+                : (c, s, l) => baseAuth(c, s, l) && prevFolderAuth(c, s, l);
+
             using (var create = conn.CreateCommand())
             {
                 create.Transaction = tx;
@@ -609,10 +927,18 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             coverage.Transaction = tx;
             coverage.CommandText = @"SELECT 1 FROM chunks c
                 JOIN documents d ON d.id=c.document_id LEFT JOIN chunk_vectors v ON v.chunk_id=c.id
-                WHERE c.enabled = 1 AND v.chunk_id IS NULL AND (@connector IS NULL OR d.connector_id=@connector)" + scopeClause + " LIMIT 1";
+                WHERE c.enabled = 1 AND v.chunk_id IS NULL AND (@connector IS NULL OR d.connector_id=@connector)" + scopeClause + folderClause + " LIMIT 1";
             coverage.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
+            foreach (var p in folderParams)
+            {
+                coverage.Parameters.AddWithValue(p.ParameterName, p.Value);
+            }
             if (await coverage.ExecuteScalarAsync(ct) != null)
             {
+                if (!request.AllowDegrade)
+                {
+                    throw new InvalidOperationException("知识库存在未向量化分块，禁止向量检索。");
+                }
                 hasVectorCoverage = false;
                 isDegraded = true;
                 degradeReason = "知识库向量索引未完全覆盖，自动降级为全量纯词法检索";
@@ -620,10 +946,11 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             }
         }
 
-        // 1. BM25 全文召回 (支持长句分层阶梯与近音短语邻近)
+        // 1. BM25 全文召回 (支持长句分层阶梯、专有名词增强与 BM25F 多列打分)
         var isLongQuery = request.Query != null && request.Query.Length > 15;
-        var table = request.UseLexicalTokenizer ? "fts_chunks_lexical" : "fts_chunks";
-        var plan = isLongQuery && request.UseLexicalTokenizer
+        var useLexicalTable = request.UseLexicalTokenizer || isDegraded || !hasVectorCoverage || request.QueryVector is not { Length: > 0 };
+        var table = useLexicalTable ? "fts_chunks_lexical" : "fts_chunks";
+        var plan = isLongQuery && useLexicalTable
             ? ReferenceRAG.Core.Features.Search.Lexical.LongQueryRefiner.Default.PlanQuery(request.Query)
             : null;
 
@@ -636,64 +963,59 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         }
         else
         {
-            var fallback = request.UseLexicalTokenizer ? SanitizeLexicalQuery(request.Query) : SanitizeFtsQuery(request.Query);
-            if (!string.IsNullOrWhiteSpace(fallback)) queriesToTry.Add(fallback);
+            var fallback = useLexicalTable ? SanitizeLexicalQuery(request.Query) : SanitizeFtsQuery(request.Query);
+            if (!string.IsNullOrWhiteSpace(fallback))
+            {
+                // SAG-Wiki 专有名词短语与双引号锁定增强
+                var enhanced = NamePhraseExtractor.BuildEnhancedFtsQuery(request.Query, fallback);
+                if (!string.Equals(enhanced, fallback, StringComparison.Ordinal))
+                {
+                    queriesToTry.Add(enhanced);
+                }
+                queriesToTry.Add(fallback);
+            }
         }
 
         var seenChunkIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var ftsQuery in queriesToTry)
         {
             if (bm25Items.Count >= request.TopK) break;
+            var retrieved = await ExecuteLexicalQueryInternalAsync(conn, tx, table, ftsQuery, request, scopeClause, folderClause, folderParams, seenChunkIds, ct);
+            bm25Items.AddRange(retrieved);
+        }
 
-            try
+        // 1.1 级联早停状态机裁决 (Cascade Early-Pruning State Machine)
+        if (request.Query != null && bm25Items.Count > 0)
+        {
+            var (shouldEarlyExit, earlyExitReason) = CascadeEarlyPruningStateMachine.CheckEarlyExit(request.Query, bm25Items);
+            if (shouldEarlyExit)
             {
-                using var cmd = conn.CreateCommand();
-                cmd.Transaction = tx;
-                cmd.CommandText = $@"
-                    SELECT c.id, c.document_id, d.source_key, c.text,
-                           bm25({table}) AS score, c.document_version, d.connector_id, d.locator
-                    FROM {table} f
-                    JOIN chunks c ON c.id = f.chunk_id
-                    JOIN documents d ON d.id = c.document_id
-                    WHERE {table} MATCH @match AND c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause}
-                    ORDER BY score ASC
-                    LIMIT @topK;
-                ";
-                cmd.Parameters.AddWithValue("@match", ftsQuery);
-                cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@topK", Math.Clamp(request.TopK, 1, 100));
-
-                using var reader = await cmd.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
-                {
-                    var chunkId = reader.GetString(0);
-                    if (!seenChunkIds.Add(chunkId)) continue;
-
-                    var docId = reader.GetString(1);
-                    var sourceKey = reader.GetString(2);
-                    var text = reader.GetString(3);
-                    var bm25Raw = reader.GetDouble(4);
-                    var docVer = reader.GetInt64(5);
-                    var connId = reader.GetString(6);
-
-                    var score = request.UseLexicalTokenizer ? Math.Abs(bm25Raw) : 1.0 / (1.0 + Math.Max(0, bm25Raw));
-
-                    bm25Items.Add(new RecallItem(
-                        ChunkId: chunkId,
-                        DocumentId: docId,
-                        SourceKey: sourceKey,
-                        Text: text,
-                        Score: score,
-                        ScoreKind: ScoreKind.BM25,
-                        DocumentVersion: docVer,
-                        ConnectorId: connId,
-                        Locator: reader.IsDBNull(7) ? null : reader.GetString(7)
-                    ));
-                }
+                _logger?.LogInformation("[SqliteKnowledgeBaseStore] 触发词法级联早停: {Reason}，短路跳过向量检索与融合", earlyExitReason);
+                return new RecallSnapshot(
+                    KnowledgeBaseId, readRevision, contentGeneration, vectorGeneration,
+                    bm25Items.Take(request.TopK).ToList(),
+                    Degraded: isDegraded, DegradationReason: degradeReason, EarlyPruned: true);
             }
-            catch (SqliteException ex)
+        }
+
+        // 1.2 上下文共现多跳扩展与公平交错 (Context-IDF Expansion & Interleave)
+        if (request.Query != null && bm25Items.Count > 0 && bm25Items.Count < request.TopK)
+        {
+            var expansions = ContextIdfTermSelector.SelectExpansionTerms(request.Query, bm25Items, limit: 2);
+            if (expansions.Count > 0)
             {
-                _logger?.LogDebug(ex, "[SqliteKnowledgeBaseStore] FTS 阶梯查询回退: {Query}", ftsQuery);
+                var hopLists = new List<IReadOnlyList<RecallItem>> { bm25Items };
+                foreach (var exp in expansions)
+                {
+                    var hopQuery = exp.IsNamePhrase ? $"\"{exp.Term.Replace("\"", "\"\"")}\"" : TokenizeLexical(exp.Term);
+                    if (string.IsNullOrWhiteSpace(hopQuery)) continue;
+                    var hopRetrieved = await ExecuteLexicalQueryInternalAsync(conn, tx, table, hopQuery, request, scopeClause, folderClause, folderParams, seenChunkIds, ct);
+                    if (hopRetrieved.Count > 0)
+                    {
+                        hopLists.Add(hopRetrieved);
+                    }
+                }
+                bm25Items = InterleaveAlgorithm.Interleave(hopLists, request.TopK * 2).ToList();
             }
         }
 
@@ -717,51 +1039,71 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             }
         }
 
-        // 2. 向量相似度召回 (若传入 QueryVector 且向量覆盖完整)
+        // 2. 向量相似度召回 (优先尝试连续内存硬件 SIMD 投影池加速)
         if (hasVectorCoverage && request.QueryVector != null && request.QueryVector.Length > 0)
         {
             try
             {
-                using var vecCmd = conn.CreateCommand();
-                vecCmd.Transaction = tx;
-                vecCmd.CommandText = @"
-                    SELECT v.chunk_id, v.document_id, d.source_key, c.text,
-                           v.vector_blob, c.document_version, d.connector_id, d.locator
-                    FROM chunk_vectors v
-                    JOIN chunks c ON c.id = v.chunk_id
-                    JOIN documents d ON d.id = c.document_id
-                    WHERE c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector)" + scopeClause;
-                vecCmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
-                using var reader = await vecCmd.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
+                await EnsureTensorProjectionPoolLoadedAsync(conn, tx, vectorGeneration, ct);
+                var pool = InMemoryTensorProjectionPool.GetOrCreate(KnowledgeBaseId);
+                if (pool.TryScanSimd(request.QueryVector.AsSpan(), request.ConnectorId, authorizeDocument: effectiveSimdAuth, request.TopK, out var simdItems) && simdItems.Count > 0)
                 {
-                    var chunkId = reader.GetString(0);
-                    var docId = reader.GetString(1);
-                    var sourceKey = reader.GetString(2);
-                    var text = reader.GetString(3);
-                    var blob = (byte[])reader.GetValue(4);
-                    var docVer = reader.GetInt64(5);
-                    var connId = reader.GetString(6);
-
-                    var docSpan = MemoryMarshal.Cast<byte, float>(blob.AsSpan());
-                    var sim = CosineSimilarity(request.QueryVector.AsSpan(), docSpan);
-                    if (sim > 0.0)
-                    {
-                        vectorItems.Add(new RecallItem(
-                            ChunkId: chunkId,
-                            DocumentId: docId,
-                            SourceKey: sourceKey,
-                            Text: text,
-                            Score: sim,
-                            ScoreKind: ScoreKind.Cosine,
-                            DocumentVersion: docVer,
-                            ConnectorId: connId,
-                            Locator: reader.IsDBNull(7) ? null : reader.GetString(7)
-                        ));
-                    }
+                    vectorItems = simdItems;
                 }
+                else
+                {
+                    using var vecCmd = conn.CreateCommand();
+                    vecCmd.Transaction = tx;
+                    vecCmd.CommandText = @"
+                        SELECT v.chunk_id, v.document_id, d.source_key, c.text,
+                               v.vector_blob, c.document_version, d.connector_id, d.locator,
+                               c.start_line, c.end_line, c.heading_path
+                        FROM chunk_vectors v
+                        JOIN chunks c ON c.id = v.chunk_id
+                        JOIN documents d ON d.id = c.document_id
+                        WHERE c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector)" + scopeClause + folderClause;
+                    vecCmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
+                    foreach (var p in folderParams)
+                    {
+                        vecCmd.Parameters.AddWithValue(p.ParameterName, p.Value);
+                    }
+                    using var reader = await vecCmd.ExecuteReaderAsync(ct);
+                    while (await reader.ReadAsync(ct))
+                    {
+                        var chunkId = reader.GetString(0);
+                        var docId = reader.GetString(1);
+                        var sourceKey = reader.GetString(2);
+                        var text = reader.GetString(3);
+                        var blob = (byte[])reader.GetValue(4);
+                        var docVer = reader.GetInt64(5);
+                        var connId = reader.GetString(6);
+                        var startLine = reader.IsDBNull(8) ? 0 : reader.GetInt32(8);
+                        var endLine = reader.IsDBNull(9) ? 0 : reader.GetInt32(9);
+                        var headingPath = reader.IsDBNull(10) ? null : reader.GetString(10);
 
-                vectorItems = vectorItems.OrderByDescending(v => v.Score).Take(request.TopK).ToList();
+                        var docSpan = MemoryMarshal.Cast<byte, float>(blob.AsSpan());
+                        var sim = CosineSimilarity(request.QueryVector.AsSpan(), docSpan);
+                        if (sim > 0.0)
+                        {
+                            vectorItems.Add(new RecallItem(
+                                ChunkId: chunkId,
+                                DocumentId: docId,
+                                SourceKey: sourceKey,
+                                Text: text,
+                                Score: sim,
+                                ScoreKind: ScoreKind.Cosine,
+                                DocumentVersion: docVer,
+                                ConnectorId: connId,
+                                Locator: reader.IsDBNull(7) ? null : reader.GetString(7),
+                                StartLine: startLine,
+                                EndLine: endLine,
+                                HeadingPath: headingPath
+                            ));
+                        }
+                    }
+
+                    vectorItems = vectorItems.OrderByDescending(v => v.Score).Take(request.TopK).ToList();
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -770,37 +1112,11 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             }
         }
 
-        // 3. 多路融合裁决 (Hybrid / Pure Vector / Pure BM25)
+        // 3. 多路融合裁决 (自适应动态意图权重与 Z-Score 正态标准化融合)
         IReadOnlyList<RecallItem> finalItems;
         if (vectorItems.Count > 0 && bm25Items.Count > 0)
         {
-            // 单库内置自适应 RRF 混合融合
-            var (wBm25, wVector) = ReferenceRAG.Core.Features.Search.Fusion.AdaptiveSearchFusionHelper.CalculateWeights(request.Query);
-            var fused = new Dictionary<string, (double Score, RecallItem Item)>();
-            for (int r = 0; r < bm25Items.Count; r++)
-            {
-                var it = bm25Items[r];
-                fused[it.ChunkId] = (wBm25 / (60 + r + 1), it);
-            }
-            for (int r = 0; r < vectorItems.Count; r++)
-            {
-                var it = vectorItems[r];
-                var score = wVector / (60 + r + 1);
-                if (fused.TryGetValue(it.ChunkId, out var existing))
-                {
-                    fused[it.ChunkId] = (existing.Score + score, existing.Item);
-                }
-                else
-                {
-                    fused[it.ChunkId] = (score, it);
-                }
-            }
-
-            finalItems = fused.Values
-                .OrderByDescending(x => x.Score)
-                .Take(request.TopK)
-                .Select(x => x.Item with { Score = x.Score, ScoreKind = ScoreKind.RRF })
-                .ToList();
+            finalItems = AdaptiveQueryAwareFusion.FuseWithZScore(bm25Items, vectorItems, request.Query, request.TopK);
         }
         else if (vectorItems.Count > 0)
         {
@@ -814,6 +1130,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         return new RecallSnapshot(
             KnowledgeBaseId, readRevision, contentGeneration, vectorGeneration, finalItems,
             Degraded: isDegraded, DegradationReason: degradeReason);
+
     }
 
     public static byte[] FloatsToBytes(float[] floats)
@@ -1636,6 +1953,363 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         }
     }
 
+    public async Task<int> PurgeConnectorDataAsync(string connectorId, CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+            var hasLexical = await HasLexicalIndexAsync(conn, tx, ct);
+
+            if (hasLexical)
+            {
+                using var cleanLex = conn.CreateCommand();
+                cleanLex.Transaction = tx;
+                cleanLex.CommandText = "DELETE FROM fts_chunks_lexical WHERE document_id IN (SELECT id FROM documents WHERE connector_id = @c_id);";
+                cleanLex.Parameters.AddWithValue("@c_id", connectorId);
+                await cleanLex.ExecuteNonQueryAsync(ct);
+            }
+
+            using var cleanCmd = conn.CreateCommand();
+            cleanCmd.Transaction = tx;
+            cleanCmd.CommandText = @"
+                DELETE FROM fts_chunks WHERE document_id IN (SELECT id FROM documents WHERE connector_id = @c_id);
+                DELETE FROM chunk_vectors WHERE document_id IN (SELECT id FROM documents WHERE connector_id = @c_id);
+                DELETE FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE connector_id = @c_id);
+                DELETE FROM documents WHERE connector_id = @c_id;
+            ";
+            cleanCmd.Parameters.AddWithValue("@c_id", connectorId);
+            var affected = await cleanCmd.ExecuteNonQueryAsync(ct);
+
+            // 递增知识库版本代次与写入代次栅栏
+            using var bumpCmd = conn.CreateCommand();
+            bumpCmd.Transaction = tx;
+            bumpCmd.CommandText = @"
+                UPDATE kb_manifest
+                SET read_revision = read_revision + 1,
+                    index_epoch = index_epoch + 1,
+                    content_generation = content_generation + 1,
+                    vector_generation = vector_generation + 1,
+                    updated_at = @now
+                WHERE kb_id = @id;
+            ";
+            bumpCmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+            bumpCmd.Parameters.AddWithValue("@id", KnowledgeBaseId);
+            await bumpCmd.ExecuteNonQueryAsync(ct);
+
+            tx.Commit();
+            return affected;
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+    }
+
+    public async Task<(int DocumentCount, int ChunkCount)> GetConnectorStatsAsync(string connectorId, CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        using var conn = CreateConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT 
+                (SELECT COUNT(1) FROM documents WHERE connector_id = @c_id) AS doc_count,
+                (SELECT COUNT(1) FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE connector_id = @c_id)) AS chunk_count;
+        ";
+        cmd.Parameters.AddWithValue("@c_id", connectorId);
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+        {
+            var docCount = reader.GetInt32(0);
+            var chunkCount = reader.GetInt32(1);
+            return (docCount, chunkCount);
+        }
+        return (0, 0);
+    }
+
+    /// <summary>
+    /// 获取当前知识库所有连接器与其下文档的路径树信息
+    /// </summary>
+    public async Task<IReadOnlyList<SourcePathInfo>> GetPathsAsync(
+        IReadOnlyList<ConnectorDefinition> connectors,
+        CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        var result = new List<SourcePathInfo>();
+        using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+
+        var processedConnIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var connector in connectors.Where(c => c.Enabled))
+        {
+            processedConnIds.Add(connector.Id);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT source_key, locator FROM documents WHERE connector_id = @connId";
+            cmd.Parameters.AddWithValue("@connId", connector.Id);
+
+            var foldersSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var sourceKey = reader.IsDBNull(0) ? "" : reader.GetString(0);
+                if (!string.IsNullOrWhiteSpace(sourceKey))
+                {
+                    var parts = sourceKey.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+                    var current = "";
+                    for (int p = 0; p < parts.Length - 1; p++)
+                    {
+                        current = string.IsNullOrEmpty(current) ? parts[p] : current + "/" + parts[p];
+                        foldersSet.Add(current);
+                    }
+                }
+            }
+
+            var displayName = Path.GetFileName(connector.TargetPath.TrimEnd('/', '\\'));
+            if (string.IsNullOrWhiteSpace(displayName)) displayName = connector.TargetPath;
+
+            result.Add(new SourcePathInfo
+            {
+                Name = displayName,
+                RootPath = connector.TargetPath,
+                Folders = foldersSet.OrderBy(x => x).ToList()
+            });
+        }
+
+        // 补充 documents 表中存在但未在 connectors 清单中的连接器数据（若有历史遗留）
+        using (var extraCmd = conn.CreateCommand())
+        {
+            extraCmd.CommandText = "SELECT DISTINCT connector_id FROM documents";
+            using var extraReader = await extraCmd.ExecuteReaderAsync(ct);
+            var otherConnIds = new List<string>();
+            while (await extraReader.ReadAsync(ct))
+            {
+                var cId = extraReader.GetString(0);
+                if (!processedConnIds.Contains(cId))
+                {
+                    otherConnIds.Add(cId);
+                }
+            }
+
+            foreach (var otherId in otherConnIds)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT source_key, locator FROM documents WHERE connector_id = @connId";
+                cmd.Parameters.AddWithValue("@connId", otherId);
+                var foldersSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                string? sampleLocator = null;
+                using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var sourceKey = reader.IsDBNull(0) ? "" : reader.GetString(0);
+                    if (sampleLocator == null && !reader.IsDBNull(1)) sampleLocator = reader.GetString(1);
+                    if (!string.IsNullOrWhiteSpace(sourceKey))
+                    {
+                        var parts = sourceKey.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+                        var current = "";
+                        for (int p = 0; p < parts.Length - 1; p++)
+                        {
+                            current = string.IsNullOrEmpty(current) ? parts[p] : current + "/" + parts[p];
+                            foldersSet.Add(current);
+                        }
+                    }
+                }
+
+                result.Add(new SourcePathInfo
+                {
+                    Name = otherId,
+                    RootPath = sampleLocator != null ? (Path.GetDirectoryName(sampleLocator) ?? otherId) : otherId,
+                    Folders = foldersSet.OrderBy(x => x).ToList()
+                });
+            }
+        }
+
+        return result;
+    }
+
+    public async Task<KnowledgeBaseDocumentRecord> CreateDocumentAsync(
+        string connectorId,
+        string sourceKey,
+        string? title,
+        string content,
+        ChunkingSpec? chunkingSpec = null,
+        CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+            var hasLexical = await HasLexicalIndexAsync(conn, tx, ct);
+            var now = DateTime.UtcNow.ToString("O");
+            var docId = Guid.NewGuid().ToString("N");
+            var docKey = string.IsNullOrWhiteSpace(sourceKey) ? (string.IsNullOrWhiteSpace(title) ? $"doc_{docId[..8]}.md" : title) : sourceKey;
+
+            // 1. 插入文档记录
+            using (var insertDoc = conn.CreateCommand())
+            {
+                insertDoc.Transaction = tx;
+                insertDoc.CommandText = @"
+                    INSERT INTO documents (
+                        id, connector_id, source_key, locator, content_hash,
+                        document_version, created_at, updated_at
+                    ) VALUES (
+                        @id, @c_id, @s_key, @locator, @hash,
+                        1, @now, @now
+                    );
+                ";
+                insertDoc.Parameters.AddWithValue("@id", docId);
+                insertDoc.Parameters.AddWithValue("@c_id", connectorId);
+                insertDoc.Parameters.AddWithValue("@s_key", docKey);
+                insertDoc.Parameters.AddWithValue("@locator", $"manual://{connectorId}/{docId}");
+                insertDoc.Parameters.AddWithValue("@hash", Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content))));
+                insertDoc.Parameters.AddWithValue("@now", now);
+                await insertDoc.ExecuteNonQueryAsync(ct);
+            }
+
+            // 2. 自适应分块解析与分块生成，提取行号与标题路径
+            var rawLines = content.Replace("\r\n", "\n").Split('\n');
+            string? currentHeading = null;
+            var chunkList = new List<(string Text, int StartLine, int EndLine, string? HeadingPath)>();
+
+            var currentChunkBuilder = new System.Text.StringBuilder();
+            int chunkStartLine = 1;
+
+            // 根据知识库 ChunkingSpec 自适应参数进行切分
+            int maxChars = chunkingSpec != null ? Math.Max(128, chunkingSpec.MaxTokens * 2) : 600;
+            int minChars = chunkingSpec != null ? Math.Min(30, chunkingSpec.MinTokens) : 0;
+            bool preserveCode = chunkingSpec?.PreserveCodeBlocks ?? true;
+            bool insideCodeFence = false;
+
+            for (int lineIdx = 0; lineIdx < rawLines.Length; lineIdx++)
+            {
+                var line = rawLines[lineIdx];
+                int lineNum = lineIdx + 1;
+
+                if (preserveCode && line.TrimStart().StartsWith("```", StringComparison.Ordinal))
+                {
+                    insideCodeFence = !insideCodeFence;
+                }
+
+                if (!insideCodeFence && line.TrimStart().StartsWith('#'))
+                {
+                    currentHeading = line.TrimStart('#', ' ').Trim();
+                }
+
+                if (currentChunkBuilder.Length == 0)
+                {
+                    chunkStartLine = lineNum;
+                }
+
+                currentChunkBuilder.AppendLine(line);
+
+                bool isSplitBoundary = !insideCodeFence && (
+                    (string.IsNullOrWhiteSpace(line) && currentChunkBuilder.Length >= minChars) ||
+                    currentChunkBuilder.Length >= maxChars
+                );
+
+                if (isSplitBoundary)
+                {
+                    var chunkText = currentChunkBuilder.ToString().Trim();
+                    if (!string.IsNullOrWhiteSpace(chunkText))
+                    {
+                        chunkList.Add((chunkText, chunkStartLine, lineNum, currentHeading));
+                    }
+                    currentChunkBuilder.Clear();
+                }
+            }
+
+            if (currentChunkBuilder.Length > 0)
+            {
+                var chunkText = currentChunkBuilder.ToString().Trim();
+                if (!string.IsNullOrWhiteSpace(chunkText))
+                {
+                    chunkList.Add((chunkText, chunkStartLine, rawLines.Length, currentHeading));
+                }
+            }
+
+            if (chunkList.Count == 0 && !string.IsNullOrWhiteSpace(content))
+            {
+                chunkList.Add((content.Trim(), 1, rawLines.Length, title));
+            }
+
+            int ordinal = 1;
+            foreach (var (chunkText, sLine, eLine, hPath) in chunkList)
+            {
+                var chunkId = Guid.NewGuid().ToString("N");
+                using var insertChunk = conn.CreateCommand();
+                insertChunk.Transaction = tx;
+                insertChunk.CommandText = @"
+                    INSERT INTO chunks (id, document_id, document_version, ordinal, text, token_count, enabled, start_line, end_line, heading_path)
+                    VALUES (@id, @doc_id, 1, @ord, @text, @tokens, 1, @s_line, @e_line, @h_path);
+                    INSERT INTO fts_chunks (chunk_id, document_id, text)
+                    VALUES (@id, @doc_id, @text);
+                ";
+                insertChunk.Parameters.AddWithValue("@id", chunkId);
+                insertChunk.Parameters.AddWithValue("@doc_id", docId);
+                insertChunk.Parameters.AddWithValue("@ord", ordinal++);
+                insertChunk.Parameters.AddWithValue("@text", chunkText);
+                insertChunk.Parameters.AddWithValue("@tokens", chunkText.Length);
+                insertChunk.Parameters.AddWithValue("@s_line", sLine);
+                insertChunk.Parameters.AddWithValue("@e_line", eLine);
+                insertChunk.Parameters.AddWithValue("@h_path", (object?)hPath ?? DBNull.Value);
+                await insertChunk.ExecuteNonQueryAsync(ct);
+
+                if (hasLexical)
+                {
+                    var docTitle = ExtractTitle(title, chunkText);
+                    var heading = hPath ?? ExtractHeading(chunkText);
+                    using var insertLex = conn.CreateCommand();
+                    insertLex.Transaction = tx;
+                    insertLex.CommandText = "INSERT INTO fts_chunks_lexical(chunk_id, document_id, title, heading, text) VALUES(@id, @doc, @title, @heading, @text);";
+                    insertLex.Parameters.AddWithValue("@id", chunkId);
+                    insertLex.Parameters.AddWithValue("@doc", docId);
+                    insertLex.Parameters.AddWithValue("@title", TokenizeLexical(docTitle));
+                    insertLex.Parameters.AddWithValue("@heading", TokenizeLexical(heading));
+                    insertLex.Parameters.AddWithValue("@text", TokenizeLexical(chunkText));
+                    await insertLex.ExecuteNonQueryAsync(ct);
+                }
+            }
+
+            // 3. 递增版本
+            using (var bumpCmd = conn.CreateCommand())
+            {
+                bumpCmd.Transaction = tx;
+                bumpCmd.CommandText = @"
+                    UPDATE kb_manifest
+                    SET read_revision = read_revision + 1,
+                        content_generation = content_generation + 1,
+                        updated_at = @now
+                    WHERE kb_id = @id;
+                ";
+                bumpCmd.Parameters.AddWithValue("@now", now);
+                bumpCmd.Parameters.AddWithValue("@id", KnowledgeBaseId);
+                await bumpCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            tx.Commit();
+
+            return new KnowledgeBaseDocumentRecord(
+                Id: docId,
+                ConnectorId: connectorId,
+                SourceKey: docKey,
+                Locator: $"manual://{connectorId}/{docId}",
+                SourceRevision: null,
+                ContentHash: Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content))),
+                DocumentVersion: 1,
+                ChunkCount: ordinal - 1,
+                CreatedAt: DateTime.UtcNow,
+                UpdatedAt: DateTime.UtcNow
+            );
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+    }
+
     // ==================== 切片增删改查实现 (HITL) ====================
     public async Task<(IReadOnlyList<KnowledgeBaseChunkRecord> Chunks, int TotalCount)> GetChunksAsync(
         string? documentId = null,
@@ -1677,7 +2351,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 SELECT c.id, c.document_id, c.document_version, c.ordinal, c.text,
                        c.token_count, c.embedding_text,
                        (CASE WHEN v.chunk_id IS NOT NULL THEN 1 ELSE 0 END) AS has_vector,
-                       c.enabled, d.source_key
+                       c.enabled, d.source_key,
+                       c.start_line, c.end_line, c.heading_path
                 FROM chunks c
                 LEFT JOIN chunk_vectors v ON v.chunk_id = c.id
                 LEFT JOIN documents d ON d.id = c.document_id
@@ -1703,7 +2378,10 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     EmbeddingText: reader.IsDBNull(6) ? null : reader.GetString(6),
                     HasVector: reader.GetInt32(7) == 1,
                     Enabled: reader.GetInt32(8) == 1,
-                    DocumentSourceKey: reader.IsDBNull(9) ? null : reader.GetString(9)
+                    DocumentSourceKey: reader.IsDBNull(9) ? null : reader.GetString(9),
+                    StartLine: reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
+                    EndLine: reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                    HeadingPath: reader.IsDBNull(12) ? null : reader.GetString(12)
                 ));
             }
         }
@@ -1719,7 +2397,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             SELECT c.id, c.document_id, c.document_version, c.ordinal, c.text,
                    c.token_count, c.embedding_text,
                    (CASE WHEN v.chunk_id IS NOT NULL THEN 1 ELSE 0 END) AS has_vector,
-                   c.enabled, d.source_key
+                   c.enabled, d.source_key,
+                   c.start_line, c.end_line, c.heading_path
             FROM chunks c
             LEFT JOIN chunk_vectors v ON v.chunk_id = c.id
             LEFT JOIN documents d ON d.id = c.document_id
@@ -1739,7 +2418,10 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 EmbeddingText: reader.IsDBNull(6) ? null : reader.GetString(6),
                 HasVector: reader.GetInt32(7) == 1,
                 Enabled: reader.GetInt32(8) == 1,
-                DocumentSourceKey: reader.IsDBNull(9) ? null : reader.GetString(9)
+                DocumentSourceKey: reader.IsDBNull(9) ? null : reader.GetString(9),
+                StartLine: reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
+                EndLine: reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                HeadingPath: reader.IsDBNull(12) ? null : reader.GetString(12)
             );
         }
         return null;
@@ -1809,11 +2491,15 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
 
             if (hasLexical)
             {
+                var title = ExtractTitle(string.Empty, text);
+                var heading = ExtractHeading(text);
                 using var insertLex = conn.CreateCommand();
                 insertLex.Transaction = tx;
-                insertLex.CommandText = "INSERT INTO fts_chunks_lexical(chunk_id, document_id, text) VALUES(@id, @doc, @text);";
+                insertLex.CommandText = "INSERT INTO fts_chunks_lexical(chunk_id, document_id, title, heading, text) VALUES(@id, @doc, @title, @heading, @text);";
                 insertLex.Parameters.AddWithValue("@id", chunkId);
                 insertLex.Parameters.AddWithValue("@doc", documentId);
+                insertLex.Parameters.AddWithValue("@title", TokenizeLexical(title));
+                insertLex.Parameters.AddWithValue("@heading", TokenizeLexical(heading));
                 insertLex.Parameters.AddWithValue("@text", TokenizeLexical(text));
                 await insertLex.ExecuteNonQueryAsync(ct);
             }
@@ -1943,14 +2629,18 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
 
             if (hasLexical)
             {
+                var title = ExtractTitle(string.Empty, newText);
+                var heading = ExtractHeading(newText);
                 using var cleanLex = conn.CreateCommand();
                 cleanLex.Transaction = tx;
                 cleanLex.CommandText = @"
                     DELETE FROM fts_chunks_lexical WHERE chunk_id = @id;
-                    INSERT INTO fts_chunks_lexical (chunk_id, document_id, text) VALUES (@id, @doc_id, @text);
+                    INSERT INTO fts_chunks_lexical (chunk_id, document_id, title, heading, text) VALUES (@id, @doc_id, @title, @heading, @text);
                 ";
                 cleanLex.Parameters.AddWithValue("@id", chunkId);
                 cleanLex.Parameters.AddWithValue("@doc_id", docId);
+                cleanLex.Parameters.AddWithValue("@title", TokenizeLexical(title));
+                cleanLex.Parameters.AddWithValue("@heading", TokenizeLexical(heading));
                 cleanLex.Parameters.AddWithValue("@text", TokenizeLexical(newText));
                 await cleanLex.ExecuteNonQueryAsync(ct);
             }
@@ -2101,5 +2791,163 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         {
             _writeGate.Release();
         }
+    }
+
+    /// <summary>
+    /// 蓝绿影子重构索引：在保持当前向量检索零停机的情况下，在影子表中重算所有向量并原子切换
+    /// </summary>
+    public async Task<int> ExecuteShadowModelReindexAsync(
+        Func<IReadOnlyList<string>, Task<IReadOnlyList<float[]>>> vectorProvider,
+        string newSpecHash,
+        int newDimension,
+        CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+
+        // 1. 获取所有有效分块清单（读操作，不阻塞并发搜索）
+        var chunkPayloads = new List<(string ChunkId, string DocumentId, string Text)>();
+        using (var readConn = CreateConnection(readOnly: true))
+        {
+            using var readCmd = readConn.CreateCommand();
+            readCmd.CommandText = "SELECT id, document_id, COALESCE(embedding_text, text) FROM chunks WHERE enabled = 1 ORDER BY ordinal ASC";
+            using var reader = await readCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                chunkPayloads.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+        }
+
+        if (chunkPayloads.Count == 0)
+        {
+            return 0;
+        }
+
+        // 2. 准备影子表 chunk_vectors_shadow
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var prepConn = CreateConnection();
+            using var prepCmd = prepConn.CreateCommand();
+            prepCmd.CommandText = @"
+                CREATE TABLE IF NOT EXISTS chunk_vectors_shadow (
+                    chunk_id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    vector_blob BLOB NOT NULL,
+                    producer_cohort TEXT,
+                    created_at TEXT NOT NULL
+                );
+                DELETE FROM chunk_vectors_shadow;
+            ";
+            await prepCmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+
+        // 3. 分批调用向量计算并写入影子表（批处理，允许并发读）
+        const int batchSize = 32;
+        var now = DateTime.UtcNow.ToString("O");
+        for (int i = 0; i < chunkPayloads.Count; i += batchSize)
+        {
+            ct.ThrowIfCancellationRequested();
+            var batch = chunkPayloads.Skip(i).Take(batchSize).ToList();
+            var texts = batch.Select(b => b.Text).ToList();
+            var vectors = await vectorProvider(texts);
+
+            if (vectors.Count != batch.Count)
+            {
+                throw new InvalidOperationException($"影子索引生成异常: 期望 {batch.Count} 个向量，实际返回 {vectors.Count} 个。");
+            }
+
+            await _writeGate.WaitAsync(ct);
+            try
+            {
+                using var conn = CreateConnection();
+                using var tx = conn.BeginTransaction();
+                using var insertCmd = conn.CreateCommand();
+                insertCmd.Transaction = tx;
+                insertCmd.CommandText = @"
+                    INSERT INTO chunk_vectors_shadow (chunk_id, document_id, dimension, vector_blob, created_at)
+                    VALUES (@chunk_id, @doc_id, @dimension, @vector_blob, @created_at)
+                    ON CONFLICT(chunk_id) DO UPDATE SET
+                        document_id = excluded.document_id,
+                        dimension = excluded.dimension,
+                        vector_blob = excluded.vector_blob,
+                        created_at = excluded.created_at;
+                ";
+                var pChunkId = insertCmd.Parameters.Add("@chunk_id", SqliteType.Text);
+                var pDocId = insertCmd.Parameters.Add("@doc_id", SqliteType.Text);
+                var pDim = insertCmd.Parameters.Add("@dimension", SqliteType.Integer);
+                var pBlob = insertCmd.Parameters.Add("@vector_blob", SqliteType.Blob);
+                var pCreated = insertCmd.Parameters.Add("@created_at", SqliteType.Text);
+
+                for (int j = 0; j < batch.Count; j++)
+                {
+                    var vec = vectors[j];
+                    pChunkId.Value = batch[j].ChunkId;
+                    pDocId.Value = batch[j].DocumentId;
+                    pDim.Value = vec.Length > 0 ? vec.Length : newDimension;
+                    pBlob.Value = MemoryMarshal.Cast<float, byte>(vec.AsSpan()).ToArray();
+                    pCreated.Value = now;
+                    await insertCmd.ExecuteNonQueryAsync(ct);
+                }
+                tx.Commit();
+            }
+            finally
+            {
+                _writeGate.Release();
+            }
+        }
+
+        // 4. 原子切换影子表与主表，更新 manifest
+        long newVectorGen = 1;
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+
+            using var swapCmd = conn.CreateCommand();
+            swapCmd.Transaction = tx;
+            swapCmd.CommandText = @"
+                DROP TABLE IF EXISTS chunk_vectors_old;
+                ALTER TABLE chunk_vectors RENAME TO chunk_vectors_old;
+                ALTER TABLE chunk_vectors_shadow RENAME TO chunk_vectors;
+                DROP TABLE IF EXISTS chunk_vectors_old;
+
+                UPDATE kb_manifest
+                SET index_epoch = index_epoch + 1,
+                    vector_generation = vector_generation + 1,
+                    read_revision = read_revision + 1,
+                    active_spec_hash = @specHash,
+                    target_spec_hash = @specHash,
+                    active_vector_count = (SELECT COUNT(1) FROM chunk_vectors),
+                    updated_at = @now
+                WHERE kb_id = @id;
+
+                SELECT vector_generation FROM kb_manifest WHERE kb_id = @id;
+            ";
+            swapCmd.Parameters.AddWithValue("@specHash", newSpecHash);
+            swapCmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+            swapCmd.Parameters.AddWithValue("@id", KnowledgeBaseId);
+            var scalar = await swapCmd.ExecuteScalarAsync(ct);
+            if (scalar != null && scalar != DBNull.Value)
+            {
+                newVectorGen = Convert.ToInt64(scalar);
+            }
+
+            tx.Commit();
+
+            // 5. 立即重新载入内存 SIMD 投影池
+            await EnsureTensorProjectionPoolLoadedAsync(conn, null, newVectorGen, ct);
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+
+        return chunkPayloads.Count;
     }
 }

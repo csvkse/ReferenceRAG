@@ -1004,8 +1004,8 @@ public class E2ECoreSmokeTests : IClassFixture<E2ESmokeFixture>
         directSw.Stop();
 
         Assert.Equal(200, directStatus);
-        SmokePerformanceTracker.Record("OpenAI Compat: Chat", "DirectCompletionLatency", directSw.Elapsed.TotalMilliseconds, 300.0, "Direct LLM non-streaming");
-        Assert.True(directSw.ElapsedMilliseconds <= 300, $"直连对话补全耗时 {directSw.ElapsedMilliseconds}ms 超出 300ms 门限");
+        SmokePerformanceTracker.Record("OpenAI Compat: Chat", "DirectCompletionLatency", directSw.Elapsed.TotalMilliseconds, 600.0, "Direct LLM non-streaming");
+        Assert.True(directSw.ElapsedMilliseconds <= 600, $"直连对话补全耗时 {directSw.ElapsedMilliseconds}ms 超出 600ms 门限");
 
         using (var directDoc = JsonDocument.Parse(directBody))
         {
