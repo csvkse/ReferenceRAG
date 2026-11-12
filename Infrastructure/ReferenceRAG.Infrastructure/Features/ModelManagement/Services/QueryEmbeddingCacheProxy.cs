@@ -1,6 +1,11 @@
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
+using ReferenceRAG.Core.Features.ModelManagement.Adapters;
+using ReferenceRAG.Core.Features.ModelManagement.StateMachine;
+using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
+using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Core.Features.ModelManagement.Services;
 
@@ -8,12 +13,37 @@ namespace ReferenceRAG.Core.Features.ModelManagement.Services;
 /// 查询向量高性能有界 LRU 缓存代理 (Query Embedding Cache Proxy)
 /// 针对高频重复/变体问句，实现 0ms 向量生成，避免重复 200~500ms 模型推理耗时。
 /// </summary>
-public sealed class QueryEmbeddingCacheProxy : IEmbeddingService
+public sealed class QueryEmbeddingCacheProxy : IEmbeddingService, IModelRuntimeTelemetryProvider
 {
     private readonly IEmbeddingService _inner;
     private readonly int _maxCapacity;
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.Ordinal);
     private long _accessCounter;
+
+    public ModelLifecycleSnapshot GetLifecycleSnapshot()
+    {
+        if (_inner is IModelRuntimeTelemetryProvider provider)
+            return provider.GetLifecycleSnapshot();
+
+        return new ModelLifecycleSnapshot
+        {
+            State = ModelState.Ready,
+            IsReady = true,
+            StateDescription = "就绪",
+            ActiveLeases = 0
+        };
+    }
+
+    public IEmbeddingBackendAdapter? CurrentAdapter =>
+        (_inner as IModelRuntimeTelemetryProvider)?.CurrentAdapter;
+
+    public EmbeddingOptions CurrentOptions =>
+        (_inner as IModelRuntimeTelemetryProvider)?.CurrentOptions
+        ?? new EmbeddingOptions
+        {
+            ModelName = _inner.ModelName,
+            MaxSequenceLength = 512
+        };
 
     private sealed class CacheEntry
     {

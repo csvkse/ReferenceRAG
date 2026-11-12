@@ -1,5 +1,10 @@
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Core.Features.ModelManagement.Adapters;
+using ReferenceRAG.Core.Features.ModelManagement.StateMachine;
+using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Interfaces;
+using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Infrastructure.Features.ModelManagement.Services;
 
@@ -10,12 +15,26 @@ namespace ReferenceRAG.Infrastructure.Features.ModelManagement.Services;
 /// 2. 搜索查询 (Query Search / Retrieval)：路由至本地低延迟、零费用、隐私离线的本地轻量引擎 (如 ONNX / GGUF INT8)；
 /// 3. 故障容灾熔断降级：当线上入库端点不可用或网络异常时，平滑降级回退至本地服务。
 /// </summary>
-public sealed class DualChannelEmbeddingService : IEmbeddingService, IDisposable
+public sealed class DualChannelEmbeddingService : IEmbeddingService, IModelRuntimeTelemetryProvider, IDisposable
 {
     private readonly IEmbeddingService _searchService;
     private readonly IEmbeddingService _ingestionService;
     private readonly ILogger<DualChannelEmbeddingService>? _logger;
     private readonly bool _enableFallback;
+
+    public ModelLifecycleSnapshot GetLifecycleSnapshot() =>
+        (_searchService as IModelRuntimeTelemetryProvider)?.GetLifecycleSnapshot()
+        ?? (_ingestionService as IModelRuntimeTelemetryProvider)?.GetLifecycleSnapshot()
+        ?? new ModelLifecycleSnapshot { State = ModelState.Ready, IsReady = true, StateDescription = "就绪" };
+
+    public IEmbeddingBackendAdapter? CurrentAdapter =>
+        (_searchService as IModelRuntimeTelemetryProvider)?.CurrentAdapter
+        ?? (_ingestionService as IModelRuntimeTelemetryProvider)?.CurrentAdapter;
+
+    public EmbeddingOptions CurrentOptions =>
+        (_searchService as IModelRuntimeTelemetryProvider)?.CurrentOptions
+        ?? (_ingestionService as IModelRuntimeTelemetryProvider)?.CurrentOptions
+        ?? new EmbeddingOptions { ModelName = ModelName, MaxSequenceLength = 512 };
 
     public DualChannelEmbeddingService(
         IEmbeddingService searchService,

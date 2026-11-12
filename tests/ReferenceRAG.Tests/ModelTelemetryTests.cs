@@ -186,6 +186,37 @@ public class ModelTelemetryTests
         Assert.Equal(0, telemetry4.StateMachine.ActiveLeases);
     }
 
+    [Fact]
+    public void QueryEmbeddingCacheProxy_ImplementsAndForwardsTelemetryProvider()
+    {
+        var mockInner = new Mock<IEmbeddingService>();
+        var mockProvider = mockInner.As<IModelRuntimeTelemetryProvider>();
+        var fakeAdapter = new FakeEmbeddingAdapter();
+        var options = new EmbeddingOptions
+        {
+            ModelPath = "bge-m3-q4_k_m.gguf",
+            ModelName = "bge-m3",
+            UseCuda = true
+        };
+
+        mockProvider.Setup(p => p.GetLifecycleSnapshot()).Returns(new ModelLifecycleSnapshot
+        {
+            State = ModelState.Ready,
+            IsReady = true,
+            StateDescription = "就绪"
+        });
+        mockProvider.Setup(p => p.CurrentAdapter).Returns(fakeAdapter);
+        mockProvider.Setup(p => p.CurrentOptions).Returns(options);
+
+        var proxy = new ReferenceRAG.Core.Features.ModelManagement.Services.QueryEmbeddingCacheProxy(mockInner.Object);
+
+        Assert.IsAssignableFrom<IModelRuntimeTelemetryProvider>(proxy);
+        var provider = (IModelRuntimeTelemetryProvider)proxy;
+        Assert.Equal(ModelState.Ready, provider.GetLifecycleSnapshot().State);
+        Assert.Same(fakeAdapter, provider.CurrentAdapter);
+        Assert.Same(options, provider.CurrentOptions);
+    }
+
     private class FakeEmbeddingAdapter : IEmbeddingBackendAdapter
     {
         public string BackendType => "llama";
