@@ -79,6 +79,12 @@ Set-Location $RepoRoot
 # ------------------------------------------------------------------------------
 # State 1: Configuration Loading & Parsing (Adapter Pattern)
 # ------------------------------------------------------------------------------
+if ([string]::IsNullOrWhiteSpace($EnvFile) -or $EnvFile -eq "env/.envdev") {
+    if ($Mode -eq "Official" -and (Test-Path (Join-Path $RepoRoot "env/.envprod"))) {
+        $EnvFile = "env/.envprod"
+    }
+}
+
 Write-Step "State [INIT]: Resolving environment configuration from '$EnvFile'..."
 
 $resolvedEnvPath = Join-Path $RepoRoot $EnvFile
@@ -145,6 +151,8 @@ $remoteDataDir = if ($envMap["REMOTE_DATA_DIR"]) { $envMap["REMOTE_DATA_DIR"] } 
 $remoteModelsDir = if ($envMap["REMOTE_MODELS_DIR"]) { $envMap["REMOTE_MODELS_DIR"] } else { "/opt/referencerag/models" }
 $remoteSourcesDir = if ($envMap["REMOTE_SOURCES_DIR"]) { $envMap["REMOTE_SOURCES_DIR"] } else { "/opt/referencerag/sources" }
 $masterKey = if ($envMap["REFERENCERAG_MASTER_KEY"]) { $envMap["REFERENCERAG_MASTER_KEY"] } else { "" }
+$extraVolumes = if ($envMap["EXTRA_VOLUMES"]) { $envMap["EXTRA_VOLUMES"] } else { "" }
+$extraDockerArgs = if ($envMap["EXTRA_DOCKER_ARGS"]) { $envMap["EXTRA_DOCKER_ARGS"] } else { "" }
 
 # Hardware strategy resolution
 $selectedHardware = if ($Hardware) { $Hardware.ToLower() } elseif ($envMap["HARDWARE_ACCELERATION"]) { $envMap["HARDWARE_ACCELERATION"].ToLower() } else { "cpu" }
@@ -199,6 +207,47 @@ try {
             throw "SSH command failed with exit code $($LASTEXITCODE): $cmd"
         }
         return (Clean-SshOutput $output)
+    }
+
+    function Push-RuntimeEnvFile() {
+        $runtimeEnvLines = @()
+        foreach ($k in $envMap.Keys) {
+            if ($k -notlike "DEPLOY_*" -and $k -notlike "REMOTE_*" -and $k -ne "DOCKER_IMAGE" -and $k -ne "REFERENCERAG_MASTER_KEY" -and $k -ne "EXTRA_VOLUMES" -and $k -ne "EXTRA_DOCKER_ARGS") {
+                $v = $envMap[$k]
+                if (-not [string]::IsNullOrWhiteSpace($v)) {
+                    $runtimeEnvLines += "$k=$v"
+                }
+            }
+        }
+
+        if ($runtimeEnvLines.Count -eq 0) { return "" }
+
+        Invoke-RemoteSsh "mkdir -p $remoteWorkdir"
+        $runtimeEnvPath = "$remoteWorkdir/.env.runtime"
+        $envFileContent = ($runtimeEnvLines -join "`n") + "`n"
+        $tempEnvPath = [System.IO.Path]::GetTempFileName()
+        try {
+            [System.IO.File]::WriteAllText($tempEnvPath, $envFileContent, [System.Text.Encoding]::UTF8)
+            $envStreamArgs = @(
+                "-i", $tempKeyPath,
+                "-p", "$deployPort",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "LogLevel=ERROR",
+                "$deployUser@$deployHost",
+                "cat > $runtimeEnvPath && chmod 600 $runtimeEnvPath"
+            )
+            $envProc = Start-Process -FilePath "ssh" -ArgumentList $envStreamArgs -RedirectStandardInput $tempEnvPath -NoNewWindow -Wait -PassThru
+            if ($envProc.ExitCode -eq 0) {
+                return "--env-file $runtimeEnvPath"
+            } else {
+                Write-Warn "Failed to stream runtime environment file to $runtimeEnvPath"
+                return ""
+            }
+        }
+        finally {
+            if (Test-Path $tempEnvPath) { Remove-Item $tempEnvPath -Force -ErrorAction SilentlyContinue }
+        }
     }
 
     # --------------------------------------------------------------------------
@@ -416,42 +465,8 @@ try {
             }
         }
 
-        # Prepare runtime environment variables from envMap (excluding SSH/Deploy variables)
-        $runtimeEnvLines = @()
-        foreach ($k in $envMap.Keys) {
-            if ($k -notlike "DEPLOY_*" -and $k -notlike "REMOTE_*" -and $k -ne "DOCKER_IMAGE" -and $k -ne "REFERENCERAG_MASTER_KEY") {
-                $v = $envMap[$k]
-                if (-not [string]::IsNullOrWhiteSpace($v)) {
-                    $runtimeEnvLines += "$k=$v"
-                }
-            }
-        }
-
-        $runtimeEnvPath = "$remoteWorkdir/.env.runtime"
-        $envFileContent = ($runtimeEnvLines -join "`n") + "`n"
-        $tempEnvPath = [System.IO.Path]::GetTempFileName()
-        try {
-            [System.IO.File]::WriteAllText($tempEnvPath, $envFileContent, [System.Text.Encoding]::UTF8)
-            $envStreamArgs = @(
-                "-i", $tempKeyPath,
-                "-p", "$deployPort",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "LogLevel=ERROR",
-                "$deployUser@$deployHost",
-                "cat > $runtimeEnvPath && chmod 600 $runtimeEnvPath"
-            )
-            $envProc = Start-Process -FilePath "ssh" -ArgumentList $envStreamArgs -RedirectStandardInput $tempEnvPath -NoNewWindow -Wait -PassThru
-            if ($envProc.ExitCode -ne 0) {
-                Write-Warn "Failed to stream runtime environment file to $runtimeEnvPath"
-            }
-        }
-        finally {
-            if (Test-Path $tempEnvPath) { Remove-Item $tempEnvPath -Force -ErrorAction SilentlyContinue }
-        }
-
+        $envFileArg = Push-RuntimeEnvFile
         $masterKeyEnv = if ($masterKey) { "-e MasterKey=$masterKey" } else { "" }
-        $envFileArg = if ($runtimeEnvLines.Count -gt 0) { "--env-file $runtimeEnvPath" } else { "" }
 
         # Three-volume mount strategy + live frontend mount for zero-rebuild updates
         $runCmd = @"
@@ -462,6 +477,7 @@ docker run -d \
   -p ${devPort}:5000 \
   $hwArgs \
   $envFileArg \
+  $extraDockerArgs \
   -e ASPNETCORE_ENVIRONMENT=Development \
   -e DataPath=/app/data \
   -e LogsPath=/app/logs \
@@ -474,6 +490,7 @@ docker run -d \
   -v ${remoteModelsDir}:/app/models \
   -v ${remoteSourcesDir}:/app/sources \
   -v ${remoteWorkdir}/Business/ReferenceRAG.Business/wwwroot:/app/wwwroot \
+  $extraVolumes \
   $devImage
 "@
         Invoke-RemoteSsh $runCmd
@@ -606,6 +623,7 @@ docker run -d \
             default { "" }
         }
 
+        $envFileArg = Push-RuntimeEnvFile
         $masterKeyEnv = if ($masterKey) { "-e MasterKey=$masterKey" } else { "" }
 
         $prodRunCmd = @"
@@ -615,6 +633,8 @@ docker run -d \
   --restart unless-stopped \
   -p ${prodPort}:5000 \
   $hwArgs \
+  $envFileArg \
+  $extraDockerArgs \
   -e ASPNETCORE_ENVIRONMENT=Production \
   -e DataPath=/app/data \
   -e LogsPath=/app/logs \
@@ -625,6 +645,7 @@ docker run -d \
   -v ${remoteDataDir}:/app/data \
   -v ${remoteModelsDir}:/app/models \
   -v ${remoteSourcesDir}:/app/sources \
+  $extraVolumes \
   $dockerImage
 "@
         Invoke-RemoteSsh $prodRunCmd

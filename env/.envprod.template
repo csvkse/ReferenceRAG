@@ -1,0 +1,42 @@
+# ==============================================================================
+# ReferenceRAG Linux Remote Production Deployment Configuration
+# ==============================================================================
+# Instructions:
+# 1. Copy this template file to env/.envprod (which is git-ignored):
+#    Copy-Item env/.envprod.template env/.envprod
+# 2. Fill in your production server address, SSH credentials, and storage mounts.
+# 3. Run: .\scripts\deploy-linux.ps1 -Mode Official
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Remote SSH Target Configuration (Adapter Pattern: Remote SSH Executor)
+# ------------------------------------------------------------------------------
+DEPLOY_HOST="127.0.0.1"
+DEPLOY_PORT="22"
+DEPLOY_USER="root"
+DEPLOY_SSH_KEY="<PASTE_YOUR_OPENSSH_OR_RSA_PRIVATE_KEY_HERE>"
+
+# ------------------------------------------------------------------------------
+# 2. Service & Container Configuration
+# ------------------------------------------------------------------------------
+DEPLOY_CONTAINER_NAME="reference-rag"
+DOCKER_IMAGE="ghcr.io/csvkse/referencerag:latest"
+WEB_PORT="5123"
+DEV_WEB_PORT="5124"
+DEPLOY_REMOTE_DIR="/mnt/disk1/domains/Docker/dc/referencerag/workspace"
+
+# ------------------------------------------------------------------------------
+# 3. Persistent Storage Paths & Mounts
+# ------------------------------------------------------------------------------
+REMOTE_DATA_DIR="/mnt/disk1/domains/Docker/dc/referencerag/data"
+REMOTE_MODELS_DIR="/mnt/disk1/domains/Docker/dc/referencerag/models"
+REMOTE_SOURCES_DIR="/mnt/disk1/domains/Docker/dc/referencerag/sources"
+EXTRA_VOLUMES="-v /mnt/disk1/domains/Docker/dc/referencerag/logs:/app/logs"
+
+# ------------------------------------------------------------------------------
+# 4. Hardware Acceleration & Runtime Environment
+# ------------------------------------------------------------------------------
+HARDWARE_ACCELERATION="rocm"
+HSA_OVERRIDE_GFX_VERSION="11.0.0"
+REFERENCERAG_API_KEY=""
+DIAG_KEY=""
