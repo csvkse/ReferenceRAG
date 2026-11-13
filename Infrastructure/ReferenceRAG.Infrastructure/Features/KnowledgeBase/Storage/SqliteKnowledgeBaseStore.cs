@@ -6,6 +6,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Infrastructure.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Infrastructure.Features.Search.Lexical;
+using ReferenceRAG.Core.Features.Search.Lexical;
 using ReferenceRAG.Infrastructure.Features.Search.Fusion;
 using JiebaNet.Segmenter;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
@@ -28,6 +29,13 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
     private bool _initialized;
     private bool _disposed;
     private static readonly JiebaSegmenter LexicalSegmenter = new();
+
+    // ── 词法查询统计缓存 ────────────────────────────────────────────────────
+    // corpusSize = COUNT(*) chunks（57k 行约 18ms），df 走「带上限的 COUNT」逐词统计（11 词约 20ms）。
+    // 两者都只在 read_revision 变化（内容代次推进）时失效，热路径零成本。
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Revision, int Total)> CorpusSizeCache = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> TermDfCache = new();
+    private const int TermDfCacheCapacity = 50_000;
 
     public SqliteKnowledgeBaseStore(string knowledgeBaseId, string dbPath, ILogger<SqliteKnowledgeBaseStore>? logger = null)
     {
@@ -483,10 +491,20 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             if (distinctIds >= total)
             {
                 await MarkLexicalGenerationAsync(ct);
-                span.SetDetail($"快路径：索引已完整（{indexedRows} 行 / {distinctIds} 块），仅对齐代次");
+
+                // 升级/并发补齐留下的重复行必须在这里顺手清掉：df 虚高会让 bm25 打分失真，
+                // 倒排表翻倍会让查询耗时翻倍。这一步是幂等的，重复执行无副作用。
+                var repaired = 0;
+                if (indexedRows > distinctIds)
+                {
+                    repaired = await RepairLexicalIndexAsync(ct);
+                }
+
+                span.SetDetail($"快路径：索引已完整（{indexedRows} 行 / {distinctIds} 块），仅对齐代次" +
+                               (repaired > 0 ? $"，自愈清理 {repaired} 行" : string.Empty));
                 _logger?.LogInformation(
-                    "[SqliteKnowledgeBaseStore] 词法索引已完整，跳过重建仅对齐代次: {KbId}，{Indexed}/{Total} 块，耗时 {Elapsed}ms",
-                    KnowledgeBaseId, distinctIds, total, sw.ElapsedMilliseconds);
+                    "[SqliteKnowledgeBaseStore] 词法索引已完整，跳过重建仅对齐代次: {KbId}，{Indexed}/{Total} 块，清理重复 {Repaired} 行，耗时 {Elapsed}ms",
+                    KnowledgeBaseId, distinctIds, total, repaired, sw.ElapsedMilliseconds);
                 return new LexicalIndexBackfillResult(
                     KnowledgeBaseId, 0, total, sw.ElapsedMilliseconds, true, false,
                     $"索引已完整（{distinctIds}/{total}），仅对齐代次");
@@ -498,6 +516,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
 
         try
         {
+            int casConflicts = 0;
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
@@ -505,7 +524,27 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 if (rows.Count == 0) break;
 
                 var tokenized = TokenizeBatch(rows);
-                await WriteLexicalBatchAsync(rows, tokenized, ct);
+                var written = await WriteLexicalBatchAsync(rows, tokenized, checkpoint, ct);
+                if (!written)
+                {
+                    // 另一个写者已推进检查点：本批作废，从最新检查点续跑（绝不重复插入）。
+                    var latest = await ReadLexicalCheckpointAsync(ct);
+                    casConflicts++;
+                    _logger?.LogInformation(
+                        "[SqliteKnowledgeBaseStore] 词法补齐检查点冲突（{KbId}）：本批已回滚，检查点 {From} → {To}",
+                        KnowledgeBaseId, checkpoint, latest);
+                    if (latest > checkpoint)
+                    {
+                        checkpoint = latest;
+                        continue;
+                    }
+                    if (casConflicts >= 5)
+                    {
+                        span.SetDetail($"检查点竞争 {casConflicts} 次，让出本次补齐");
+                        break;
+                    }
+                    continue;
+                }
 
                 checkpoint = rows[^1].RowId;
                 processed += rows.Count;
@@ -515,8 +554,20 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
 
             // 完成后对齐代次（内容未变更时即等价于"索引与内容一致"）
             await MarkLexicalGenerationAsync(ct);
+
+            // 自愈：历史并发补齐可能留下重复行/孤儿行，补齐收尾时一次性核对并清理。
+            var (rows_, distinct) = await GetLexicalRowCountsAsync(ct);
+            if (rows_ != distinct || rows_ != total)
+            {
+                var removed = await RepairLexicalIndexAsync(ct);
+                span.SetDetail($"补齐 {processed}/{total} 块，{batchNo} 批；自愈清理 {removed} 行（{rows_}→{rows_ - removed}）");
+            }
+            else
+            {
+                span.SetDetail($"补齐 {processed}/{total} 块，{batchNo} 批");
+            }
+
             span.SetOutput(processed);
-            span.SetDetail($"补齐 {processed}/{total} 块，{batchNo} 批");
             _logger?.LogInformation(
                 "[SqliteKnowledgeBaseStore] 词法索引补齐完成: {KbId}，{Processed}/{Total} 块，{Batches} 批，耗时 {Elapsed}ms",
                 KnowledgeBaseId, processed, total, batchNo, sw.ElapsedMilliseconds);
@@ -622,9 +673,19 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         finally { _writeGate.Release(); }
     }
 
-    private async Task WriteLexicalBatchAsync(
+    /// <summary>
+    /// 写入一批词法行。返回 <c>false</c> 表示检查点已被另一个写者推进（CAS 失败），本批已回滚。
+    ///
+    /// 为什么需要 CAS：<c>_writeGate</c> 是**实例级**信号量，而 <c>SqliteKnowledgeBaseStore</c>
+    /// 按租约创建、可同时存在多个实例（后台 Worker + 手动触发 + 对账作业）。
+    /// 两个实例从同一检查点出发、各自插入同一批 500 行，就会得到 rowid 相差 500 的重复行
+    /// （生产库实测 107,966 行 / 57,733 块 = 1.87 倍膨胀，df 甚至超过语料规模）。
+    /// FTS5 没有唯一约束，重复行会让倒排表翻倍，是首查 18s 的第二个乘数。
+    /// </summary>
+    private async Task<bool> WriteLexicalBatchAsync(
         List<(long RowId, string ChunkId, string DocumentId, string SourceKey, string Text)> rows,
         (string Title, string Heading, string Text)[] tokenized,
+        long expectedCheckpoint,
         CancellationToken ct)
     {
         await _writeGate.WaitAsync(ct);
@@ -632,6 +693,29 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         {
             using var conn = CreateConnection();
             using var tx = conn.BeginTransaction();
+
+            // 先做检查点 CAS：只有"我读到的检查点仍是当前值"才允许写入，跨实例互斥且零新增表。
+            int claimed;
+            using (var cp = conn.CreateCommand())
+            {
+                cp.Transaction = tx;
+                cp.CommandText = @"UPDATE kb_manifest
+                    SET lexical_indexed_rowid=@row, tokenizer_version=@ver, updated_at=@now
+                    WHERE kb_id=@id AND lexical_indexed_rowid=@expected";
+                cp.Parameters.AddWithValue("@row", rows[^1].RowId);
+                cp.Parameters.AddWithValue("@ver", LexicalTokenizerVersion);
+                cp.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+                cp.Parameters.AddWithValue("@id", KnowledgeBaseId);
+                cp.Parameters.AddWithValue("@expected", expectedCheckpoint);
+                claimed = await cp.ExecuteNonQueryAsync(ct);
+            }
+
+            if (claimed == 0)
+            {
+                tx.Rollback();
+                return false;
+            }
+
             using (var insert = conn.CreateCommand())
             {
                 insert.Transaction = tx;
@@ -652,20 +736,19 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     await insert.ExecuteNonQueryAsync(ct);
                 }
             }
-
-            using (var cp = conn.CreateCommand())
-            {
-                cp.Transaction = tx;
-                cp.CommandText = "UPDATE kb_manifest SET lexical_indexed_rowid=@row, tokenizer_version=@ver, updated_at=@now WHERE kb_id=@id";
-                cp.Parameters.AddWithValue("@row", rows[^1].RowId);
-                cp.Parameters.AddWithValue("@ver", LexicalTokenizerVersion);
-                cp.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
-                cp.Parameters.AddWithValue("@id", KnowledgeBaseId);
-                await cp.ExecuteNonQueryAsync(ct);
-            }
             tx.Commit();
+            return true;
         }
         finally { _writeGate.Release(); }
+    }
+
+    private async Task<long> ReadLexicalCheckpointAsync(CancellationToken ct)
+    {
+        using var conn = CreateConnection(readOnly: true);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT lexical_indexed_rowid FROM kb_manifest WHERE kb_id=@id";
+        cmd.Parameters.AddWithValue("@id", KnowledgeBaseId);
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct) ?? 0L);
     }
 
     private async Task MarkLexicalGenerationAsync(CancellationToken ct)
@@ -693,6 +776,84 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
 
     /// <summary>分词器版本号：写入 manifest，版本漂移时触发后台重建，防止索引/查询词项不一致。</summary>
     private const string LexicalTokenizerVersion = "jieba-0.42.2/search-v1";
+
+    private async Task<(int Rows, int Distinct)> GetLexicalRowCountsAsync(CancellationToken ct)
+    {
+        using var conn = CreateConnection(readOnly: true);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*), COUNT(DISTINCT chunk_id) FROM fts_chunks_lexical";
+        using var r = await cmd.ExecuteReaderAsync(ct);
+        if (await r.ReadAsync(ct))
+        {
+            return (r.GetInt32(0), r.GetInt32(1));
+        }
+        return (0, 0);
+    }
+
+    /// <summary>
+    /// 清理词法索引中的重复行与孤儿行（FTS5 无唯一约束，历史并发补齐/断点续传会留下重复行）。
+    /// 仅在后台补齐收尾与运维端点调用，**绝不在读路径执行**。
+    /// 重复行不是"脏数据"这么简单：倒排表长度翻倍会让 df 虚高、bm25 打分失真、查询耗时翻倍。
+    /// </summary>
+    public async Task<int> RepairLexicalIndexAsync(CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        using var span = TimingScope.Begin("kb.lexical-index.repair", SpanCategory.Io, "词法索引去重");
+        var sw = Stopwatch.StartNew();
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+            int removed = 0;
+
+            // 每个 chunk_id 只保留最小 rowid（首次写入的那一行）
+            using (var keep = conn.CreateCommand())
+            {
+                keep.Transaction = tx;
+                keep.CommandText = @"
+                    DROP TABLE IF EXISTS temp.kb_lex_keep;
+                    CREATE TEMP TABLE kb_lex_keep(rowid INTEGER PRIMARY KEY);
+                    INSERT INTO kb_lex_keep(rowid) SELECT MIN(rowid) FROM fts_chunks_lexical GROUP BY chunk_id;";
+                await keep.ExecuteNonQueryAsync(ct);
+            }
+
+            using (var del = conn.CreateCommand())
+            {
+                del.Transaction = tx;
+                del.CommandText = "DELETE FROM fts_chunks_lexical WHERE rowid NOT IN (SELECT rowid FROM temp.kb_lex_keep)";
+                removed += await del.ExecuteNonQueryAsync(ct);
+            }
+
+            // 孤儿行：chunks 已被删除但词法表还留着（文档删除/重分块的历史残留）
+            using (var orphan = conn.CreateCommand())
+            {
+                orphan.Transaction = tx;
+                orphan.CommandText = "DELETE FROM fts_chunks_lexical WHERE chunk_id NOT IN (SELECT id FROM chunks)";
+                removed += await orphan.ExecuteNonQueryAsync(ct);
+            }
+
+            using (var drop = conn.CreateCommand())
+            {
+                drop.Transaction = tx;
+                drop.CommandText = "DROP TABLE IF EXISTS temp.kb_lex_keep";
+                await drop.ExecuteNonQueryAsync(ct);
+            }
+
+            tx.Commit();
+
+            if (removed > 0)
+            {
+                _logger?.LogInformation(
+                    "[SqliteKnowledgeBaseStore] 词法索引去重完成: {KbId}，清理 {Removed} 行，耗时 {Elapsed}ms",
+                    KnowledgeBaseId, removed, sw.ElapsedMilliseconds);
+            }
+            span.SetOutput(removed);
+            span.SetDetail($"清理 {removed} 行重复/孤儿");
+            return removed;
+        }
+        finally { _writeGate.Release(); }
+    }
 
     private static async Task<bool> HasLexicalIndexAsync(SqliteConnection conn, SqliteTransaction tx, CancellationToken ct)
     {
@@ -759,6 +920,130 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             .Select(t => t.Trim())
             .Where(t => t.Any(char.IsLetterOrDigit)).Distinct(StringComparer.OrdinalIgnoreCase).Take(64);
         return string.Join(" OR ", tokens.Select(t => $"\"{t.Replace("\"", "\"\"")}\""));
+    }
+
+    /// <summary>按原句顺序抽取词元（含音近/同义词扩展），供查询规划器做 df 剪枝与相邻 NEAR。</summary>
+    private static IReadOnlyList<string> ExtractLexicalTerms(string? query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return Array.Empty<string>();
+        if (query.Length > 4096) throw new ArgumentOutOfRangeException(nameof(query));
+        var expansionTerms = ReferenceRAG.Core.Features.Search.PhoneticQueryExpander.GetExpansionTerms(query);
+        return LexicalSegmenter.CutForSearch(query)
+            .Concat(expansionTerms)
+            .Select(t => t.Trim())
+            .Where(t => t.Any(char.IsLetterOrDigit))
+            .Take(64)
+            .ToList();
+    }
+
+    private string StatsCacheKey(long revision) => $"{_dbPath}\u0001{revision}";
+
+    private async Task<int> GetCorpusSizeAsync(SqliteConnection conn, SqliteTransaction tx, long readRevision, CancellationToken ct)
+    {
+        var key = StatsCacheKey(readRevision);
+        if (CorpusSizeCache.TryGetValue(key, out var cached) && cached.Revision == readRevision)
+        {
+            return cached.Total;
+        }
+
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT COUNT(*) FROM chunks";
+        var total = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct) ?? 0);
+        if (CorpusSizeCache.Count > 1024) CorpusSizeCache.Clear();
+        CorpusSizeCache[key] = (readRevision, total);
+        return total;
+    }
+
+    /// <summary>
+    /// 读取词项的文档频率（df）。
+    /// <para>
+    /// <b>为什么不用 <c>fts5vocab</c>：</b>该虚表不支持按 term 索引查找，任何 <c>WHERE term IN (...)</c>
+    /// 都是对「词 × 文档」全表的线性扫描。57k 块 / ~1.7M 条 (term,doc) 记录实测 1,060ms，
+    /// 全部落在首查的请求线程上——修好 MATCH 之后它反而成了新的首查瓶颈。
+    /// </para>
+    /// <para>
+    /// <b>现在改用带上限的 COUNT：</b><c>SELECT COUNT(*) FROM (SELECT 1 ... MATCH @t LIMIT @cap)</c>。
+    /// 命中上限即停止扫描，因此单个词元的代价被 <c>O(min(df, cap))</c> 约束：稀有词读全部 postings（本来就少），
+    /// 高频虚词读到阈值就停。上限取「常见词判定阈值 + 1」，所以上限值本身已足以完成"该剪/不该剪"的裁决；
+    /// 且封顶值只会**高估** df，使候选预算更保守（偏向多剪），不会破坏正确性。
+    /// </para>
+    /// 不可用时返回空统计，规划器会自动退回"全词 OR"（行为与历史版本一致，不抛错）。
+    /// </summary>
+    private async Task<Dictionary<string, int>> LoadTermDocumentFrequenciesAsync(
+        SqliteConnection conn,
+        SqliteTransaction tx,
+        IReadOnlyList<string> terms,
+        long readRevision,
+        int corpusSize,
+        CancellationToken ct)
+    {
+        var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var keyPrefix = StatsCacheKey(readRevision);
+        var missing = new List<string>();
+        foreach (var term in terms)
+        {
+            if (TermDfCache.TryGetValue($"{keyPrefix}\u0001{term}", out var cachedDf))
+            {
+                result[term] = cachedDf;
+            }
+            else
+            {
+                missing.Add(term);
+            }
+        }
+        if (missing.Count == 0) return result;
+
+        // 上限 = 常见词阈值 + 1：达到该值即可判定"这是虚词/高频词"，继续精确统计没有意义。
+        var cap = Math.Max(
+            64,
+            (int)Math.Ceiling(corpusSize * LexicalQueryPlannerOptions.Default.CommonTermCutoff) + 1);
+
+        try
+        {
+            foreach (var term in missing.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                using var q = conn.CreateCommand();
+                q.Transaction = tx;
+                q.CommandText =
+                    "SELECT COUNT(*) FROM (SELECT 1 FROM fts_chunks_lexical " +
+                    "WHERE fts_chunks_lexical MATCH @match LIMIT @cap)";
+                q.Parameters.AddWithValue("@match", LexicalQueryPlanner.QuotePhrase(term));
+                q.Parameters.AddWithValue("@cap", cap);
+                var df = Convert.ToInt32(await q.ExecuteScalarAsync(ct) ?? 0);
+                result[term] = df;
+                if (TermDfCache.Count > TermDfCacheCapacity) TermDfCache.Clear();
+                TermDfCache[$"{keyPrefix}\u0001{term}"] = df;
+            }
+        }
+        catch (SqliteException ex)
+        {
+            _logger?.LogDebug(ex, "[SqliteKnowledgeBaseStore] 词频统计不可用，词法查询退回无统计模式");
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// 生成词法 MATCH 表达式（统计驱动）。这是 18s 首查的直接修复点：
+    /// 旧实现对 ≤15 字查询直接拼 <c>"他" OR "的" OR "她" ...</c>，命中率 &gt;100% 语料，
+    /// bm25 必须对全库打分，冷缓存下退化为 16.7s。
+    /// </summary>
+    private async Task<LexicalQueryPlan> BuildLexicalQueryPlanAsync(
+        SqliteConnection conn,
+        SqliteTransaction tx,
+        string query,
+        long readRevision,
+        CancellationToken ct)
+    {
+        using var span = TimingScope.Begin("kb.lexical.plan", SpanCategory.SubPhase, "词法查询规划");
+        var terms = ExtractLexicalTerms(query);
+        var corpusSize = await GetCorpusSizeAsync(conn, tx, readRevision, ct);
+        var df = await LoadTermDocumentFrequenciesAsync(conn, tx, terms, readRevision, corpusSize, ct);
+        var plan = LexicalQueryPlanner.Plan(query, terms, df, corpusSize);
+        span.SetInput(terms.Count);
+        span.SetOutput(plan.AnchorTerms.Count);
+        span.SetDetail(plan.Describe());
+        return plan;
     }
 
     private static async Task PopulateLexicalIndexAsync(SqliteConnection conn, SqliteTransaction tx, CancellationToken ct)
@@ -1223,64 +1508,98 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         var resultList = new List<RecallItem>();
         try
         {
-            using var cmd = conn.CreateCommand();
-            cmd.Transaction = tx;
             var scoreExpr = table == "fts_chunks_lexical"
                 ? "bm25(fts_chunks_lexical, 0.0, 0.0, 5.0, 2.5, 1.0)"
                 : $"bm25({table})";
+            var topK = Math.Clamp(request.TopK, 1, 100);
 
-            cmd.CommandText = $@"
-                SELECT c.id, c.document_id, d.source_key, c.text,
-                       {scoreExpr} AS score, c.document_version, d.connector_id, d.locator,
-                       c.start_line, c.end_line, c.heading_path
-                FROM {table} f
-                JOIN chunks c ON c.id = f.chunk_id
-                JOIN documents d ON d.id = c.document_id
-                WHERE {table} MATCH @match AND c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}
-                ORDER BY score ASC
-                LIMIT @topK;
-            ";
-            cmd.Parameters.AddWithValue("@match", ftsQuery);
-            cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@topK", Math.Clamp(request.TopK, 1, 100));
-            foreach (var p in folderParams)
+            // ── 候选优先（two-phase）────────────────────────────────────────
+            // 旧 SQL 是「FTS 全命中 → JOIN chunks(214MB) → 临时 B 树排序 → LIMIT 10」，
+            // JOIN 与 bm25 都发生在 LIMIT 之前，候选集多大就要读多少正文页。
+            // 现在先在 FTS 内部只取「前 N 个候选的 chunk_id + 分数」，再回填正文：
+            // 冷缓存下被读的页数从 O(命中数) 降到 O(候选数)，这是 18s → 亚秒的关键一步。
+            // 目录/授权过滤放在外层，若过滤后不足 topK，则指数放大候选窗口重试（保证结果正确性）。
+            var candidateWindow = Math.Clamp(topK * 8, 80, 2000);
+            const int maxCandidates = 2000;
+            var collected = new List<RecallItem>(topK);
+
+            for (int attempt = 0; ; attempt++)
             {
-                cmd.Parameters.AddWithValue(p.ParameterName, p.Value);
+                collected.Clear();
+                var localSeen = new HashSet<string>(StringComparer.Ordinal);
+
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = $@"
+                    SELECT c.id, c.document_id, d.source_key, c.text, f.score,
+                           c.document_version, d.connector_id, d.locator,
+                           c.start_line, c.end_line, c.heading_path
+                    FROM (
+                        SELECT chunk_id, {scoreExpr} AS score
+                        FROM {table}
+                        WHERE {table} MATCH @match
+                        ORDER BY score ASC
+                        LIMIT @candidates
+                    ) f
+                    JOIN chunks c ON c.id = f.chunk_id
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}
+                    ORDER BY f.score ASC
+                    LIMIT @topK;
+                ";
+                cmd.Parameters.AddWithValue("@match", ftsQuery);
+                cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@topK", topK);
+                cmd.Parameters.AddWithValue("@candidates", candidateWindow);
+                foreach (var p in folderParams)
+                {
+                    cmd.Parameters.AddWithValue(p.ParameterName, p.Value);
+                }
+
+                using (var reader = await cmd.ExecuteReaderAsync(ct))
+                {
+                    while (await reader.ReadAsync(ct))
+                    {
+                        var chunkId = reader.GetString(0);
+                        // 跨查询去重（seenChunkIds）在窗口重试全部成功后才提交，避免半成品污染后续查询
+                        if (seenChunkIds.Contains(chunkId) || !localSeen.Add(chunkId)) continue;
+
+                        var docId = reader.GetString(1);
+                        var sourceKey = reader.GetString(2);
+                        var text = reader.GetString(3);
+                        var bm25Raw = reader.GetDouble(4);
+                        var docVer = reader.GetInt64(5);
+                        var connId = reader.GetString(6);
+                        var startLine = reader.IsDBNull(8) ? 0 : reader.GetInt32(8);
+                        var endLine = reader.IsDBNull(9) ? 0 : reader.GetInt32(9);
+                        var headingPath = reader.IsDBNull(10) ? null : reader.GetString(10);
+
+                        var score = request.UseLexicalTokenizer ? Math.Abs(bm25Raw) : 1.0 / (1.0 + Math.Max(0, bm25Raw));
+
+                        collected.Add(new RecallItem(
+                            ChunkId: chunkId,
+                            DocumentId: docId,
+                            SourceKey: sourceKey,
+                            Text: text,
+                            Score: score,
+                            ScoreKind: ScoreKind.BM25,
+                            DocumentVersion: docVer,
+                            ConnectorId: connId,
+                            Locator: reader.IsDBNull(7) ? null : reader.GetString(7),
+                            StartLine: startLine,
+                            EndLine: endLine,
+                            HeadingPath: headingPath
+                        ));
+                    }
+                }
+
+                if (collected.Count >= topK || candidateWindow >= maxCandidates || attempt >= 2) break;
+                candidateWindow = Math.Min(maxCandidates, candidateWindow * 4);
             }
 
-            using var reader = await cmd.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                var chunkId = reader.GetString(0);
-                if (!seenChunkIds.Add(chunkId)) continue;
-
-                var docId = reader.GetString(1);
-                var sourceKey = reader.GetString(2);
-                var text = reader.GetString(3);
-                var bm25Raw = reader.GetDouble(4);
-                var docVer = reader.GetInt64(5);
-                var connId = reader.GetString(6);
-                var startLine = reader.IsDBNull(8) ? 0 : reader.GetInt32(8);
-                var endLine = reader.IsDBNull(9) ? 0 : reader.GetInt32(9);
-                var headingPath = reader.IsDBNull(10) ? null : reader.GetString(10);
-
-                var score = request.UseLexicalTokenizer ? Math.Abs(bm25Raw) : 1.0 / (1.0 + Math.Max(0, bm25Raw));
-
-                resultList.Add(new RecallItem(
-                    ChunkId: chunkId,
-                    DocumentId: docId,
-                    SourceKey: sourceKey,
-                    Text: text,
-                    Score: score,
-                    ScoreKind: ScoreKind.BM25,
-                    DocumentVersion: docVer,
-                    ConnectorId: connId,
-                    Locator: reader.IsDBNull(7) ? null : reader.GetString(7),
-                    StartLine: startLine,
-                    EndLine: endLine,
-                    HeadingPath: headingPath
-                ));
-            }
+            foreach (var item in collected) seenChunkIds.Add(item.ChunkId);
+            resultList.AddRange(collected);
+            span.AddAttribute("candidates", candidateWindow.ToString());
         }
         catch (SqliteException ex)
         {
@@ -1433,27 +1752,31 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             }
         }
 
-        // 1. BM25 全文召回 (支持长句分层阶梯、专有名词增强与 BM25F 多列打分)
+        // 1. BM25 全文召回 (统计驱动的词法规划 + BM25F 多列打分)
         var isLongQuery = request.Query != null && request.Query.Length > 15;
         var useLexicalTable = request.UseLexicalTokenizer || isDegraded || !hasVectorCoverage || request.QueryVector is not { Length: > 0 };
         var table = useLexicalTable ? "fts_chunks_lexical" : "fts_chunks";
-        var plan = isLongQuery && useLexicalTable
+
+        // 长句仍复用 LongQueryRefiner 的蒸馏词与 PRF 能力，但**表达式不再直接取它的 Tier1/2/3 字符串**：
+        // 那三层里包含「的/她/他/手」这类 df 高达 70%~180% 的虚词，OR 之后 MATCH 命中全库，
+        // FTS5 必须对全部命中行算 bm25 再排序（LIMIT 失效），冷缓存下单条查询 16.7s。
+        var longQueryPlan = isLongQuery && useLexicalTable
             ? ReferenceRAG.Core.Features.Search.Lexical.LongQueryRefiner.Default.PlanQuery(request.Query)
             : null;
 
         var queriesToTry = new List<string>();
-        if (plan != null)
+        LexicalQueryPlan? lexicalQueryPlan = null;
+        if (useLexicalTable)
         {
-            if (!string.IsNullOrWhiteSpace(plan.Tier1StrictNearQuery)) queriesToTry.Add(plan.Tier1StrictNearQuery);
-            if (!string.IsNullOrWhiteSpace(plan.Tier2WeightedQuery)) queriesToTry.Add(plan.Tier2WeightedQuery);
-            if (!string.IsNullOrWhiteSpace(plan.Tier3FallbackQuery)) queriesToTry.Add(plan.Tier3FallbackQuery);
+            lexicalQueryPlan = await BuildLexicalQueryPlanAsync(conn, tx, request.Query ?? string.Empty, readRevision, ct);
+            queriesToTry.AddRange(lexicalQueryPlan.Queries);
         }
         else
         {
-            var fallback = useLexicalTable ? SanitizeLexicalQuery(request.Query) : SanitizeFtsQuery(request.Query);
+            var fallback = SanitizeFtsQuery(request.Query);
             if (!string.IsNullOrWhiteSpace(fallback))
             {
-                // SAG-Wiki 专有名词短语与双引号锁定增强
+                // SAG-Wiki 专有名词短语与双引号锁定增强（非词法表路径保持原行为）
                 var enhanced = NamePhraseExtractor.BuildEnhancedFtsQuery(request.Query, fallback);
                 if (!string.Equals(enhanced, fallback, StringComparison.Ordinal))
                 {
@@ -1518,10 +1841,10 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         }
 
         // PRF 统计伪相关反馈重排
-        if (plan != null && bm25Items.Count > 0 && request.Query != null && request.Query.Length > 20)
+        if (longQueryPlan != null && bm25Items.Count > 0 && request.Query != null && request.Query.Length > 20)
         {
             var prfTerms = ReferenceRAG.Core.Features.Search.Lexical.StatisticalPrfOperator.MineExpansionTerms(
-                bm25Items.Select(i => i.Text), plan.DistilledTerms, 3);
+                bm25Items.Select(i => i.Text), longQueryPlan.DistilledTerms, 3);
             if (prfTerms.Count > 0)
             {
                 for (int i = 0; i < bm25Items.Count; i++)

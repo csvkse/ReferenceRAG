@@ -51,6 +51,13 @@ public interface IKnowledgeBaseStore
         CancellationToken ct = default,
         bool force = false);
 
+    /// <summary>
+    /// 清理词法索引中的重复行与孤儿行（FTS5 无唯一约束，历史并发补齐会留下重复行）。
+    /// 仅在后台补齐收尾或运维端点调用，读路径禁止调用。
+    /// </summary>
+    /// <returns>被清理的行数。</returns>
+    Task<int> RepairLexicalIndexAsync(CancellationToken ct = default);
+
     Task<IndexManifest> GetManifestAsync(CancellationToken ct = default);
 
     Task<CommitResult> CommitDocumentAsync(IndexBatch batch, CancellationToken ct = default);

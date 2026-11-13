@@ -417,6 +417,32 @@ public class KnowledgeBasesController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// 清理词法索引中的重复行/孤儿行（运维用）。FTS5 无唯一约束，历史并发补齐会留下重复行，
+    /// 重复行会让倒排表与 df 虚高、bm25 打分失真、查询耗时成倍放大。
+    /// </summary>
+    [HttpPost("{id}/lexical-index/repair")]
+    public async Task<ActionResult<object>> RepairLexicalIndex(string id, CancellationToken ct)
+    {
+        if (_storageManager == null)
+            return StatusCode(503, new { message = "知识库存储未就绪" });
+        try
+        {
+            await using var lease = await _storageManager.AcquireLeaseAsync(id, StorageAccess.ReadWrite, ct);
+            var removed = await lease.Store.RepairLexicalIndexAsync(ct);
+            return Ok(new { success = true, removedRows = removed });
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "知识库 {Id} 词法索引去重失败", id);
+            return StatusCode(500, new { message = ex.Message });
+        }
+    }
+
     // ==================== 配置偏离诊断与蓝绿影子重构索引 ====================
     [HttpGet("{id}/drift")]
     public async Task<ActionResult<ConfigDriftResult>> CheckConfigDrift(string id, CancellationToken ct)
