@@ -1,5 +1,6 @@
-import { defineComponent as _defineComponent, ref, computed } from 'vue';
+import { defineComponent as _defineComponent, ref, computed, watch } from 'vue';
 import { NSpace, NText, NTag, NButton } from 'naive-ui';
+import { LayoutPreferenceKey, readLayoutPreference, writeLayoutPreference } from '/app/services/reader/LayoutPreference.js';
 
 /**
  * 全链路耗时链瀑布图。
@@ -43,10 +44,26 @@ const DEFAULT_VISIBLE = 14;
 const component = /*@__PURE__*/ _defineComponent({
     name: 'TimingWaterfall',
     props: {
-        chain: { type: Object, default: null }
+        chain: { type: Object, default: null },
+        // 默认折叠：只展示汇总标签，明细需用户显式展开。
+        // 逐行 Span 属于"排查时才看"的细节，默认铺开会把结果列表往下推很远。
+        defaultExpanded: { type: Boolean, default: false }
     },
     setup(props) {
-        const expanded = ref(false);
+        const expanded = ref(readLayoutPreference(LayoutPreferenceKey.TIMING_WATERFALL_EXPANDED, props.defaultExpanded));
+        // 展开后仍先给前 N 行，避免一次渲染上百行；"展开全部"再放开
+        const showAll = ref(false);
+
+        // 数据换了（新一次检索）就回到用户偏好的初始态，避免上一次点开的"全部"残留
+        watch(() => props.chain, () => { showAll.value = false; });
+
+        const toggleExpanded = () => {
+            expanded.value = !expanded.value;
+            if (!expanded.value) showAll.value = false;
+            writeLayoutPreference(LayoutPreferenceKey.TIMING_WATERFALL_EXPANDED, expanded.value);
+        };
+
+        const toggleShowAll = () => { showAll.value = !showAll.value; };
 
         const hasData = computed(() => {
             const c = props.chain;
@@ -132,7 +149,15 @@ const component = /*@__PURE__*/ _defineComponent({
             });
         });
 
-        const visibleRows = computed(() => (expanded.value ? rows.value : rows.value.slice(0, DEFAULT_VISIBLE)));
+        const visibleRows = computed(() => {
+            if (!expanded.value) return [];
+            return showAll.value ? rows.value : rows.value.slice(0, DEFAULT_VISIBLE);
+        });
+
+        // 折叠时提示"里面还有多少条"，避免用户以为没有明细
+        const spanCount = computed(() => rows.value.length);
+        const hasMoreRows = computed(() => expanded.value && rows.value.length > DEFAULT_VISIBLE);
+        const previewLimit = DEFAULT_VISIBLE;
 
         const rowStyle = (row) => ({
             display: 'flex',
@@ -165,6 +190,9 @@ const component = /*@__PURE__*/ _defineComponent({
 
         const __returned__ = {
             expanded,
+            showAll,
+            toggleExpanded,
+            toggleShowAll,
             hasData,
             total,
             summary,
@@ -173,6 +201,9 @@ const component = /*@__PURE__*/ _defineComponent({
             verdictType,
             rows,
             visibleRows,
+            spanCount,
+            hasMoreRows,
+            previewLimit,
             rowStyle,
             dotStyle,
             barStyle,
@@ -185,6 +216,6 @@ const component = /*@__PURE__*/ _defineComponent({
     }
 });
 
-component.template = "<div v-if=\"hasData\" style=\"margin: 12px 0 4px;\">\n  <div style=\"display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;\">\n    <n-space align=\"center\" :size=\"8\">\n      <n-text strong style=\"font-size: 13px;\">耗时链瀑布</n-text>\n      <n-tag size=\"small\" :bordered=\"false\" round>总 {{ total }}ms</n-tag>\n      <n-tag v-if=\"summary && summary.verdict\" size=\"small\" :type=\"verdictType\" :bordered=\"false\" round>{{ summary.verdict }}</n-tag>\n      <n-tag v-if=\"summary\" size=\"small\" type=\"success\" :bordered=\"false\" round>纯检索 {{ summary.pureRetrievalMs }}ms</n-tag>\n      <n-tag v-if=\"unattributed > 0\" size=\"small\" type=\"info\" :bordered=\"false\" round title=\"未能归因到任何子 Span 的时间\">未归因 {{ unattributed }}ms</n-tag>\n    </n-space>\n    <n-space align=\"center\" :size=\"6\">\n      <n-tag v-if=\"summary && summary.modelLoadMs > 0\" size=\"small\" type=\"warning\" :bordered=\"false\" round title=\"向量推理/模型加载耗时（不含检索本身）\">模型 {{ summary.modelLoadMs }}ms</n-tag>\n      <n-tag v-if=\"summary && summary.indexBuildMs > 0\" size=\"small\" type=\"error\" :bordered=\"false\" round>索引构建 {{ summary.indexBuildMs }}ms</n-tag>\n      <n-tag v-if=\"summary && summary.coldStartMs > 0\" size=\"small\" type=\"warning\" :bordered=\"false\" round>冷启动 {{ summary.coldStartMs }}ms</n-tag>\n      <n-tag v-if=\"summary && summary.lockWaitMs > 0\" size=\"small\" type=\"error\" :bordered=\"false\" round>锁等待 {{ summary.lockWaitMs }}ms</n-tag>\n      <n-tag v-if=\"summary\" size=\"small\" :bordered=\"false\" round>IO {{ summary.ioMs }}ms</n-tag>\n      <n-tag v-if=\"summary\" size=\"small\" :bordered=\"false\" round>CPU {{ summary.cpuMs }}ms</n-tag>\n    </n-space>\n  </div>\n  <div style=\"border: 1px solid rgba(128,128,128,0.18); border-radius: 8px; overflow: hidden;\">\n    <div v-for=\"row in visibleRows\" :key=\"row.id\" :style=\"rowStyle(row)\">\n      <div :title=\"row.title\" style=\"width: 230px; flex: 0 0 230px; display: flex; align-items: center; gap: 6px; overflow: hidden;\">\n        <span :style=\"dotStyle(row)\"></span>\n        <span style=\"font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\">{{ row.label }}</span>\n        <span v-if=\"row.cold\" style=\"font-size: 10px; color: #d97706;\">冷</span>\n        <span v-if=\"row.waitMs > 0\" style=\"font-size: 10px; color: #dc2626;\">等{{ row.waitMs }}</span>\n      </div>\n      <div style=\"flex: 1; min-width: 120px; position: relative; height: 14px; background: rgba(128,128,128,0.08); border-radius: 3px;\">\n        <div :title=\"row.title\" :style=\"barStyle(row)\"></div>\n      </div>\n      <div style=\"width: 122px; flex: 0 0 122px; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums;\">\n        <b>{{ row.durationMs }}ms</b>\n        <span v-if=\"row.selfMs !== row.durationMs\" style=\"color: #94a3b8; font-size: 11px;\"> / 自身 {{ row.selfMs }}</span>\n      </div>\n    </div>\n  </div>\n  <div style=\"display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 6px;\">\n    <n-space align=\"center\" :size=\"10\">\n      <span v-for=\"item in legend\" :key=\"item.key\" style=\"display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #94a3b8;\">\n        <span :style=\"{ width: '8px', height: '8px', borderRadius: '2px', background: item.color, display: 'inline-block' }\"></span>{{ item.label }}\n      </span>\n    </n-space>\n    <n-button v-if=\"rows.length > visibleRows.length || expanded\" text size=\"tiny\" type=\"primary\" @click=\"expanded = !expanded\">\n      {{ expanded ? '收起' : ('展开全部 ' + rows.length + ' 个 Span') }}\n    </n-button>\n  </div>\n</div>";
+component.template = "<div v-if=\"hasData\" style=\"margin: 12px 0 4px;\">\n  <div style=\"display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;\">\n    <n-space align=\"center\" :size=\"8\">\n      <n-button text size=\"tiny\" type=\"primary\" :title=\"expanded ? '收起明细' : '展开明细'\" @click=\"toggleExpanded\">\n        <span style=\"font-size: 11px;\">{{ expanded ? '▾' : '▸' }}</span>\n      </n-button>\n      <n-text strong style=\"font-size: 13px; cursor: pointer; user-select: none;\" @click=\"toggleExpanded\">耗时链瀑布</n-text>\n      <n-tag size=\"small\" :bordered=\"false\" round>总 {{ total }}ms</n-tag>\n      <n-tag v-if=\"summary && summary.verdict\" size=\"small\" :type=\"verdictType\" :bordered=\"false\" round>{{ summary.verdict }}</n-tag>\n      <n-tag v-if=\"summary\" size=\"small\" type=\"success\" :bordered=\"false\" round>纯检索 {{ summary.pureRetrievalMs }}ms</n-tag>\n      <n-tag v-if=\"unattributed > 0\" size=\"small\" type=\"info\" :bordered=\"false\" round title=\"未能归因到任何子 Span 的时间\">未归因 {{ unattributed }}ms</n-tag>\n      <n-text v-if=\"!expanded\" depth=\"3\" style=\"font-size: 11px;\">共 {{ spanCount }} 个 Span，点击标题展开明细</n-text>\n    </n-space>\n    <n-space align=\"center\" :size=\"6\">\n      <n-tag v-if=\"summary && summary.modelLoadMs > 0\" size=\"small\" type=\"warning\" :bordered=\"false\" round title=\"向量推理/模型加载耗时（不含检索本身）\">模型 {{ summary.modelLoadMs }}ms</n-tag>\n      <n-tag v-if=\"summary && summary.indexBuildMs > 0\" size=\"small\" type=\"error\" :bordered=\"false\" round>索引构建 {{ summary.indexBuildMs }}ms</n-tag>\n      <n-tag v-if=\"summary && summary.coldStartMs > 0\" size=\"small\" type=\"warning\" :bordered=\"false\" round>冷启动 {{ summary.coldStartMs }}ms</n-tag>\n      <n-tag v-if=\"summary && summary.lockWaitMs > 0\" size=\"small\" type=\"error\" :bordered=\"false\" round>锁等待 {{ summary.lockWaitMs }}ms</n-tag>\n      <n-tag v-if=\"summary\" size=\"small\" :bordered=\"false\" round>IO {{ summary.ioMs }}ms</n-tag>\n      <n-tag v-if=\"summary\" size=\"small\" :bordered=\"false\" round>CPU {{ summary.cpuMs }}ms</n-tag>\n    </n-space>\n  </div>\n  <div v-if=\"expanded\" style=\"border: 1px solid rgba(128,128,128,0.18); border-radius: 8px; overflow: hidden;\">\n    <div v-for=\"row in visibleRows\" :key=\"row.id\" :style=\"rowStyle(row)\">\n      <div :title=\"row.title\" style=\"width: 230px; flex: 0 0 230px; display: flex; align-items: center; gap: 6px; overflow: hidden;\">\n        <span :style=\"dotStyle(row)\"></span>\n        <span style=\"font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\">{{ row.label }}</span>\n        <span v-if=\"row.cold\" style=\"font-size: 10px; color: #d97706;\">冷</span>\n        <span v-if=\"row.waitMs > 0\" style=\"font-size: 10px; color: #dc2626;\">等{{ row.waitMs }}</span>\n      </div>\n      <div style=\"flex: 1; min-width: 120px; position: relative; height: 14px; background: rgba(128,128,128,0.08); border-radius: 3px;\">\n        <div :title=\"row.title\" :style=\"barStyle(row)\"></div>\n      </div>\n      <div style=\"width: 122px; flex: 0 0 122px; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums;\">\n        <b>{{ row.durationMs }}ms</b>\n        <span v-if=\"row.selfMs !== row.durationMs\" style=\"color: #94a3b8; font-size: 11px;\"> / 自身 {{ row.selfMs }}</span>\n      </div>\n    </div>\n  </div>\n  <div v-if=\"expanded\" style=\"display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 6px;\">\n    <n-space align=\"center\" :size=\"10\">\n      <span v-for=\"item in legend\" :key=\"item.key\" style=\"display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #94a3b8;\">\n        <span :style=\"{ width: '8px', height: '8px', borderRadius: '2px', background: item.color, display: 'inline-block' }\"></span>{{ item.label }}\n      </span>\n    </n-space>\n    <n-space align=\"center\" :size=\"6\">\n      <n-button v-if=\"hasMoreRows\" text size=\"tiny\" type=\"primary\" @click=\"toggleShowAll\">\n        {{ showAll ? ('只看前 ' + previewLimit + ' 个') : ('展开全部 ' + spanCount + ' 个 Span') }}\n      </n-button>\n      <n-button text size=\"tiny\" @click=\"toggleExpanded\">收起明细</n-button>\n    </n-space>\n  </div>\n</div>\n";
 
 export default component;

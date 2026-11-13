@@ -9,7 +9,9 @@ const PREFIX = 'referencerag.layout.';
 
 export const LayoutPreferenceKey = Object.freeze({
     READER_WRAP: 'reader.wrapLines',
-    FILE_SEARCH_WRAP: 'fileSearch.wrapLines'
+    FILE_SEARCH_WRAP: 'fileSearch.wrapLines',
+    // 耗时链瀑布图明细的展开状态：默认折叠（只留汇总标签），用户手动展开后记住选择
+    TIMING_WATERFALL_EXPANDED: 'timingWaterfall.expanded'
 });
 
 export function readLayoutPreference(key, fallback = true) {

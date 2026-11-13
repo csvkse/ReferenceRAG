@@ -1300,12 +1300,29 @@ s01 request.kb-search      Request    d=7743 self=6
 | `lexical-03-degraded-during-backfill.png` | 补齐窗口内的降级标签 |
 | `lexical-04-hybrid-waterfall.png` | 平衡模式耗时链（修复前，模型归因缺失的取证） |
 | `lexical-05-hybrid-model-attribution.png` | 平衡模式耗时链（修复后：模型 5506ms + 树序层级正确） |
+| `lexical-06-collapsed-default.png` | 默认折叠态：只有汇总标签 + 「共 N 个 Span」提示 |
+| `lexical-07-expanded-on-demand.png` | 点击标题后的展开态：层级明细 + 图例 + 收起按钮 |
 
-### 16.6 遗留
+### 16.6 交互优化：耗时链默认折叠
+
+逐行 Span 属于「排查时才看」的细节，默认铺开会把结果列表往下推很远（平衡模式 10 条结果时，首屏只剩瀑布图）。改为**默认折叠**：
+
+| 行为 | 实现 |
+| --- | --- |
+| 默认折叠 | `expanded` 初值取 `readLayoutPreference(TIMING_WATERFALL_EXPANDED, props.defaultExpanded)`，`defaultExpanded` 默认 `false` |
+| 折叠态内容 | 只渲染汇总标签（总 / 判定 / 纯检索 / 未归因 / 模型 / 索引 / 冷启动 / 锁等待 / IO / CPU）+ 「共 N 个 Span，点击标题展开明细」 |
+| 展开入口 | 标题左侧 `▸/▾` 按钮与标题文字本身都可点击；折叠时明细容器**不渲染**（不是 `v-show`），省 DOM |
+| 分页展开 | 展开后先给前 14 行，超出时提供「展开全部 N 个 Span」/「只看前 14 个」 |
+| 记忆偏好 | 展开/收起写回 `localStorage`（`referencerag.layout.timingWaterfall.expanded`），刷新与路由切换后保持；隐私模式下静默降级 |
+| 数据切换 | 新一次检索到来时重置 `showAll`，但不改变用户的折叠偏好 |
+
+复用既有的 `LayoutPreference`（Repository Pattern，与阅读器折行开关同一套），未新增依赖。验收：默认 `▸` / 0 行 / 无偏好键 → 点击标题 `▾` / 4 行 / `pref=true` → 重新加载仍 `▾` / 4 行 → 点「收起明细」`▸` / 0 行 / `pref=false`。
+
+### 16.7 遗留
 
 - **P1**（并行分词已做，其余未做）：单次分词多字段、停用词表、重建期 `PRAGMA` 调优、`optimize`/`automerge`；
 - **P2**：连接复用、授权按 `read_revision` 缓存；
 - **P3**：`TimingSpan` 扁平数组 + `parentId` 已实现，但尚未导出为 OTel / Chrome Trace 格式；`SearchTraceAttribute`（AOP）与 `SearchTimeline`（显式埋点）仍是双轨，`ActivitySource` 仍无监听者；
 - **`SearchService.SearchLexicalAsync` 仍绕过 `SearchStrategyFactory`**，双路径未收敛；
 - `embed.infer` 在 `KnowledgeBaseSearchService` 中未调用 `MarkColdStart`（`SearchService` 中调了）—— 现在靠 `ModelLoadMs` 分类聚合兜住，但两处语义仍不统一；
-- 正式环境（`-Mode Official`）本轮未重新部署。
+- 默认折叠这一版尚未重新发布到正式环境（正式环境为 `5db70ba` 构建的镜像）。

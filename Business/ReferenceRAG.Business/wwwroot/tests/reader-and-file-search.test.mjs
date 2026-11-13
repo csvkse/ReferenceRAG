@@ -538,3 +538,26 @@ test('Sources.js batch link submits each selected source and counts outcomes', (
     assert.ok(src.includes('failed.push('), 'failed submissions must be collected');
     assert.ok(src.includes('await loadSources(true)'), 'list must refresh after real submission');
 });
+
+test('TimingWaterfall collapses by default and remembers the user choice', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, '../app/components/TimingWaterfall.js'), 'utf8');
+
+    // 默认折叠：初始态来自偏好读取，fallback 取 props.defaultExpanded（组件默认 false）
+    assert.ok(src.includes('readLayoutPreference(LayoutPreferenceKey.TIMING_WATERFALL_EXPANDED, props.defaultExpanded)'),
+        'initial expanded state must come from the persisted preference');
+    assert.ok(src.includes('defaultExpanded: { type: Boolean, default: false }'),
+        'defaultExpanded must default to false');
+
+    // 折叠时不得渲染明细行（省 DOM，也避免把结果列表推下去）
+    assert.ok(src.includes('if (!expanded.value) return [];'),
+        'collapsed state must render no detail rows');
+    assert.ok(src.includes('v-if=\\"expanded\\"'), 'row container must be gated by expanded');
+
+    // 展开/收起必须写回偏好，否则刷新后又回到折叠
+    assert.ok(src.includes('writeLayoutPreference(LayoutPreferenceKey.TIMING_WATERFALL_EXPANDED, expanded.value)'),
+        'toggling must persist the preference');
+
+    // 折叠态仍要告知有多少条明细，否则用户不知道里面还有内容
+    assert.ok(src.includes('共 {{ spanCount }} 个 Span'),
+        'collapsed state must hint how many spans are hidden');
+});
