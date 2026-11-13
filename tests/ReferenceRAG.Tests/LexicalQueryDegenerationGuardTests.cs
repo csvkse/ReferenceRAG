@@ -270,6 +270,69 @@ public class LexicalQueryDegenerationGuardTests
             $"预热后分词仍耗时 {sw.ElapsedMilliseconds}ms，预热未生效");
     }
 
+    /// <summary>
+    /// G4-10：当所有锚点的 df 都是 0（查询的内容词在本语料里根本不存在）时，必须追加「召回地板」层。
+    /// 生产真实事故：在**技术文档库**（24,776 块）里搜小说句子「他笑嘻嘻的走上前去，拉着她的手」，
+    /// 锚点 笑嘻嘻/走上/前去 df 全为 0 → 只查锚点必然 0 结果。
+    /// 旧实现靠虚词命中全库（"有结果但 18 秒"），剪枝后变成"62ms 但 0 条"——从"慢"变成"空"，
+    /// 这是比慢更严重的回归，必须在规划层就堵住。
+    /// </summary>
+    [Fact]
+    public void G4_AbsentContentWords_MustEmitRecallFloor()
+    {
+        var tokens = new[] { "他", "笑嘻嘻", "的", "走上", "前去", "拉", "着", "她", "手" };
+        const int corpus = 24_776;
+        // 注意：笑嘻嘻 / 走上 / 前去 不在词典里 —— 代表"语料中不存在该词"
+        var df = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["他"] = 20_000, ["的"] = 24_000, ["着"] = 12_000,
+            ["她"] = 9_000, ["拉"] = 5_000, ["手"] = 4_500
+        };
+
+        var plan = LexicalQueryPlanner.Plan("他笑嘻嘻的走上前去，拉着她的手", tokens, df, corpus);
+
+        Assert.Equal(0, plan.EstimatedMatchedDocs);
+        Assert.True(plan.UsedRecallFloor, "锚点全不命中时必须生成召回地板层");
+        Assert.True(plan.Queries.Count >= 2, "除锚点层外，必须还有一条回落虚词的查询");
+
+        // 最后一条查询必须落在虚词上（取 df 最小的几个，兼顾召回与延迟）
+        var floor = plan.Queries[plan.Queries.Count - 1];
+        Assert.Contains("\"", floor);
+        Assert.DoesNotContain("笑嘻嘻", floor);
+        Assert.DoesNotContain("走上", floor);
+
+        Assert.Contains("fallback=recall-floor", plan.Describe());
+    }
+
+    /// <summary>
+    /// G4-11：语料完全不含查询内容词时，检索不得返回空结果（端到端验证召回地板真的执行）。
+    /// 对照组先证明"只查锚点确实 0 命中"，避免语料恰好包含该词导致假通过。
+    /// </summary>
+    [Fact]
+    public async Task G4_Recall_MustNotReturnEmpty_WhenEveryContentWordIsAbsent()
+    {
+        var dir = NewDir("g4-floor");
+        var dbPath = Path.Combine(dir, "kb.db");
+        try
+        {
+            using var store = new SqliteKnowledgeBaseStore("kb_g4floor", dbPath);
+            await store.InitializeAsync();
+            await SeedFunctionWordOnlyCorpusAsync(store, 800);
+
+            // 对照组：锚点确实一个都不命中
+            var anchorHits = await ScalarAsync(dbPath,
+                "SELECT COUNT(*) FROM fts_chunks_lexical " +
+                "WHERE fts_chunks_lexical MATCH '\"笑嘻嘻\" OR \"走上\" OR \"前去\"'");
+            Assert.Equal(0, anchorHits);
+
+            var snapshot = await store.RecallAsync(new RecallRequest(
+                "他笑嘻嘻的走上前去，拉着她的手", TopK: 10, UseLexicalTokenizer: true, AllowDegrade: true));
+
+            Assert.NotEmpty(snapshot.Items);
+        }
+        finally { Cleanup(dir); }
+    }
+
     // ---------------- G5：补齐幂等（重复行根因） ----------------
 
     [Fact]
@@ -414,6 +477,39 @@ public class LexicalQueryDegenerationGuardTests
                 var idx = offset + i;
                 var marker = idx % 100 == 0 ? "笑嘻嘻" : "山水画";
                 var text = $"他看着她手上的剑，笑着说道这句话不要紧。{marker}第{idx}段，剑法随风而动。";
+                chunks.Add(new ChunkData($"chunk_{idx}", idx, text, text.Length));
+            }
+
+            var manifest = await store.GetManifestAsync();
+            var result = await store.CommitDocumentAsync(new IndexBatch(
+                KnowledgeBaseId: "kb",
+                ExpectedIndexEpoch: manifest.IndexEpoch,
+                ExpectedDocumentVersion: 0,
+                ConnectorId: "c1",
+                SourceKey: $"doc_{offset}.md",
+                Locator: $"/notes/doc_{offset}.md",
+                SourceRevision: $"rev_{offset}",
+                ContentHash: $"hash_{offset}",
+                Chunks: chunks));
+            Assert.True(result.Success, result.ErrorMessage);
+        }
+    }
+
+    /// <summary>
+    /// 构造"只有虚词、没有查询内容词"的语料：每块都含 他/她/的/手/着，
+    /// 但**不含** 笑嘻嘻 / 走上 / 前去 / 拉 —— 模拟"在技术文档库里搜小说句子"。
+    /// </summary>
+    private static async Task SeedFunctionWordOnlyCorpusAsync(SqliteKnowledgeBaseStore store, int chunkCount)
+    {
+        const int perDoc = 200;
+        for (int offset = 0; offset < chunkCount; offset += perDoc)
+        {
+            var take = Math.Min(perDoc, chunkCount - offset);
+            var chunks = new List<ChunkData>(take);
+            for (int i = 0; i < take; i++)
+            {
+                var idx = offset + i;
+                var text = $"他看着她手上的剑，笑着说道这句话不要紧。山水画第{idx}段，剑法随风而动。";
                 chunks.Add(new ChunkData($"chunk_{idx}", idx, text, text.Length));
             }
 

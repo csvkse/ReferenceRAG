@@ -47,7 +47,8 @@ public sealed record LexicalQueryPlan(
     int CorpusSize,
     long EstimatedMatchedDocs,
     double CommonTermCutoff,
-    bool UsedFallbackAnchors)
+    bool UsedFallbackAnchors,
+    bool UsedRecallFloor = false)
 {
     public static LexicalQueryPlan Empty(string? rawQuery = null)
     {
@@ -67,7 +68,8 @@ public sealed record LexicalQueryPlan(
         var pruned = PrunedCommonTerms.Count == 0 ? "-" : string.Join("/", PrunedCommonTerms.Take(6));
         return $"anchors={AnchorTerms.Count} pruned={PrunedCommonTerms.Count}({pruned}) " +
                $"est={EstimatedMatchedDocs}/{CorpusSize} near={NearClauses.Count}" +
-               (UsedFallbackAnchors ? " fallback=common" : "");
+               (UsedFallbackAnchors ? " fallback=common" : "") +
+               (UsedRecallFloor ? " fallback=recall-floor" : "");
     }
 }
 
@@ -183,9 +185,31 @@ public static class LexicalQueryPlanner
             queries.Add(QuotePhrase(rawQuery));
         }
 
+        // 6) 召回地板（recall floor）：所有锚点的 df 都是 0 —— 说明这句查询的"内容词"在本语料里
+        //    根本不存在。生产真实案例：在「技术文档库」里搜小说句子「他笑嘻嘻的走上前去，拉着她的手」，
+        //    锚点（笑嘻嘻/走上/前去）df 全为 0，只查锚点必然 0 结果；
+        //    而旧实现靠虚词命中全库（所以"有结果但 18 秒"）。
+        //    这里补一层"回落虚词"：保证"有结果"优先于"够快"，但仍受两阶段候选窗口约束，
+        //    不会退回全量 bm25 排序；且它在阶梯末尾，只有前面所有层都不足 topK 时才会执行。
+        var usedRecallFloor = false;
+        if (estimated == 0 && pruned.Count > 0)
+        {
+            var floorTerms = pruned
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(Df)
+                .Take(opt.MaxCommonFallbackTerms)
+                .ToList();
+            var floorQuery = Or(floorTerms);
+            if (!string.IsNullOrWhiteSpace(floorQuery) && !queries.Contains(floorQuery))
+            {
+                queries.Add(floorQuery);
+                usedRecallFloor = true;
+            }
+        }
+
         return new LexicalQueryPlan(
             anchors, pruned, nearClauses, queries,
-            corpusSize, Math.Min(corpusSize, estimated), opt.CommonTermCutoff, usedFallbackAnchors);
+            corpusSize, Math.Min(corpusSize, estimated), opt.CommonTermCutoff, usedFallbackAnchors, usedRecallFloor);
     }
 
     /// <summary>把一组词元拼成 FTS5 的 OR 表达式（每个词加引号锁定，防止被当成语法）。</summary>
