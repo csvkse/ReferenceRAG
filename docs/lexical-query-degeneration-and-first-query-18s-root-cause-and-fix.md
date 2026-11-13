@@ -1,6 +1,6 @@
 # 词法查询退化（Query Degeneration）与"首次查询 18 秒"根因剖析、业界方案对比与门禁落地
 
-> **文档状态**：根因已定位 & P0 已落地并部署验证（含 12 条回归门禁；冷启动 18,000ms → 426ms）
+> **文档状态**：根因已定位 & P0 已落地、已部署到**开发与生产两套环境**并实测验证（含 14 条回归门禁；冷启动 18,000ms → 426ms / 生产 111ms）
 > **现象**：词法检索首次查询 `19,211ms`，第二次 `2,753ms`；链路追踪显示 `知识库召回 17,938ms`（自身仅 38ms），`FTS5 匹配` 单条 1.2s
 > **核心结论**：18 秒不是"冷启动"，也**不是**索引构建（上一轮已修）。真正原因是**查询退化为全库扫描**——
 > 15 字中文自然句被切成 10 个词元后，`的/他/她/着` 的文档频率高达 **73%~183%**，
@@ -51,7 +51,7 @@
 | 2 | 耗时由命中数决定，不由 `LIMIT` 决定 | 同一 SQL：不剪枝 **974ms**；按 df≤10% 剪枝 **83ms**；df≤5% 剪枝 **48ms**；纯 FTS 无 JOIN **5.4ms** |
 | 3 | 倒排表重复 1.87 倍 | `COUNT(*)=107,966`、`COUNT(DISTINCT chunk_id)=57,733`；重复对 rowid 相差**恰好 500**（= 补齐批次大小） |
 
-### 1.3 五条修复主线
+### 1.3 六条修复主线
 
 | 主线 | 动作 | 实测效果 |
 | :--- | :--- | :--- |
@@ -60,9 +60,13 @@
 | **C. 索引一致性（去乘数）** | 补齐写批次加**检查点 CAS**（跨实例互斥）+ 收尾/升级快路径**自愈去重** | 重复行 50,233 → 0，倒排表减半；热态 1,203ms → **6ms** |
 | **D. 统计获取（去全表扫描）** | df 统计从 `fts5vocab` 全表扫描改为**带上限的 `COUNT`**（命中阈值即停） | 冷态 plan **1,060ms → 20ms 量级** |
 | **E. 启动预热（去首查尾巴）** | jieba 词典（进程级静态单例，首次加载 1.2s）改在宿主启动后预热 | 冷启动首查 **1,837ms → 426ms** |
+| **F. 召回地板（保结果）** | 锚点 df 全为 0（查询词在本语料根本不存在）时，在阶梯末尾回落虚词，保证"有结果"优先于"够快" | 生产库剪枝版 **0 条 → 10 条**，冷 111ms / 热 55ms |
 
-> A~C 是"18 秒"的根因修复；D、E 是**修完之后才暴露出来的下一层瓶颈**——
-> 它们共同说明一件事：性能问题不会一次修完，必须**每一步都重新测量**，而不是照着一开始的假设一路改下去。
+> A~C 是"18 秒"的根因修复；D、E 是**修完之后才暴露出来的下一层瓶颈**；
+> F 是**上线生产后由真实语料暴露出来的回归**（技术文档库里没有"笑嘻嘻"）。
+> 它们共同说明一件事：性能问题不会一次修完，必须**每一步都重新测量**，
+> 而不是照着一开始的假设一路改下去；而"快"和"对"必须同时锁，
+> 只锁"快"会把白屏优化成更快的白屏。
 
 ### 1.4 关键判断
 
@@ -75,7 +79,8 @@
 | 是否必须重建索引才能生效 | **不需要**。剪枝在**查询侧**，索引侧分词未改动（这是刻意设计，避免 57k 块 67s 重建） | 高 |
 | 为什么"剪了枝"热态还是 1.2s | 重复行让每个 tier 的候选被重复对挤占 → `topK` 填不满 → 阶梯一路松弛到最宽 tier，4 个 tier × 300ms 吃掉全部收益 | 高（§9.4 第 1 次实测） |
 | 为什么清完重复行、冷启动还要 1.2s | **不是** FTS（12ms），是 `fts5vocab` 全表扫描（1,060ms）+ jieba 首次加载（1.2s） | 高（§9.4 第 3~5 次实测） |
-| 生产环境是否已生效 | **尚未**。本轮只部署到开发容器（`<dev-host>:5124`）。生产需执行一次部署 + 一次 `repair` | 高 |
+| 生产环境是否已生效 | **已生效**。`<prod-host>:5123` 已换镜像 `428e0bd57cc5`（含召回地板），冷 111ms / 热 55~59ms / 10 条结果；详见 §9.5 | 高（§9.5 实测） |
+| 剪枝会不会导致"零结果" | **会，且已在生产真实发生**。技术文档库中"笑嘻嘻/走上/前去"`df=0`，剪枝后无命中 → 白屏。已加**召回地板**修复 | 高（§9.5） |
 
 ---
 
@@ -459,7 +464,7 @@ anchors=4 pruned=6(他/的/着/她/手/拉) est=6700/57733 near=0
 **共性缺陷：规模盲（scale-blind）**。所有用例都在 1~2 个分块上跑，
 永远跨不过 500 行的批次边界，也永远触发不了"高频词命中全库"。
 
-### 8.2 新增门禁（`tests/ReferenceRAG.Tests/LexicalQueryDegenerationGuardTests.cs`，12 条）
+### 8.2 新增门禁（`tests/ReferenceRAG.Tests/LexicalQueryDegenerationGuardTests.cs`，14 条）
 
 | # | 用例 | 锁住的不变量 | 若回归会怎样失败 |
 | :-- | :--- | :--- | :--- |
@@ -472,6 +477,8 @@ anchors=4 pruned=6(他/的/着/她/手/拉) est=6700/57733 near=0
 | G4-7 | `LatencyMustNotScaleLinearlyWithCorpus` | 2,000 → 8,000 块（4 倍语料），耗时不得线性增长 | 查询再次退化为全库扫描 |
 | G4-8 | `DfStatistics_MustNotScanWholeVocabulary` | **结构**：生产代码不得再出现 `fts5vocab`、必须保留 `LIMIT @cap`；**行为**：冷统计首查 <1,000ms | 有人把词频统计改回全词表扫描 → 首查重回 1s+ |
 | G4-9 | `SegmenterWarmup_MustBeRegisteredAtStartup` | 预热服务必须注册在宿主、必须调用 `Warm()`；预热后分词 <300ms | 删掉预热 → 1.2s 重新落回首个用户查询 |
+| G4-10 | `AbsentContentWords_MustEmitRecallFloor` | 锚点 df 全为 0 时必须额外生成「回落虚词」层（`UsedRecallFloor` / `fallback=recall-floor`） | 剪枝后零命中 → 用户看到空结果页 |
+| G4-11 | `Recall_MustNotReturnEmpty_WhenEveryContentWordIsAbsent` | 端到端：800 块纯虚词语料 + 内容词全部不在库 → 先断言锚点 MATCH 确实为 0，再断言 `RecallAsync` 仍非空 | 规划器单测通过但实际链路仍返回 0 条 |
 | G5-1 | `ConcurrentBackfill_MustNotProduceDuplicateRows` | 两个 Store 实例并发补齐 1,500 块（3 批），`rows == distinct == chunks` | 去掉 CAS → 立刻出现 2 倍行 |
 | G6-1 | `Repair_ClearsHistoricalDuplicateAndOrphanRows` | 重复行 + 孤儿行可被一次性清理 | 自愈失效 |
 | G7-1 | `TwoPhaseRecall_ReturnsTopKInDescendingScoreOrder` | 两阶段召回条数正确、分数降序、无重复 | 为提速牺牲正确性 |
@@ -493,6 +500,10 @@ anchors=4 pruned=6(他/的/着/她/手/拉) est=6700/57733 near=0
    > 是因为它们锁的是"读路径不许建索引"（一个**行为**），
    > 而事故来自"查询表达式退化"（另一个**维度**），两者正交。
    > 门禁必须锁**你这次真正依赖的那个机制**，而不是锁"症状消失"。
+6. **剪枝必须配地板**：任何"减少候选"的优化都必须有一条"候选归零时怎么办"的兜底，
+   并且兜底本身要有门禁。G4-10 锁规划器、G4-11 锁端到端——
+   本次生产回归正是**只锁了"快"没锁"有结果"**导致的：
+   剪枝版在技术文档库上 62ms 返回 0 条，门禁全绿，用户侧却是白屏。
 
 ---
 
@@ -502,22 +513,22 @@ anchors=4 pruned=6(他/的/着/她/手/拉) est=6700/57733 near=0
 
 | 文件 | 改动 |
 | :--- | :--- |
-| `Infrastructure/.../Search/Lexical/LexicalQueryPlanner.cs`（新增） | df 驱动的查询规划器：剪枝 / 候选预算 / NEAR 门控 / 阶梯输出 |
+| `Infrastructure/.../Search/Lexical/LexicalQueryPlanner.cs`（新增） | df 驱动的查询规划器：剪枝 / 候选预算 / NEAR 门控 / 阶梯输出 / **召回地板** |
 | `Infrastructure/.../Search/Lexical/LexicalSegmenterWarmup.cs`（新增） | jieba 词典预热（进程级静态单例，首次加载 1.2s） |
 | `Business/.../KnowledgeBase/Services/LexicalSegmenterWarmupService.cs`（新增） | 启动期后台预热宿主服务 |
 | `Business/.../KnowledgeBase/KnowledgeBaseBusinessExtensions.cs` | 注册 `LexicalSegmenterWarmupService` |
 | `Infrastructure/.../Storage/SqliteKnowledgeBaseStore.cs` | 新增 `ExtractLexicalTerms`、`LoadTermDocumentFrequenciesAsync`（**带上限 COUNT**，替代 fts5vocab 全表扫描）、`BuildLexicalQueryPlanAsync`（`kb.lexical.plan` span）、`RepairLexicalIndexAsync`、`ReadLexicalCheckpointAsync`；`RecallAsync` 改用规划器；`ExecuteLexicalQueryInternalAsync` 改两阶段 + 候选窗口重试；`WriteLexicalBatchAsync` 加检查点 CAS；补齐收尾与升级快路径自愈去重 |
 | `Infrastructure/.../Storage/IKnowledgeBaseStorage.cs` | 新增 `RepairLexicalIndexAsync` |
 | `Host/.../Controllers/KnowledgeBasesController.cs` | 新增 `POST {id}/lexical-index/repair` |
-| `tests/ReferenceRAG.Tests/LexicalQueryDegenerationGuardTests.cs`（新增） | 12 条 G4~G7 门禁 |
+| `tests/ReferenceRAG.Tests/LexicalQueryDegenerationGuardTests.cs`（新增） | 14 条 G4~G7 门禁 |
 
 ### 9.2 门禁结果
 
 | 门禁 | 结果 |
 | :--- | :--- |
 | `dotnet build ReferenceRAG.slnx` | **0 错误** |
-| `dotnet test tests/ReferenceRAG.Tests` | **716 通过 / 47 跳过 / 0 失败** |
-| `LexicalQueryDegenerationGuardTests` 单跑 | **12/12 通过（4s）** |
+| `dotnet test tests/ReferenceRAG.Tests` | **718 通过 / 47 跳过 / 0 失败** |
+| `LexicalQueryDegenerationGuardTests` 单跑 | **14/14 通过（4s）** |
 | `node wwwroot/check.mjs` | **53 模块 + 14 模板，0 问题** |
 | `node --test wwwroot/tests/*.test.mjs` | **78/78 通过** |
 
@@ -629,6 +640,81 @@ plan 从 1,210ms → **115ms**（剩下的 115ms 是 `COUNT(*) chunks` + 首轮 
 > 验收结论：**首查不再有可感知的等待**，且结果质量未退化（Top 结果即目标原文），
 > 证明"剪枝"剪掉的是虚词而不是语义——这正是 §6 对比中 ES `common terms` 与 Meilisearch 分层排序的同一思想。
 
+### 9.5 生产上线实测与一次真实回归
+
+#### 环境与流程
+
+| 项 | 值 |
+| :--- | :--- |
+| 生产容器 | `reference-rag` @ `<prod-host>:5123` |
+| 知识库 | `dadd847d18b54162`「默认知识库」，**技术文档语料 24,776 块** |
+| 镜像 | `referencerag:prod-local`（在正式宿主上用 `git archive HEAD` + `Dockerfile` 构建） |
+| 回滚镜像 | `referencerag:prod-local-prev` |
+
+上线流程（`-Mode Official` 只重建容器，不构建）：
+
+```bash
+git archive HEAD -o src.tar.gz          # 只含已提交内容
+ssh <prod> "cat > /opt/prod-src.tar.gz"  < src.tar.gz
+ssh <prod> "rm -rf /opt/referencerag-build && mkdir -p /opt/referencerag-build \
+            && tar -xzf /opt/prod-src.tar.gz -C /opt/referencerag-build \
+            && cd /opt/referencerag-build \
+            && docker build -f support/deploy/docker/Dockerfile -t referencerag:prod-local ."
+.\scripts\deploy-linux.ps1 -Mode Official -Image referencerag:prod-local
+```
+
+#### 三个踩过的坑（都会导致"部署成功但没生效"）
+
+| # | 坑 | 现象 | 正解 |
+| :-- | :--- | :--- | :--- |
+| 1 | **dev 宿主与正式宿主是两套独立 Docker daemon** | 在 dev 宿主构建的镜像不会出现在正式宿主，`-Image referencerag:prod-local` **静默复用正式宿主上的旧 tag**；容器 `healthy`，代码却是旧的 | 必须在正式宿主上构建；用 `docker inspect` 核对 `Image` 的 sha256 是否等于新构建的镜像 ID |
+| 2 | **正式宿主未启用 sftp 子系统** | `scp` 不报错、不写文件、**静默挂起**（10 分钟 0 字节） | 走 ssh 的 exec 通道：`ssh <prod> "cat > /path" < file` |
+| 3 | **`env/.envprod` 的 `DEPLOY_SSH_KEY` 是多行引号块** | 简易 `key=value` 解析只取首行 → `ssh: Load key "…": invalid format`，随后卡在交互式密码提示 | 复用 `deploy-linux.ps1` 的多行引号块解析逻辑，并加 `-o BatchMode=yes` 让失败立刻暴露 |
+
+> 附带一条环境坑：PowerShell 5.1 按 ANSI 读取**无 BOM** 的 `.ps1`，中文注释会被误解析成语法错误
+> （报"意外的标记 }"，与真实位置无关）。脚本含中文时必须存成 UTF-8 with BOM。
+
+#### 回归：剪枝把「18 秒但有结果」变成了「62ms 但 0 条」
+
+部署后首次复测，生产返回 **0 条**：
+
+```
+plan: anchors=4 pruned=6(他/的/拉/着/她/手) est=0/24776 near=3
+items: 0        TotalMs: 62
+```
+
+原因：生产知识库是**技术文档语料**，查询「他笑嘻嘻的走上前去，拉着她的手」里的内容词
+（笑嘻嘻 / 走上 / 前去）在该语料中 **df 全为 0**。规划器把虚词剪掉后，只剩一组"语料里根本不存在的词"，
+自然 0 命中。而旧实现靠虚词命中全库——所以它是"慢但有结果"。
+
+**这是比慢更严重的回归：慢可以接受，空不能。**
+
+修复（主线 F，召回地板 recall floor）：当 `EstimatedMatchedDocs == 0` 且存在被剪虚词时，
+在阶梯**末尾**追加一条"回落虚词"查询（取 df 最小的 3 个），复用两阶段候选窗口，
+因此不会退回全量 bm25 排序；且它在最后，前面层级够 `topK` 时不会执行。
+
+#### 生产复测（同一查询）
+
+| 指标 | 修复前（旧代码） | 剪枝版（回归） | 召回地板版 |
+| :--- | ---: | ---: | ---: |
+| 冷启动首查 | **18,000 ms** | 62 ms | **111 ms** |
+| 热态 | — | 62 ms | **55~59 ms** |
+| 返回条数 | 10 | **0（回归）** | **10** |
+| `kb.fts.match` 层数 | 3 | 2 | 3（第 3 层为地板，1ms） |
+| `kb.lexical.plan` | 不存在 | 13~38 ms | 13 ms（冷）/ 0 ms（热） |
+| 倒排表重复行 | 未知 | — | **0**（repair 返回 0，该库本就干净） |
+
+> 生产库只有 24,776 块且无重复行，所以绝对值比 dev（57,733 块）更低；
+> 但**冷启动从 18s 降到 111ms 的量级变化与 dev 一致**。
+
+#### 关于"结果相关性"的诚实说明
+
+召回地板命中是靠虚词，语义相关性天然很低（返回的是真题文档而非小说原文）。
+这是**旧行为的等价物**，不是新引入的问题：语料里没有这些内容词，本来就不存在"相关结果"。
+产品上更合理的做法是把 `fallback=recall-floor` 暴露给前端，提示"未找到匹配内容，以下为宽松结果"——
+已列为 P1（§10.4）。
+
+
 
 ---
 
@@ -645,7 +731,9 @@ plan 从 1,210ms → **115ms**（剩下的 115ms 是 `COUNT(*) chunks` + 首轮 
 | 统计缓存与内容不一致 | 低 | 低 | 缓存键含 `read_revision`，内容代次推进即失效 |
 | **df 封顶值高估导致多剪** | 低 | 低 | 封顶只发生在"已判定为常见词"的项上，这些词本来就该剪；G4-6 保证结果集仍非空 |
 | **预热服务抢占启动 CPU** | 低 | 低 | `BackgroundService` + `Task.Run`，不阻塞宿主启动；失败静默 |
-| **生产未部署 → 用户仍见 18s** | 高 | 高 | 见 §10.5 上线步骤；文档明确标注"生产尚未生效" |
+| **生产未部署 → 用户仍见 18s** | ~~高~~ **已消除** | 高 | 已于 `<prod-host>:5123` 上线镜像 `428e0bd57cc5` 并实测（§9.5）；回滚标签 `referencerag:prod-local-prev` 保留 |
+| **剪枝后零命中 → 白屏** | 中 | 高 | 召回地板（§9.5）；G4-10 锁规划器、G4-11 锁端到端；生产技术文档库已验证 0 条 → 10 条 |
+| **在开发宿主构建生产镜像（双 daemon 误用）** | 中 | 高 | 生产镜像**必须**在正式宿主上用 `support/deploy/docker/Dockerfile` 源码构建；上线后用 `docker inspect --format '{{.Image}}'` 核对 sha256（§9.5 坑 1） |
 
 ### 10.2 回滚
 
@@ -669,31 +757,76 @@ plan 从 1,210ms → **115ms**（剩下的 115ms 是 `COUNT(*) chunks` + 首轮 
 
 | 优先级 | 项 | 说明 |
 | :--- | :--- | :--- |
+| **P1** | **`fallback=recall-floor` 未暴露给前端** | 当前地板层结果与正常结果在前端**视觉上完全一致**。技术文档库里查"他笑嘻嘻的走上前去"会返回 10 条与查询毫无关系的文档，用户无从判断这是"宽松兜底"而非"精确命中"。应把 `LexicalQueryPlan.UsedRecallFloor` 透出到响应（或 trace），前端提示"未找到匹配内容，以下为宽松结果" |
 | P1 | `fts_chunks`（非词法旧表）仍占 227.8MB 且与 `fts_chunks_lexical` 双写 | 若确认向量路径不再需要它，可下线（需评估混合模式） |
 | P1 | `optimize` / `automerge` 未在补齐后执行 | 可进一步压缩索引、减少段数 |
+| P2 | 召回地板的"相关性下限"未量化 | 目前只要"有结果"就返回。可考虑对地板层加最低 bm25 阈值，低于阈值直接返回空 + 明确的"无匹配"语义，而不是返回无关文档 |
 | P2 | `detail=column` 体积评估 | 需先确认 Tier1 NEAR 是否仍被业务依赖 |
 | P2 | 查询侧分词未走 `TokenizationCacheProxy`（无 LRU） | 每次查询重新 jieba 分词，约 1~3ms，收益有限 |
 | P2 | `IKnowledgeBaseStorage.ChunkCount/IndexedCount` 在 fast-path 下返回 `-1` | 为了走 O(1) 状态裁决而跳过 `COUNT(*)`；前端已按 `Status` 展示，但接口语义不够清晰 |
 
-### 10.5 生产上线步骤（尚未执行）
+### 10.5 生产上线流程（已执行，可复用）
 
-本轮验证只覆盖开发容器（`<dev-host>:5124`），生产（用户截图中的 `<prod-host>:5123`）**仍是旧代码**。
-上线需按序执行，缺一不可：
+#### 前置事实（不知道这三条会走弯路）
+
+| 事实 | 说明 |
+| :--- | :--- |
+| **两套独立 Docker daemon** | 开发宿主（`<dev-host>`，容器 `referencerag-dev`@5124）与正式宿主（`<prod-host>`，容器 `reference-rag`@5123）**互不可见**。在开发宿主上 build 的镜像，正式宿主上不存在 |
+| **`-Mode Official` 不构建** | 该模式只**拉取/复用** GHCR 预构建镜像再重建容器。本轮代码未发布到 GHCR，因此**必须在正式宿主上从源码构建** |
+| **认证模型不同** | 开发宿主 loopback 豁免鉴权；正式宿主**不豁免**，需 `X-API-Key`，密钥来自容器环境变量 `REFERENCERAG_API_KEY`（**不在** `/app/data/appsettings.json` 里） |
+
+#### 执行步骤
 
 ```powershell
-# 1) 部署到生产（Mode 默认 Production）
-.\scripts\deploy-linux.ps1
+# ── 0) 确认真的连到正式宿主 ────────────────────────────────
+# 期望：Target=root@<prod-host>:22, Container=reference-rag, Port=5123
+.\scripts\deploy-linux.ps1 -Mode Official -WhatIf   # 或直接看脚本首行 Configuration loaded
 
-# 2) 清历史重复行（每个词法知识库执行一次；返回 removedRows 后复调应为 0）
-curl -X POST http://<prod-host>:5123/api/knowledge-bases/<kbId>/lexical-index/repair
+# ── 1) 备份现有容器环境变量（重建容器时唯一的密钥来源）────────
+docker inspect reference-rag --format '{{range .Config.Env}}{{println .}}{{end}}' > /tmp/referencerag-prod.env
 
-# 3) 复测（应与 §9.4 同量级：冷 ~0.4s / 热 ~10ms）
-curl -X POST http://<prod-host>:5123/api/knowledge-base-search \
-  -H "Content-Type: application/json" \
+# ── 2) 打回滚标签（失败时一条命令回去）──────────────────────
+docker tag referencerag:prod-local referencerag:prod-local-prev
+
+# ── 3) 在正式宿主上构建（源码经 ssh exec 通道传入，不走 sftp）──
+git archive HEAD | ssh root@<prod-host> "mkdir -p /opt/referencerag-prod && tar -x -C /opt/referencerag-prod"
+ssh root@<prod-host> "cd /opt/referencerag-prod && docker build -f support/deploy/docker/Dockerfile -t referencerag:prod-local ."
+
+# ── 4) 用第 1 步的快照重建容器（--env-file 是关键）───────────
+docker rm -f reference-rag
+docker run -d --name reference-rag --restart unless-stopped \
+  --env-file /tmp/referencerag-prod.env \
+  -p 5123:8080 -v /opt/referencerag/data:/app/data \
+  referencerag:prod-local
+
+# ── 5) 核对镜像 sha256（不要只看容器 healthy）───────────────
+docker inspect reference-rag --format '{{.Image}}'
+docker images --no-trunc --format '{{.ID}} {{.Tag}}' | grep prod-local
+
+# ── 6) 清历史重复行（每个词法知识库一次；复调应返回 0）────────
+curl -s -X POST http://<prod-host>:5123/api/knowledge-bases/<kbId>/lexical-index/repair \
+  -H "X-API-Key: <REFERENCERAG_API_KEY>"
+
+# ── 7) 复测（词法模式，与用户截图同一查询）──────────────────
+curl -s -X POST http://<prod-host>:5123/api/knowledge-base-search \
+  -H "Content-Type: application/json" -H "X-API-Key: <REFERENCERAG_API_KEY>" \
   -d '{"Query":"他笑嘻嘻的走上前去，拉着她的手","KnowledgeBaseIds":["<kbId>"],"TopK":10,"UseLexicalTokenizer":true}'
 ```
 
-**注意**：第 2 步不能跳过。重复行不清，剪枝收益会被"阶梯松弛"吃掉（§9.4 第 1 次实测：9,137ms）。
+#### 验收判据（缺一不可）
+
+| 判据 | 通过值 | 失败说明 |
+| :--- | :--- | :--- |
+| `docker inspect --format '{{.Image}}'` | 等于刚构建的 sha256 | 容器还在跑旧镜像（第 4 步没删干净） |
+| 健康状态 | `healthy` | 启动失败，查 `docker logs` |
+| 返回条数 | **≥1**（本轮 10 条） | 若 0 条 → 检查 `plan` 是否 `est=0` 且无 `fallback=recall-floor` |
+| `plan` 字段 | 出现 `fallback=recall-floor` 或 `est>0` | 剪枝后无兜底 |
+| 冷启动首查 | 与 §9.4 同量级（~100ms 级） | 若仍 >1s → 检查 jieba 预热是否生效 |
+| `repair` 二次调用 | `removedRows: 0` | 非 0 说明去重不幂等 |
+
+> **第 2 步（repair）不能跳过**：重复行不清，剪枝收益会被"阶梯松弛"吃掉（§9.4 第 1 次实测：9,137ms）。
+> 但也不要假设它一定有产出——生产技术文档库本身就是干净的，`repair` 返回 **0**，属正常。
+
 
 ---
 
