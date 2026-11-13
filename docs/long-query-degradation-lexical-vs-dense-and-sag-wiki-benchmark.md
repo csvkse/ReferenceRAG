@@ -1148,7 +1148,7 @@ AND 把命中集压到 1/30，打分成本降到 1/3.2。
 
 #### 10.6.4 门禁
 
-`LexicalBudgetAndCoverageGuardTests`（9 个用例）：
+`LexicalBudgetAndCoverageGuardTests`（10 个用例）：
 
 | # | 用例 | 锁住的不变量 |
 | :-- | :--- | :--- |
@@ -1160,10 +1160,120 @@ AND 把命中集压到 1/30，打分成本降到 1/3.2。
 | G8-6 | `FloorResult_MustBeFlagged` | `UsedRecallFloor` + 逐条 `IsFloor` + 覆盖率 ≈ 0 |
 | G8-7 | `BoundedPrefetch_MustStayFast` | 2k 语料纯虚词查询 < 800ms（删掉预取分支立刻变红） |
 | G8-8 | `RecallItemColumns_MustNotShift` | 两条路径下 `ConnectorId / StartLine / EndLine` 语义正确（Theory 两档语料） |
+| G8-9 | `FtsSegments_MustBeMergedAndAutomergeConfigured` | `automerge==8`；`optimize` 幂等；不改结果 |
+| G8-13 | `RecallJoinOrder_MustPinFtsSubqueryAsOuterLoop` | 召回 SQL 必须是 `CROSS JOIN chunks c`（把 FTS 子查询钉在外层），且候选窗口在 JOIN 前收口 |
 
-全量：`dotnet test` **727 通过 / 47 跳过 / 0 失败**；`check.mjs` 53 模块 + 14 模板；`node --test` 78/78。
+全量：`dotnet test` **728 通过 / 47 跳过 / 0 失败**（1 条 `HuggingFaceModelDownloaderTests` 为网络抖动，单独跑通过）；`check.mjs` 53 模块 + 14 模板；`node --test` 78/78。
 
-#### 10.6.5 仍未做（P1/P2）
+#### 10.6.5 验收发现的第五类退化：0 命中查询比命中查询慢 60 倍
+
+P0 上线后做 dev 验收（57,733 块 / 923MB 库），发现一个**不属于 L1~L5、也不属于 V1~V3** 的退化：
+
+| 查询 | 命中 | `kb.fts.match` |
+| :--- | :--- | ---: |
+| `zzzzzzqqq` | 0 | **239 ms** |
+| `量子纠缠`（金庸库不存在） | 0 | **366 ms**（3 层阶梯） |
+| `客栈` | 10 | **4 ms** |
+
+**0 命中的查询比有命中的慢 60 倍**，而 `数据库`（语料里确实不存在，`LIKE` 命中 0 块）
+整个请求要 **4.6 秒**。
+
+##### 被推翻的第一个假设：FTS5 段碎片化
+
+初始假设是"每次写入事务产生一个 segment，查不存在的词要在每个 segment 的 term 索引各查一次"。
+按此做了三件事：`OptimizeLexicalIndexAsync`（`INSERT INTO ft(ft) VALUES('optimize')`）、
+`repair` 端点顺手合并、建表时 `automerge=8 / crisismerge=32`。
+
+**全部无效**：`optimize` 执行成功（耗时 2.6~9.8s，返回 `optimized:true`），
+但 `zzzzzzqqq` 仍是 229ms（合并前 239ms），`量子纠缠` 仍 222ms。
+更关键的是——**同一条 SQL 在宿主上用 Python 直连同一个库文件只要 0.03ms**：
+
+```
+== 同一文件、同一时刻、Python 3.40.1 直连（含 bm25 + JOIN + ORDER BY）==
+absent-latin  '"zzzzzzqqq"'                 0.05 ms  rows=0
+absent-zh     '"数据库"'                     0.04 ms  rows=0
+present-zh    '"客栈"'                       0.38 ms  rows=10
+near-tier     (NEAR.. AND NEAR..) OR NEAR..  0.03 ms  rows=0
+```
+
+SQL 层 0.03ms、API 层 105ms —— **差 3000 倍，问题不在 SQL、不在索引、不在 IO**。
+
+##### 二分定位：把 span 拆到语句内部
+
+在 `ExecuteLexicalQueryInternalAsync` 里把一条语句拆成 `kb.fts.prepare`（`cmd.Prepare()`）、
+`kb.fts.execute`（首步执行）、`kb.fts.read`（迭代）三段后，结果非常干净：
+
+```
+kb.fts.prepare   0ms
+kb.fts.execute 105ms   ← 全部成本在这里，且每次都是 105~120ms
+kb.fts.read      0ms   ← 0 行，迭代不花时间
+```
+
+再在同一进程内跑三种 SQL 形态（`#diag#` 前缀触发的临时诊断）：
+
+| 形态 | 耗时 | 行数 |
+| :--- | ---: | ---: |
+| `bare`：`SELECT chunk_id FROM fts WHERE MATCH ? LIMIT 10` | **0 ms** | 0 |
+| `rank`：`SELECT chunk_id, bm25(...) ORDER BY score LIMIT 1280` | **0 ms** | 0 |
+| `full`：完整两阶段 SQL（含 `JOIN chunks` / `JOIN documents`） | **105~152 ms** | 0 |
+
+**FTS5 完全无辜**，成本全在 JOIN 上——而且是 0 结果、0 行回表的情况下。
+
+##### 真根因：SQLite 3.53 把两阶段召回的 JOIN 顺序反转了
+
+`EXPLAIN QUERY PLAN` 给出答案：
+
+```
+CO-ROUTINE f
+  SCAN fts_chunks_lexical VIRTUAL TABLE INDEX 0:M5
+SEARCH c USING INDEX idx_chunks_enabled (enabled=?)        ← 外层直接扫 chunks 全表
+SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)
+BLOOM FILTER ON f (chunk_id=?)
+SEARCH f USING AUTOMATIC COVERING INDEX (chunk_id=?)       ← 逐行回探 FTS 协程
+```
+
+规划器把 `chunks`（走 `idx_chunks_enabled`）选成了**驱动表**：每条语句先把 57,733 个
+chunk 全扫一遍，再逐行回探 FTS 协程。0 命中时协程立刻返回空，于是 57,733 次探测全部白做
+——这就是那 105ms，且**与 LIMIT 无关**（80 / 320 / 1280 都是 105ms 量级，因为扫描行数由
+外层 `chunks` 决定，不由候选窗口决定）。
+
+同一条 SQL 在 SQLite 3.40.1 上选的是 `MATERIALIZE f → SCAN f → SEARCH c`，所以只要 0.03ms。
+**这是规划器版本差异造成的静默性能反转**：结果完全正确，只是两阶段召回的收益被外层全表扫描吃掉。
+
+##### 修复：用 CROSS JOIN 把 f 钉在外层
+
+```sql
+FROM (SELECT chunk_id, bm25(...) AS score FROM fts WHERE fts MATCH @match
+      ORDER BY score ASC LIMIT @candidates) f
+CROSS JOIN chunks c ON c.id = f.chunk_id      -- 顺序约束，不能用普通 JOIN
+JOIN documents d ON d.id = c.document_id
+```
+
+##### 修复效果（dev，57,733 块）
+
+| 查询 | 修复前 | 修复后 | 倍率 |
+| :--- | ---: | ---: | ---: |
+| `数据库`（0 命中，3 层阶梯） | 4,595 ms | **3 ms** | 1,500× |
+| `zzzzzzqqq`（0 命中） | 300 ms | **3 ms** | 100× |
+| `量子纠缠`（第二层命中） | 415 ms | **45 ms** | 9× |
+| `她的他`（有界预取路径） | 181 ms | 180 ms | 不变（走的是另一条 SQL） |
+
+##### 三条方法论
+
+1. **"更快的白屏"之后还有"更慢的正确"**：上一轮的教训是门禁只锁了"快"没锁"有结果"；
+   这一轮的教训是**结果正确也可能慢 1500 倍**，而耗时门禁在测试语料规模下测不出来。
+2. **看执行计划，不要只看耗时**：耗时只告诉你"慢"，`EXPLAIN QUERY PLAN` 才告诉你"为什么慢"。
+   定位顺序应该是：span 拆分（哪一段）→ SQL 形态对照（哪一句）→ 执行计划（为什么）。
+3. **结构门禁在这里是唯一可行的手段**：400 块测试语料 + `ANALYZE` 之后，
+   规划器仍然选对顺序，`EXPLAIN QUERY PLAN` 断言和毫秒级耗时断言**都会通过**。
+   只有 5.7 万块真实语料才触发反转，所以 G8-13 直接锁 SQL 文本（`CROSS JOIN` 必须在），
+   并已反向验证：把 `CROSS JOIN` 改回 `JOIN`，门禁立即变红。
+
+> 段合并与 `automerge` 配置**保留**——它们是合理的写入侧卫生（0 命中查询在合并后确实
+> 从 239ms 降到 229ms，只是这点收益被 105ms 的 JOIN 成本彻底淹没）。
+> 但必须记住：**它不是这个问题的解**，当时的判断是错的。
+
+#### 10.6.6 仍未做（P1/P2）
 
 | 项 | 为什么还要做 |
 | :--- | :--- |
@@ -1192,6 +1302,10 @@ AND 把命中集压到 1/30，打分成本降到 1/3.2。
 | G8-10 | `Recall_MustRespectBudget` | 10 万块 + 200ms 预算，实际 ≤ 500ms 且返回部分结果 | 超时机制失效 |
 | G8-11 | `IntentClassifier_MustBeDeterministic` | 同一输入两次分类结果相同；三类意图各有正样本 | 引入随机性/模型依赖 |
 | G8-12 | `Plan_MustBeStructurallyAssertable` | `LexicalQueryPlan.Clauses` 可枚举且类型正确 | 退回字符串拼接 |
+
+> **编号说明**：本节表格是**规划**编号，其中 G8-10~G8-12 尚未实现；
+> 已实现的门禁以 §10.6.4 为准。`G8-13`（召回 SQL 的 JOIN 顺序）是实现阶段新发现的，
+> 不在原规划里——它锁的是一条**当时根本不知道存在**的退化（§10.6.5）。
 
 **门禁设计要点**（补充上一轮 §8.3）：
 

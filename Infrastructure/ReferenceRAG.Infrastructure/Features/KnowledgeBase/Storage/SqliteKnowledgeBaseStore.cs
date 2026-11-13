@@ -1589,9 +1589,12 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             span.AddAttribute("bounded", boundedPrefetch ? "prefetch" : "bm25");
 
             var collected = new List<RecallItem>(topK);
+            var attempts = 0;
+            var rawRows = 0;
 
             for (int attempt = 0; ; attempt++)
             {
+                attempts = attempt + 1;
                 collected.Clear();
                 var localSeen = new HashSet<string>(StringComparer.Ordinal);
 
@@ -1605,27 +1608,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 {
                     using var cmd = conn.CreateCommand();
                     cmd.Transaction = tx;
-                    // ⚠️ 列顺序必须与 ReadRecallItem 严格一致：0~9 是公共列，第 10 列才是 score。
-                    // 两条召回路径（bm25 / 有界预取）的列序必须相同，否则 ConnectorId、StartLine
-                    // 会静默错位——授权过滤读到 document_version，行号读到 locator。
-                    cmd.CommandText = $@"
-                        SELECT c.id, c.document_id, d.source_key, c.text,
-                               c.document_version, d.connector_id, d.locator,
-                               c.start_line, c.end_line, c.heading_path,
-                               f.score
-                        FROM (
-                            SELECT chunk_id, {scoreExpr} AS score
-                            FROM {table}
-                            WHERE {table} MATCH @match
-                            ORDER BY score ASC
-                            LIMIT @candidates
-                        ) f
-                        JOIN chunks c ON c.id = f.chunk_id
-                        JOIN documents d ON d.id = c.document_id
-                        WHERE c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}
-                        ORDER BY f.score ASC
-                        LIMIT @topK;
-                    ";
+                    cmd.CommandText = BuildLexicalRecallSql(scoreExpr, table, scopeClause, folderClause);
                     cmd.Parameters.AddWithValue("@match", ftsQuery);
                     cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@topK", topK);
@@ -1636,8 +1619,10 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     }
 
                     using var reader = await cmd.ExecuteReaderAsync(ct);
+                    span.SetDetail(ftsQuery);
                     while (await reader.ReadAsync(ct))
                     {
+                        rawRows++;
                         var chunkId = reader.GetString(0);
                         // 跨查询去重（seenChunkIds）在窗口重试全部成功后才提交，避免半成品污染后续查询
                         if (seenChunkIds.Contains(chunkId) || !localSeen.Add(chunkId)) continue;
@@ -1672,6 +1657,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             foreach (var item in collected) seenChunkIds.Add(item.ChunkId);
             resultList.AddRange(collected);
             span.AddAttribute("candidates", candidateWindow.ToString());
+            span.AddAttribute("attempts", attempts.ToString());
+            span.AddAttribute("raw", rawRows.ToString());
             if (isFloorTier) span.AddAttribute("floor", "1");
         }
         catch (SqliteException ex)
@@ -1681,6 +1668,44 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         span.SetOutput(resultList.Count);
         return resultList;
     }
+
+    /// <summary>
+    /// 构造词法召回的两阶段 SQL（FTS 先取候选 → 再回表取正文）。
+    /// <para>
+    /// <b>列序契约</b>：0~9 是公共列，第 10 列才是 score。两条召回路径（bm25 / 有界预取）必须
+    /// 保持一致，否则 <c>ConnectorId</c>、<c>StartLine</c> 会静默错位——授权过滤读到
+    /// <c>document_version</c>，行号读到 <c>locator</c>。
+    /// </para>
+    /// <para>
+    /// <b>⚠️ f 与 chunks 之间必须是 CROSS JOIN（顺序约束），不能写普通 JOIN。</b>
+    /// SQLite 3.53 的规划器会把 chunks 选成外层驱动表（<c>SEARCH c USING INDEX
+    /// idx_chunks_enabled</c>），于是每条语句都要把整个 chunks 表扫一遍再逐行回探 FTS 协程：
+    /// 5.7 万块语料实测 0 命中的查询也要 <b>105ms</b>，且与 LIMIT 无关（LIMIT 80/320/1280 都一样）。
+    /// 同一条 SQL 在 SQLite 3.40 上只要 0.03ms，因为它选了 <c>MATERIALIZE f → SCAN f → SEARCH c</c>。
+    /// 这是规划器版本差异造成的**静默性能反转**：两阶段召回的收益被外层全表扫描吃掉，
+    /// 而且不看执行计划根本发现不了（结果完全正确，只是慢）。
+    /// CROSS JOIN 把 f 钉在外层，才让「先取候选、再回表」真正生效。
+    /// </para>
+    /// </summary>
+    internal static string BuildLexicalRecallSql(
+        string scoreExpr, string table, string scopeClause, string folderClause) => $@"
+                        SELECT c.id, c.document_id, d.source_key, c.text,
+                               c.document_version, d.connector_id, d.locator,
+                               c.start_line, c.end_line, c.heading_path,
+                               f.score
+                        FROM (
+                            SELECT chunk_id, {scoreExpr} AS score
+                            FROM {table}
+                            WHERE {table} MATCH @match
+                            ORDER BY score ASC
+                            LIMIT @candidates
+                        ) f
+                        CROSS JOIN chunks c ON c.id = f.chunk_id
+                        JOIN documents d ON d.id = c.document_id
+                        WHERE c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}
+                        ORDER BY f.score ASC
+                        LIMIT @topK;
+                    ";
 
     /// <summary>
     /// 退化查询的有界预取：FTS5 的 <c>bm25()</c> 必须对**全部命中行**打分再排序，

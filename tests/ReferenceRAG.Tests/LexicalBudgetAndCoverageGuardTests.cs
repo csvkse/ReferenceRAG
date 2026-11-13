@@ -332,6 +332,41 @@ public class LexicalBudgetAndCoverageGuardTests
         finally { Cleanup(dir); }
     }
 
+    // ---------------- G8-10：召回 SQL 的 JOIN 顺序不得被规划器反转 ----------------
+
+    /// <summary>
+    /// 两阶段召回（FTS 先取候选 → 再回表）的全部收益，都建立在「f 是 JOIN 的外层」这个顺序上。
+    /// SQLite 3.53 的规划器会把它反转：把 <c>chunks</c> 选成驱动表（<c>SEARCH c USING INDEX
+    /// idx_chunks_enabled</c>），于是每条语句都要把整个 chunks 表扫一遍再逐行回探 FTS 协程。
+    /// 5.7 万块真实语料实测：0 命中的查询每条语句 <b>105ms</b>，且与 LIMIT 无关（80/320/1280 一样）；
+    /// 同一条 SQL 在 SQLite 3.40 上只要 <b>0.03ms</b>，因为它选了
+    /// <c>MATERIALIZE f → SCAN f → SEARCH c</c>。整个请求因此从 3ms 劣化到 4.6s。
+    /// <para>
+    /// 为什么用**结构门禁**而不是执行计划/耗时门禁：在测试语料规模（几百到几千块）下，
+    /// 规划器仍然会选对顺序，<c>EXPLAIN QUERY PLAN</c> 断言与毫秒级耗时断言都测不出来
+    /// （实测 400 块语料加 ANALYZE 后依旧通过）——这正是"全绿却慢 1500 倍"的成因。
+    /// 只有 5.7 万块真实语料才会触发反转，所以这里锁 SQL 文本本身。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void G8_RecallJoinOrder_MustPinFtsSubqueryAsOuterLoop()
+    {
+        const string scoreExpr = "bm25(fts_chunks_lexical, 0.0, 0.0, 5.0, 2.5, 1.0)";
+        var sql = SqliteKnowledgeBaseStore.BuildLexicalRecallSql(scoreExpr, "fts_chunks_lexical", "", "");
+
+        // ① f 与 chunks 之间必须是 CROSS JOIN（顺序约束）；普通 JOIN 会被规划器重排
+        Assert.Contains("CROSS JOIN chunks c ON c.id = f.chunk_id", sql, StringComparison.Ordinal);
+
+        // ② 两阶段形状不能被改回去：候选窗口必须在子查询内部收口
+        Assert.Contains("LIMIT @candidates", sql, StringComparison.Ordinal);
+        Assert.True(sql.IndexOf("LIMIT @candidates", StringComparison.Ordinal)
+                    < sql.IndexOf("CROSS JOIN chunks c", StringComparison.Ordinal),
+            "候选窗口必须在 JOIN 之前收口，否则又退回「全命中 → 回表 → 排序」的旧形态");
+
+        // ③ 列序契约：score 必须是第 11 列（索引 10），否则 ConnectorId / StartLine 会静默错位
+        Assert.Contains("f.score", sql, StringComparison.Ordinal);
+    }
+
     // ---------------- helpers ----------------
 
     /// <summary>
