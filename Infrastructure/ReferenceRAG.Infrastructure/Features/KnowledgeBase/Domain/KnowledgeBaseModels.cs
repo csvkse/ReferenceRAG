@@ -136,6 +136,69 @@ public sealed record KnowledgeBaseLexicalStats(
     double AverageDocumentLength);
 
 /// <summary>
+/// 词法倒排索引生命周期状态（读路径只允许"读 + 打点 + 投递补齐意图"，任何状态都禁止同步写索引）
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum LexicalIndexStatus
+{
+    /// <summary>库内无分块，无需索引</summary>
+    Empty = 0,
+
+    /// <summary>索引缺失（表不存在或为空），需要全量构建</summary>
+    Absent = 1,
+
+    /// <summary>索引落后于内容代次，需要增量补齐</summary>
+    Stale = 2,
+
+    /// <summary>索引就绪且与内容代次一致</summary>
+    Ready = 3
+}
+
+/// <summary>
+/// 词法索引状态快照（O(1) 裁决，不做任何写操作）
+/// </summary>
+public sealed record LexicalIndexStatusInfo(
+    LexicalIndexStatus Status,
+    int ChunkCount,
+    int IndexedCount,
+    long ContentGeneration,
+    long LexicalGeneration,
+    string? TokenizerVersion = null,
+    long IndexedRowId = 0)
+{
+    /// <summary>补齐进度（0~100）；Ready 快路径未做 COUNT 时返回 100</summary>
+    public int ProgressPercent => IndexedCount < 0 || ChunkCount <= 0
+        ? 100
+        : (int)Math.Clamp(IndexedCount * 100L / ChunkCount, 0, 100);
+}
+
+/// <summary>
+/// 词法索引后台补齐进度
+/// </summary>
+public sealed record LexicalIndexProgress(
+    string KnowledgeBaseId,
+    int Processed,
+    int Total,
+    int BatchIndex,
+    string Phase)
+{
+    public int Percent => Total <= 0 ? 100 : (int)Math.Clamp(Processed * 100L / Total, 0, 100);
+}
+
+/// <summary>
+/// 词法索引补齐结果
+/// </summary>
+public sealed record LexicalIndexBackfillResult(
+    string KnowledgeBaseId,
+    int Indexed,
+    int Total,
+    long DurationMs,
+    bool Completed,
+    bool Rebuilt,
+    string? Message = null);
+
+
+/// <summary>
 /// 逻辑嵌入模型规范契约（不可变 EmbeddingSpec，支持搜索与向量生成双通道解耦）
 /// </summary>
 public sealed record EmbeddingSpec(

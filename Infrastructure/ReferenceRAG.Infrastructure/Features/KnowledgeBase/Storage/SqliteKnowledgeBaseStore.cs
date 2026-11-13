@@ -1,6 +1,7 @@
 using System.Numerics.Tensors;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Infrastructure.Features.KnowledgeBase.Storage;
@@ -10,6 +11,7 @@ using JiebaNet.Segmenter;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Tracing;
 
 namespace ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 
@@ -88,6 +90,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     target_spec_hash TEXT,
                     cohort_set_revision INTEGER NOT NULL DEFAULT 1,
                     active_vector_count INTEGER NOT NULL DEFAULT 0,
+                    lexical_generation INTEGER NOT NULL DEFAULT 0,
+                    lexical_indexed_rowid INTEGER NOT NULL DEFAULT 0,
+                    tokenizer_version TEXT,
                     updated_at TEXT NOT NULL
                 );
 
@@ -133,6 +138,15 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
                     chunk_id UNINDEXED,
                     document_id UNINDEXED,
+                    text
+                );
+
+                -- 词法倒排索引：与 fts_chunks 对称建表，避免首次查询时在读路径上现场建表与全量分词
+                CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks_lexical USING fts5(
+                    chunk_id UNINDEXED,
+                    document_id UNINDEXED,
+                    title,
+                    heading,
                     text
                 );
 
@@ -208,6 +222,29 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 using var idxCmd = conn.CreateCommand();
                 idxCmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_chunks_enabled ON chunks(enabled);";
                 await idxCmd.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException) { }
+
+            // 词法索引代次与断点续传检查点（历史库平滑补列）
+            try
+            {
+                using var alterLexGen = conn.CreateCommand();
+                alterLexGen.CommandText = "ALTER TABLE kb_manifest ADD COLUMN lexical_generation INTEGER NOT NULL DEFAULT 0;";
+                await alterLexGen.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException) { }
+            try
+            {
+                using var alterLexRow = conn.CreateCommand();
+                alterLexRow.CommandText = "ALTER TABLE kb_manifest ADD COLUMN lexical_indexed_rowid INTEGER NOT NULL DEFAULT 0;";
+                await alterLexRow.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException) { }
+            try
+            {
+                using var alterTokVer = conn.CreateCommand();
+                alterTokVer.CommandText = "ALTER TABLE kb_manifest ADD COLUMN tokenizer_version TEXT;";
+                await alterTokVer.ExecuteNonQueryAsync(ct);
             }
             catch (SqliteException) { }
 
@@ -292,26 +329,370 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         );
     }
 
+    /// <summary>
+    /// 确保词法索引就绪。⚠️ 仅供后台任务 / 索引期调用；查询读路径必须使用 <see cref="GetLexicalIndexStatusAsync"/>，
+    /// 严禁在读路径上执行 DDL 或全量分词（历史事故：首次词法查询被阻塞 16 秒）。
+    /// </summary>
     public async Task EnsureLexicalIndexAsync(CancellationToken ct = default)
     {
+        await BackfillLexicalIndexAsync(500, null, ct);
+    }
+
+    /// <summary>
+    /// O(1) 裁决词法索引状态：只读连接、无 DDL、无写栅栏，可安全运行在查询请求线程。
+    /// 快路径仅读 kb_manifest 一行；仅在"代次不一致/表缺失"时才做一次 COUNT 以给出补齐进度。
+    /// </summary>
+    public async Task<LexicalIndexStatusInfo> GetLexicalIndexStatusAsync(CancellationToken ct = default)
+    {
         await InitializeAsync(ct);
+        using var span = TimingScope.Begin("kb.lexical-index.status", SpanCategory.SubPhase, "词法索引状态裁决");
+        using var conn = CreateConnection(readOnly: true);
+
+        long contentGen = 0, lexGen = 0, rowId = 0;
+        string? tokenizerVersion = null;
+        using (var m = conn.CreateCommand())
+        {
+            m.CommandText = "SELECT content_generation, lexical_generation, lexical_indexed_rowid, tokenizer_version FROM kb_manifest WHERE kb_id=@id";
+            m.Parameters.AddWithValue("@id", KnowledgeBaseId);
+            using var r = await m.ExecuteReaderAsync(ct);
+            if (await r.ReadAsync(ct))
+            {
+                contentGen = r.GetInt64(0);
+                lexGen = r.IsDBNull(1) ? 0 : r.GetInt64(1);
+                rowId = r.IsDBNull(2) ? 0 : r.GetInt64(2);
+                tokenizerVersion = r.IsDBNull(3) ? null : r.GetString(3);
+            }
+        }
+
+        bool tableExists;
+        using (var t = conn.CreateCommand())
+        {
+            t.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fts_chunks_lexical'";
+            tableExists = await t.ExecuteScalarAsync(ct) != null;
+        }
+
+        // 快路径：表存在 + 代次对齐 + 有检查点 → 就绪，无需 COUNT
+        if (tableExists && lexGen > 0 && lexGen == contentGen && rowId > 0)
+        {
+            span.SetDetail("Ready (fast-path)");
+            return new LexicalIndexStatusInfo(LexicalIndexStatus.Ready, -1, -1, contentGen, lexGen, tokenizerVersion, rowId);
+        }
+
+        int chunks;
+        using (var c = conn.CreateCommand())
+        {
+            c.CommandText = "SELECT COUNT(*) FROM chunks";
+            chunks = Convert.ToInt32(await c.ExecuteScalarAsync(ct) ?? 0);
+        }
+
+        if (!tableExists)
+        {
+            span.SetDetail(chunks == 0 ? "Empty (无表/无分块)" : "Absent (表缺失)");
+            return new LexicalIndexStatusInfo(
+                chunks == 0 ? LexicalIndexStatus.Empty : LexicalIndexStatus.Absent,
+                chunks, 0, contentGen, lexGen, tokenizerVersion, rowId);
+        }
+
+        int indexed;
+        using (var i = conn.CreateCommand())
+        {
+            i.CommandText = "SELECT COUNT(*) FROM fts_chunks_lexical";
+            indexed = Convert.ToInt32(await i.ExecuteScalarAsync(ct) ?? 0);
+        }
+
+        var status = chunks == 0
+            ? LexicalIndexStatus.Empty
+            : indexed == 0
+                ? LexicalIndexStatus.Absent
+                : indexed < chunks
+                    ? LexicalIndexStatus.Stale
+                    : (lexGen == contentGen ? LexicalIndexStatus.Ready : LexicalIndexStatus.Stale);
+
+        span.SetDetail($"{status} (chunks={chunks}, indexed={indexed}, gen={lexGen}/{contentGen})");
+        span.SetOutput(indexed);
+        return new LexicalIndexStatusInfo(status, chunks, indexed, contentGen, lexGen, tokenizerVersion, rowId);
+    }
+
+    /// <summary>
+    /// 后台分批补齐词法倒排索引：每批独立事务 + 检查点持久化（可断点续传）+ 并行分词。
+    /// 每批仅短暂持有写栅栏，不会长时间阻塞写入；查询读路径不调用本方法。
+    /// </summary>
+    public async Task<LexicalIndexBackfillResult> BackfillLexicalIndexAsync(
+        int batchSize = 500,
+        IProgress<LexicalIndexProgress>? progress = null,
+        CancellationToken ct = default,
+        bool force = false)
+    {
+        await InitializeAsync(ct);
+        var sw = Stopwatch.StartNew();
+        using var span = TimingScope.Begin("kb.lexical-index.backfill", SpanCategory.Io, "词法索引补齐");
+        span.MarkColdStart();
+
+        await EnsureLexicalTableAsync(ct);
+
+        int total;
+        long checkpoint;
+        using (var conn = CreateConnection(readOnly: true))
+        {
+            using (var c = conn.CreateCommand())
+            {
+                c.CommandText = "SELECT COUNT(*) FROM chunks";
+                total = Convert.ToInt32(await c.ExecuteScalarAsync(ct) ?? 0);
+            }
+            using (var m = conn.CreateCommand())
+            {
+                m.CommandText = "SELECT lexical_indexed_rowid FROM kb_manifest WHERE kb_id=@id";
+                m.Parameters.AddWithValue("@id", KnowledgeBaseId);
+                checkpoint = Convert.ToInt64(await m.ExecuteScalarAsync(ct) ?? 0L);
+            }
+        }
+
+        // 运维强制重建：忽略检查点与快路径，先清空再全量重建（用于清理历史重复行 / 强制重分词）
+        if (force)
+        {
+            await ClearLexicalIndexAsync(ct);
+            checkpoint = 0;
+            span.SetDetail("force=true，已清空词法表并从零重建");
+        }
+
+        int processed = 0, batchNo = 0;
+
+        // ── 升级兼容快路径 ────────────────────────────────────────────────
+        // 历史库可能早已存在完整词法索引，只是 manifest 的 lexical_generation 列是本次新增的（初值 0）。
+        // 这种情况下若直接按 checkpoint=0 重建，会对 5w+ 块重复分词，并因 FTS5 无唯一约束产生重复行。
+        // 因此先做一次轻量核对：fts 行数与 distinct chunk_id 数都覆盖 chunks 时，仅对齐代次即可。
+        if (!force && total > 0 && checkpoint <= 0)
+        {
+            int indexedRows, distinctIds;
+            using (var conn = CreateConnection(readOnly: true))
+            using (var i = conn.CreateCommand())
+            {
+                i.CommandText = "SELECT COUNT(*), COUNT(DISTINCT chunk_id) FROM fts_chunks_lexical";
+                using var r = await i.ExecuteReaderAsync(ct);
+                if (await r.ReadAsync(ct))
+                {
+                    indexedRows = r.GetInt32(0);
+                    distinctIds = r.GetInt32(1);
+                }
+                else
+                {
+                    indexedRows = distinctIds = 0;
+                }
+            }
+
+            if (distinctIds >= total)
+            {
+                await MarkLexicalGenerationAsync(ct);
+                span.SetDetail($"快路径：索引已完整（{indexedRows} 行 / {distinctIds} 块），仅对齐代次");
+                _logger?.LogInformation(
+                    "[SqliteKnowledgeBaseStore] 词法索引已完整，跳过重建仅对齐代次: {KbId}，{Indexed}/{Total} 块，耗时 {Elapsed}ms",
+                    KnowledgeBaseId, distinctIds, total, sw.ElapsedMilliseconds);
+                return new LexicalIndexBackfillResult(
+                    KnowledgeBaseId, 0, total, sw.ElapsedMilliseconds, true, false,
+                    $"索引已完整（{distinctIds}/{total}），仅对齐代次");
+            }
+
+            // 索引不完整：从零重建前必须清空历史残留，避免重复行污染检索结果
+            await ClearLexicalIndexAsync(ct);
+        }
+
+        try
+        {
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                var rows = await ReadChunkBatchAsync(checkpoint, Math.Clamp(batchSize, 50, 2000), ct);
+                if (rows.Count == 0) break;
+
+                var tokenized = TokenizeBatch(rows);
+                await WriteLexicalBatchAsync(rows, tokenized, ct);
+
+                checkpoint = rows[^1].RowId;
+                processed += rows.Count;
+                batchNo++;
+                progress?.Report(new LexicalIndexProgress(KnowledgeBaseId, processed, total, batchNo, "分词与写入"));
+            }
+
+            // 完成后对齐代次（内容未变更时即等价于"索引与内容一致"）
+            await MarkLexicalGenerationAsync(ct);
+            span.SetOutput(processed);
+            span.SetDetail($"补齐 {processed}/{total} 块，{batchNo} 批");
+            _logger?.LogInformation(
+                "[SqliteKnowledgeBaseStore] 词法索引补齐完成: {KbId}，{Processed}/{Total} 块，{Batches} 批，耗时 {Elapsed}ms",
+                KnowledgeBaseId, processed, total, batchNo, sw.ElapsedMilliseconds);
+
+            return new LexicalIndexBackfillResult(KnowledgeBaseId, processed, total, sw.ElapsedMilliseconds, true, false);
+        }
+        catch (OperationCanceledException)
+        {
+            span.SetDetail($"已取消（检查点 {checkpoint}，已处理 {processed}/{total}）");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            span.Fail(ex);
+            _logger?.LogError(ex, "[SqliteKnowledgeBaseStore] 词法索引补齐失败: {KbId}", KnowledgeBaseId);
+            return new LexicalIndexBackfillResult(KnowledgeBaseId, processed, total, sw.ElapsedMilliseconds, false, false, ex.Message);
+        }
+    }
+
+    /// <summary>建表（DDL 仅在写栅栏内短时执行，幂等）。</summary>
+    private async Task EnsureLexicalTableAsync(CancellationToken ct)
+    {
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks_lexical USING fts5(
+                    chunk_id UNINDEXED, document_id UNINDEXED, title, heading, text
+                );";
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally { _writeGate.Release(); }
+    }
+
+    private async Task<List<(long RowId, string ChunkId, string DocumentId, string SourceKey, string Text)>> ReadChunkBatchAsync(
+        long afterRowId, int limit, CancellationToken ct)
+    {
+        var rows = new List<(long, string, string, string, string)>(limit);
+        using var conn = CreateConnection(readOnly: true);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT c.rowid, c.id, c.document_id, d.source_key, c.text
+            FROM chunks c JOIN documents d ON d.id = c.document_id
+            WHERE c.rowid > @last ORDER BY c.rowid LIMIT @lim";
+        cmd.Parameters.AddWithValue("@last", afterRowId);
+        cmd.Parameters.AddWithValue("@lim", limit);
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add((reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)));
+        }
+        return rows;
+    }
+
+    /// <summary>并行分词（jieba 只读字典，线程安全），显著降低全量构建的 CPU 墙钟时间。</summary>
+    private static (string Title, string Heading, string Text)[] TokenizeBatch(
+        List<(long RowId, string ChunkId, string DocumentId, string SourceKey, string Text)> rows)
+    {
+        var result = new (string, string, string)[rows.Count];
+        var dop = Math.Clamp(Environment.ProcessorCount, 1, 4);
+        if (dop <= 1)
+        {
+            for (int i = 0; i < rows.Count; i++)
+                result[i] = TokenizeRow(rows[i].SourceKey, rows[i].Text);
+            return result;
+        }
+
+        Parallel.For(0, rows.Count, new ParallelOptions { MaxDegreeOfParallelism = dop }, i =>
+        {
+            result[i] = TokenizeRow(rows[i].SourceKey, rows[i].Text);
+        });
+        return result;
+    }
+
+    private static (string Title, string Heading, string Text) TokenizeRow(string sourceKey, string text)
+        => (TokenizeLexical(ExtractTitle(sourceKey, text)), TokenizeLexical(ExtractHeading(text)), TokenizeLexical(text));
+
+    /// <summary>清空词法索引（仅用于从零重建前的清理，避免 FTS5 无唯一约束导致的重复行）。</summary>
+    private async Task ClearLexicalIndexAsync(CancellationToken ct)
+    {
         await _writeGate.WaitAsync(ct);
         try
         {
             using var conn = CreateConnection();
             using var tx = conn.BeginTransaction();
-            if (!await HasLexicalIndexAsync(conn, tx, ct))
+            using (var del = conn.CreateCommand())
             {
-                using var create = conn.CreateCommand();
-                create.Transaction = tx;
-                create.CommandText = "CREATE VIRTUAL TABLE fts_chunks_lexical USING fts5(chunk_id UNINDEXED, document_id UNINDEXED, title, heading, text)";
-                await create.ExecuteNonQueryAsync(ct);
-                await PopulateLexicalIndexAsync(conn, tx, ct);
+                del.Transaction = tx;
+                del.CommandText = "DELETE FROM fts_chunks_lexical";
+                await del.ExecuteNonQueryAsync(ct);
+            }
+            using (var reset = conn.CreateCommand())
+            {
+                reset.Transaction = tx;
+                reset.CommandText = "UPDATE kb_manifest SET lexical_indexed_rowid = 0, lexical_generation = 0 WHERE kb_id = @id";
+                reset.Parameters.AddWithValue("@id", KnowledgeBaseId);
+                await reset.ExecuteNonQueryAsync(ct);
             }
             tx.Commit();
         }
         finally { _writeGate.Release(); }
     }
+
+    private async Task WriteLexicalBatchAsync(
+        List<(long RowId, string ChunkId, string DocumentId, string SourceKey, string Text)> rows,
+        (string Title, string Heading, string Text)[] tokenized,
+        CancellationToken ct)
+    {
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+            using (var insert = conn.CreateCommand())
+            {
+                insert.Transaction = tx;
+                insert.CommandText = "INSERT INTO fts_chunks_lexical(chunk_id, document_id, title, heading, text) VALUES(@c,@d,@t,@h,@x)";
+                var pc = insert.Parameters.Add("@c", SqliteType.Text);
+                var pd = insert.Parameters.Add("@d", SqliteType.Text);
+                var pt = insert.Parameters.Add("@t", SqliteType.Text);
+                var ph = insert.Parameters.Add("@h", SqliteType.Text);
+                var px = insert.Parameters.Add("@x", SqliteType.Text);
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    pc.Value = rows[i].ChunkId;
+                    pd.Value = rows[i].DocumentId;
+                    pt.Value = tokenized[i].Title;
+                    ph.Value = tokenized[i].Heading;
+                    px.Value = tokenized[i].Text;
+                    await insert.ExecuteNonQueryAsync(ct);
+                }
+            }
+
+            using (var cp = conn.CreateCommand())
+            {
+                cp.Transaction = tx;
+                cp.CommandText = "UPDATE kb_manifest SET lexical_indexed_rowid=@row, tokenizer_version=@ver, updated_at=@now WHERE kb_id=@id";
+                cp.Parameters.AddWithValue("@row", rows[^1].RowId);
+                cp.Parameters.AddWithValue("@ver", LexicalTokenizerVersion);
+                cp.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+                cp.Parameters.AddWithValue("@id", KnowledgeBaseId);
+                await cp.ExecuteNonQueryAsync(ct);
+            }
+            tx.Commit();
+        }
+        finally { _writeGate.Release(); }
+    }
+
+    private async Task MarkLexicalGenerationAsync(CancellationToken ct)
+    {
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"UPDATE kb_manifest
+                    SET lexical_generation = content_generation,
+                        lexical_indexed_rowid = COALESCE((SELECT MAX(rowid) FROM chunks), 0),
+                        tokenizer_version = @ver,
+                        updated_at = @now
+                    WHERE kb_id = @id";
+                cmd.Parameters.AddWithValue("@ver", LexicalTokenizerVersion);
+                cmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+                cmd.Parameters.AddWithValue("@id", KnowledgeBaseId);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }
+        finally { _writeGate.Release(); }
+    }
+
+    /// <summary>分词器版本号：写入 manifest，版本漂移时触发后台重建，防止索引/查询词项不一致。</summary>
+    private const string LexicalTokenizerVersion = "jieba-0.42.2/search-v1";
 
     private static async Task<bool> HasLexicalIndexAsync(SqliteConnection conn, SqliteTransaction tx, CancellationToken ct)
     {
@@ -320,13 +701,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         cmd.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name='fts_chunks_lexical'";
         var sql = (string?)await cmd.ExecuteScalarAsync(ct);
         if (sql == null) return false;
-        // Clean-Break: 必须包含 title 与 heading 列，若为旧版 3 列结构则立即重建
+        // Clean-Break: 必须包含 title 与 heading 列，若为旧版 3 列结构则视为缺失（由后台补齐重建）
         if (!sql.Contains("title", StringComparison.OrdinalIgnoreCase) || !sql.Contains("heading", StringComparison.OrdinalIgnoreCase))
         {
-            using var dropCmd = conn.CreateCommand();
-            dropCmd.Transaction = tx;
-            dropCmd.CommandText = "DROP TABLE IF EXISTS fts_chunks_lexical;";
-            await dropCmd.ExecuteNonQueryAsync(ct);
             return false;
         }
         return true;
@@ -407,6 +784,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 }
             }
             if (rows.Count == 0) break;
+            var tokenized = TokenizeBatch(rows);
             using var insert = conn.CreateCommand();
             insert.Transaction = tx;
             insert.CommandText = "INSERT INTO fts_chunks_lexical(chunk_id, document_id, title, heading, text) VALUES(@chunk, @doc, @title, @heading, @text)";
@@ -415,17 +793,14 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             var titleParam = insert.Parameters.Add("@title", SqliteType.Text);
             var headingParam = insert.Parameters.Add("@heading", SqliteType.Text);
             var text = insert.Parameters.Add("@text", SqliteType.Text);
-            foreach (var row in rows)
+            for (int i = 0; i < rows.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
-                var title = ExtractTitle(row.SourceKey, row.Text);
-                var heading = ExtractHeading(row.Text);
-
-                chunk.Value = row.ChunkId;
-                document.Value = row.DocumentId;
-                titleParam.Value = TokenizeLexical(title);
-                headingParam.Value = TokenizeLexical(heading);
-                text.Value = TokenizeLexical(row.Text);
+                chunk.Value = rows[i].ChunkId;
+                document.Value = rows[i].DocumentId;
+                titleParam.Value = tokenized[i].Title;
+                headingParam.Value = tokenized[i].Heading;
+                text.Value = tokenized[i].Text;
                 await insert.ExecuteNonQueryAsync(ct);
             }
             lastRowId = rows[^1].RowId;
@@ -440,7 +815,6 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         {
             using var conn = CreateConnection();
             using var tx = conn.BeginTransaction();
-            var hasLexicalIndex = await HasLexicalIndexAsync(conn, tx, ct);
 
             // 1. 校验写入栅栏 IndexEpoch
             var currentManifest = await GetManifestInternalAsync(conn, tx, ct);
@@ -523,7 +897,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 cleanCmd.Parameters.AddWithValue("@doc_id", docId);
                 await cleanCmd.ExecuteNonQueryAsync(ct);
             }
-            if (hasLexicalIndex)
+            // 无条件维护词法倒排索引：InitializeAsync 已保证表存在；
+            // 历史上这里用 if (hasLexicalIndex) 条件跳过，导致"索引永远缺一段，直到首次查询现场构建 16 秒"。
             {
                 using var cleanLexical = conn.CreateCommand();
                 cleanLexical.Transaction = tx;
@@ -563,7 +938,6 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 insertChunkCmd.Parameters.AddWithValue("@heading_path", (object?)chunk.HeadingPath ?? DBNull.Value);
                 await insertChunkCmd.ExecuteNonQueryAsync(ct);
 
-                if (hasLexicalIndex)
                 {
                     var title = ExtractTitle(batch.SourceKey, chunk.Text);
                     var heading = ExtractHeading(chunk.Text);
@@ -612,6 +986,20 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 manifestCmd.Parameters.AddWithValue("@now", now);
                 manifestCmd.Parameters.AddWithValue("@id", KnowledgeBaseId);
                 await manifestCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            // 同步维护词法索引代次：本次写入已双写 fts_chunks_lexical，故词法索引与内容一致。
+            using (var lexGen = conn.CreateCommand())
+            {
+                lexGen.Transaction = tx;
+                lexGen.CommandText = @"UPDATE kb_manifest
+                    SET lexical_generation = content_generation,
+                        lexical_indexed_rowid = COALESCE((SELECT MAX(rowid) FROM chunks), 0),
+                        tokenizer_version = @ver
+                    WHERE kb_id = @id";
+                lexGen.Parameters.AddWithValue("@ver", LexicalTokenizerVersion);
+                lexGen.Parameters.AddWithValue("@id", KnowledgeBaseId);
+                await lexGen.ExecuteNonQueryAsync(ct);
             }
 
             tx.Commit();
@@ -734,6 +1122,89 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         return (" AND (" + string.Join(" OR ", clauses) + ") ", parameters);
     }
 
+    /// <summary>
+    /// 词法索引未就绪时的降级召回：对查询词项做 LIKE 扫描（毫秒级），保证补齐期间仍可用、可解释、可取消。
+    /// </summary>
+    private async Task<List<RecallItem>> ExecuteLikeFallbackAsync(
+        SqliteConnection conn,
+        SqliteTransaction tx,
+        RecallRequest request,
+        string scopeClause,
+        string folderClause,
+        IReadOnlyList<SqliteParameter> folderParams,
+        HashSet<string> seenChunkIds,
+        CancellationToken ct)
+    {
+        var results = new List<RecallItem>();
+        if (string.IsNullOrWhiteSpace(request.Query)) return results;
+
+        var tokens = LexicalSegmenter.CutForSearch(request.Query)
+            .Select(t => t.Trim())
+            .Where(t => t.Length >= 2 && t.Any(char.IsLetterOrDigit))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(4)
+            .ToList();
+        if (tokens.Count == 0)
+        {
+            var raw = request.Query.Trim();
+            if (raw.Length == 0) return results;
+            tokens.Add(raw);
+        }
+
+        var likeClause = string.Join(" OR ", tokens.Select((_, i) => $"c.text LIKE @kw{i}"));
+        var hitsExpr = string.Join(" + ", tokens.Select((_, i) => $"(c.text LIKE @kw{i})"));
+
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $@"
+            SELECT c.id, c.document_id, d.source_key, c.text, c.document_version, d.connector_id, d.locator,
+                   c.start_line, c.end_line, c.heading_path, ({hitsExpr}) AS hits
+            FROM chunks c JOIN documents d ON d.id = c.document_id
+            WHERE c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}
+              AND ({likeClause})
+            ORDER BY hits DESC, c.rowid ASC
+            LIMIT @lim";
+        cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@lim", Math.Clamp(request.TopK * 3, 10, 200));
+        for (int i = 0; i < tokens.Count; i++)
+        {
+            cmd.Parameters.AddWithValue($"@kw{i}", $"%{tokens[i]}%");
+        }
+        foreach (var p in folderParams)
+        {
+            cmd.Parameters.AddWithValue(p.ParameterName, p.Value);
+        }
+
+        try
+        {
+            using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var chunkId = reader.GetString(0);
+                if (!seenChunkIds.Add(chunkId)) continue;
+                var hits = reader.IsDBNull(10) ? 1 : reader.GetInt32(10);
+                results.Add(new RecallItem(
+                    ChunkId: chunkId,
+                    DocumentId: reader.GetString(1),
+                    SourceKey: reader.GetString(2),
+                    Text: reader.GetString(3),
+                    Score: 0.30 + 0.10 * Math.Min(hits, 4),   // 归一化到 [0.4, 0.7]，避免压过真正的 BM25 召回
+                    ScoreKind: ScoreKind.BM25,
+                    DocumentVersion: reader.GetInt64(4),
+                    ConnectorId: reader.GetString(5),
+                    Locator: reader.IsDBNull(6) ? null : reader.GetString(6),
+                    StartLine: reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+                    EndLine: reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
+                    HeadingPath: reader.IsDBNull(9) ? null : reader.GetString(9)));
+            }
+        }
+        catch (SqliteException ex)
+        {
+            _logger?.LogDebug(ex, "[SqliteKnowledgeBaseStore] 词法降级扫描失败: {Query}", request.Query);
+        }
+        return results;
+    }
+
     private async Task<List<RecallItem>> ExecuteLexicalQueryInternalAsync(
         SqliteConnection conn,
         SqliteTransaction tx,
@@ -746,6 +1217,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         HashSet<string> seenChunkIds,
         CancellationToken ct)
     {
+        using var span = TimingScope.Begin("kb.fts.match", SpanCategory.Io, "FTS5 匹配");
+        span.AddAttribute("kb", KnowledgeBaseId);
+        span.AddAttribute("table", table);
         var resultList = new List<RecallItem>();
         try
         {
@@ -812,13 +1286,24 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         {
             _logger?.LogDebug(ex, "[SqliteKnowledgeBaseStore] FTS 查询回退: {Query}", ftsQuery);
         }
+        span.SetOutput(resultList.Count);
         return resultList;
     }
 
     public async Task<RecallSnapshot> RecallAsync(RecallRequest request, CancellationToken ct = default)
     {
         await InitializeAsync(ct);
-        await EnsureLexicalIndexAsync(ct);
+
+        // ⚠️ 读路径禁止构建索引：这里只做 O(1) 状态裁决。
+        // 历史实现调用 EnsureLexicalIndexAsync()，导致首次词法查询在请求线程内全量分词建索引（实测 16 秒）。
+        var lexicalStatus = await GetLexicalIndexStatusAsync(ct);
+        bool lexicalReady = lexicalStatus.Status is LexicalIndexStatus.Ready or LexicalIndexStatus.Empty;
+        if (!lexicalReady)
+        {
+            // 只投递补齐意图，交给后台 Worker；请求线程绝不构建索引。
+            LexicalIndexBackfillSignal.Request(KnowledgeBaseId);
+        }
+
         var bm25Items = new List<RecallItem>();
         var vectorItems = new List<RecallItem>();
 
@@ -919,8 +1404,10 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             scopeClause = " AND EXISTS (SELECT 1 FROM authorized_kb_documents a WHERE a.id=d.id)";
         }
         bool hasVectorCoverage = true;
-        bool isDegraded = false;
-        string? degradeReason = null;
+        bool isDegraded = !lexicalReady;
+        string? degradeReason = lexicalReady
+            ? null
+            : $"词法索引补齐中 ({lexicalStatus.ProgressPercent}%)，已降级为关键词扫描召回";
         if (request.QueryVector is { Length: > 0 })
         {
             using var coverage = conn.CreateCommand();
@@ -977,11 +1464,22 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         }
 
         var seenChunkIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var ftsQuery in queriesToTry)
+        if (useLexicalTable && !lexicalReady)
         {
-            if (bm25Items.Count >= request.TopK) break;
-            var retrieved = await ExecuteLexicalQueryInternalAsync(conn, tx, table, ftsQuery, request, scopeClause, folderClause, folderParams, seenChunkIds, ct);
-            bm25Items.AddRange(retrieved);
+            // 降级通道：词法倒排索引尚未补齐时，用关键词 LIKE 扫描兜底（毫秒级，绝不阻塞在分词建索引上）
+            using var fb = TimingScope.Begin("kb.lexical.like-fallback", SpanCategory.Io, "关键词扫描兜底");
+            var fallbackItems = await ExecuteLikeFallbackAsync(conn, tx, request, scopeClause, folderClause, folderParams, seenChunkIds, ct);
+            bm25Items.AddRange(fallbackItems);
+            fb.SetOutput(fallbackItems.Count);
+        }
+        else
+        {
+            foreach (var ftsQuery in queriesToTry)
+            {
+                if (bm25Items.Count >= request.TopK) break;
+                var retrieved = await ExecuteLexicalQueryInternalAsync(conn, tx, table, ftsQuery, request, scopeClause, folderClause, folderParams, seenChunkIds, ct);
+                bm25Items.AddRange(retrieved);
+            }
         }
 
         // 1.1 级联早停状态机裁决 (Cascade Early-Pruning State Machine)
@@ -1290,11 +1788,15 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     
                     UPDATE kb_manifest
                     SET read_revision = read_revision + 1,
+                        lexical_generation = content_generation,
+                        lexical_indexed_rowid = COALESCE((SELECT MAX(rowid) FROM chunks), 0),
+                        tokenizer_version = @ver,
                         updated_at = @now
                     WHERE kb_id = @kb_id;
                     
                     SELECT read_revision FROM kb_manifest WHERE kb_id = @kb_id;
                 ";
+                populateCmd.Parameters.AddWithValue("@ver", LexicalTokenizerVersion);
                 populateCmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
                 populateCmd.Parameters.AddWithValue("@kb_id", KnowledgeBaseId);
                 var newRevision = (long)(await populateCmd.ExecuteScalarAsync(ct) ?? 0L);

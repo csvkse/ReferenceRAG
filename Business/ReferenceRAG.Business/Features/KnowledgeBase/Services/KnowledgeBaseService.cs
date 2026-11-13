@@ -297,6 +297,174 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         return path.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
     }
 
+    // ==================== P2：事件驱动与漂移治理（remaining-plan §1） ====================
+
+    /// <summary>
+    /// 只读对账：connectors（事实） vs config.Sources（投影）。
+    /// 产出 Orphaned（物理目录消失且无候选）/ Drifted（消失但有疑似改名候选）/ Unlinked（残留投影）。
+    /// 首版只报告，不删除连接器、不清理语料。
+    /// </summary>
+    public async Task<SourceLinkReconcileReport> ReconcileAsync(CancellationToken ct = default)
+    {
+        var kbs = await _catalog.ListKnowledgeBasesAsync(ct);
+        var connectors = new List<(KnowledgeBaseDefinition Kb, ConnectorDefinition Connector)>();
+        foreach (var kb in kbs)
+        {
+            ct.ThrowIfCancellationRequested();
+            foreach (var conn in await _catalog.GetConnectorsByKnowledgeBaseAsync(kb.Id, ct))
+                connectors.Add((kb, conn));
+        }
+
+        var configSources = _configManager?.Load()?.Sources?.ToList() ?? new List<SourceFolder>();
+        var linkedKeys = new HashSet<string>(
+            connectors.Select(x => NormalizePathKey(x.Connector.TargetPath)),
+            StringComparer.OrdinalIgnoreCase);
+        var issues = new List<SourceLinkDriftIssue>();
+
+        // 1) 事实侧：连接器指向的物理目录是否还在
+        foreach (var group in connectors.GroupBy(x => NormalizePathKey(x.Connector.TargetPath)))
+        {
+            ct.ThrowIfCancellationRequested();
+            var path = group.First().Connector.TargetPath;
+            if (string.IsNullOrWhiteSpace(path) || Directory.Exists(path)) continue;
+
+            var candidates = FindRebindCandidates(path, linkedKeys);
+            foreach (var (kb, connector) in group)
+            {
+                if (candidates.Count > 0)
+                {
+                    issues.Add(new SourceLinkDriftIssue(
+                        SourceLinkDriftKind.Drifted,
+                        path,
+                        $"物理目录不存在，检测到 {candidates.Count} 个疑似改名/迁移的候选目录；确认后可重绑（保留原连接器与索引数据）。",
+                        KnowledgeBaseId: kb.Id,
+                        KnowledgeBaseName: kb.Name,
+                        ConnectorId: connector.Id,
+                        RebindCandidates: candidates));
+                }
+                else
+                {
+                    issues.Add(new SourceLinkDriftIssue(
+                        SourceLinkDriftKind.Orphaned,
+                        path,
+                        "连接器指向的物理目录已不存在（孤儿连接器），可在确认后一键清理。",
+                        KnowledgeBaseId: kb.Id,
+                        KnowledgeBaseName: kb.Name,
+                        ConnectorId: connector.Id));
+                }
+            }
+        }
+
+        // 2) 投影侧：config.Sources 中是否存在没有任何连接器指向的残留行
+        foreach (var source in configSources)
+        {
+            if (linkedKeys.Contains(NormalizePathKey(source.Path))) continue;
+            issues.Add(new SourceLinkDriftIssue(
+                SourceLinkDriftKind.Unlinked,
+                source.Path,
+                "源仍在配置中，但已未挂载到任何知识库（解绑后的残留投影）。",
+                SourceName: source.Name));
+        }
+
+        var report = new SourceLinkReconcileReport(
+            DateTime.UtcNow, kbs.Count, connectors.Count, configSources.Count, issues);
+        _logger?.LogInformation(
+            "[KnowledgeBaseService] 对账完成: KB={KbCount} Connector={ConnCount} Source={SourceCount} Issues={IssueCount}",
+            kbs.Count, connectors.Count, configSources.Count, issues.Count);
+        return report;
+    }
+
+    /// <summary>
+    /// 在缺失目录的同级下寻找「名称相似」的候选目录（模拟用户把 foo 改成 bar 的场景）。
+    /// 只做名称相似度（Dice 字符二元组），不递归扫描、不比较体积，避免对账变成重 IO。
+    /// </summary>
+    private static IReadOnlyList<string> FindRebindCandidates(string missingPath, ISet<string> linkedKeys)
+    {
+        try
+        {
+            var trimmed = Path.TrimEndingDirectorySeparator(missingPath);
+            var parent = Path.GetDirectoryName(trimmed);
+            if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent)) return Array.Empty<string>();
+            var leaf = Path.GetFileName(trimmed);
+
+            return Directory.EnumerateDirectories(parent)
+                .Take(256)
+                .Where(d => !linkedKeys.Contains(NormalizePathKey(d)))
+                .Select(d => (Path: d, Score: NameSimilarity(leaf, Path.GetFileName(Path.TrimEndingDirectorySeparator(d)))))
+                .Where(x => x.Score >= 0.6)
+                .OrderByDescending(x => x.Score)
+                .Take(3)
+                .Select(x => x.Path)
+                .ToArray();
+        }
+        catch (Exception)
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    private static double NameSimilarity(string a, string b)
+    {
+        if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase)) return 1.0;
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return 0.0;
+        a = a.ToLowerInvariant();
+        b = b.ToLowerInvariant();
+        if (a.Contains(b, StringComparison.Ordinal) || b.Contains(a, StringComparison.Ordinal)) return 0.8;
+
+        var bigrams = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 0; i < a.Length - 1; i++)
+        {
+            var g = a.Substring(i, 2);
+            bigrams[g] = bigrams.GetValueOrDefault(g) + 1;
+        }
+        var matches = 0;
+        for (var i = 0; i < b.Length - 1; i++)
+        {
+            var g = b.Substring(i, 2);
+            if (bigrams.TryGetValue(g, out var remaining) && remaining > 0)
+            {
+                matches++;
+                bigrams[g] = remaining - 1;
+            }
+        }
+        var total = Math.Max(1, (a.Length - 1) + (b.Length - 1));
+        return 2.0 * matches / total;
+    }
+
+    /// <summary>
+    /// 确认重绑：原地更新 target_path（CatalogStore.SaveConnectorAsync 的 ON CONFLICT(id) DO UPDATE
+    /// 会同步刷新 path_key），保留 connectorId 与全部已索引语料。
+    /// 若目标路径已被同 KB 的另一连接器占用，则拒绝，避免触发 ux_connectors_kb_path 唯一约束。
+    /// </summary>
+    public async Task<ConnectorDefinition> RebindConnectorAsync(
+        string knowledgeBaseId,
+        string connectorId,
+        string newTargetPath,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(newTargetPath))
+            throw new ArgumentException("新路径不能为空", nameof(newTargetPath));
+        if (!Directory.Exists(newTargetPath))
+            throw new InvalidOperationException($"目标目录不存在或不可访问: {newTargetPath}");
+
+        var connector = await _catalog.GetConnectorAsync(connectorId, ct);
+        if (connector == null || !string.Equals(connector.KnowledgeBaseId, knowledgeBaseId, StringComparison.OrdinalIgnoreCase))
+            throw new KeyNotFoundException($"连接器未找到: {connectorId}");
+
+        var key = NormalizePathKey(newTargetPath);
+        var conflict = (await _catalog.GetConnectorsByKnowledgeBaseAsync(knowledgeBaseId, ct))
+            .FirstOrDefault(c => c.Id != connectorId && NormalizePathKey(c.TargetPath) == key);
+        if (conflict != null)
+            throw new InvalidOperationException($"知识库内已存在指向该路径的连接器: {conflict.Id}");
+
+        var rebound = connector with { TargetPath = newTargetPath, UpdatedAt = DateTime.UtcNow };
+        await _catalog.SaveConnectorAsync(rebound, ct);
+        _logger?.LogInformation(
+            "[KnowledgeBaseService] 连接器 {Id} 已重绑: {Old} -> {New}（保留索引数据）",
+            connectorId, connector.TargetPath, newTargetPath);
+        return rebound;
+    }
+
     public async Task<IReadOnlyList<ConnectorDetailDto>> GetConnectorsAsync(string knowledgeBaseId, CancellationToken ct = default)
     {
         var rawConnectors = await _catalog.GetConnectorsByKnowledgeBaseAsync(knowledgeBaseId, ct);

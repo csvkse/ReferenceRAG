@@ -497,3 +497,44 @@ test('Sources.js treats knowledge-base connector rows as read-only', () => {
     assert.ok(src.indexOf('if (isConnectorRow(row))') < src.indexOf('handleDelete(row)'),
         'delete action must only live in the non-connector branch');
 });
+
+test('Source <-> knowledge base bidirectional navigation and origin labels', () => {
+    const sourcesSrc = fs.readFileSync(path.resolve(__dirname, '../app/views/Sources.js'), 'utf8');
+    assert.ok(sourcesSrc.includes('useRoute'), 'Sources must read route query for reverse navigation');
+    assert.ok(sourcesSrc.includes('goToKnowledgeBases(row)'), 'linked tag must navigate with row context');
+    assert.ok(sourcesSrc.includes("query.kb = links[0].id"), 'navigation must target the linked knowledge base');
+    assert.ok(sourcesSrc.includes('sourceOrigin(row)'), 'rows must expose a source origin label');
+    assert.ok(sourcesSrc.includes('来源：'), 'origin label must be rendered');
+    assert.ok(sourcesSrc.includes('syncFromRoute()'), 'highlighted path must be read from the route');
+
+    const kbSrc = fs.readFileSync(path.resolve(__dirname, '../app/views/KnowledgeBases.js'), 'utf8');
+    assert.ok(kbSrc.includes('useRoute'), 'KnowledgeBases must read route query for connector focus');
+    assert.ok(kbSrc.includes("route.query?.connector"), 'connector focus must come from route query');
+    assert.ok(kbSrc.includes('openConnectorsDrawer(kb)'), 'matched knowledge base drawer must open automatically');
+    assert.ok(kbSrc.includes('getConnectorOrigin(conn)'), 'connector rows must show their origin');
+    assert.ok(kbSrc.includes('viewInSourceManagement(conn)'), 'connector rows must link back to source management');
+    assert.ok(kbSrc.includes('scrollIntoView'), 'focused connector must be scrolled into view');
+});
+
+test('Sources.js exposes drift reconciliation panel with confirm-gated actions', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, '../app/views/Sources.js'), 'utf8');
+    assert.ok(src.includes('knowledgeBasesApi.reconcile()'), 'panel must trigger the reconcile endpoint');
+    assert.ok(src.includes('knowledgeBasesApi.cleanupOrphan('), 'orphan cleanup must be exposed');
+    assert.ok(src.includes('knowledgeBasesApi.rebindConnector('), 'candidate rebind must be exposed');
+    assert.ok(src.includes('dialog.warning'), 'cleanup/rebind must be confirm-gated');
+    assert.ok(src.includes('driftKindLabel(issue.kind)'), 'drift kinds must be labelled');
+
+    const apiSrc = fs.readFileSync(path.resolve(__dirname, '../app/api/index.js'), 'utf8');
+    assert.ok(apiSrc.includes("reconcile: () => api.post('/knowledge-bases/reconcile')"));
+    assert.ok(apiSrc.includes("'/knowledge-bases/reconcile/rebind'"));
+    assert.ok(apiSrc.includes("'/knowledge-bases/reconcile/cleanup'"));
+});
+
+test('Sources.js batch link submits each selected source and counts outcomes', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, '../app/views/Sources.js'), 'utf8');
+    assert.ok(src.includes('sourcesApi.link(target.name, linkKbId.value)'),
+        'batch link must actually submit each selected source');
+    assert.ok(src.includes("res.data?.status === 'already-linked'"), 'already-linked must count as skipped');
+    assert.ok(src.includes('failed.push('), 'failed submissions must be collected');
+    assert.ok(src.includes('await loadSources(true)'), 'list must refresh after real submission');
+});

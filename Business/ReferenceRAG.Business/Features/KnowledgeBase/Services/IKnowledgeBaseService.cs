@@ -84,6 +84,22 @@ public interface IKnowledgeBaseService
 
     Task<bool> DeleteConnectorAsync(string knowledgeBaseId, string connectorId, bool cascade = true, CancellationToken ct = default);
 
+    /// <summary>
+    /// P2 对账：以 connectors 为事实来源、config.Sources 为投影，产出孤儿 / 未挂载 / 路径漂移报告。
+    /// 只读，不修改任何数据（ReportOnly）。
+    /// </summary>
+    Task<SourceLinkReconcileReport> ReconcileAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// 路径迁移确认重绑：保留 connectorId 与既有索引数据，仅更新 target_path / path_key。
+    /// 目标目录须存在，且同一知识库内不得已有连接器指向该路径。
+    /// </summary>
+    Task<ConnectorDefinition> RebindConnectorAsync(
+        string knowledgeBaseId,
+        string connectorId,
+        string newTargetPath,
+        CancellationToken ct = default);
+
     Task<JobDefinition> TriggerSyncJobAsync(string knowledgeBaseId, string connectorId, CancellationToken ct = default);
 
     Task<JobDefinition?> GetJobAsync(string jobId, CancellationToken ct = default);
@@ -204,4 +220,13 @@ public sealed record CrossKnowledgeBaseSearchResponse(
     ScoreKind ScoreKind,
     TimeSpan Elapsed,
     bool EarlyPruned = false,
-    bool Degraded = false);
+    bool Degraded = false,
+    /// <summary>降级原因（如"词法索引补齐中 (42%)"），用于前端明确告知用户当前走的是哪条降级通道。</summary>
+    string? DegradationReason = null,
+    /// <summary>
+    /// 索引级降级：存储层因「词法索引未就绪 / 向量覆盖不全」而走了降级召回通道。
+    /// 与 <paramref name="Degraded"/>（模型/服务级降级）区分开，避免把索引构建状态误判为模型故障。
+    /// </summary>
+    bool IndexDegraded = false,
+    /// <summary>本次跨库检索的全链路耗时链（扇出 / 各库召回 / 融合），未开启时为 null。</summary>
+    ReferenceRAG.Core.Tracing.TimingChain? TimingChain = null);

@@ -26,6 +26,15 @@ export function knowledgeBaseResponse(data, mode) {
             refId: item.chunkId, fileId: item.documentId, filePath: item.sourceKey,
             title: item.sourceKey, content: item.text, score: item.score, scoreKind: item.scoreKind, source: item.connectorId,
             locator: item.locator, startLine: item.startLine, endLine: item.endLine, headingPath: item.headingPath
-        })), files: [], context: '', stats: { durationMs: Math.round(durationMs), estimatedTokens: 0, isDegraded: data.partialSuccess, isEarlyPruned }
+        })), files: [], context: '', stats: {
+            durationMs: Math.round(durationMs),
+            estimatedTokens: 0,
+            // 模型级降级（断路器/推理失败）与索引级降级（词法索引补齐中）都要如实透出
+            isDegraded: !!(data.degraded || data.indexDegraded),
+            degradeReason: data.degradationReason || null,
+            isEarlyPruned,
+            // 后端跨库检索的全链路耗时链（扇出 / 各库召回 / 融合），用于瀑布图
+            timingChain: data.timingChain || null
+        }
     };
 }

@@ -337,7 +337,13 @@ export const knowledgeBasesApi = {
     createChunk: (id, data) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/chunks`, data),
     updateChunk: (id, chunkId, data) => api.put(`/knowledge-bases/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}`, data),
     toggleChunk: (id, chunkId, enabled) => api.patch(`/knowledge-bases/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}/toggle`, { enabled }),
-    deleteChunk: (id, chunkId) => api.delete(`/knowledge-bases/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}`)
+    deleteChunk: (id, chunkId) => api.delete(`/knowledge-bases/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}`),
+    // P2 挂载漂移治理（首版只报告；清理/重绑需用户在面板中显式确认）
+    reconcile: () => api.post('/knowledge-bases/reconcile'),
+    getLatestReconcile: () => api.get('/knowledge-bases/reconcile/latest'),
+    rebindConnector: (data) => api.post('/knowledge-bases/reconcile/rebind', data),
+    cleanupOrphan: (data) => api.post('/knowledge-bases/reconcile/cleanup', data),
+    getLinkEvents: (take = 50) => api.get('/knowledge-bases/link-events', { params: { take } })
 };
 
 // 跨知识库受控检索 API

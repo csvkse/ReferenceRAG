@@ -187,6 +187,39 @@ public class ConfigManager
     }
 
     /// <summary>
+    /// 重绑连接器后同步迁移源的投影路径。
+    /// 源是连接器在「源管理」中的投影，若只改连接器 target_path 而不迁移源路径，
+    /// 旧路径会残留为 Unlinked 投影、新路径会多出一条「仅知识库」行。
+    /// </summary>
+    /// <returns>迁移后的源；未命中或目标路径冲突时返回 null（不视为错误）</returns>
+    public SourceFolder? RenameSourcePath(string oldPath, string newPath)
+    {
+        if (string.IsNullOrWhiteSpace(oldPath) || string.IsNullOrWhiteSpace(newPath))
+        {
+            return null;
+        }
+
+        var config = Load();
+        var source = config.Sources.FirstOrDefault(s => s.Path.Equals(oldPath, StringComparison.OrdinalIgnoreCase));
+        if (source == null)
+        {
+            return null;
+        }
+
+        if (config.Sources.Any(s => !ReferenceEquals(s, source) && s.Path.Equals(newPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            _logger.LogInformation("[ConfigManager] 迁移源路径跳过：目标路径已存在 {Path}", newPath);
+            return null;
+        }
+
+        source.Path = newPath;
+        Save(config);
+
+        _logger.LogInformation("[ConfigManager] 已迁移源路径: {Name} {Old} -> {New}", source.Name, oldPath, newPath);
+        return source;
+    }
+
+    /// <summary>
     /// 移除源文件夹
     /// </summary>
     public bool RemoveSource(string pathOrName)

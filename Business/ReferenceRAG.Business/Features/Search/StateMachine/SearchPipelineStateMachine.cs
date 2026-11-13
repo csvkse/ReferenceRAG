@@ -11,6 +11,8 @@ public class SearchPipelineStateMachine
     private readonly Stopwatch _phaseStopwatch = new();
     private readonly List<SearchPipelineStepTelemetry> _steps = new();
     private SearchPipelinePhase _currentPhase = SearchPipelinePhase.Created;
+    private int _currentInput = 0;
+    private string? _currentDetails;
     private int _lastInputCandidates = 0;
 
     public SearchPipelinePhase CurrentPhase => _currentPhase;
@@ -46,18 +48,24 @@ public class SearchPipelineStateMachine
 
         if (_currentPhase != SearchPipelinePhase.Created)
         {
+            // 本方法负责"结算上一阶段"：
+            //   Details / InputCandidates 取「进入该阶段时」记录的值（谁被记录，就归属于谁）；
+            //   OutputCandidates 取本次调用传入的 outputCandidates（上一阶段实际产出的候选数）。
+            // 历史实现把本次调用的 details 写进上一阶段，导致前端文案整体错位一个阶段。
             _steps.Add(new SearchPipelineStepTelemetry
             {
                 Phase = _currentPhase.ToString(),
                 PhaseName = GetPhaseDisplayName(_currentPhase),
                 DurationMs = Math.Max(1, durationMs),
-                InputCandidates = inputCandidates > 0 ? inputCandidates : _lastInputCandidates,
+                InputCandidates = _currentInput,
                 OutputCandidates = outputCandidates,
-                Details = details
+                Details = _currentDetails
             });
         }
 
         _currentPhase = nextPhase;
+        _currentInput = inputCandidates > 0 ? inputCandidates : _currentInput;
+        _currentDetails = details;
         _lastInputCandidates = outputCandidates > 0 ? outputCandidates : inputCandidates;
         _phaseStopwatch.Restart();
     }
@@ -75,9 +83,9 @@ public class SearchPipelineStateMachine
             Phase = _currentPhase.ToString(),
             PhaseName = GetPhaseDisplayName(_currentPhase),
             DurationMs = Math.Max(1, durationMs),
-            InputCandidates = _lastInputCandidates,
+            InputCandidates = _currentInput,
             OutputCandidates = finalCount,
-            Details = "结果清洗就绪"
+            Details = _currentDetails
         });
 
         _currentPhase = SearchPipelinePhase.Completed;

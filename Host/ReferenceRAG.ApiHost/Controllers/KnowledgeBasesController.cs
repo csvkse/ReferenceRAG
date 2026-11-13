@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Business.Features.KnowledgeBase.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
 
@@ -19,13 +20,41 @@ public class KnowledgeBasesController : ControllerBase
 {
     private readonly IKnowledgeBaseService _kbService;
     private readonly ILogger<KnowledgeBasesController> _logger;
+    private readonly ISourceLinkEventPublisher? _eventPublisher;
+    private readonly IReconciliationState? _reconciliationState;
+    private readonly ConfigManager? _configManager;
+    private readonly IFileMonitorService? _fileMonitor;
+    private readonly IKnowledgeBaseStorageManager? _storageManager;
 
     public KnowledgeBasesController(
         IKnowledgeBaseService kbService,
-        ILogger<KnowledgeBasesController> logger)
+        ILogger<KnowledgeBasesController> logger,
+        ISourceLinkEventPublisher? eventPublisher = null,
+        IReconciliationState? reconciliationState = null,
+        ConfigManager? configManager = null,
+        IFileMonitorService? fileMonitor = null,
+        IKnowledgeBaseStorageManager? storageManager = null)
     {
         _kbService = kbService ?? throw new ArgumentNullException(nameof(kbService));
         _logger = logger;
+        _eventPublisher = eventPublisher;
+        _reconciliationState = reconciliationState;
+        _configManager = configManager;
+        _fileMonitor = fileMonitor;
+        _storageManager = storageManager;
+    }
+
+    private void Publish(SourceLinkEventKind kind, string path, string? kbId = null,
+        string? connectorId = null, string? detail = null)
+    {
+        _eventPublisher?.Publish(new SourceLinkEvent
+        {
+            Kind = kind,
+            Path = path,
+            KnowledgeBaseId = kbId,
+            ConnectorId = connectorId,
+            Detail = detail
+        });
     }
 
     [HttpGet]
@@ -163,6 +192,7 @@ public class KnowledgeBasesController : ControllerBase
                 request.TargetPath,
                 request.FilePattern,
                 ct);
+            Publish(SourceLinkEventKind.SourceLinked, connector.TargetPath, id, connector.Id, "add-connector");
             return Ok(connector);
         }
         catch (InvalidOperationException ex)
@@ -178,8 +208,11 @@ public class KnowledgeBasesController : ControllerBase
         [FromQuery] bool cascade = true,
         CancellationToken ct = default)
     {
+        var connector = await _kbService.GetConnectorAsync(connectorId, ct);
         var success = await _kbService.DeleteConnectorAsync(id, connectorId, cascade, ct);
         if (!success) return NotFound(new { message = $"连接器不存在: {connectorId}" });
+        Publish(SourceLinkEventKind.ConnectorDetached, connector?.TargetPath ?? string.Empty,
+            id, connectorId, $"delete-connector:cascade={cascade}");
         return NoContent();
     }
 
@@ -329,6 +362,59 @@ public class KnowledgeBasesController : ControllerBase
         var success = await _kbService.DeleteChunkingSpecAsync(specId, ct);
         if (!success) return NotFound(new { message = $"分段规格不存在: {specId}" });
         return NoContent();
+    }
+
+    // ==================== 词法倒排索引状态与手动补齐 ====================
+
+    /// <summary>
+    /// 查询词法倒排索引状态（O(1) 裁决，不触发任何构建）。
+    /// 返回 Absent/Stale 表示当前读路径已降级为关键词扫描，后台 Worker 正在补齐。
+    /// </summary>
+    [HttpGet("{id}/lexical-index")]
+    public async Task<ActionResult<LexicalIndexStatusInfo>> GetLexicalIndexStatus(string id, CancellationToken ct)
+    {
+        if (_storageManager == null)
+            return StatusCode(503, new { message = "知识库存储未就绪" });
+        try
+        {
+            await using var lease = await _storageManager.AcquireLeaseAsync(id, StorageAccess.ReadOnly, ct);
+            return Ok(await lease.Store.GetLexicalIndexStatusAsync(ct));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// 手动触发词法索引补齐（运维/验收用）。分批构建 + 检查点续传，可重复调用（幂等）。
+    /// <paramref name="rebuild"/>=true 时先清空词法表再全量重建，用于清理历史重复行或强制重分词。
+    /// </summary>
+    [HttpPost("{id}/lexical-index/backfill")]
+    public async Task<ActionResult<LexicalIndexBackfillResult>> BackfillLexicalIndex(
+        string id,
+        [FromQuery] int batchSize = 500,
+        [FromQuery] bool rebuild = false,
+        CancellationToken ct = default)
+    {
+        if (_storageManager == null)
+            return StatusCode(503, new { message = "知识库存储未就绪" });
+        try
+        {
+            await using var lease = await _storageManager.AcquireLeaseAsync(id, StorageAccess.ReadWrite, ct);
+            var result = await lease.Store.BackfillLexicalIndexAsync(
+                Math.Clamp(batchSize, 50, 5000), null, ct, force: rebuild);
+            return Ok(result);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "知识库 {Id} 词法索引补齐失败", id);
+            return StatusCode(500, new { message = ex.Message });
+        }
     }
 
     // ==================== 配置偏离诊断与蓝绿影子重构索引 ====================
@@ -568,6 +654,150 @@ public class KnowledgeBasesController : ControllerBase
             return BadRequest(new { message = ex.Message });
         }
     }
+
+    // ==================== P2：挂载漂移对账（remaining-plan §1.2 / §1.3） ====================
+
+    /// <summary>手动触发一次对账（首版只读，只产出报告，不修改任何数据）。</summary>
+    [HttpPost("reconcile")]
+    public async Task<ActionResult<SourceLinkReconcileReport>> Reconcile(CancellationToken ct)
+    {
+        var report = await _kbService.ReconcileAsync(ct);
+        _reconciliationState?.Set(report);
+        return Ok(report);
+    }
+
+    /// <summary>读取定时作业最近一次对账结果；尚未运行时返回 null。</summary>
+    [HttpGet("reconcile/latest")]
+    public ActionResult<SourceLinkReconcileReport?> GetLatestReconcile()
+        => Ok(_reconciliationState?.Latest);
+
+    /// <summary>
+    /// 确认重绑：把漂移连接器指向用户选定的新目录，保留 connectorId 与已索引语料。
+    /// 仅更新 target_path / path_key；目标被占用时返回 409，不自动 detach/attach。
+    /// </summary>
+    [HttpPost("reconcile/rebind")]
+    public async Task<ActionResult> RebindConnector(
+        [FromBody] RebindConnectorRequest request,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request?.KnowledgeBaseId) ||
+            string.IsNullOrWhiteSpace(request?.ConnectorId) ||
+            string.IsNullOrWhiteSpace(request?.TargetPath))
+        {
+            return BadRequest(new { message = "knowledgeBaseId / connectorId / targetPath 均不能为空" });
+        }
+        try
+        {
+            // 重绑前先取旧路径：源（源管理投影）需随之迁移，否则旧路径残留 Unlinked、
+            // 新路径又多出一条「仅知识库」行。
+            var before = await _kbService.GetConnectorAsync(request.ConnectorId, ct);
+            var oldPath = before?.TargetPath;
+
+            var updated = await _kbService.RebindConnectorAsync(
+                request.KnowledgeBaseId, request.ConnectorId, request.TargetPath, ct);
+            Publish(SourceLinkEventKind.SourceLinked, updated.TargetPath,
+                request.KnowledgeBaseId, updated.Id, "rebind");
+
+            var migratedSource = string.IsNullOrWhiteSpace(oldPath) || oldPath == updated.TargetPath
+                ? null
+                : _configManager?.RenameSourcePath(oldPath, updated.TargetPath);
+            if (migratedSource != null)
+            {
+                // 文件监控按源名注册，路径变化后需重新挂载监控
+                _fileMonitor?.RemoveSource(migratedSource.Name);
+                _fileMonitor?.AddSource(migratedSource.Path, migratedSource.Name, migratedSource.FilePatterns);
+                _logger.LogInformation("[KnowledgeBases] 重绑已同步迁移源投影: {Old} -> {New}",
+                    oldPath, updated.TargetPath);
+            }
+
+            return Ok(new
+            {
+                status = "rebound",
+                connectorId = updated.Id,
+                targetPath = updated.TargetPath,
+                sourceMigrated = migratedSource != null,
+                sourceName = migratedSource?.Name
+            });
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new { message = ex.Message, code = "ConnectorPathConflict" });
+        }
+    }
+
+    /// <summary>
+    /// 一键清理孤儿连接器。默认 purgeData=false 只删 catalog 记录（保守），
+    /// 显式传 true 才调用 PurgeConnectorDataAsync 级联清空该连接器的文档/切片/索引。
+    /// </summary>
+    [HttpPost("reconcile/cleanup")]
+    public async Task<ActionResult> CleanupOrphanConnector(
+        [FromBody] CleanupOrphanRequest request,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request?.KnowledgeBaseId) ||
+            string.IsNullOrWhiteSpace(request?.ConnectorId))
+        {
+            return BadRequest(new { message = "knowledgeBaseId / connectorId 均不能为空" });
+        }
+        var connector = await _kbService.GetConnectorAsync(request.ConnectorId, ct);
+        var success = await _kbService.DeleteConnectorAsync(
+            request.KnowledgeBaseId, request.ConnectorId, request.PurgeData, ct);
+        if (!success) return NotFound(new { message = $"连接器不存在: {request.ConnectorId}" });
+
+        Publish(SourceLinkEventKind.ConnectorDetached, connector?.TargetPath ?? string.Empty,
+            request.KnowledgeBaseId, request.ConnectorId, $"orphan-cleanup:purgeData={request.PurgeData}");
+
+        // 孤儿连接器清理后，若该路径已无连接器引用且物理目录仍不存在，
+        // 说明它是一条彻底失效的源投影，一并移除，避免列表里留下「未挂载」僵尸行。
+        var targetPath = connector?.TargetPath;
+        var sourceRemoved = false;
+        if (!string.IsNullOrWhiteSpace(targetPath) && !Directory.Exists(targetPath) && _configManager != null)
+        {
+            var stillReferenced = false;
+            foreach (var kb in await _kbService.ListKnowledgeBasesAsync(ct))
+            {
+                var connectors = await _kbService.GetConnectorsAsync(kb.Id, ct);
+                if (connectors.Any(c => string.Equals(c.TargetPath, targetPath, StringComparison.OrdinalIgnoreCase)))
+                {
+                    stillReferenced = true;
+                    break;
+                }
+            }
+            if (!stillReferenced)
+            {
+                var pendingName = _configManager.Load().Sources
+                    .FirstOrDefault(s => string.Equals(s.Path, targetPath, StringComparison.OrdinalIgnoreCase))?.Name;
+                sourceRemoved = _configManager.RemoveSource(targetPath);
+                if (sourceRemoved && !string.IsNullOrWhiteSpace(pendingName))
+                {
+                    _fileMonitor?.RemoveSource(pendingName);
+                    Publish(SourceLinkEventKind.SourceRemoved, targetPath, request.KnowledgeBaseId,
+                        request.ConnectorId, "orphan-cleanup:remove-projection");
+                }
+            }
+        }
+
+        return Ok(new
+        {
+            status = "cleaned",
+            connectorId = request.ConnectorId,
+            purgeData = request.PurgeData,
+            sourceRemoved
+        });
+    }
+
+    /// <summary>最近关联事件（可观测性：SourceLinked / ConnectorDetached / SourceRemoved）。</summary>
+    [HttpGet("link-events")]
+    public ActionResult<IReadOnlyList<SourceLinkEvent>> GetLinkEvents([FromQuery] int take = 50)
+        => Ok(_eventPublisher?.Recent(take) ?? (IReadOnlyList<SourceLinkEvent>)Array.Empty<SourceLinkEvent>());
 }
 
 /// <summary>Source names are not grants for independent knowledge-base connectors.</summary>
@@ -713,3 +943,15 @@ public sealed record ToggleKnowledgeBaseRequest(bool Enabled);
 public sealed record ToggleChunkRequest(bool Enabled);
 public sealed record CreateDocumentRequest(string? ConnectorId, string? Title, string Content, string? SourceKey);
 public sealed record GetKnowledgeBasePathsRequest(IReadOnlyList<string>? KnowledgeBaseIds);
+
+/// <summary>确认重绑请求（路径迁移治理）。</summary>
+public sealed record RebindConnectorRequest(
+    string? KnowledgeBaseId,
+    string? ConnectorId,
+    string? TargetPath);
+
+/// <summary>孤儿连接器清理请求；PurgeData 默认 false，避免误删语料。</summary>
+public sealed record CleanupOrphanRequest(
+    string? KnowledgeBaseId,
+    string? ConnectorId,
+    bool PurgeData = false);

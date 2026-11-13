@@ -1,6 +1,6 @@
 import { defineComponent as _defineComponent } from 'vue';
 import { ref, computed, h, onMounted, onUnmounted, onActivated } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
 import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput, NInputGroup, NRadioGroup, NRadio, NText, NAlert, NCard, NForm, NFormItem, NDataTable, NModal, NSelect } from 'naive-ui';
 import { sourcesApi, knowledgeBasesApi } from '/app/api/index.js';
 import { isDesktop, selectFolder } from '/core/platform.js';
@@ -15,6 +15,7 @@ const component = /*@__PURE__*/ _defineComponent({
     setup(__props, { expose: __expose }) {
         __expose();
         const router = useRouter();
+        const route = useRoute();
         const message = useMessage();
         const dialog = useDialog();
         const formRef = ref(null);
@@ -29,6 +30,113 @@ const component = /*@__PURE__*/ _defineComponent({
         const linkKbId = ref(null);
         const linking = ref(false);
         const checkedRowKeys = ref([]);
+
+        // 从知识库管理「在源管理中查看」反向跳转过来时，高亮对应源行
+        const highlightedPath = ref('');
+        const normalizePath = (p) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+        const rowProps = (row) => {
+            if (!highlightedPath.value) return {};
+            return normalizePath(row.path) === normalizePath(highlightedPath.value)
+                ? { style: 'background: rgba(24,160,88,0.14);' }
+                : {};
+        };
+        const syncFromRoute = () => {
+            highlightedPath.value = route.query?.path ? String(route.query.path) : '';
+        };
+
+        // P2 挂载漂移对账（首版只读报告；清理/重绑需逐项确认）
+        const showReconcilePanel = ref(false);
+        const reconcileReport = ref(null);
+        const reconcileIssues = ref([]);
+        const reconcileLoading = ref(false);
+        const driftKindLabel = (kind) => ({ Orphaned: '孤儿', Unlinked: '未挂载', Drifted: '路径漂移' })[kind] || kind;
+        const driftKindType = (kind) => ({ Orphaned: 'error', Unlinked: 'warning', Drifted: 'info' })[kind] || 'default';
+
+        // 行级漂移标记：以最近一次对账报告为准，便于不打开面板也能发现异常行
+        const driftByPath = ref({});
+        const buildDriftMap = (issues) => {
+            const map = {};
+            for (const issue of issues || []) {
+                if (!issue?.path) continue;
+                map[issue.path] = { kind: issue.kind, label: driftKindLabel(issue.kind), type: driftKindType(issue.kind) };
+            }
+            return map;
+        };
+        const loadLatestDrift = async () => {
+            try {
+                const res = await knowledgeBasesApi.getLatestReconcile();
+                if (!res || res.status === 204 || !res.data) {
+                    driftByPath.value = {};
+                    return;
+                }
+                reconcileReport.value = res.data;
+                reconcileIssues.value = res.data.issues || [];
+                driftByPath.value = buildDriftMap(reconcileIssues.value);
+            } catch {
+                driftByPath.value = {};
+            }
+        };
+
+        const runReconcile = async () => {
+            reconcileLoading.value = true;
+            try {
+                const res = await knowledgeBasesApi.reconcile();
+                reconcileReport.value = res.data || null;
+                reconcileIssues.value = res.data?.issues || [];
+                driftByPath.value = buildDriftMap(reconcileIssues.value);
+            } catch (err) {
+                message.error('对账失败：' + (err.response?.data?.message || err.message));
+            } finally {
+                reconcileLoading.value = false;
+            }
+        };
+        const openReconcilePanel = async () => {
+            showReconcilePanel.value = true;
+            await runReconcile();
+        };
+        const cleanupOrphanIssue = (issue) => {
+            dialog.warning({
+                title: '清理孤儿连接器',
+                content: `将删除连接器 ${issue.connectorId}（${issue.path}）。默认仅移除挂载记录，不清空已索引语料。`,
+                positiveText: '确认清理',
+                negativeText: '取消',
+                onPositiveClick: async () => {
+                    try {
+                        await knowledgeBasesApi.cleanupOrphan({
+                            knowledgeBaseId: issue.knowledgeBaseId,
+                            connectorId: issue.connectorId
+                        });
+                        message.success('孤儿连接器已清理');
+                        await runReconcile();
+                        await loadSources(true);
+                    } catch (err) {
+                        message.error('清理失败：' + (err.response?.data?.message || err.message));
+                    }
+                }
+            });
+        };
+        const rebindIssue = (issue, candidatePath) => {
+            dialog.warning({
+                title: '确认重绑连接器',
+                content: `把连接器 ${issue.connectorId} 从「${issue.path}」重绑到「${candidatePath}」？将保留原连接器 ID 与已索引语料。`,
+                positiveText: '确认重绑',
+                negativeText: '取消',
+                onPositiveClick: async () => {
+                    try {
+                        await knowledgeBasesApi.rebindConnector({
+                            knowledgeBaseId: issue.knowledgeBaseId,
+                            connectorId: issue.connectorId,
+                            targetPath: candidatePath
+                        });
+                        message.success('连接器已重绑');
+                        await runReconcile();
+                        await loadSources(true);
+                    } catch (err) {
+                        message.error('重绑失败：' + (err.response?.data?.message || err.message));
+                    }
+                }
+            });
+        };
 
         const kbOptions = computed(() => knowledgeBases.value.map(kb => ({
             label: kb.name,
@@ -164,7 +272,23 @@ const component = /*@__PURE__*/ _defineComponent({
         // 因此写操作（编辑/探查/停用/删除）必须收敛到知识库管理。
         const CONNECTOR_TYPE = 'KnowledgeBaseConnector';
         const isConnectorRow = (row) => Boolean(row?.isConnector) || row?.type === CONNECTOR_TYPE;
-        const goToKnowledgeBases = () => router.push('/knowledge-bases');
+        const sourceOrigin = (row) =>
+            (row?.origin || 'SourceManagement') === 'SourceManagement' ? '源文件管理' : '仅知识库';
+
+        // 带定位参数跳转：知识库页据此自动打开连接器抽屉并高亮目标连接器。
+        const goToKnowledgeBases = (row) => {
+            const query = {};
+            const links = row?.linkedKnowledgeBases || [];
+            if (links.length > 0) {
+                query.kb = links[0].id;
+                query.connector = links[0].connectorId;
+            } else if (isConnectorRow(row)) {
+                if (row.knowledgeBaseId) query.kb = row.knowledgeBaseId;
+                if (row.connectorId) query.connector = row.connectorId;
+            }
+            if (row?.path) query.path = row.path;
+            router.push({ path: '/knowledge-bases', query });
+        };
 
         const columns = [
             {
@@ -174,42 +298,69 @@ const component = /*@__PURE__*/ _defineComponent({
             {
                 title: '名称',
                 key: 'name',
-                width: 240,
+                width: 260,
                 render: (row) => {
+                    // 名称单行省略、标签另起一行：避免标签撑破 260px 覆盖到「路径」列
+                    const renderNameCell = (tags) => h('div', {
+                        style: 'display: flex; flex-direction: column; gap: 2px; min-width: 0;'
+                    }, [
+                        h('span', {
+                            style: 'font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;'
+                        }, row.name),
+                        h(NSpace, { size: 4, align: 'center', wrap: true }, { default: () => tags })
+                    ]);
+
                     if (isConnectorRow(row)) {
-                        return h(NSpace, { size: 4, align: 'center', wrap: false }, {
-                            default: () => [
-                                h('span', { style: 'font-size: 13px;' }, row.name),
-                                h(NTag, { type: 'info', size: 'tiny', bordered: false }, {
-                                    default: () => '知识库连接器'
-                                })
-                            ]
-                        });
+                        return renderNameCell([
+                            h(NTag, { type: 'info', size: 'tiny', bordered: false }, {
+                                default: () => '知识库连接器'
+                            }),
+                            h(NTag, { type: 'default', size: 'tiny', bordered: false }, {
+                                default: () => `来源：${sourceOrigin(row)}`
+                            })
+                        ]);
                     }
                     const links = row.linkedKnowledgeBases || [];
                     if (links.length === 0) {
-                        return h(NSpace, { size: 4, align: 'center', wrap: false }, {
-                            default: () => [
-                                h('span', { style: 'font-size: 13px;' }, row.name),
-                                h(NTag, { type: 'warning', size: 'tiny', bordered: false }, {
-                                    default: () => '未挂载'
-                                })
-                            ]
-                        });
-                    }
-                    return h(NSpace, { size: 4, align: 'center', wrap: false }, {
-                        default: () => [
-                            h('span', { style: 'font-size: 13px;' }, row.name),
-                            h(NTag, { type: 'success', size: 'tiny', bordered: false }, {
-                                default: () => `已挂载 ${links.length}`
+                        return renderNameCell([
+                            h(NTag, { type: 'warning', size: 'tiny', bordered: false }, {
+                                default: () => '未挂载'
                             })
-                        ]
-                    });
+                        ]);
+                    }
+                    return renderNameCell([
+                        h(NTag, {
+                            type: 'success',
+                            size: 'tiny',
+                            bordered: false,
+                            style: 'cursor: pointer;',
+                            title: '点击查看已挂载的知识库连接器',
+                            onClick: () => goToKnowledgeBases(row)
+                        }, {
+                            default: () => `已挂载 ${links.length}`
+                        }),
+                        h(NTag, { type: 'default', size: 'tiny', bordered: false }, {
+                            default: () => `来源：${sourceOrigin(row)}`
+                        }),
+                        driftByPath.value[row.path]
+                            ? h(NTag, {
+                                type: driftByPath.value[row.path].type,
+                                size: 'tiny',
+                                bordered: false,
+                                style: 'cursor: pointer;',
+                                title: '点击打开挂载漂移对账面板',
+                                onClick: () => openReconcilePanel()
+                            }, {
+                                default: () => driftByPath.value[row.path].label
+                            })
+                            : null
+                    ]);
                 }
             },
             {
                 title: '路径',
                 key: 'path',
+                minWidth: 200,
                 ellipsis: { tooltip: true }
             },
             {
@@ -274,7 +425,7 @@ const component = /*@__PURE__*/ _defineComponent({
                                 size: 'small',
                                 type: 'info',
                                 tertiary: true,
-                                onClick: goToKnowledgeBases
+                                onClick: () => goToKnowledgeBases(row)
                             }, {
                                 default: () => '去知识库管理'
                             })
@@ -533,7 +684,9 @@ const component = /*@__PURE__*/ _defineComponent({
 
         let unbindSources = null;
         onMounted(async () => {
+            syncFromRoute();
             loadSources();
+            loadLatestDrift();
             try {
                 await JobCenter.initialize();
                 unbindSources = JobCenter.registerRefresher('sources', () => loadSources(true));
@@ -547,17 +700,23 @@ const component = /*@__PURE__*/ _defineComponent({
         });
 
         onActivated(() => {
+            syncFromRoute();
             loadSources(true);
+            loadLatestDrift();
         });
 
         const __returned__ = {
-            router, isDesktop, selectDirectory, showFolderPicker, handleFolderSelected,
+            router, route, isDesktop, selectDirectory, showFolderPicker, handleFolderSelected,
             message, dialog, formRef, loading, creating, sources, editingSource, editingName,
             newSource, formRules, columns, loadSources, handleCreateSource, resetForm,
             handleToggle, handleEdit, handleInspectSource, handleDelete, showFileManager,
             knowledgeBases, kbOptions, linkModalVisible, linkTargets, linkKbId, linking,
             checkedRowKeys, openLinkModal, openBatchLink, handleLink,
             fileManagerSource, handleOpenFileManager, handleSearchSource,
+            highlightedPath, rowProps, syncFromRoute, goToKnowledgeBases, sourceOrigin,
+            showReconcilePanel, reconcileReport, reconcileIssues, reconcileLoading,
+            openReconcilePanel, runReconcile, cleanupOrphanIssue, rebindIssue,
+            driftKindLabel, driftKindType, driftByPath, loadLatestDrift,
             get FolderPickerModal() { return FolderPickerModal; },
             get SourceFileManagerDrawer() { return SourceFileManagerDrawer; },
             get NButton() { return NButton; },
@@ -634,17 +793,27 @@ component.template = `
           >
             批量挂载 ({{ checkedRowKeys.length }})
           </n-button>
+          <n-button size="small" @click="openReconcilePanel">
+            漂移检查
+            <template v-if="reconcileIssues.length > 0" #icon>
+              <n-tag size="tiny" type="warning" :bordered="false" round>{{ reconcileIssues.length }}</n-tag>
+            </template>
+          </n-button>
           <n-button size="small" :loading="loading" @click="loadSources">
             刷新
           </n-button>
         </n-space>
       </template>
+      <n-alert v-if="highlightedPath" type="success" :show-icon="false" style="margin-bottom: 10px;">
+        已从知识库管理定位到源路径：<n-text code>{{ highlightedPath }}</n-text>
+      </n-alert>
       <n-data-table
         :columns="columns"
         :data="sources"
         :loading="loading"
         :bordered="false"
         :row-key="(row) => row.name"
+        :row-props="rowProps"
         v-model:checked-row-keys="checkedRowKeys"
       />
     </n-card>
@@ -690,6 +859,67 @@ component.template = `
           <n-button type="primary" :loading="linking" @click="handleLink">确定挂载</n-button>
         </n-space>
       </template>
+    </n-modal>
+
+    <!-- 挂载漂移对账（P2）：只读报告 + 逐项确认的清理/重绑 -->
+    <n-modal
+      v-model:show="showReconcilePanel"
+      preset="card"
+      title="挂载漂移对账"
+      style="width: 880px"
+      :bordered="false"
+    >
+      <n-space vertical :size="12">
+        <n-alert type="info" :show-icon="false">
+          以「连接器为事实来源、源为投影」进行对账。首版只报告不自动修改；清理孤儿与路径重绑均需逐项确认。
+        </n-alert>
+        <n-space align="center" :size="8">
+          <n-button size="small" :loading="reconcileLoading" @click="runReconcile">重新对账</n-button>
+          <n-text v-if="reconcileReport" depth="3" style="font-size: 12px;">
+            知识库 {{ reconcileReport.knowledgeBaseCount }} · 连接器 {{ reconcileReport.connectorCount }} · 源 {{ reconcileReport.sourceCount }}
+            ｜ 孤儿 {{ reconcileReport.orphanedCount }} · 未挂载 {{ reconcileReport.unlinkedCount }} · 可重绑 {{ reconcileReport.driftedCount }}
+          </n-text>
+        </n-space>
+        <n-spin :show="reconcileLoading">
+          <n-list v-if="reconcileIssues.length > 0" bordered>
+            <n-list-item v-for="issue in reconcileIssues" :key="issue.path + (issue.connectorId || '')">
+              <n-space vertical :size="6">
+                <n-space align="center" :size="8">
+                  <n-tag size="small" :type="driftKindType(issue.kind)" :bordered="false">
+                    {{ driftKindLabel(issue.kind) }}
+                  </n-tag>
+                  <n-text style="font-size: 12px; word-break: break-all;">{{ issue.path }}</n-text>
+                </n-space>
+                <n-text depth="3" style="font-size: 12px;">{{ issue.message }}</n-text>
+                <n-text v-if="issue.knowledgeBaseName" depth="3" style="font-size: 12px;">
+                  知识库：{{ issue.knowledgeBaseName }}
+                </n-text>
+                <n-space v-if="issue.kind === 'Drifted' && issue.rebindCandidates && issue.rebindCandidates.length > 0" align="center" :size="6">
+                  <n-button
+                    v-for="candidate in issue.rebindCandidates"
+                    :key="candidate"
+                    size="tiny"
+                    type="primary"
+                    secondary
+                    @click="rebindIssue(issue, candidate)"
+                  >
+                    重绑到 {{ candidate }}
+                  </n-button>
+                </n-space>
+                <n-space :size="6">
+                  <n-button v-if="issue.kind === 'Orphaned' && issue.connectorId" size="tiny" type="error" secondary @click="cleanupOrphanIssue(issue)">
+                    一键清理
+                  </n-button>
+                  <n-button v-if="issue.kind === 'Unlinked'" size="tiny" @click="goToKnowledgeBases({ path: issue.path })">
+                    去挂载
+                  </n-button>
+                </n-space>
+              </n-space>
+            </n-list-item>
+          </n-list>
+          <n-empty v-else description="未检测到挂载漂移" />
+        </n-spin>
+      </n-space>
     </n-modal>
   </n-space>
 `;

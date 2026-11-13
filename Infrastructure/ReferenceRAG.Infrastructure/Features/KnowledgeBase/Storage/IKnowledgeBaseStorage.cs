@@ -29,7 +29,27 @@ public interface IKnowledgeBaseStore
 
     Task InitializeAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// 确保词法索引就绪（仅供后台/索引期调用；读路径禁止调用，读路径请用 <see cref="GetLexicalIndexStatusAsync"/>）。
+    /// </summary>
     Task EnsureLexicalIndexAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// O(1) 裁决词法索引状态，不执行任何写操作（建表/填充），可安全用于查询请求线程。
+    /// </summary>
+    Task<LexicalIndexStatusInfo> GetLexicalIndexStatusAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// 后台分批补齐词法倒排索引（可断点续传、分批提交、并行分词），不阻塞查询。
+    /// </summary>
+    /// <param name="force">
+    /// true = 忽略检查点，先清空词法表再从零重建（运维修复用：清理历史重复行 / 强制重分词）。
+    /// </param>
+    Task<LexicalIndexBackfillResult> BackfillLexicalIndexAsync(
+        int batchSize = 500,
+        IProgress<LexicalIndexProgress>? progress = null,
+        CancellationToken ct = default,
+        bool force = false);
 
     Task<IndexManifest> GetManifestAsync(CancellationToken ct = default);
 

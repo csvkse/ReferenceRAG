@@ -864,7 +864,8 @@ public class E2ECoreSmokeTests : IClassFixture<E2ESmokeFixture>
 
         // 4. 级联删除该源及其所有切片并监控清理耗时
         var delSw = Stopwatch.StartNew();
-        var (delStatus, delBody) = await _fixture.DispatchAsync("DELETE", "/api/sources/ExtraSource?deleteData=true");
+        // P0 起新增源会自动挂载知识库连接器，P1 起删除需显式 cascade=true 一并解绑
+        var (delStatus, delBody) = await _fixture.DispatchAsync("DELETE", "/api/sources/ExtraSource?deleteData=true&cascade=true");
         delSw.Stop();
 
         Assert.True(delStatus is 204 or 200, $"Delete source failed with status {delStatus}: {delBody}");

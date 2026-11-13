@@ -55,6 +55,51 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# --- 环境变量大小写重复兼容守卫 ---
+# Windows 环境块中可能同时存在 HTTPS_PROXY 与 https_proxy（大小写不同、语义相同）。
+# .NET 在构造子进程环境字典时按大小写不敏感比较，遇到重复键会抛异常，导致
+# Start-Process（ssh 流式传输）直接崩溃。此处启动时合并重复项，脚本结束时恢复。
+$RemovedDuplicateEnvValues = $null
+try {
+    $rawEnvLines = & cmd.exe /c set 2>$null
+    $seenEnvNames = @{}
+    $duplicateEnvGroups = @{}
+    foreach ($line in $rawEnvLines) {
+        $eqIndex = $line.IndexOf("=")
+        if ($eqIndex -le 0) { continue }
+        $envName = $line.Substring(0, $eqIndex)
+        $envKey = $envName.ToLowerInvariant()
+        if ($seenEnvNames.ContainsKey($envKey)) {
+            if (-not $duplicateEnvGroups.ContainsKey($envKey)) {
+                $duplicateEnvGroups[$envKey] = @($seenEnvNames[$envKey], $envName)
+            }
+            elseif ($duplicateEnvGroups[$envKey] -notcontains $envName) {
+                $duplicateEnvGroups[$envKey] += $envName
+            }
+        }
+        else {
+            $seenEnvNames[$envKey] = $envName
+        }
+    }
+    if ($duplicateEnvGroups.Count -gt 0) {
+        $RemovedDuplicateEnvValues = @{}
+        foreach ($envKey in $duplicateEnvGroups.Keys) {
+            $envNames = $duplicateEnvGroups[$envKey]
+            $primaryName = $envNames[0]
+            $primaryValue = [System.Environment]::GetEnvironmentVariable($primaryName)
+            foreach ($envName in $envNames) {
+                [System.Environment]::SetEnvironmentVariable($envName, $null)
+            }
+            [System.Environment]::SetEnvironmentVariable($primaryName, $primaryValue)
+            $RemovedDuplicateEnvValues[$primaryName] = $primaryValue
+            Write-Host "[env] 已合并大小写重复环境变量: $($envNames -join ', ')" -ForegroundColor DarkYellow
+        }
+    }
+}
+catch {
+    Write-Host "[env] 环境变量去重跳过: $($_.Exception.Message)" -ForegroundColor DarkYellow
+}
+
 # Helper display functions
 function Write-Step([string]$msg) {
     Write-Host "`n====> $msg" -ForegroundColor Cyan
@@ -202,14 +247,32 @@ try {
             "$deployUser@$deployHost",
             $cleanCmd
         )
-        $output = & ssh @sshArgs
-        if ($LASTEXITCODE -ne 0) {
-            throw "SSH command failed with exit code $($LASTEXITCODE): $cmd"
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $output = & ssh @sshArgs
+            $sshExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousEap
+        }
+        if ($sshExitCode -ne 0) {
+            throw "SSH command failed with exit code ${sshExitCode}: $cmd"
         }
         return (Clean-SshOutput $output)
     }
 
     function Push-RuntimeEnvFile() {
+        # 正式容器的环境变量是硬编码在容器配置里的（含 REFERENCERAG_API_KEY）。
+        # 若主机上已有从原容器导出的 env 快照，优先复用，避免重建后丢失配置。
+        if ($Mode -eq "Official") {
+            $snapshotState = (Invoke-RemoteSsh "test -s /tmp/referencerag-prod.env && echo EXISTS || echo MISSING").Trim()
+            if ($snapshotState -eq "EXISTS") {
+                Write-Success "复用正式容器原有环境变量快照 /tmp/referencerag-prod.env"
+                return "--env-file /tmp/referencerag-prod.env"
+            }
+        }
+
         $runtimeEnvLines = @()
         foreach ($k in $envMap.Keys) {
             if ($k -notlike "DEPLOY_*" -and $k -notlike "REMOTE_*" -and $k -ne "DOCKER_IMAGE" -and $k -ne "REFERENCERAG_MASTER_KEY" -and $k -ne "EXTRA_VOLUMES" -and $k -ne "EXTRA_DOCKER_ARGS") {
@@ -688,6 +751,17 @@ docker run -d \
 }
 finally {
     if (Test-Path $tempKeyPath) {
+        # 临时密钥此前用 icacls 收紧了 ACL（仅读取权限），需先恢复继承权限才能删除。
+        & icacls.exe $tempKeyPath /reset | Out-Null
         Remove-Item -Path $tempKeyPath -Force -ErrorAction SilentlyContinue
+        if (Test-Path $tempKeyPath) {
+            [System.IO.File]::Delete($tempKeyPath)
+        }
+    }
+    if ($null -ne $RemovedDuplicateEnvValues) {
+        foreach ($dupName in $RemovedDuplicateEnvValues.Keys) {
+            Set-Item -Path "Env:$dupName" -Value $RemovedDuplicateEnvValues[$dupName] -ErrorAction SilentlyContinue
+        }
+        $RemovedDuplicateEnvValues = $null
     }
 }

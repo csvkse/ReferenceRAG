@@ -235,6 +235,8 @@ public class SearchStats
     public SearchPhaseStats? Phases { get; set; }
     /// <summary>搜索流水线状态机与模型遥测信息</summary>
     public SearchPipelineTelemetry? PipelineTelemetry { get; set; }
+    /// <summary>全链路请求耗时链（Span 树 + 归因摘要）；未开启耗时链时为 null</summary>
+    public ReferenceRAG.Core.Tracing.TimingChain? TimingChain { get; set; }
     public bool IsDegraded { get; set; } = false;
     public string? DegradeReason { get; set; }
     public bool IsEarlyPruned { get; set; } = false;
@@ -298,6 +300,14 @@ public class SearchPhaseStats
     public long GraphMs { get; set; }
     /// <summary>Cross-Encoder 重排（RerankService）</summary>
     public long RerankMs { get; set; }
+    /// <summary>词法倒排索引构建/补齐（冷启动的一次性成本，正常查询应为 0）</summary>
+    public long LexicalIndexMs { get; set; }
+    /// <summary>锁等待 / 排队耗时（包含在上述各阶段内，单独标注便于归因）</summary>
+    public long LockWaitMs { get; set; }
+    /// <summary>磁盘 / 数据库 IO 总耗时</summary>
+    public long IoMs { get; set; }
+    /// <summary>未能归因到任何子阶段的"孤儿时间"</summary>
+    public long UnattributedMs { get; set; }
 }
 
 /// <summary>

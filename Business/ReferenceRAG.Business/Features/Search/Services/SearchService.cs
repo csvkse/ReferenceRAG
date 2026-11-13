@@ -191,9 +191,56 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     }
 
     /// <summary>
-    /// 搜索
+    /// 搜索（根入口）：开启请求级耗时链 → 执行检索主流程 → 物化耗时链并投影阶段明细。
+    /// 采用模板方法模式，把「计时」与「检索」解耦：<see cref="SearchCoreAsync"/> 只关心业务，
+    /// 计时/归因/降级判定全部收敛在包装器内，任何新增检索分支都自动获得完整耗时链。
     /// </summary>
     public async Task<AIQueryResponse> SearchAsync(AIQueryRequest request, CancellationToken cancellationToken = default)
+    {
+        // 已存在上游耗时链（如 Controller 已开启）时复用，不重复创建、不提前 Complete
+        var ownsTimeline = !SearchTimeline.IsActive;
+        var timeline = SearchTimeline.BeginRequest(out var timelineScope);
+
+        var root = TimingScope.Begin("request.search", SpanCategory.Request, $"检索请求 · {request.Mode}");
+        root.SetDetail(request.Query);
+        root.AddAttribute("mode", request.Mode.ToString());
+        root.AddAttribute("topK", request.TopK.ToString());
+
+        AIQueryResponse response;
+        try
+        {
+            response = await SearchCoreAsync(request, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            root.Fail(ex);
+            root.Dispose();
+            if (ownsTimeline) timelineScope.Dispose();
+            throw;
+        }
+
+        // 必须先关闭根 Span 再 Complete，否则根节点不会进入 Span 列表
+        root.Dispose();
+
+        if (ownsTimeline)
+        {
+            var chain = timeline.Complete(response?.Stats?.DurationMs);
+            if (response?.Stats != null)
+            {
+                response.Stats.TimingChain = chain;
+                // 旧契约兜底：耗时链投影优先，AOP 全零结果不覆盖
+                response.Stats.Phases ??= PhaseProjector.Project(chain);
+            }
+            timelineScope.Dispose();
+        }
+
+        return response!;
+    }
+
+    /// <summary>
+    /// 检索主流程（无计时职责，由 <see cref="SearchAsync"/> 统一包装）。
+    /// </summary>
+    private async Task<AIQueryResponse> SearchCoreAsync(AIQueryRequest request, CancellationToken cancellationToken)
     {
         var sw = Stopwatch.StartNew();
         var config = _configManager.Load();
@@ -215,9 +262,26 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var vectorSources = request.Sources?.Count > 0 ? request.Sources :
             config.Sources.Where(s => s.Enabled).Select(s => s.Name).ToList();
         var needsVectorLease = config.Search.EnableLexical || (_hasPersistedLexicalChanges?.Invoke() ?? true);
-        using var vectorLease = _lexicalFactory == null || !needsVectorLease ? null :
-            await _lexicalFactory().AcquireVectorQueryLeaseAsync(vectorSources,
-                config.Sources.Count == 0 && request.Sources?.Count is not > 0, cancellationToken);
+        IDisposable? vectorLease = null;
+        if (_lexicalFactory != null && needsVectorLease)
+        {
+            // 租约获取是典型的「锁等待」：必须单独成 Span，否则会被误判为算法慢
+            var leaseScope = TimingScope.Begin("kb.lease", SpanCategory.LockWait, "向量查询租约等待");
+            var leaseSw = Stopwatch.StartNew();
+            try
+            {
+                vectorLease = await _lexicalFactory().AcquireVectorQueryLeaseAsync(vectorSources,
+                    config.Sources.Count == 0 && request.Sources?.Count is not > 0, cancellationToken);
+            }
+            finally
+            {
+                leaseSw.Stop();
+                leaseScope.SetWait(leaseSw.ElapsedMilliseconds);
+                leaseScope.SetDetail($"租约获取 {leaseSw.ElapsedMilliseconds}ms");
+                leaseScope.Dispose();
+            }
+        }
+        using var vectorLeaseScope = vectorLease;
         var rerankConfig = config.Rerank;
 
         // 判断是否需要执行两阶段搜索
@@ -331,25 +395,36 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
         List<SearchResult> topResults;
         RerankStats? rerankStats = null;
+        bool degraded = false;
+        string? degradeReason = null;
 
         // 等待向量完成（标题搜索在后台继续，hybrid search 依赖向量先就绪）
         float[] queryVector;
+        var embedScope = TimingScope.Begin("embed.infer", SpanCategory.ModelLoad, "查询向量推理");
         try
         {
             var timeoutMs = config.Search?.EmbeddingTimeoutMs > 0 ? config.Search.EmbeddingTimeoutMs : 2500;
             using var timeoutCts = new CancellationTokenSource(timeoutMs);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
             queryVector = await embeddingTask.WaitAsync(linkedCts.Token);
+            embedScope.MarkColdStart(); // 首查/模型冷加载时该 Span 显著放大，用于冷启动归因
+            embedScope.SetOutput(queryVector.Length);
+            embedScope.SetDetail($"dim={queryVector.Length}, timeout={timeoutMs}ms");
             ReferenceRAG.Infrastructure.Features.KnowledgeBase.Storage.QueryVectorCacheProxy.Default.SetVector(request.Query, null, queryVector);
         }
         catch (Exception ex) when (config.Search.EnableAutomaticFallback && (ex is OperationCanceledException or System.Net.Http.HttpRequestException or TimeoutException or SearchCapabilityException or InvalidOperationException))
         {
+            embedScope.Fail(ex);
             _logger.LogWarning(ex, "[SearchService] 向量推理发生异常/超时，自动平滑降级为本地极速词法检索: {Message}", ex.Message);
             var reason = ex is OperationCanceledException ? $"向量推理超时 ({config.Search.EmbeddingTimeoutMs}ms)" : $"向量服务异常 ({ex.Message})";
             var fallbackResp = await SearchLexicalAsync(request, config, sw, cancellationToken);
             fallbackResp.Stats.IsDegraded = true;
             fallbackResp.Stats.DegradeReason = reason;
             return fallbackResp;
+        }
+        finally
+        {
+            embedScope.Dispose();
         }
 
         // ========== 第一阶段：召回 ==========
@@ -372,10 +447,21 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
 
             stateMachine.TransitionTo(SearchPipelinePhase.ParallelRetrieving, 1, recallTopK, "BM25与Dense向量并行双路检索");
 
-            var hybridResults = await _hybridSearchService.SearchAsync(
-                request.Query, recallTopK, request.K1, request.B,
-                request.Filters?.Folders, cancellationToken,
-                precomputedQueryVector: queryVector);
+            List<HybridSearchResult> hybridResults;
+            var fusionScope = TimingScope.Begin("fusion.hybrid", SpanCategory.Cpu, "BM25 + 向量双路融合");
+            try
+            {
+                hybridResults = await _hybridSearchService.SearchAsync(
+                    request.Query, recallTopK, request.K1, request.B,
+                    request.Filters?.Folders, cancellationToken,
+                    precomputedQueryVector: queryVector);
+                fusionScope.SetInput(recallTopK);
+                fusionScope.SetOutput(hybridResults.Count);
+            }
+            finally
+            {
+                fusionScope.Dispose();
+            }
 
             stateMachine.TransitionTo(SearchPipelinePhase.HybridFusing, hybridResults.Count, hybridResults.Count, "双路归一化加权融合与源过滤");
 
@@ -423,7 +509,17 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             }
             stateMachine.TransitionTo(SearchPipelinePhase.ParallelRetrieving, 1, standardLimit, "Dense向量单路相似检索");
             // 标准向量搜索（复用预计算向量）
-            topResults = await ExecuteStandardSearchAsync(request, enabledSources, cancellationToken, queryVector);
+            var vectorScope = TimingScope.Begin("vector.search", SpanCategory.Io, "Dense 向量检索");
+            try
+            {
+                vectorScope.SetInput(standardLimit);
+                topResults = await ExecuteStandardSearchAsync(request, enabledSources, cancellationToken, queryVector);
+                vectorScope.SetOutput(topResults.Count);
+            }
+            finally
+            {
+                vectorScope.Dispose();
+            }
         }
 
         // 合并标题候选：等待标题搜索完成，去重后插入头部
@@ -441,7 +537,24 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         }
 
         // ========== 知识库跨库候选合并 ==========
-        var kbCandidates = await SearchKnowledgeBasesAsync(request, queryVector, useLexical: false, cancellationToken);
+        List<SearchResult> kbCandidates;
+        var kbMergeScope = TimingScope.Begin("kb.merge", SpanCategory.Io, "知识库跨库候选合并");
+        try
+        {
+            var kbOutcome = await SearchKnowledgeBasesAsync(request, queryVector, useLexical: false, cancellationToken);
+            kbCandidates = kbOutcome.Results;
+            kbMergeScope.SetOutput(kbCandidates.Count);
+            if (kbOutcome.AnyDegraded)
+            {
+                degraded = true;
+                degradeReason = kbOutcome.DegradeReason;
+                kbMergeScope.SetDetail(kbOutcome.DegradeReason ?? "知识库召回降级");
+            }
+        }
+        finally
+        {
+            kbMergeScope.Dispose();
+        }
         if (kbCandidates.Count > 0)
         {
             var existingIds = topResults.Select(r => r.ChunkId).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -458,7 +571,17 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         if (searchConfig?.EnableGraphExpansion == true && _graphStore != null && topResults.Count > 0)
         {
             int beforeGraphCount = topResults.Count;
-            topResults = await ExpandWithGraphAsync(topResults, queryVector, searchConfig, enabledSources, request.Filters, cancellationToken);
+            var graphScope = TimingScope.Begin("graph.expand", SpanCategory.Io, "图谱邻居扩展");
+            try
+            {
+                graphScope.SetInput(beforeGraphCount);
+                topResults = await ExpandWithGraphAsync(topResults, queryVector, searchConfig, enabledSources, request.Filters, cancellationToken);
+                graphScope.SetOutput(topResults.Count);
+            }
+            finally
+            {
+                graphScope.Dispose();
+            }
             stateMachine.TransitionTo(SearchPipelinePhase.GraphExpanding, beforeGraphCount, topResults.Count, "图谱实体与关联文档扩展");
         }
 
@@ -486,9 +609,11 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             _logger.LogInformation("开始重排: 候选数={Count}, Query={Query}", topResults.Count, request.Query);
 
             // 批量重排
+            var rerankScope = TimingScope.Begin("rerank.cross-encoder", SpanCategory.ModelLoad, "Cross-Encoder 精排");
             try
             {
                 var documents = topResults.Select(r => r.Content).ToList();
+                rerankScope.SetInput(documents.Count);
                 var rerankResult = await _rerankService.RerankBatchAsync(
                     request.Query,
                     documents,
@@ -562,6 +687,11 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                     AverageScore = topResults.Count > 0 ? topResults.Average(r => r.Score) : 0.0
                 };
             }
+            finally
+            {
+                rerankScope.SetOutput(topResults.Count);
+                rerankScope.Dispose();
+            }
         }
         else if (shouldRerank && _rerankService == null)
         {
@@ -586,10 +716,24 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var pipelineTelemetry = stateMachine.Complete(topResults.Count);
 
         // 构建响应
-        var chunks = BuildChunkResults(topResults);
-        var files = BuildFileSummaries(topResults);
-        var context = BuildContext(chunks, request.MaxTokens, request.ContextFormat, request.MergeAdjacentChunks);
-        var prompt = request.Slim ? string.Empty : BuildPrompt(request.Query, context, request.ContextFormat);
+        var assembleScope = TimingScope.Begin("phase.assemble", SpanCategory.Assembly, "结果装配与上下文构建");
+        List<ChunkResult> chunks;
+        List<FileSummary> files;
+        string context;
+        string prompt;
+        try
+        {
+            assembleScope.SetInput(topResults.Count);
+            chunks = BuildChunkResults(topResults);
+            files = BuildFileSummaries(topResults);
+            context = BuildContext(chunks, request.MaxTokens, request.ContextFormat, request.MergeAdjacentChunks);
+            prompt = request.Slim ? string.Empty : BuildPrompt(request.Query, context, request.ContextFormat);
+            assembleScope.SetOutput(chunks.Count);
+        }
+        finally
+        {
+            assembleScope.Dispose();
+        }
 
         sw.Stop();
 
@@ -613,7 +757,9 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                 TotalMatches = topResults.Count,
                 DurationMs = sw.ElapsedMilliseconds,
                 EstimatedTokens = TokenEstimator.EstimateTokens(context),
-                PipelineTelemetry = pipelineTelemetry
+                PipelineTelemetry = pipelineTelemetry,
+                IsDegraded = degraded,
+                DegradeReason = degradeReason
             },
             HasMore = false,
             Suggestion = null,
@@ -627,6 +773,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
     {
         if (_lexicalFactory == null && _kbSearchService == null)
             throw new SearchCapabilityException("lexical_disabled", "词法检索尚未启用。");
+        var prepareScope = TimingScope.Begin("phase.query-prepared", SpanCategory.Phase, "词法查询准备");
         var enabled = config.Sources.Where(s => s.Enabled).Select(s => s.Name)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (request.Sources?.Count > 0) enabled.IntersectWith(request.Sources);
@@ -637,6 +784,9 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var initialSources = config.Sources.Where(s => s.Enabled && enabled.Contains(s.Name)).ToList();
         var scope = new LexicalSearchScope(enabled, filter?.Folders, filter?.Tags,
             filter?.DateRange?.Start, filter?.DateRange?.End, roots, f => SourceAllowsLexicalFile(initialSources, f));
+        prepareScope.SetDetail($"sources={enabled.Count}, topK={request.TopK}");
+        prepareScope.SetOutput(enabled.Count);
+        prepareScope.Dispose();
         var sm = new SearchPipelineStateMachine(QueryMode.Lexical.ToString());
         sm.TransitionTo(SearchPipelinePhase.QueryPrepared, 0, 1, "词法查询准备");
         sm.TransitionTo(SearchPipelinePhase.ParallelRetrieving, 1, request.TopK, "限定范围的词法检索");
@@ -644,6 +794,8 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         var kbLexicalCandidates = new List<SearchResult>();
         bool rerankApplied = false;
         string? rerankModel = null;
+        bool degraded = false;
+        string? degradeReason = null;
 
         var cognitiveEvaluator = config.Search.CognitiveLexical?.Backend != CognitiveLexicalBackend.Disabled && _cognitiveFactory != null
             ? _cognitiveFactory.GetEvaluator(config.Search.CognitiveLexical!)
@@ -666,7 +818,17 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                 EnabledSources = enabled
             };
 
-            var stratResult = await cognitiveStrategy.ExecuteAsync(execContext, cancellationToken);
+            var cognitiveScope = TimingScope.Begin("phase.lexical.cognitive", SpanCategory.Phase, "认知增强词法检索");
+            SearchStrategyResult stratResult;
+            try
+            {
+                stratResult = await cognitiveStrategy.ExecuteAsync(execContext, cancellationToken);
+                cognitiveScope.SetOutput(stratResult.Results.Count);
+            }
+            finally
+            {
+                cognitiveScope.Dispose();
+            }
             results.AddRange(stratResult.Results);
             kbLexicalCandidates.AddRange(stratResult.Results);
             rerankApplied = stratResult.RerankApplied;
@@ -675,7 +837,24 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         else
         {
             // 知识库统一词法检索：知识库为权威数据底座
-            var kbRetrieved = await SearchKnowledgeBasesAsync(request, null, useLexical: true, cancellationToken);
+            var kbLexicalScope = TimingScope.Begin("phase.lexical.kb", SpanCategory.Io, "知识库词法召回");
+            KbRecallOutcome kbOutcome;
+            try
+            {
+                kbOutcome = await SearchKnowledgeBasesAsync(request, null, useLexical: true, cancellationToken);
+                kbLexicalScope.SetOutput(kbOutcome.Results.Count);
+                if (kbOutcome.AnyDegraded)
+                {
+                    degraded = true;
+                    degradeReason = kbOutcome.DegradeReason;
+                    kbLexicalScope.SetDetail(kbOutcome.DegradeReason ?? "知识库词法召回降级");
+                }
+            }
+            finally
+            {
+                kbLexicalScope.Dispose();
+            }
+            var kbRetrieved = kbOutcome.Results;
             if (kbRetrieved.Count > 0)
             {
                 kbLexicalCandidates.AddRange(kbRetrieved);
@@ -685,6 +864,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             {
                 if (_lexicalFactory != null)
                 {
+                    var matchScope = TimingScope.Begin("kb.lexical.match", SpanCategory.Io, "词法协调器检索");
                     try
                     {
                         var coordResults = await _lexicalFactory().SearchAuthorizedAsync(request.Query, scope, request.TopK, cancellationToken);
@@ -692,19 +872,27 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                         {
                             results.AddRange(coordResults);
                         }
+                        matchScope.SetOutput(results.Count);
                     }
                     catch (Exception ex)
                     {
+                        matchScope.Fail(ex);
                         _logger.LogDebug(ex, "Lexical coordinator search returned 0 or unready");
+                    }
+                    finally
+                    {
+                        matchScope.Dispose();
                     }
                 }
 
                 if (results.Count == 0 && _bm25StoreFactory != null)
                 {
+                    var bm25Scope = TimingScope.Begin("kb.bm25.match", SpanCategory.Io, "原生 BM25 检索");
                     try
                     {
                         var bm25Store = _bm25StoreFactory();
                         int candidateLimit = Math.Max(request.TopK * 4, 30);
+                        bm25Scope.SetInput(candidateLimit);
                         var bm25Results = await bm25Store.SearchAsync(request.Query, candidateLimit);
                         if (bm25Results.Count > 0)
                         {
@@ -743,7 +931,13 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                     }
                     catch (Exception ex)
                     {
+                        bm25Scope.Fail(ex);
                         _logger.LogWarning(ex, "BM25 native store query failed");
+                    }
+                    finally
+                    {
+                        bm25Scope.SetOutput(results.Count);
+                        bm25Scope.Dispose();
                     }
                 }
             }
@@ -772,9 +966,22 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
         }
         sm.TransitionTo(SearchPipelinePhase.AssemblingResults, results.Count, filtered.Count, "原文与引用装配");
         var telemetry = sm.Complete(filtered.Count);
-        var chunks = BuildChunkResults(filtered);
-        var context = BuildContext(chunks, request.MaxTokens, request.ContextFormat, request.MergeAdjacentChunks);
-        var prompt = request.Slim ? string.Empty : BuildPrompt(request.Query, context, request.ContextFormat);
+        var assembleScope = TimingScope.Begin("phase.assemble", SpanCategory.Assembly, "结果装配与上下文构建");
+        List<ChunkResult> chunks;
+        string context;
+        string prompt;
+        try
+        {
+            assembleScope.SetInput(filtered.Count);
+            chunks = BuildChunkResults(filtered);
+            context = BuildContext(chunks, request.MaxTokens, request.ContextFormat, request.MergeAdjacentChunks);
+            prompt = request.Slim ? string.Empty : BuildPrompt(request.Query, context, request.ContextFormat);
+            assembleScope.SetOutput(chunks.Count);
+        }
+        finally
+        {
+            assembleScope.Dispose();
+        }
         if (request.Slim) foreach (var chunk in chunks) chunk.Content = string.Empty;
         sw.Stop();
         return new AIQueryResponse
@@ -783,19 +990,39 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             Chunks = chunks, Files = BuildFileSummaries(filtered), RerankApplied = rerankApplied,
             RerankStats = rerankApplied ? new RerankStats { ModelName = rerankModel ?? "Cognitive", RerankDurationMs = sw.ElapsedMilliseconds } : null,
             Stats = new SearchStats { TotalMatches = filtered.Count, DurationMs = sw.ElapsedMilliseconds,
-                EstimatedTokens = TokenEstimator.EstimateTokens(context), PipelineTelemetry = telemetry }
+                EstimatedTokens = TokenEstimator.EstimateTokens(context), PipelineTelemetry = telemetry,
+                IsDegraded = degraded, DegradeReason = degradeReason }
         };
     }
 
-    private async Task<List<SearchResult>> SearchKnowledgeBasesAsync(
+    /// <summary>
+    /// 知识库跨库召回结果。除候选外同时带回降级状态与原因，
+    /// 使「词法索引补齐中」「向量断路器开启」等真实降级通道能一路透出到前端。
+    /// </summary>
+    private sealed record KbRecallOutcome(
+        List<SearchResult> Results,
+        bool Degraded,
+        string? DegradeReason,
+        bool IndexDegraded = false)
+    {
+        public static readonly KbRecallOutcome Empty = new(new List<SearchResult>(), false, null);
+
+        /// <summary>模型级降级或索引级降级，任一成立都应在 UI 明确告知用户。</summary>
+        public bool AnyDegraded => Degraded || IndexDegraded;
+    }
+
+    private async Task<KbRecallOutcome> SearchKnowledgeBasesAsync(
         AIQueryRequest request,
         float[]? queryVector,
         bool useLexical,
         CancellationToken cancellationToken)
     {
         var kbResults = new List<SearchResult>();
+        bool degraded = false;
+        bool indexDegraded = false;
+        string? degradeReason = null;
         if (_kbSearchService == null || _catalogStore == null)
-            return kbResults;
+            return KbRecallOutcome.Empty;
 
         try
         {
@@ -811,7 +1038,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             }
 
             if (targetKbIds.Count == 0)
-                return kbResults;
+                return KbRecallOutcome.Empty;
 
             var candidateTopK = Math.Max(request.TopK * 3, 30);
             var kbResponse = await _kbSearchService.SearchAsync(new CrossKnowledgeBaseSearchRequest(
@@ -823,6 +1050,10 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                 FailurePolicy: FailurePolicy.AllowPartial,
                 AllowDegrade: true
             ), cancellationToken);
+
+            degraded = kbResponse.Degraded;
+            indexDegraded = kbResponse.IndexDegraded;
+            degradeReason = kbResponse.DegradationReason;
 
             if (kbResponse.Items != null && kbResponse.Items.Count > 0)
             {
@@ -842,7 +1073,7 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
             _logger.LogWarning(ex, "[SearchService] 知识库跨库检索异常: {Message}", ex.Message);
         }
 
-        return kbResults;
+        return new KbRecallOutcome(kbResults, degraded, degradeReason, indexDegraded);
     }
 
     private static bool SourceAllowsLexicalFile(IEnumerable<SourceFolder> sources, FileRecord file)

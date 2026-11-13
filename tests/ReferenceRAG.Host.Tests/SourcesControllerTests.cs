@@ -254,7 +254,7 @@ public class SourcesControllerTests : IDisposable
     }
 
     [Fact]
-    public void Add_DefaultFilePatterns_IncludesBothMdAndTxt()
+    public async Task Add_DefaultFilePatterns_IncludesBothMdAndTxt()
     {
         var sourceDir = Path.Combine(_tempDir, "NovelDir");
         Directory.CreateDirectory(sourceDir);
@@ -262,7 +262,8 @@ public class SourcesControllerTests : IDisposable
         var initialConfig = new ObsidianRagConfig();
         var (controller, _) = CreateController(initialConfig);
 
-        var result = controller.Add(new AddSourceRequest
+        // Add 自 P0 起为 async（同步 EnsureConnectorAsync 挂载），必须 await
+        var result = await controller.Add(new AddSourceRequest
         {
             Name = "NovelSource",
             Path = sourceDir

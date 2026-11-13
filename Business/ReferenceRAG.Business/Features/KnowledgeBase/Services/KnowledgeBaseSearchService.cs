@@ -5,6 +5,7 @@ using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Features.Search.Fusion;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Core.Tracing;
 using ReferenceRAG.Infrastructure.Features.Resilience;
 
 namespace ReferenceRAG.Business.Features.KnowledgeBase.Services;
@@ -44,6 +45,43 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
         CrossKnowledgeBaseSearchRequest request,
         CancellationToken ct = default)
     {
+        // 与 SearchService 同一套模板方法：耗时链在这里开启/收口，
+        // 若上游（如 SearchService）已开启则复用其链，只补充自己的 Span。
+        var ownsTimeline = !SearchTimeline.IsActive;
+        var timeline = SearchTimeline.BeginRequest(out var timelineScope);
+
+        var root = TimingScope.Begin("request.kb-search", SpanCategory.Request, "跨库检索请求");
+        root.SetDetail(request.Query);
+
+        CrossKnowledgeBaseSearchResponse response;
+        try
+        {
+            response = await SearchCoreAsync(request, ct);
+        }
+        catch (Exception ex)
+        {
+            root.Fail(ex);
+            root.Dispose();
+            if (ownsTimeline) timelineScope.Dispose();
+            throw;
+        }
+
+        root.Dispose();
+
+        if (ownsTimeline)
+        {
+            var chain = timeline.Complete((long)response.Elapsed.TotalMilliseconds);
+            response = response with { TimingChain = chain };
+            timelineScope.Dispose();
+        }
+
+        return response;
+    }
+
+    private async Task<CrossKnowledgeBaseSearchResponse> SearchCoreAsync(
+        CrossKnowledgeBaseSearchRequest request,
+        CancellationToken ct)
+    {
         var sw = Stopwatch.StartNew();
         var embeddingEnabled = _configManager?.Load().Indexing.EmbeddingEnabled ?? true;
         if (request.AuthorizedSourceNames != null && _configManager == null)
@@ -53,6 +91,7 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
         var useLexical = !embeddingEnabled || request.UseLexicalTokenizer;
         var queryVector = request.QueryVector;
         bool isDegraded = false;
+        string? degradationReason = null;
 
         // 在线向量计算与断路器高可用降级保护
         if (!useLexical && (queryVector == null || queryVector.Length == 0) && _embeddingService != null)
@@ -62,12 +101,15 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
                 _logger?.LogWarning("[KnowledgeBaseSearchService] 向量模型断路器开启，0ms 短路降级为词法检索。");
                 useLexical = true;
                 isDegraded = true;
+                degradationReason = "向量模型断路器开启，已短路降级为词法检索";
             }
             else
             {
                 try
                 {
+                    using var embedSpan = TimingScope.Begin("embed.infer", SpanCategory.ModelLoad, "查询向量推理");
                     queryVector = await _embeddingService.EncodeAsync(request.Query, EmbeddingMode.Query, ct);
+                    embedSpan.SetOutput(queryVector.Length);
                     _circuitBreaker.RecordSuccess();
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -76,6 +118,7 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
                     _logger?.LogWarning(ex, "[KnowledgeBaseSearchService] 向量服务异常，熔断器记录失败并降级为词法检索。");
                     useLexical = true;
                     isDegraded = true;
+                    degradationReason = $"向量服务异常，已降级为词法检索 ({ex.Message})";
                 }
             }
         }
@@ -97,7 +140,8 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
                 PartialSuccess: false,
                 ScoreKind: _fusionStrategy.ScoreKind,
                 Elapsed: sw.Elapsed,
-                Degraded: isDegraded
+                Degraded: isDegraded,
+                DegradationReason: degradationReason
             );
         }
 
@@ -118,48 +162,92 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
         var effectiveCt = cts?.Token ?? ct;
 
         // 并发检索各库（受控并行度）
+        var fanoutScope = TimingScope.Begin("kb.fanout", SpanCategory.Phase, $"跨库扇出检索（{targetKbIds.Count} 库）");
+        fanoutScope.SetInput(targetKbIds.Count);
         var tasks = targetKbIds.Select(async kbId =>
         {
+            var recallSpan = TimingScope.Begin("kb.recall", SpanCategory.Io, "知识库召回");
+            recallSpan.AddAttribute("kbId", kbId);
             try
             {
                 var kbDef = await _catalog.GetKnowledgeBaseAsync(kbId, effectiveCt);
                 if (kbDef == null || !kbDef.Enabled)
                 {
+                    recallSpan.SetDetail("知识库不存在或未启用");
                     return (KbId: kbId, Success: false, Snapshot: (RecallSnapshot?)null);
                 }
 
                 var isKbLexical = kbDef.IsPureLexical || string.Equals(kbDef.EmbeddingSpecId, "spec_lexical_only", StringComparison.OrdinalIgnoreCase);
                 var kbQueryVector = isKbLexical ? null : queryVector;
                 var kbUseLexical = useLexical || isKbLexical;
+                recallSpan.AddAttribute("lexical", kbUseLexical.ToString());
 
-                await using var lease = await _storageManager.AcquireLeaseAsync(kbId, StorageAccess.ReadOnly, effectiveCt);
-                KnowledgeBaseFileAuthorization? authorization = null;
-                if (request.AuthorizedSourceNames != null)
-                    authorization = new KnowledgeBaseFileAuthorization(_configManager!, request.AuthorizedSourceNames,
-                        await _catalog.GetConnectorsByKnowledgeBaseAsync(kbId, effectiveCt));
-                var snapshot = await lease.Store.RecallAsync(new RecallRequest(request.Query, request.TopK,
-                    QueryVector: kbQueryVector, UseLexicalTokenizer: kbUseLexical, AllowDegrade: request.AllowDegrade, Folders: request.Folders)
-                    { AuthorizeDocument = authorization == null ? null : authorization.Allows }, effectiveCt);
+                RecallSnapshot snapshot;
+                // 租约 Span 只覆盖"获取"本身：若把整个 recall 包进来，租约耗时会吞掉真正的检索耗时，
+                // 归因就会把「冷启动打开数据库」和「FTS 匹配慢」混为一谈。
+                IStorageLease? lease = null;
+                var leaseSpan = TimingScope.Begin("kb.lease", SpanCategory.LockWait, "知识库存储租约获取");
+                var leaseSw = Stopwatch.StartNew();
+                try
+                {
+                    lease = await _storageManager.AcquireLeaseAsync(kbId, StorageAccess.ReadOnly, effectiveCt);
+                }
+                finally
+                {
+                    leaseSw.Stop();
+                    leaseSpan.SetWait(leaseSw.ElapsedMilliseconds);
+                    leaseSpan.SetDetail($"租约获取 {leaseSw.ElapsedMilliseconds}ms");
+                    leaseSpan.Dispose();
+                }
+
+                await using (lease)
+                {
+                    KnowledgeBaseFileAuthorization? authorization = null;
+                    if (request.AuthorizedSourceNames != null)
+                        authorization = new KnowledgeBaseFileAuthorization(_configManager!, request.AuthorizedSourceNames,
+                            await _catalog.GetConnectorsByKnowledgeBaseAsync(kbId, effectiveCt));
+                    snapshot = await lease.Store.RecallAsync(new RecallRequest(request.Query, request.TopK,
+                        QueryVector: kbQueryVector, UseLexicalTokenizer: kbUseLexical, AllowDegrade: request.AllowDegrade, Folders: request.Folders)
+                        { AuthorizeDocument = authorization == null ? null : authorization.Allows }, effectiveCt);
+                }
+
                 if (request.AuthorizedSourceNames != null)
                 {
                     var latestAuthorization = new KnowledgeBaseFileAuthorization(_configManager!, request.AuthorizedSourceNames,
                         await _catalog.GetConnectorsByKnowledgeBaseAsync(kbId, effectiveCt));
                     snapshot = snapshot with { Items = snapshot.Items.Where(i => i.ConnectorId != null && latestAuthorization.Allows(i.ConnectorId, i.SourceKey, i.Locator)).ToArray() };
                 }
+                recallSpan.SetOutput(snapshot.Items.Count);
+                if (snapshot.Degraded) recallSpan.SetDetail(snapshot.DegradationReason ?? "降级");
                 return (KbId: kbId, Success: true, Snapshot: (RecallSnapshot?)snapshot);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                recallSpan.SetDetail("请求取消");
                 throw;
             }
             catch (Exception ex)
             {
+                recallSpan.Fail(ex);
                 _logger?.LogWarning(ex, "[KnowledgeBaseSearchService] 知识库 {KbId} 召回异常", kbId);
                 return (KbId: kbId, Success: false, Snapshot: (RecallSnapshot?)null);
             }
+            finally
+            {
+                recallSpan.Dispose();
+            }
         });
 
-        var results = await Task.WhenAll(tasks);
+        (string KbId, bool Success, RecallSnapshot? Snapshot)[] results;
+        try
+        {
+            results = await Task.WhenAll(tasks);
+            fanoutScope.SetOutput(results.Count(r => r.Success));
+        }
+        finally
+        {
+            fanoutScope.Dispose();
+        }
 
         foreach (var r in results)
         {
@@ -182,10 +270,32 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
                 : "部分知识库无法完成检索。");
         }
 
+        // 汇总各库降级原因：
+        //  - Degraded 保持"模型/服务级降级"语义（断路器、向量推理失败），不因索引状态变化而翻转，
+        //    避免把「词法索引正在后台补齐」误判成模型故障；
+        //  - 索引级降级（词法索引未就绪 / 向量覆盖不全）单独走 IndexDegraded，原因仍透出给前端。
+        bool indexDegraded = snapshots.Any(s => s.Degraded);
+        if (indexDegraded && string.IsNullOrWhiteSpace(degradationReason))
+        {
+            degradationReason = snapshots
+                .FirstOrDefault(s => s.Degraded && !string.IsNullOrWhiteSpace(s.DegradationReason))?.DegradationReason;
+        }
+
         var strategy = _fusionStrategy is RrfSearchFusionStrategy
             ? new RrfSearchFusionStrategy(k: 60, query: request.Query)
             : _fusionStrategy;
-        var fusedItems = strategy.Fuse(snapshots, request.TopK);
+        IReadOnlyList<RecallItem> fusedItems;
+        var fusionSpan = TimingScope.Begin("fusion.rrf", SpanCategory.Cpu, "RRF 多路融合");
+        try
+        {
+            fusionSpan.SetInput(snapshots.Sum(s => s.Items.Count));
+            fusedItems = strategy.Fuse(snapshots, request.TopK);
+            fusionSpan.SetOutput(fusedItems.Count);
+        }
+        finally
+        {
+            fusionSpan.Dispose();
+        }
         sw.Stop();
 
         return new CrossKnowledgeBaseSearchResponse(
@@ -198,7 +308,9 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
             ScoreKind: _fusionStrategy.ScoreKind,
             Elapsed: sw.Elapsed,
             EarlyPruned: snapshots.Any(s => s.EarlyPruned),
-            Degraded: isDegraded
+            Degraded: isDegraded,
+            DegradationReason: degradationReason,
+            IndexDegraded: indexDegraded
         );
     }
 

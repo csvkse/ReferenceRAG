@@ -571,3 +571,71 @@ DELETE /api/Sources/{name}/link?knowledgeBaseId=kb_xxx&reclaim=retain
 截图：`support/acceptance/25-source-batch-link.png`、`26-source-batch-link-final.png`、`27-source-batch-link-final.png`。
 
 **遗留**：批量提交仅验证到弹窗层，未实际提交（避免污染语料）；「删除连接器不删 `config.Sources`」仍按设计保留，源行会显示「未挂载」提示。
+
+### 15.6 P2 实施与验收记录（2026-11-13）
+
+执行清单见 `docs/source-knowledge-base-bidirectional-linking-remaining-plan.md`。本轮在**本地 Linux 开发环境**（`deploy-linux.ps1 -Mode Dev`，127.0.0.1:5124）完成实施 + 浏览器端逐项验收，正式环境（127.0.0.1:5123）本轮未动。
+
+#### 15.6.1 已实施改动
+
+| 层 | 文件 | 变更 |
+| :--- | :--- | :--- |
+| 后端 | `SourceLinkEvent.cs`（新） | 领域事件 `SourceLinkEventKind`（SourceLinked / ConnectorDetached / SourceRemoved）+ `ISourceLinkEventPublisher` 同步发布器（环形缓冲，供 `/link-events` 观测） |
+| 后端 | `SourceLinkProjectionCache.cs`（新） | 源列表投影缓存 + 版本号失效，避免每次 `GET /api/sources` 全量重算连接器映射 |
+| 后端 | `ReconciliationModels.cs`（新） | `SourceLinkDriftKind`（Orphaned / Unlinked / Drifted）与报告 DTO |
+| 后端 | `ReconciliationJob.cs`（新） | `BackgroundService`，首次延迟 5 min、间隔 30 min，只报告不自动修复；`RunOnceAsync` 可被手动触发复用 |
+| 后端 | `KnowledgeBaseService.cs` / `IKnowledgeBaseService.cs` | 新增 `ReconcileAsync`（事实侧连接器目录探测 + 投影侧残留检测 + 名称相似度候选重绑）、`RebindConnectorAsync`、批量挂载返回 `created/skipped/failed` |
+| 后端 | `ConfigManager.cs` | 新增 `RenameSourcePath(old,new)`：重绑后迁移源投影路径，避免旧路径残留 Unlinked |
+| 后端 | `KnowledgeBasesController.cs` | 新增 `POST /reconcile`、`GET /reconcile/latest`、`GET /link-events`、`POST /reconcile/rebind`、`POST /reconcile/cleanup`；重绑同步迁移源投影并重挂文件监控；清理孤儿后同步移除失效源投影 |
+| 后端 | `SourcesController.cs` | 源列表注入 `Origin`（SourceManagement / KnowledgeBaseOnly）与连接器行；Link/Unlink/Delete 触发领域事件 |
+| 前端 | `Sources.js` | 「已挂载 N」可点击跳转 `?kb=&connector=&path=`；连接器行「来源：仅知识库」；新增「漂移检查」面板（统计 + 逐项重绑/清理）；**行级漂移标签**；名称列改为「名称单行 + 标签换行」两段式布局，路径列 `minWidth:200` 修复列塌陷 |
+| 前端 | `KnowledgeBases.js` | 读取 `?connector=` 定位并高亮连接器；连接器行「来源：源文件管理 / 仅知识库」+「在源管理中查看」反向入口（`n-thing` 插槽修正为 `#header-extra`，此前按钮不渲染） |
+| 前端 | `api/index.js` | `reconcile` / `getLatestReconcile` / `rebindConnector` / `cleanupOrphan` |
+| 部署 | `deploy-linux.ps1` | ①`finally` 先 `icacls /reset` 再删临时密钥（BCL 删除兜底）；②启动时合并大小写重复环境变量（`HTTPS_PROXY` vs `https_proxy` 导致 `Start-Process` 崩溃）；③`Invoke-RemoteSsh` 不再把 docker build 的 stderr 当终止错误；④Official 模式复用 `/tmp/referencerag-prod.env` 快照 |
+| 测试 | `SourceLinkReconciliationTests.cs`（新） | 13 个用例：`EnsureConnectorAsync` 幂等/跨 KB/并发唯一冲突回查、对账三类分类、重绑冲突、报告缓存 |
+
+#### 15.6.2 关键实现决策
+
+- **事件同步处理**：不引入 MediatR，事务提交后同步失效投影缓存 / 刷新计数 / 取消索引，避免异步队列带来的一致性与可观测性成本；
+- **对账只报告**：`ReportOnly=true`，清理与重绑一律要求逐项人工确认（UI 二次弹窗），不做自动修复；
+- **重绑保留索引**：只改 `target_path`/`path_key`，`connectorId` 与已索引语料不变；源投影路径同步迁移，保证「一个连接器一行」；
+- **孤儿判定**：目录缺失且同级无相似候选（Dice 二元组 ≥ 0.6）= Orphaned；有候选 = Drifted（可重绑）；配置里有源但无连接器 = Unlinked。
+
+#### 15.6.3 验收实测
+
+| 门禁（remaining-plan §1.4 / §2.3） | 结果 | 实测证据 |
+| :--- | :--- | :--- |
+| 触发 SourceLinked → 源列表 `linkedKnowledgeBases` 立即反映 | ✅ | 新增源挂载后 `GET /api/sources` 立刻返回 `LinkedKnowledgeBases=[{ConnectorId}]`，无需刷新容器 |
+| 目录被删 → `ReconcileAsync` 产出 Orphaned | ✅ | `orphaned=1 /path=/app/sources/orphan-zzz`，UI 面板显示「孤儿」+「一键清理」 |
+| 目录改名 → Drifted + 候选重绑，确认后恢复 Linked | ✅ | `drifted=1`，候选 `/app/sources/accept-drift3-renamed`；确认重绑后 `drifted=0`、连接器 `targetPath` 更新 |
+| 解绑后残留源 → Unlinked | ✅ | 删除连接器但保留源时报告 `unlinked=1`，UI 提供「去挂载」 |
+| 重绑不产生残留投影 | ✅（本轮修复） | 接口返回 `sourceMigrated=true, sourceName=accept_drift2`，重绑后 `issues=0`、源列表仅一行新路径（修复前会同时出现 Unlinked + 「仅知识库」两行） |
+| 一键清理孤儿不留僵尸行 | ✅（本轮修复） | 清理返回 `sourceRemoved=true`，报告 `孤儿 0 / 未挂载 0`，源数 7→6 |
+| 「已挂载 N」可点击跳转 | ✅ | 点击后 URL 变为 `/knowledge-bases?kb=…&connector=46ace576266f470a&path=/app/sources/smoke`，目标行 `background: rgba(24,160,88,0.14)` 且 `inViewport=true` |
+| 连接器行「来源」标识 + 反向入口 | ✅ | 行内显示「来源：源文件管理 / 仅知识库」与「立即同步 / 编辑 / 在源管理中查看」；点击反向入口跳 `/sources?path=…` 并提示「已从知识库管理定位到源路径」 |
+| 行级漂移标记 | ✅（本轮新增） | `accept_drift4` 行显示「路径漂移」标签，工具栏「漂移检查」带数量徽标 |
+| 关联事件可观测 | ✅ | `GET /link-events` 返回 `SourceRemoved(orphan-cleanup:remove-projection)`、`ConnectorDetached(purgeData=False)` |
+| `EnsureConnectorAsync` 幂等 | ✅ | 重复 `POST /api/sources/orphan_zzz/link` 返回 `already-linked` 且 `connectorId` 恒定 |
+| 部署脚本临时密钥清理 | ✅ | `-Mode Dev` / `-FrontendOnly` 全流程无「访问被拒绝」，`%TEMP%` 无残留 `tmp*.tmp` |
+| 部署脚本大小写重复环境变量 | ✅ | 启动日志 `[env] 已合并大小写重复环境变量: HTTPS_PROXY, https_proxy`，`Start-Process` 不再崩溃 |
+| 编译与门禁 | ✅ | `dotnet build` 0 错误；`check.mjs` 52 模块 / 13 模板；`npm test` 77/77；`dotnet test` 全量 **454/454**（5m45s） |
+
+#### 15.6.4 本轮验收发现并修复的缺陷
+
+| 缺陷 | 现象 | 根因 | 修复 |
+| :--- | :--- | :--- | :--- |
+| 连接器行动作按钮整体不渲染 | 知识库页连接器行看不到「立即同步 / 编辑 / 在源管理中查看 / 删除」 | `n-thing` 无 `#extra` 插槽（正确为 `#header-extra`），插槽内容被静默丢弃 | `KnowledgeBases.js` 改用 `#header-extra` |
+| 重绑后留下 Unlinked 残影 | 重绑「成功」后立刻出现「未挂载」项 + 多出一条「仅知识库」行 | 只改 connector，未迁移 `config.Sources` 投影 | 新增 `ConfigManager.RenameSourcePath`，重绑接口调用并重挂文件监控 |
+| 一键清理后留僵尸源 | 清理孤儿连接器后源行变「未挂载」且指向不存在的目录 | 清理只删连接器，未处理失效投影 | 清理接口在「无连接器引用且目录不存在」时移除源投影（`sourceRemoved`） |
+| 源列表名称逐字换行 / 路径列消失 | 名称列被标签挤成竖排，路径列宽度塌陷为 0 | 名称单元格单行 flex + `nowrap` 缺失；路径列无最小宽度 | 名称改「名称行 + 标签行」两段式，路径列 `minWidth: 200` |
+
+#### 15.6.5 截图（`docs/acceptance/`）
+
+`01-sources-list.png`（源管理页）、`02-sources-drift-badge.png`（六列布局 + 漂移徽标）、`03-sources-drift-row.png`（行级「路径漂移」）、`04-drift-panel.png`（对账面板 + 重绑）、`05-kb-connector-focused.png`（连接器高亮 + 来源 + 反向入口）、`06-drift-panel-orphan.png`（孤儿 + 一键清理）、`07-sources-clean.png`（清理后基线）。
+
+#### 15.6.6 遗留
+
+- 正式环境（`-Mode Official`）本轮未执行；脚本四处修复已在 Dev 模式验证，正式流程需单独走一次（含 `docker tag` 备份与回滚）；
+- 知识库页连接器行在窄栏（右侧抽屉 380px）下路径与「删除」按钮换行，属可读性瑕疵，未在本次调整；
+- `ReconciliationJob` 尚未提供「自动重绑」开关（`AutoRebind`），首版按计划只报告；
+- 验收数据（`accept-drift*` / `orphan-zzz` 源与目录）已全部清理，开发环境恢复基线：1 KB / 3 连接器 / 2 源 / 0 漂移。

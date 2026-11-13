@@ -1,9 +1,9 @@
 import { defineComponent as _defineComponent } from 'vue';
-import { ref, onMounted, onUnmounted, onActivated, h, computed } from 'vue';
-import { useRouter } from 'vue-router';
+import { ref, onMounted, onUnmounted, onActivated, h, computed, nextTick } from 'vue';
+import { useRouter, useRoute } from 'vue-router';
 import { NTag, NButton, useMessage, useDialog } from 'naive-ui';
 import { BookOutline, CubeOutline, FolderOutline, GridOutline, LayersOutline, PlayOutline, TrashOutline, RefreshOutline, AddOutline, SearchOutline, SettingsOutline, CreateOutline, DocumentTextOutline, CheckmarkCircleOutline } from '@vicons/ionicons5';
-import { knowledgeBasesApi, modelsApi } from '/app/api/index.js';
+import { knowledgeBasesApi, sourcesApi, modelsApi } from '/app/api/index.js';
 import { isDesktop, selectFolder } from '/core/platform.js';
 import FolderPickerModal from '/app/components/FolderPickerModal.js';
 
@@ -14,8 +14,20 @@ const component = /*@__PURE__*/ _defineComponent({
     setup(__props, { expose: __expose }) {
         __expose();
         const router = useRouter();
+        const route = useRoute();
         const message = useMessage();
         const dialog = useDialog();
+
+        // 双向关联定位：从源管理跳转过来时自动打开对应 KB 的连接器抽屉并高亮目标连接器
+        const focusConnectorId = ref('');
+        const sourceOrigins = ref({});
+        const normalizePath = (p) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+        const isFocusedConnector = (conn) => Boolean(focusConnectorId.value) && conn?.id === focusConnectorId.value;
+        const getConnectorOrigin = (conn) =>
+            sourceOrigins.value[normalizePath(conn?.targetPath)] ? '源文件管理' : '仅知识库';
+        const viewInSourceManagement = (conn) => {
+            router.push({ path: '/sources', query: { path: conn.targetPath } });
+        };
 
         // 状态列表
         const loading = ref(false);
@@ -201,12 +213,40 @@ const component = /*@__PURE__*/ _defineComponent({
                     }
                 }));
                 connectorsMap.value = map;
+
+                // 连接器「来源」标识：config.Sources 中存在同路径的行 => 源文件管理，否则仅知识库
+                try {
+                    const srcRes = await sourcesApi.getAll();
+                    const origins = {};
+                    for (const s of (srcRes.data || [])) {
+                        if (!s.isConnector && s.type !== 'KnowledgeBaseConnector') {
+                            origins[normalizePath(s.path)] = true;
+                        }
+                    }
+                    sourceOrigins.value = origins;
+                } catch (e) {
+                    sourceOrigins.value = {};
+                }
             } catch (err) {
                 console.error('加载知识库失败:', err);
                 message.error('加载知识库失败: ' + (err.response?.data?.message || err.message));
             } finally {
                 loading.value = false;
             }
+        };
+
+        // 读取来源页带过来的定位参数：?kb=<id>&connector=<connectorId>&path=<path>
+        const syncFromRoute = async () => {
+            focusConnectorId.value = route.query?.connector ? String(route.query.connector) : '';
+            const kbId = route.query?.kb ? String(route.query.kb) : '';
+            if (!kbId) return;
+            const kb = knowledgeBases.value.find(k => k.id === kbId);
+            if (!kb) return;
+            await openConnectorsDrawer(kb);
+            if (!focusConnectorId.value) return;
+            await nextTick();
+            document.getElementById(`connector-${focusConnectorId.value}`)
+                ?.scrollIntoView({ block: 'center' });
         };
 
         // 加载预设模型规范
@@ -905,13 +945,16 @@ const component = /*@__PURE__*/ _defineComponent({
 
         onMounted(async () => {
             await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs(), loadChunkingSpecs()]);
+            await syncFromRoute();
         });
 
         onActivated(async () => {
             await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs(), loadChunkingSpecs()]);
+            await syncFromRoute();
         });
 
         const __returned__ = {
+            route, focusConnectorId, isFocusedConnector, getConnectorOrigin, viewInSourceManagement, syncFromRoute,
             chunkingSpecs, chunkingSpecOptions, driftMap, showSwitchModelModal, switchModelTargetKb, selectedTargetSpecId,
             reindexing, openSwitchModelModal, handleTriggerReindex, handleUnbindModel, allEmbeddingModelOptions, loadChunkingSpecs,
             showRechunkModal, rechunkTargetKb, selectedRechunkSpecId, rechunking, openRechunkModal, handleTriggerRechunk,
@@ -1265,10 +1308,18 @@ component.template = `
             </template>
             <n-spin :show="loadingConnectors">
               <n-list v-if="currentConnectors.length > 0">
-                <n-list-item v-for="conn in currentConnectors" :key="conn.id">
+                <n-list-item
+                  v-for="conn in currentConnectors"
+                  :key="conn.id"
+                  :id="'connector-' + conn.id"
+                  :style="isFocusedConnector(conn) ? 'background: rgba(24,160,88,0.14); border-radius: 4px;' : ''"
+                >
                   <n-thing :title="conn.targetPath">
                     <template #description>
                       <n-space align="center" :size="8" style="margin-top: 4px;">
+                        <n-tag size="small" type="default" :bordered="false" round>
+                          来源：{{ getConnectorOrigin(conn) }}
+                        </n-tag>
                         <n-tooltip trigger="hover">
                           <template #trigger>
                             <n-tag size="small" :type="getReachabilityTagType(conn)" :bordered="false" round style="cursor: pointer;">
@@ -1286,7 +1337,7 @@ component.template = `
                         <n-text depth="3" style="font-size: 12px;">规则: {{ conn.filePattern || '全部文件' }}</n-text>
                       </n-space>
                     </template>
-                    <template #extra>
+                    <template #header-extra>
                       <n-space>
                         <n-button size="small" type="primary" secondary @click="handleTriggerSync(currentKb.id, conn.id)">
                           <template #icon><n-icon :component="PlayOutline" /></template>
@@ -1295,6 +1346,9 @@ component.template = `
                         <n-button size="small" secondary @click="openEditConnectorModal(conn)">
                           <template #icon><n-icon :component="CreateOutline" /></template>
                           编辑
+                        </n-button>
+                        <n-button size="small" tertiary type="info" @click="viewInSourceManagement(conn)">
+                          在源管理中查看
                         </n-button>
                         <n-button size="small" quaternary type="error" @click="handleDeleteConnector(conn)">
                           <template #icon><n-icon :component="TrashOutline" /></template>

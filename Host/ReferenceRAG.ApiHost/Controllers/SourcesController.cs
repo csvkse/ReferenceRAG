@@ -23,6 +23,8 @@ public class SourcesController : ControllerBase
     private readonly ILogger<SourcesController> _logger;
     private readonly ICatalogStore? _catalogStore;
     private readonly IKnowledgeBaseService? _kbService;
+    private readonly ISourceLinkEventPublisher? _eventPublisher;
+    private readonly ISourceLinkProjectionCache? _projectionCache;
 
     public SourcesController(
         ConfigManager configManager,
@@ -31,7 +33,9 @@ public class SourcesController : ControllerBase
         IFileMonitorService fileMonitor,
         ILogger<SourcesController> logger,
         ICatalogStore? catalogStore = null,
-        IKnowledgeBaseService? kbService = null)
+        IKnowledgeBaseService? kbService = null,
+        ISourceLinkEventPublisher? eventPublisher = null,
+        ISourceLinkProjectionCache? projectionCache = null)
     {
         _configManager = configManager;
         _vectorStore = vectorStore;
@@ -40,6 +44,41 @@ public class SourcesController : ControllerBase
         _logger = logger;
         _catalogStore = catalogStore;
         _kbService = kbService;
+        _eventPublisher = eventPublisher;
+        _projectionCache = projectionCache;
+    }
+
+    /// <summary>写事务完成后同步发布领域事件；可选依赖为空时（单测/降级）静默跳过。</summary>
+    private void Publish(SourceLinkEventKind kind, string path, string? sourceName = null,
+        string? kbId = null, string? kbName = null, string? connectorId = null, string? detail = null)
+    {
+        _eventPublisher?.Publish(new SourceLinkEvent
+        {
+            Kind = kind,
+            Path = path,
+            SourceName = sourceName,
+            KnowledgeBaseId = kbId,
+            KnowledgeBaseName = kbName,
+            ConnectorId = connectorId,
+            Detail = detail
+        });
+    }
+
+    /// <summary>一次性枚举所有 KB 的连接器并投影为读模型；供 GetAll 与投影缓存共用。</summary>
+    private async Task<IReadOnlyList<ConnectorProjection>> LoadConnectorProjections(CancellationToken ct)
+    {
+        if (_catalogStore == null) return Array.Empty<ConnectorProjection>();
+        var result = new List<ConnectorProjection>();
+        foreach (var kb in await _catalogStore.ListKnowledgeBasesAsync(ct))
+        {
+            foreach (var conn in await _catalogStore.GetConnectorsByKnowledgeBaseAsync(kb.Id, ct))
+            {
+                result.Add(new ConnectorProjection(
+                    kb.Id, kb.Name, conn.Id, conn.TargetPath,
+                    conn.Enabled, conn.FilePattern, conn.UpdatedAt));
+            }
+        }
+        return result;
     }
 
     /// <summary>
@@ -70,52 +109,55 @@ public class SourcesController : ControllerBase
 
         var linkMap = new Dictionary<string, List<LinkedKnowledgeBaseInfo>>(StringComparer.OrdinalIgnoreCase);
 
+        // 连接器投影带缓存（由领域事件显式失效 + 30s TTL 兜底），避免每次 GetAll 都做 N+1 catalog 遍历。
+        // 未注入缓存时（单测 / 降级）走原直读路径，行为与 P0 一致。
+        IReadOnlyList<ConnectorProjection> projections = Array.Empty<ConnectorProjection>();
         if (_catalogStore != null)
         {
             try
             {
-                var kbs = await _catalogStore.ListKnowledgeBasesAsync();
-                foreach (var kb in kbs)
-                {
-                    var connectors = await _catalogStore.GetConnectorsByKnowledgeBaseAsync(kb.Id);
-                    foreach (var conn in connectors)
-                    {
-                        var key = NormalizePathKey(conn.TargetPath);
-                        if (!linkMap.TryGetValue(key, out var links))
-                        {
-                            links = new List<LinkedKnowledgeBaseInfo>();
-                            linkMap[key] = links;
-                        }
-                        links.Add(new LinkedKnowledgeBaseInfo
-                        {
-                            Id = kb.Id,
-                            Name = kb.Name,
-                            ConnectorId = conn.Id
-                        });
-
-                        if (!sources.Any(s => s.Path.Equals(conn.TargetPath, StringComparison.OrdinalIgnoreCase)))
-                        {
-                            sources.Add(new SourceDetail
-                            {
-                                Name = BuildConnectorDisplayName(kb, conn),
-                                Path = conn.TargetPath,
-                                Type = "KnowledgeBaseConnector",
-                                Enabled = conn.Enabled,
-                                FilePatterns = SplitPatterns(conn.FilePattern),
-                                FileCount = 0,
-                                ChunkCount = 0,
-                                LastIndexed = conn.UpdatedAt,
-                                IsConnector = true,
-                                KnowledgeBaseId = kb.Id,
-                                ConnectorId = conn.Id
-                            });
-                        }
-                    }
-                }
+                projections = _projectionCache != null
+                    ? await _projectionCache.GetOrLoadAsync(LoadConnectorProjections)
+                    : await LoadConnectorProjections(default);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "[SourcesController] 从 CatalogStore 获取连接器列表异常");
+            }
+        }
+
+        foreach (var conn in projections)
+        {
+            var key = NormalizePathKey(conn.TargetPath);
+            if (!linkMap.TryGetValue(key, out var links))
+            {
+                links = new List<LinkedKnowledgeBaseInfo>();
+                linkMap[key] = links;
+            }
+            links.Add(new LinkedKnowledgeBaseInfo
+            {
+                Id = conn.KnowledgeBaseId,
+                Name = conn.KnowledgeBaseName,
+                ConnectorId = conn.ConnectorId
+            });
+
+            if (!sources.Any(s => s.Path.Equals(conn.TargetPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                sources.Add(new SourceDetail
+                {
+                    Name = BuildConnectorDisplayName(conn),
+                    Path = conn.TargetPath,
+                    Type = "KnowledgeBaseConnector",
+                    Enabled = conn.Enabled,
+                    FilePatterns = SplitPatterns(conn.FilePattern),
+                    FileCount = 0,
+                    ChunkCount = 0,
+                    LastIndexed = conn.UpdatedAt,
+                    IsConnector = true,
+                    KnowledgeBaseId = conn.KnowledgeBaseId,
+                    ConnectorId = conn.ConnectorId,
+                    Origin = "KnowledgeBaseOnly"
+                });
             }
         }
 
@@ -274,6 +316,14 @@ public class SourcesController : ControllerBase
         return string.IsNullOrWhiteSpace(kb.Name)
             ? (string.IsNullOrWhiteSpace(folder) ? conn.Id : folder)
             : $"{kb.Name} - {folder}";
+    }
+
+    private static string BuildConnectorDisplayName(ConnectorProjection projection)
+    {
+        var folder = Path.GetFileName(projection.TargetPath);
+        return string.IsNullOrWhiteSpace(projection.KnowledgeBaseName)
+            ? (string.IsNullOrWhiteSpace(folder) ? projection.ConnectorId : folder)
+            : $"{projection.KnowledgeBaseName} - {folder}";
     }
 
     private static List<string> SplitPatterns(string? raw)
@@ -477,11 +527,16 @@ public class SourcesController : ControllerBase
 
                     if (targetKb != null)
                     {
-                        await _kbService.EnsureConnectorAsync(
+                        var (connector, created) = await _kbService.EnsureConnectorAsync(
                             targetKb.Id,
                             "LocalFolder",
                             source.Path,
                             string.Join(";", source.FilePatterns ?? new List<string>()));
+                        if (created)
+                        {
+                            Publish(SourceLinkEventKind.SourceLinked, source.Path, source.Name,
+                                targetKb.Id, targetKb.Name, connector.Id, "add-source");
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -531,6 +586,8 @@ public class SourcesController : ControllerBase
 
         if (created)
         {
+            Publish(SourceLinkEventKind.SourceLinked, source.Path, source.Name,
+                targetKb.Id, targetKb.Name, connector.Id, "link");
             return StatusCode(StatusCodes.Status201Created, new
             {
                 status = "created",
@@ -576,6 +633,8 @@ public class SourcesController : ControllerBase
             return NotFound(new { error = $"该路径未挂载到知识库 {knowledgeBaseId}" });
 
         await _kbService.DeleteConnectorAsync(knowledgeBaseId, target.Id, cascade: reclaim == "delete");
+        Publish(SourceLinkEventKind.ConnectorDetached, source.Path, source.Name,
+            knowledgeBaseId, null, target.Id, $"unlink:{reclaim}");
         return NoContent();
     }
 
@@ -679,6 +738,9 @@ public class SourcesController : ControllerBase
                         link.KnowledgeBaseId,
                         link.ConnectorId,
                         cascade: deleteData);
+                    Publish(SourceLinkEventKind.ConnectorDetached, source.Path, source.Name,
+                        link.KnowledgeBaseId, link.KnowledgeBaseName, link.ConnectorId,
+                        $"cascade-delete:deleteData={deleteData}");
                 }
             }
 
@@ -687,6 +749,8 @@ public class SourcesController : ControllerBase
 
             _configManager.RemoveSource(source.Name);
             _fileMonitor.RemoveSource(source.Name);
+            Publish(SourceLinkEventKind.SourceRemoved, source.Path, source.Name,
+                detail: $"removed:deleteData={deleteData},detached={linked.Count}");
 
             _logger.LogInformation("已删除源: {Name} (deleteData={DeleteData})", source.Name, deleteData);
             return NoContent();
@@ -1040,6 +1104,9 @@ public class SourceDetail
 
     /// <summary>该路径已挂载的知识库（允许跨知识库挂载，同一知识库内唯一）</summary>
     public List<LinkedKnowledgeBaseInfo> LinkedKnowledgeBases { get; set; } = new();
+
+    /// <summary>行来源：SourceManagement（config.Sources）/ KnowledgeBaseOnly（仅由知识库连接器投影）。</summary>
+    public string Origin { get; set; } = "SourceManagement";
 }
 
 public class LinkedKnowledgeBaseInfo

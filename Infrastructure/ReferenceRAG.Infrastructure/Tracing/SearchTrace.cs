@@ -213,7 +213,8 @@ public sealed class SearchTraceAttribute : MoAttribute
                     GraphMs     = t.GraphMs,
                     RerankMs    = t.RerankMs,
                 };
-                response.Stats.Phases = phases;
+                // 若业务层已通过耗时链（TimingChain）投影出更细的阶段明细，则不要用全零的 AOP 结果覆盖。
+                response.Stats.Phases ??= phases;
                 SearchPhaseCollector.Record(phases);
                 SearchTraceContext.Current.Value = null;
             }
