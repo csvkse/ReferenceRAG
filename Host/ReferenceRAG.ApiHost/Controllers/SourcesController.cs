@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Business.Features.KnowledgeBase.Services;
+using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
@@ -67,6 +68,8 @@ public class SourcesController : ControllerBase
             };
         }).ToList();
 
+        var linkMap = new Dictionary<string, List<LinkedKnowledgeBaseInfo>>(StringComparer.OrdinalIgnoreCase);
+
         if (_catalogStore != null)
         {
             try
@@ -77,18 +80,34 @@ public class SourcesController : ControllerBase
                     var connectors = await _catalogStore.GetConnectorsByKnowledgeBaseAsync(kb.Id);
                     foreach (var conn in connectors)
                     {
+                        var key = NormalizePathKey(conn.TargetPath);
+                        if (!linkMap.TryGetValue(key, out var links))
+                        {
+                            links = new List<LinkedKnowledgeBaseInfo>();
+                            linkMap[key] = links;
+                        }
+                        links.Add(new LinkedKnowledgeBaseInfo
+                        {
+                            Id = kb.Id,
+                            Name = kb.Name,
+                            ConnectorId = conn.Id
+                        });
+
                         if (!sources.Any(s => s.Path.Equals(conn.TargetPath, StringComparison.OrdinalIgnoreCase)))
                         {
                             sources.Add(new SourceDetail
                             {
-                                Name = $"{kb.Name} - {Path.GetFileName(conn.TargetPath)}",
+                                Name = BuildConnectorDisplayName(kb, conn),
                                 Path = conn.TargetPath,
                                 Type = "KnowledgeBaseConnector",
                                 Enabled = conn.Enabled,
-                                FilePatterns = string.IsNullOrEmpty(conn.FilePattern) ? new List<string> { "*.md", "*.txt" } : conn.FilePattern.Split(';').ToList(),
+                                FilePatterns = SplitPatterns(conn.FilePattern),
                                 FileCount = 0,
                                 ChunkCount = 0,
-                                LastIndexed = conn.UpdatedAt
+                                LastIndexed = conn.UpdatedAt,
+                                IsConnector = true,
+                                KnowledgeBaseId = kb.Id,
+                                ConnectorId = conn.Id
                             });
                         }
                     }
@@ -98,6 +117,14 @@ public class SourcesController : ControllerBase
             {
                 _logger.LogWarning(ex, "[SourcesController] 从 CatalogStore 获取连接器列表异常");
             }
+        }
+
+        // 回填每个源/连接器行已挂载的知识库（跨 KB 允许同一路径多次挂载）
+        foreach (var source in sources)
+        {
+            source.LinkedKnowledgeBases = linkMap.TryGetValue(NormalizePathKey(source.Path), out var links)
+                ? links
+                : new List<LinkedKnowledgeBaseInfo>();
         }
 
         return Ok(sources);
@@ -186,13 +213,143 @@ public class SourcesController : ControllerBase
     }
 
     /// <summary>
+    /// 解析源标识：优先 config.Sources，其次知识库连接器（投影为只读 SourceFolder）。
+    /// 连接器不在 config.Sources 中，若不显式解析，/Sources/{name} 系列接口会误报「源不存在」。
+    /// </summary>
+    private async Task<(SourceFolder? Source, ConnectorDefinition? Connector, KnowledgeBaseDefinition? KnowledgeBase)>
+        ResolveSourceAsync(string name, CancellationToken ct = default)
+    {
+        var config = _configManager.Load();
+        var source = FindSource(config, name);
+        if (source != null) return (source, null, null);
+
+        if (_catalogStore == null) return (null, null, null);
+
+        var decoded = Uri.UnescapeDataString(name);
+        try
+        {
+            foreach (var kb in await _catalogStore.ListKnowledgeBasesAsync(ct))
+            {
+                foreach (var conn in await _catalogStore.GetConnectorsByKnowledgeBaseAsync(kb.Id, ct))
+                {
+                    var displayName = BuildConnectorDisplayName(kb, conn);
+                    if (displayName.Equals(name, StringComparison.OrdinalIgnoreCase)
+                        || displayName.Equals(decoded, StringComparison.OrdinalIgnoreCase)
+                        || conn.TargetPath.Equals(name, StringComparison.OrdinalIgnoreCase)
+                        || conn.TargetPath.Equals(decoded, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var projected = new SourceFolder
+                        {
+                            Name = displayName,
+                            Path = conn.TargetPath,
+                            Enabled = conn.Enabled,
+                            FilePatterns = SplitPatterns(conn.FilePattern),
+                            Type = SourceType.Markdown
+                        };
+                        return (projected, conn, kb);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[SourcesController] 解析知识库连接器失败: {Name}", name);
+        }
+
+        return (null, null, null);
+    }
+
+    /// <summary>
+    /// 路径去重键：统一斜杠、去尾斜杠、小写。与 CatalogStore 的 path_key 保持一致。
+    /// </summary>
+    private static string NormalizePathKey(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+        return path.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
+    }
+
+    private static string BuildConnectorDisplayName(KnowledgeBaseDefinition kb, ConnectorDefinition conn)
+    {
+        var folder = Path.GetFileName(conn.TargetPath);
+        return string.IsNullOrWhiteSpace(kb.Name)
+            ? (string.IsNullOrWhiteSpace(folder) ? conn.Id : folder)
+            : $"{kb.Name} - {folder}";
+    }
+
+    private static List<string> SplitPatterns(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return new List<string> { "*.md", "*.txt" };
+        var patterns = raw.Split(new[] { ';', ',', '|' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Trim())
+            .Where(p => !string.IsNullOrEmpty(p))
+            .ToList();
+        return patterns.Count > 0 ? patterns : new List<string> { "*.md", "*.txt" };
+    }
+
+    /// <summary>
+    /// 连接器是知识库的从属实体，写操作必须回到知识库管理，返回 409 并附带定位信息。
+    /// </summary>
+    private ConflictObjectResult ConnectorWriteConflict(
+        string name, KnowledgeBaseDefinition? kb, ConnectorDefinition connector)
+    {
+        return Conflict(new
+        {
+            error = $"'{name}' 是知识库连接器，请在知识库管理中执行该操作",
+            code = "ConnectorManagedByKnowledgeBase",
+            knowledgeBaseId = kb?.Id,
+            knowledgeBaseName = kb?.Name,
+            connectorId = connector.Id,
+            connectorPath = connector.TargetPath
+        });
+    }
+
+    /// <summary>
+    /// 连接器文件列表直接按目录枚举，不依赖向量库的 source 字段命名。
+    /// </summary>
+    private List<FileDetail> EnumerateConnectorFiles(SourceFolder source, int page, int pageSize)
+    {
+        var normalizedPath = PathUtility.NormalizePath(source.Path);
+        if (!Directory.Exists(normalizedPath)) return new List<FileDetail>();
+
+        var patterns = (source.FilePatterns?.Count > 0)
+            ? source.FilePatterns
+            : new List<string> { "*.md", "*.txt" };
+        var options = new EnumerationOptions
+        {
+            IgnoreInaccessible = true,
+            RecurseSubdirectories = true,
+            MatchCasing = MatchCasing.CaseInsensitive
+        };
+
+        var safePage = Math.Max(1, page);
+        var safePageSize = Math.Clamp(pageSize, 1, 500);
+
+        return Directory.EnumerateFiles(normalizedPath, "*", options)
+            .Where(f => patterns.Any(p => MatchesPattern(f, p)))
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
+            .Select(f =>
+            {
+                var info = new FileInfo(f);
+                return new FileDetail
+                {
+                    Path = f.Replace('\\', '/'),
+                    ChunkCount = 0,
+                    LastModified = info.LastWriteTime,
+                    Hash = ""
+                };
+            })
+            .ToList();
+    }
+
+    /// <summary>
     /// 获取单个源详情
     /// </summary>
     [HttpGet("{name}")]
     public async Task<ActionResult<SourceDetail>> Get(string name)
     {
-        var config = _configManager.Load();
-        var source = FindSource(config, name);
+        var (source, connector, knowledgeBase) = await ResolveSourceAsync(name);
 
         if (source == null)
             return NotFound(new { error = $"源 '{name}' 不存在" });
@@ -205,12 +362,15 @@ public class SourcesController : ControllerBase
         {
             Name = source.Name,
             Path = source.Path,
-            Type = source.Type.ToString(),
+            Type = connector != null ? "KnowledgeBaseConnector" : source.Type.ToString(),
             Enabled = source.Enabled,
             FilePatterns = source.FilePatterns,
             FileCount = stat?.FileCount ?? 0,
             ChunkCount = stat?.ChunkCount ?? 0,
-            LastIndexed = stat?.LastIndexed
+            LastIndexed = stat?.LastIndexed,
+            IsConnector = connector != null,
+            KnowledgeBaseId = knowledgeBase?.Id,
+            ConnectorId = connector?.Id
         });
     }
 
@@ -220,11 +380,15 @@ public class SourcesController : ControllerBase
     [HttpGet("{name}/files")]
     public async Task<ActionResult<List<FileDetail>>> GetFiles(string name, [FromQuery] int page = 1, [FromQuery] int pageSize = 50)
     {
-        var config = _configManager.Load();
-        var source = FindSource(config, name);
+        var (source, connector, _) = await ResolveSourceAsync(name);
 
         if (source == null)
             return NotFound(new { error = $"源 '{name}' 不存在" });
+
+        // 连接器不在 config.Sources 中，索引侧的 source 字段命名也不保证一致，
+        // 因此只读文件列表直接按目录枚举，避免「源存在但文件为空」的误导。
+        if (connector != null)
+            return Ok(EnumerateConnectorFiles(source, page, pageSize));
 
         var files = await _vectorStore.GetFilesBySourceAsync(source.Name, page, pageSize);
         var sourceFiles = files.Select(f => new FileDetail
@@ -242,7 +406,7 @@ public class SourcesController : ControllerBase
     /// 添加源
     /// </summary>
     [HttpPost]
-    public ActionResult<SourceFolder> Add([FromBody] AddSourceRequest request)
+    public async Task<ActionResult<SourceFolder>> Add([FromBody] AddSourceRequest request)
     {
         if (string.IsNullOrEmpty(request.Path))
         {
@@ -300,35 +464,31 @@ public class SourcesController : ControllerBase
             if (source.Enabled)
                 _fileMonitor.AddSource(source.Path, source.Name, source.FilePatterns);
 
-            if (_catalogStore != null)
+            // 显式挂载：优先使用请求指定的知识库，缺省挂到第一个启用知识库。
+            // 改为同步 + 幂等（EnsureConnectorAsync），避免 fire-and-forget 丢失与重复连接器。
+            if (_kbService != null)
             {
-                _ = Task.Run(async () =>
+                try
                 {
-                    try
+                    var kbs = await _kbService.ListKnowledgeBasesAsync();
+                    var targetKb = !string.IsNullOrWhiteSpace(request.KnowledgeBaseId)
+                        ? kbs.FirstOrDefault(k => k.Id == request.KnowledgeBaseId)
+                        : (kbs.FirstOrDefault(k => k.Enabled) ?? kbs.FirstOrDefault());
+
+                    if (targetKb != null)
                     {
-                        var kbs = await _catalogStore.ListKnowledgeBasesAsync();
-                        var targetKb = kbs.FirstOrDefault(k => k.Enabled) ?? kbs.FirstOrDefault();
-                        if (targetKb != null)
-                        {
-                            var connector = new ReferenceRAG.Core.Features.KnowledgeBase.Domain.ConnectorDefinition(
-                                Id: Guid.NewGuid().ToString("N")[..16],
-                                KnowledgeBaseId: targetKb.Id,
-                                Kind: "LocalFolder",
-                                TargetPath: source.Path,
-                                FilePattern: string.Join(";", source.FilePatterns),
-                                ConfigRevision: 1,
-                                Enabled: source.Enabled,
-                                CreatedAt: DateTime.UtcNow,
-                                UpdatedAt: DateTime.UtcNow
-                            );
-                            await _catalogStore.SaveConnectorAsync(connector);
-                        }
+                        await _kbService.EnsureConnectorAsync(
+                            targetKb.Id,
+                            "LocalFolder",
+                            source.Path,
+                            string.Join(";", source.FilePatterns ?? new List<string>()));
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "[SourcesController] 同步创建知识库连接器异常");
-                    }
-                });
+                }
+                catch (Exception ex)
+                {
+                    // 源已创建成功；连接器挂载失败不回滚，但必须留痕
+                    _logger.LogWarning(ex, "[SourcesController] 同步创建知识库连接器异常");
+                }
             }
 
             _logger.LogInformation("已添加源: {Name} ({Path})", source.Name, source.Path);
@@ -342,16 +502,96 @@ public class SourcesController : ControllerBase
     }
 
     /// <summary>
+    /// 将已有源挂载到知识库（幂等：同一知识库内同路径已存在时返回 already-linked）。
+    /// 允许同一物理路径挂到多个知识库。
+    /// </summary>
+    [HttpPost("{name}/link")]
+    public async Task<ActionResult> Link(string name, [FromBody] LinkSourceRequest? request = null)
+    {
+        var (source, _, _) = await ResolveSourceAsync(name);
+        if (source == null)
+            return NotFound(new { error = $"源 '{name}' 不存在" });
+
+        if (_kbService == null)
+            return StatusCode(503, new { error = "知识库服务不可用" });
+
+        var kbs = await _kbService.ListKnowledgeBasesAsync();
+        var targetKb = !string.IsNullOrWhiteSpace(request?.KnowledgeBaseId)
+            ? kbs.FirstOrDefault(k => k.Id == request!.KnowledgeBaseId)
+            : (kbs.FirstOrDefault(k => k.Enabled) ?? kbs.FirstOrDefault());
+
+        if (targetKb == null)
+            return BadRequest(new { error = "尚未创建可用的知识库" });
+
+        var (connector, created) = await _kbService.EnsureConnectorAsync(
+            targetKb.Id,
+            "LocalFolder",
+            source.Path,
+            string.Join(";", source.FilePatterns ?? new List<string>()));
+
+        if (created)
+        {
+            return StatusCode(StatusCodes.Status201Created, new
+            {
+                status = "created",
+                connectorId = connector.Id,
+                knowledgeBaseId = targetKb.Id,
+                knowledgeBaseName = targetKb.Name
+            });
+        }
+
+        return Ok(new
+        {
+            status = "already-linked",
+            connectorId = connector.Id,
+            knowledgeBaseId = targetKb.Id,
+            knowledgeBaseName = targetKb.Name
+        });
+    }
+
+    /// <summary>
+    /// 解除源与知识库的挂载关系（不删除 config.Sources 与物理文件）。
+    /// reclaim=retain 保留索引数据，reclaim=delete 级联清理该连接器数据。
+    /// </summary>
+    [HttpDelete("{name}/link")]
+    public async Task<ActionResult> Unlink(
+        string name,
+        [FromQuery] string knowledgeBaseId,
+        [FromQuery] string reclaim = "retain")
+    {
+        if (string.IsNullOrWhiteSpace(knowledgeBaseId))
+            return BadRequest(new { error = "knowledgeBaseId 不能为空" });
+
+        var (source, _, _) = await ResolveSourceAsync(name);
+        if (source == null)
+            return NotFound(new { error = $"源 '{name}' 不存在" });
+
+        if (_kbService == null || _catalogStore == null)
+            return StatusCode(503, new { error = "知识库服务不可用" });
+
+        var key = NormalizePathKey(source.Path);
+        var connectors = await _catalogStore.GetConnectorsByKnowledgeBaseAsync(knowledgeBaseId);
+        var target = connectors.FirstOrDefault(c => NormalizePathKey(c.TargetPath) == key);
+        if (target == null)
+            return NotFound(new { error = $"该路径未挂载到知识库 {knowledgeBaseId}" });
+
+        await _kbService.DeleteConnectorAsync(knowledgeBaseId, target.Id, cascade: reclaim == "delete");
+        return NoContent();
+    }
+
+    /// <summary>
     /// 更新源
     /// </summary>
     [HttpPut("{name}")]
-    public ActionResult Update(string name, [FromBody] UpdateSourceRequest request)
+    public async Task<ActionResult> Update(string name, [FromBody] UpdateSourceRequest request)
     {
         var config = _configManager.Load();
         var source = FindSource(config, name);
 
         if (source == null)
         {
+            var (_, connector, kb) = await ResolveSourceAsync(name);
+            if (connector != null) return ConnectorWriteConflict(name, kb, connector);
             return NotFound(new { error = $"源 '{name}' 不存在" });
         }
 
@@ -382,18 +622,66 @@ public class SourcesController : ControllerBase
     /// 删除源
     /// </summary>
     [HttpDelete("{name}")]
-    public async Task<ActionResult> Delete(string name, [FromQuery] bool deleteData = false)
+    public async Task<ActionResult> Delete(string name, [FromQuery] bool deleteData = false, [FromQuery] bool cascade = false)
     {
         var config = _configManager.Load();
         var source = FindSource(config, name);
 
         if (source == null)
         {
+            var (_, connector, kb) = await ResolveSourceAsync(name);
+            if (connector != null) return ConnectorWriteConflict(name, kb, connector);
             return NotFound(new { error = $"源 '{name}' 不存在" });
         }
 
         try
         {
+            // 找出该路径已挂载的知识库连接器；默认要求显式解绑，cascade=true 时一并解绑
+            var linked = new List<(string KnowledgeBaseId, string KnowledgeBaseName, string ConnectorId)>();
+            if (_catalogStore != null)
+            {
+                var key = NormalizePathKey(source.Path);
+                foreach (var kb in await _catalogStore.ListKnowledgeBasesAsync())
+                {
+                    foreach (var conn in await _catalogStore.GetConnectorsByKnowledgeBaseAsync(kb.Id))
+                    {
+                        if (NormalizePathKey(conn.TargetPath) == key)
+                        {
+                            linked.Add((kb.Id, kb.Name, conn.Id));
+                        }
+                    }
+                }
+            }
+
+            if (linked.Count > 0 && !cascade)
+            {
+                return Conflict(new
+                {
+                    error = $"源 '{name}' 已挂载到 {linked.Count} 个知识库，请先解绑，或使用 cascade=true 一并解绑",
+                    code = "SourceLinkedToKnowledgeBases",
+                    linkedKnowledgeBases = linked.Select(x => new
+                    {
+                        id = x.KnowledgeBaseId,
+                        name = x.KnowledgeBaseName,
+                        connectorId = x.ConnectorId
+                    })
+                });
+            }
+
+            if (linked.Count > 0)
+            {
+                if (_kbService == null)
+                    return StatusCode(503, new { error = "知识库服务不可用，无法解绑关联连接器" });
+
+                foreach (var link in linked)
+                {
+                    await _kbService.DeleteConnectorAsync(
+                        link.KnowledgeBaseId,
+                        link.ConnectorId,
+                        cascade: deleteData);
+                }
+            }
+
             if (deleteData)
                 await _pipeline.DeleteSourceAsync(source.Name);
 
@@ -414,12 +702,14 @@ public class SourcesController : ControllerBase
     /// 启用/禁用源
     /// </summary>
     [HttpPatch("{name}/toggle")]
-    public ActionResult Toggle(string name, [FromBody] ToggleRequest request)
+    public async Task<ActionResult> Toggle(string name, [FromBody] ToggleRequest request)
     {
         var config = _configManager.Load();
         var source = FindSource(config, name);
         if (source == null)
         {
+            var (_, connector, kb) = await ResolveSourceAsync(name);
+            if (connector != null) return ConnectorWriteConflict(name, kb, connector);
             return NotFound(new { error = $"源 '{name}' 不存在" });
         }
 
@@ -438,10 +728,9 @@ public class SourcesController : ControllerBase
     /// 扫描源文件（不索引）
     /// </summary>
     [HttpGet("{name}/scan")]
-    public ActionResult<ScanResult> Scan(string name)
+    public async Task<ActionResult<ScanResult>> Scan(string name)
     {
-        var config = _configManager.Load();
-        var source = FindSource(config, name);
+        var (source, _, _) = await ResolveSourceAsync(name);
 
         if (source == null)
         {
@@ -743,6 +1032,26 @@ public class SourceDetail
     public int FileCount { get; set; }
     public int ChunkCount { get; set; }
     public DateTime? LastIndexed { get; set; }
+
+    /// <summary>是否为知识库连接器（只读视图，写操作需回到知识库管理）</summary>
+    public bool IsConnector { get; set; }
+    public string? KnowledgeBaseId { get; set; }
+    public string? ConnectorId { get; set; }
+
+    /// <summary>该路径已挂载的知识库（允许跨知识库挂载，同一知识库内唯一）</summary>
+    public List<LinkedKnowledgeBaseInfo> LinkedKnowledgeBases { get; set; } = new();
+}
+
+public class LinkedKnowledgeBaseInfo
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string ConnectorId { get; set; } = "";
+}
+
+public class LinkSourceRequest
+{
+    public string? KnowledgeBaseId { get; set; }
 }
 
 /// <summary>
@@ -765,6 +1074,9 @@ public class AddSourceRequest
     public string? Name { get; set; }
     public SourceType? Type { get; set; }
     public string[]? FilePatterns { get; set; }
+
+    /// <summary>可选：同时挂载到的知识库；缺省时挂到第一个启用知识库</summary>
+    public string? KnowledgeBaseId { get; set; }
 }
 
 /// <summary>

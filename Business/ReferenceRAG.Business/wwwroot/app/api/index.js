@@ -63,11 +63,15 @@ export const sourcesApi = {
     getByName: (name) => api.get(`/Sources/${encodeURIComponent(name)}`),
     create: (data) => api.post('/Sources', data),
     update: (name, data) => api.put(`/Sources/${encodeURIComponent(name)}`, data),
-    delete: (name, deleteData = false) => api.delete(`/Sources/${encodeURIComponent(name)}?deleteData=${deleteData}`),
+    delete: (name, deleteData = false, cascade = false) =>
+        api.delete(`/Sources/${encodeURIComponent(name)}`, { params: { deleteData, cascade } }),
     toggle: (name, enabled) => api.patch(`/Sources/${encodeURIComponent(name)}/toggle`, { enabled }),
     startIndex: (name, force = false) => api.post(`/Sources/${encodeURIComponent(name)}/index`, { force }),
     scan: (name) => api.get(`/Sources/${encodeURIComponent(name)}/scan`),
-    getFiles: (name) => api.get(`/Sources/${encodeURIComponent(name)}/files`)
+    getFiles: (name) => api.get(`/Sources/${encodeURIComponent(name)}/files`),
+    link: (name, knowledgeBaseId) => api.post(`/Sources/${encodeURIComponent(name)}/link`, { knowledgeBaseId }),
+    unlink: (name, knowledgeBaseId, reclaim = 'retain') =>
+        api.delete(`/Sources/${encodeURIComponent(name)}/link`, { params: { knowledgeBaseId, reclaim } })
 };
 // Index Jobs — /api/index/jobs
 export const indexJobsApi = {
@@ -263,8 +267,8 @@ export const fileSystemApi = {
     upload: (path, formData, sourcePath = '') => api.post(`/FileSystem/upload?path=${encodeURIComponent(path)}&sourcePath=${encodeURIComponent(sourcePath || '')}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
     }),
-    readRange: (path, startLine = 1, endLine = 200, sourcePath = '') =>
-        api.get('/FileSystem/read-range', { params: { path, startLine, endLine, sourcePath } }),
+    readRange: (path, startLine = 1, endLine = 200, sourcePath = '', config = {}) =>
+        api.get('/FileSystem/read-range', { params: { path, startLine, endLine, sourcePath }, ...config }),
     getMetadata: (path, sourcePath = '') =>
         api.get('/FileSystem/metadata', { params: { path, sourcePath } }),
     search: (query) => api.post('/FileSystem/search', query),

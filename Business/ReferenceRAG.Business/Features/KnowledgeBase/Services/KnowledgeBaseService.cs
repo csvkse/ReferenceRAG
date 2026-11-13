@@ -247,6 +247,56 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         return connector;
     }
 
+    public async Task<(ConnectorDefinition Connector, bool Created)> EnsureConnectorAsync(
+        string knowledgeBaseId,
+        string kind,
+        string targetPath,
+        string? filePattern = null,
+        CancellationToken ct = default)
+    {
+        var kb = await _catalog.GetKnowledgeBaseAsync(knowledgeBaseId, ct);
+        if (kb == null)
+        {
+            throw new InvalidOperationException($"知识库未找到: {knowledgeBaseId}");
+        }
+
+        var key = NormalizePathKey(targetPath);
+        var existing = (await _catalog.GetConnectorsByKnowledgeBaseAsync(knowledgeBaseId, ct))
+            .FirstOrDefault(c => NormalizePathKey(c.TargetPath) == key);
+
+        if (existing != null)
+        {
+            // 已有连接器：仅在原规则为空时补齐，不覆盖用户配置
+            if (!string.IsNullOrWhiteSpace(filePattern) && string.IsNullOrWhiteSpace(existing.FilePattern))
+            {
+                var patched = existing with { FilePattern = filePattern, UpdatedAt = DateTime.UtcNow };
+                await _catalog.SaveConnectorAsync(patched, ct);
+                return (patched, false);
+            }
+            return (existing, false);
+        }
+
+        try
+        {
+            var created = await AddConnectorAsync(knowledgeBaseId, kind, targetPath, filePattern, ct);
+            return (created, true);
+        }
+        catch (Exception)
+        {
+            // 并发插入触发唯一索引冲突时回查已存在记录，保持幂等
+            var raced = (await _catalog.GetConnectorsByKnowledgeBaseAsync(knowledgeBaseId, ct))
+                .FirstOrDefault(c => NormalizePathKey(c.TargetPath) == key);
+            if (raced != null) return (raced, false);
+            throw;
+        }
+    }
+
+    private static string NormalizePathKey(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+        return path.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
+    }
+
     public async Task<IReadOnlyList<ConnectorDetailDto>> GetConnectorsAsync(string knowledgeBaseId, CancellationToken ct = default)
     {
         var rawConnectors = await _catalog.GetConnectorsByKnowledgeBaseAsync(knowledgeBaseId, ct);

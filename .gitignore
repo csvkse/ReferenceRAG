@@ -115,3 +115,7 @@ env/data/
 # Secret documentation & uncommitted governance records
 docs_secret/
 /docs_secret/
+
+# Local build artifacts & AI workspace data
+*.tar.gz
+.workbuddy-ai/

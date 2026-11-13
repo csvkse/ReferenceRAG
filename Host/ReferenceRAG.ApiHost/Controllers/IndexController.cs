@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -291,6 +292,50 @@ public class IndexController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// 连接器由知识库管理维护，重建索引/切片必须走 /knowledge-bases/{id}/reindex。
+    /// 这里显式识别并返回 409，避免误报「源不存在」。
+    /// </summary>
+    private async Task<ConflictObjectResult?> TryBuildConnectorConflictAsync(string sourceName)
+    {
+        var catalog = _serviceProvider?.GetService(typeof(ICatalogStore)) as ICatalogStore;
+        if (catalog == null) return null;
+
+        var decoded = Uri.UnescapeDataString(sourceName);
+        try
+        {
+            foreach (var kb in await catalog.ListKnowledgeBasesAsync())
+            {
+                foreach (var conn in await catalog.GetConnectorsByKnowledgeBaseAsync(kb.Id))
+                {
+                    var folder = Path.GetFileName(conn.TargetPath);
+                    var display = string.IsNullOrWhiteSpace(kb.Name)
+                        ? (string.IsNullOrWhiteSpace(folder) ? conn.Id : folder)
+                        : $"{kb.Name} - {folder}";
+                    if (display.Equals(sourceName, StringComparison.OrdinalIgnoreCase)
+                        || display.Equals(decoded, StringComparison.OrdinalIgnoreCase)
+                        || conn.TargetPath.Equals(sourceName, StringComparison.OrdinalIgnoreCase)
+                        || conn.TargetPath.Equals(decoded, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Conflict(new
+                        {
+                            error = $"'{sourceName}' 是知识库连接器，请在知识库管理中重建",
+                            code = "ConnectorManagedByKnowledgeBase",
+                            knowledgeBaseId = kb.Id,
+                            knowledgeBaseName = kb.Name,
+                            connectorId = conn.Id
+                        });
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[IndexController] 解析知识库连接器失败: {Name}", sourceName);
+        }
+        return null;
+    }
+
     /// <summary>重建指定源的所有索引（向量 + BM25 + 图谱）。</summary>
     [HttpPost("rebuild/{sourceName}")]
     public async Task<ActionResult<RebuildJob>> RebuildSource(string sourceName)
@@ -301,7 +346,11 @@ public class IndexController : ControllerBase
             s.Name.Equals(sourceName, StringComparison.OrdinalIgnoreCase) ||
             s.Name.Equals(decoded, StringComparison.OrdinalIgnoreCase));
         if (source == null)
+        {
+            var conflict = await TryBuildConnectorConflictAsync(sourceName);
+            if (conflict != null) return conflict;
             return NotFound(new { error = $"源 '{sourceName}' 不存在" });
+        }
 
         var currentModel = _embeddingService.ModelName;
         _logger.LogInformation("源重建: {Source}", source.Name);
@@ -334,7 +383,11 @@ public class IndexController : ControllerBase
             s.Name.Equals(sourceName, StringComparison.OrdinalIgnoreCase) ||
             s.Name.Equals(decoded, StringComparison.OrdinalIgnoreCase));
         if (source == null)
+        {
+            var conflict = await TryBuildConnectorConflictAsync(sourceName);
+            if (conflict != null) return conflict;
             return NotFound(new { error = $"源 '{sourceName}' 不存在" });
+        }
 
         var currentModel = _embeddingService.ModelName;
         _logger.LogInformation("源重建切片: {Source}", source.Name);

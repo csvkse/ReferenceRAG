@@ -168,6 +168,42 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             }
             catch (SqliteException) { /* column exists */ }
 
+            // 连接器路径唯一性：允许同一物理路径挂到多个知识库，但同一知识库内路径唯一。
+            // path_key = 统一斜杠 + 去尾斜杠 + 小写，作为去重键。
+            try
+            {
+                using var addPathKeyCmd = conn.CreateCommand();
+                addPathKeyCmd.CommandText = "ALTER TABLE connectors ADD COLUMN path_key TEXT;";
+                await addPathKeyCmd.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException) { /* column exists */ }
+
+            try
+            {
+                using var connectorIndexCmd = conn.CreateCommand();
+                connectorIndexCmd.CommandText = @"
+                    UPDATE connectors
+                    SET path_key = lower(rtrim(replace(target_path, '\', '/'), '/'))
+                    WHERE path_key IS NULL OR path_key = '';
+
+                    DELETE FROM connectors
+                    WHERE rowid NOT IN (
+                        SELECT MIN(rowid) FROM connectors GROUP BY knowledge_base_id, path_key
+                    );
+
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_connectors_kb_path
+                        ON connectors(knowledge_base_id, path_key);
+
+                    CREATE INDEX IF NOT EXISTS ix_connectors_path_key
+                        ON connectors(path_key);
+                ";
+                await connectorIndexCmd.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException ex)
+            {
+                _logger?.LogWarning(ex, "[CatalogStore] 连接器路径唯一索引创建失败，可能存在重复连接器");
+            }
+
             _initialized = true;
             _logger?.LogInformation("[CatalogStore] catalog.db 数据库架构初始化成功: {DbPath}", _dbPath);
         }
@@ -293,16 +329,17 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
                 INSERT INTO connectors (
-                    id, knowledge_base_id, kind, target_path, file_pattern,
+                    id, knowledge_base_id, kind, target_path, path_key, file_pattern,
                     config_revision, enabled, created_at, updated_at
                 )
                 VALUES (
-                    @id, @kb_id, @kind, @target_path, @file_pattern,
+                    @id, @kb_id, @kind, @target_path, @path_key, @file_pattern,
                     @config_rev, @enabled, @created_at, @updated_at
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     kind = excluded.kind,
                     target_path = excluded.target_path,
+                    path_key = excluded.path_key,
                     file_pattern = excluded.file_pattern,
                     config_revision = excluded.config_revision,
                     enabled = excluded.enabled,
@@ -312,6 +349,7 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             cmd.Parameters.AddWithValue("@kb_id", connector.KnowledgeBaseId);
             cmd.Parameters.AddWithValue("@kind", connector.Kind);
             cmd.Parameters.AddWithValue("@target_path", connector.TargetPath);
+            cmd.Parameters.AddWithValue("@path_key", NormalizePathKey(connector.TargetPath));
             cmd.Parameters.AddWithValue("@file_pattern", (object?)connector.FilePattern ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@config_rev", connector.ConfigRevision);
             cmd.Parameters.AddWithValue("@enabled", connector.Enabled ? 1 : 0);
@@ -325,6 +363,15 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// 路径去重键：统一斜杠、去尾斜杠、小写。与迁移 SQL 中的表达式保持一致。
+    /// </summary>
+    private static string NormalizePathKey(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+        return path.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
     }
 
     public async Task<ConnectorDefinition?> GetConnectorAsync(string connectorId, CancellationToken ct = default)

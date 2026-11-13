@@ -16,7 +16,7 @@ namespace ReferenceRAG.ApiHost.Controllers;
 [Route("api/[controller]")]
 public sealed class FileSystemController : ControllerBase
 {
-    private const long MaxTextBytes = 2 * 1024 * 1024; // 2MB
+    private const long MaxTextBytes = 5 * 1024 * 1024; // 5MB 放宽全量读取阈值，超限文件由流式滑动窗口接管
     private readonly ILogger<FileSystemController> _logger;
     private readonly IFileReaderService _fileReaderService;
     private readonly IFileSearchEngine? _fileSearchEngine;
@@ -261,7 +261,15 @@ public sealed class FileSystemController : ControllerBase
 
         var info = new FileInfo(normalized);
         if (info.Length > MaxTextBytes)
-            return BadRequest(new { error = $"文件大小超过 2MB 限制（当前 {info.Length / 1024 / 1024}MB），无法以在线文本查看，请直接下载", isTooLarge = true, isBinary = false });
+        {
+            return BadRequest(new
+            {
+                error = $"文件大小超过 5MB 限制（当前 {info.Length / 1024 / 1024}MB），无法以在线单次全量文本加载，请使用流式阅读器或直接下载",
+                isTooLarge = true,
+                suggestStream = true,
+                isBinary = false
+            });
+        }
 
         try
         {
@@ -475,7 +483,7 @@ public sealed class FileSystemController : ControllerBase
 
         var contentBytes = Encoding.UTF8.GetByteCount(request.Content ?? string.Empty);
         if (contentBytes > MaxTextBytes)
-            return BadRequest(new { error = $"内容大小超过 2MB 限制（当前 {contentBytes / 1024 / 1024}MB）" });
+            return BadRequest(new { error = $"内容大小超过 5MB 限制（当前 {contentBytes / 1024 / 1024}MB）" });
 
         var parent = Path.GetDirectoryName(normalized);
         if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))

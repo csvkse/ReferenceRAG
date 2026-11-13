@@ -1,4 +1,5 @@
 import { defineComponent as _defineComponent, ref, computed, watch, h } from 'vue';
+import { useRouter } from 'vue-router';
 import {
     NDrawer, NDrawerContent, NCard, NSpace, NButton, NIcon, NInput, NAlert, NSpin,
     NText, NEmpty, NTag, NDataTable, NModal, NPopconfirm, useMessage, useDialog
@@ -13,6 +14,7 @@ export default _defineComponent({
     },
     emits: ['update:show', 'file-changed'],
     setup(props, { emit }) {
+        const router = useRouter();
         const message = useMessage();
         const dialog = useDialog();
 
@@ -169,6 +171,19 @@ export default _defineComponent({
             newFileName.value = '';
         };
 
+        // 在线阅读器跳转
+        const handleOpenInReader = (row) => {
+            emit('update:show', false);
+            router.push({
+                name: 'Reader',
+                query: {
+                    source: sourceName.value,
+                    path: row.path,
+                    line: '1'
+                }
+            });
+        };
+
         // 文本预览与编辑
         const handleOpenEditor = async (row) => {
             editorFilePath.value = row.path;
@@ -185,8 +200,15 @@ export default _defineComponent({
                     message.warning('二进制文件无法在线编辑，请使用下载功能');
                     showEditorModal.value = false;
                 } else if (errData?.isTooLarge) {
-                    message.warning('文件超过 2MB 大小限制，无法在线编辑，请直接下载');
+                    message.info('文件超过单次编辑大小限制，已为您引导至大文件流式阅读器');
                     showEditorModal.value = false;
+                    router.push({
+                        path: '/reader',
+                        query: {
+                            path: row.path,
+                            source: rootPath.value
+                        }
+                    });
                 } else {
                     message.error(errData?.error || err.message || '读取文件失败');
                 }
@@ -327,6 +349,37 @@ export default _defineComponent({
             handleOpenEditor({ path: fullPath, name: name });
         };
 
+        const openReaderFromSearch = (fullPath, relPath, line) => {
+            emit('update:show', false);
+            showSearchModal.value = false;
+            router.push({
+                path: '/reader',
+                query: {
+                    source: props.source?.name || rootPath.value,
+                    path: fullPath,
+                    line: line ? String(line) : '1',
+                    q: searchQuery.value.trim() || undefined,
+                    isRegex: searchIsRegex.value ? 'true' : undefined
+                }
+            });
+        };
+
+        const goToFullSearch = () => {
+            emit('update:show', false);
+            const subPath = (currentPath.value && rootPath.value && currentPath.value !== rootPath.value)
+                ? currentPath.value.substring(rootPath.value.length).replace(/^\//, '')
+                : '';
+            router.push({
+                path: '/file-search',
+                query: {
+                    source: props.source?.name || '',
+                    subPath: subPath || undefined,
+                    q: searchQuery.value.trim() || undefined,
+                    isRegex: searchIsRegex.value ? 'true' : undefined
+                }
+            });
+        };
+
         // 查看大纲
         const handleOpenOutline = async (row) => {
             outlineLoading.value = true;
@@ -376,6 +429,12 @@ export default _defineComponent({
                 width: 270,
                 render: (row) => h(NSpace, { size: 'small' }, {
                     default: () => [
+                        !row.isDirectory ? h(NButton, {
+                            size: 'tiny',
+                            type: 'success',
+                            secondary: true,
+                            onClick: () => handleOpenInReader(row)
+                        }, { default: () => '在线阅读' }) : null,
                         !row.isDirectory ? h(NButton, {
                             size: 'tiny',
                             type: 'primary',
@@ -457,6 +516,8 @@ export default _defineComponent({
             handleDownloadZip,
             handleSearch,
             openEditorFromSearch,
+            openReaderFromSearch,
+            goToFullSearch,
             handleOpenOutline
         };
     },
@@ -502,6 +563,9 @@ export default _defineComponent({
             </n-button>
             <n-button size="small" type="primary" :loading="searchLoading" @click="handleSearch">
               🔍 搜索
+            </n-button>
+            <n-button size="small" secondary @click="goToFullSearch">
+              全屏搜索
             </n-button>
           </div>
 
@@ -580,14 +644,17 @@ export default _defineComponent({
             <div v-if="searchResult.files && searchResult.files.length > 0" style="max-height: 520px; overflow-y: auto;">
               <div v-for="file in searchResult.files" :key="file.fullPath" style="margin-bottom: 12px; border: 1px solid rgba(128,128,128,0.2); border-radius: 6px; padding: 10px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                  <span style="font-weight: 600; cursor: pointer; color: #18a058;" @click="openEditorFromSearch(file.fullPath, file.relativePath)">
+                  <span style="font-weight: 600; cursor: pointer; color: #18a058;" @click="openReaderFromSearch(file.fullPath, file.relativePath, 1)">
                     📄 {{ file.relativePath }} ({{ file.matchCount }} 处命中)
                   </span>
-                  <n-button size="tiny" secondary type="primary" @click="openEditorFromSearch(file.fullPath, file.relativePath)">打开并查看</n-button>
+                  <n-space size="small">
+                    <n-button size="tiny" secondary type="success" @click="openReaderFromSearch(file.fullPath, file.relativePath, 1)">阅读全文</n-button>
+                    <n-button size="tiny" secondary type="primary" @click="openEditorFromSearch(file.fullPath, file.relativePath)">编辑</n-button>
+                  </n-space>
                 </div>
                 <div v-for="(hunk, hIdx) in file.hunks" :key="hIdx" style="background: rgba(0,0,0,0.03); border-radius: 4px; padding: 6px 10px; margin-top: 6px; font-family: Consolas, monospace; font-size: 12px;">
                   <div style="color: #888; font-size: 11px; margin-bottom: 4px;">@@ 行 {{ hunk.startLine }} - {{ hunk.endLine }} @@</div>
-                  <div v-for="line in hunk.lines" :key="line.lineNumber" :style="{ background: line.isMatch ? 'rgba(24, 160, 88, 0.15)' : 'transparent', padding: '1px 4px', display: 'flex' }">
+                  <div v-for="line in hunk.lines" :key="line.lineNumber" :style="{ background: line.isMatch ? 'rgba(24, 160, 88, 0.15)' : 'transparent', padding: '1px 4px', display: 'flex', cursor: 'pointer', borderRadius: '2px' }" :title="'点击在阅读器中定位至第 ' + line.lineNumber + ' 行'" @click="openReaderFromSearch(file.fullPath, file.relativePath, line.lineNumber)">
                     <span style="width: 45px; color: #999; user-select: none;">{{ line.lineNumber }}:</span>
                     <span :style="{ fontWeight: line.isMatch ? 'bold' : 'normal', color: line.isMatch ? '#18a058' : 'inherit' }">{{ line.text }}</span>
                   </div>
@@ -647,7 +714,7 @@ export default _defineComponent({
             <n-space vertical :size="12">
               <div style="display: flex; justify-content: space-between; align-items: center;">
                 <n-tag type="info" size="small">{{ editorFilePath }}</n-tag>
-                <n-text depth="3" style="font-size: 12px;">（支持 Markdown / 纯文本，上限 2MB）</n-text>
+                <n-text depth="3" style="font-size: 12px;">（支持 Markdown / 纯文本，上限 5MB）</n-text>
               </div>
               <n-input
                 v-model:value="editorContent"

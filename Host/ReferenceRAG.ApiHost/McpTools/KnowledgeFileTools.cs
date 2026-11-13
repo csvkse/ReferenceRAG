@@ -162,9 +162,9 @@ public class KnowledgeFileTools
             }
 
             var info = new FileInfo(resolvedPath);
-            if (info.Length > 2 * 1024 * 1024)
+            if (info.Length > 5 * 1024 * 1024)
             {
-                return JsonSerializer.Serialize(new { success = false, error = "文件超过 2MB 大小限制，请使用 startLine 和 endLine 范围读取" });
+                return JsonSerializer.Serialize(new { success = false, error = "文件超过 5MB 大小限制，请使用 startLine 和 endLine 范围流式读取" });
             }
 
             var text = await File.ReadAllTextAsync(resolvedPath);

@@ -1,8 +1,8 @@
 import { defineComponent as _defineComponent } from 'vue';
 import { ref, computed, h, onMounted, onUnmounted, onActivated } from 'vue';
 import { useRouter } from 'vue-router';
-import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput, NInputGroup, NRadioGroup, NRadio, NText, NAlert, NCard, NForm, NFormItem, NDataTable } from 'naive-ui';
-import { sourcesApi } from '/app/api/index.js';
+import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput, NInputGroup, NRadioGroup, NRadio, NText, NAlert, NCard, NForm, NFormItem, NDataTable, NModal, NSelect } from 'naive-ui';
+import { sourcesApi, knowledgeBasesApi } from '/app/api/index.js';
 import { isDesktop, selectFolder } from '/core/platform.js';
 import { JobCenter } from '/core/jobs/JobCenter.js';
 import FolderPickerModal from '/app/components/FolderPickerModal.js';
@@ -22,12 +22,101 @@ const component = /*@__PURE__*/ _defineComponent({
         const creating = ref(false);
         const sources = ref([]);
 
+        // 知识库挂载状态
+        const knowledgeBases = ref([]);
+        const linkModalVisible = ref(false);
+        const linkTargets = ref([]);
+        const linkKbId = ref(null);
+        const linking = ref(false);
+        const checkedRowKeys = ref([]);
+
+        const kbOptions = computed(() => knowledgeBases.value.map(kb => ({
+            label: kb.name,
+            value: kb.id
+        })));
+
+        const loadKnowledgeBases = async () => {
+            try {
+                const res = await knowledgeBasesApi.getAll();
+                knowledgeBases.value = (res.data || []).filter(kb => kb.enabled !== false);
+            } catch (err) {
+                console.warn('加载知识库列表失败:', err);
+            }
+        };
+
+        const openLinkModal = (row) => {
+            linkTargets.value = [row];
+            linkKbId.value = knowledgeBases.value[0]?.id || null;
+            linkModalVisible.value = true;
+        };
+
+        const openBatchLink = () => {
+            const selected = sources.value.filter(
+                s => checkedRowKeys.value.includes(s.name) && !isConnectorRow(s)
+            );
+            if (selected.length === 0) {
+                message.warning('请先选择要挂载的数据源');
+                return;
+            }
+            linkTargets.value = selected;
+            linkKbId.value = knowledgeBases.value[0]?.id || null;
+            linkModalVisible.value = true;
+        };
+
+        const handleLink = async () => {
+            if (linkTargets.value.length === 0 || !linkKbId.value) {
+                message.warning('请选择目标知识库');
+                return;
+            }
+            linking.value = true;
+            let created = 0;
+            let skipped = 0;
+            const failed = [];
+            try {
+                for (const target of linkTargets.value) {
+                    try {
+                        const res = await sourcesApi.link(target.name, linkKbId.value);
+                        if (res.data?.status === 'already-linked') skipped += 1;
+                        else created += 1;
+                    } catch (err) {
+                        failed.push(`${target.name}: ${err.response?.data?.error || err.message}`);
+                    }
+                }
+
+                if (failed.length === 0) {
+                    if (linkTargets.value.length === 1) {
+                        if (created === 0) message.info('该路径已挂载到所选知识库，已跳过');
+                        else message.success('挂载成功');
+                    } else {
+                        message.success(`批量挂载完成：新建 ${created} 个，跳过 ${skipped} 个`);
+                    }
+                } else {
+                    message.warning(`挂载完成：成功 ${created} 个，跳过 ${skipped} 个，失败 ${failed.length} 个`);
+                }
+
+                linkModalVisible.value = false;
+                checkedRowKeys.value = [];
+                await loadSources(true);
+            } finally {
+                linking.value = false;
+            }
+        };
+
         // File Manager Drawer state
         const showFileManager = ref(false);
         const fileManagerSource = ref(null);
         const handleOpenFileManager = (source) => {
             fileManagerSource.value = source;
             showFileManager.value = true;
+        };
+
+        const handleSearchSource = (source) => {
+            router.push({
+                path: '/file-search',
+                query: {
+                    source: source.name
+                }
+            });
         };
 
         // Edit state
@@ -70,11 +159,53 @@ const component = /*@__PURE__*/ _defineComponent({
             path: { required: true, message: '请输入文件夹路径', trigger: 'blur' }
         };
 
+        // 知识库连接器行：数据归属知识库，源文件管理仅提供只读视图。
+        // 连接器不在 config.Sources 中，/Sources/{name} 系列接口无法解析，
+        // 因此写操作（编辑/探查/停用/删除）必须收敛到知识库管理。
+        const CONNECTOR_TYPE = 'KnowledgeBaseConnector';
+        const isConnectorRow = (row) => Boolean(row?.isConnector) || row?.type === CONNECTOR_TYPE;
+        const goToKnowledgeBases = () => router.push('/knowledge-bases');
+
         const columns = [
+            {
+                type: 'selection',
+                disabled: (row) => isConnectorRow(row)
+            },
             {
                 title: '名称',
                 key: 'name',
-                width: 160
+                width: 240,
+                render: (row) => {
+                    if (isConnectorRow(row)) {
+                        return h(NSpace, { size: 4, align: 'center', wrap: false }, {
+                            default: () => [
+                                h('span', { style: 'font-size: 13px;' }, row.name),
+                                h(NTag, { type: 'info', size: 'tiny', bordered: false }, {
+                                    default: () => '知识库连接器'
+                                })
+                            ]
+                        });
+                    }
+                    const links = row.linkedKnowledgeBases || [];
+                    if (links.length === 0) {
+                        return h(NSpace, { size: 4, align: 'center', wrap: false }, {
+                            default: () => [
+                                h('span', { style: 'font-size: 13px;' }, row.name),
+                                h(NTag, { type: 'warning', size: 'tiny', bordered: false }, {
+                                    default: () => '未挂载'
+                                })
+                            ]
+                        });
+                    }
+                    return h(NSpace, { size: 4, align: 'center', wrap: false }, {
+                        default: () => [
+                            h('span', { style: 'font-size: 13px;' }, row.name),
+                            h(NTag, { type: 'success', size: 'tiny', bordered: false }, {
+                                default: () => `已挂载 ${links.length}`
+                            })
+                        ]
+                    });
+                }
             },
             {
                 title: '路径',
@@ -93,20 +224,24 @@ const component = /*@__PURE__*/ _defineComponent({
                 title: '文件数',
                 key: 'fileCount',
                 width: 100,
-                render: (row) => row.fileCount != null ? row.fileCount.toLocaleString() : '-'
+                render: (row) => isConnectorRow(row)
+                    ? '-'
+                    : (row.fileCount != null ? row.fileCount.toLocaleString() : '-')
             },
             {
                 title: '分块数',
                 key: 'chunkCount',
                 width: 100,
-                render: (row) => row.chunkCount != null ? row.chunkCount.toLocaleString() : '-'
+                render: (row) => isConnectorRow(row)
+                    ? '-'
+                    : (row.chunkCount != null ? row.chunkCount.toLocaleString() : '-')
             },
             {
                 title: '操作',
                 key: 'actions',
-                width: 320,
-                render: (row) => h(NSpace, { size: 'small' }, {
-                    default: () => [
+                width: 470,
+                render: (row) => {
+                    const actions = [
                         h(NButton, {
                             size: 'small',
                             type: 'primary',
@@ -117,37 +252,80 @@ const component = /*@__PURE__*/ _defineComponent({
                         }),
                         h(NButton, {
                             size: 'small',
-                            onClick: () => handleEdit(row)
-                        }, {
-                            default: () => '编辑'
-                        }),
-                        h(NButton, {
-                            size: 'small',
                             type: 'info',
-                            onClick: () => handleInspectSource(row)
+                            secondary: true,
+                            onClick: () => handleSearchSource(row)
                         }, {
-                            default: () => '探查'
-                        }),
-                        h(NButton, {
-                            size: 'small',
-                            type: row.enabled ? 'warning' : 'primary',
-                            onClick: () => handleToggle(row)
-                        }, {
-                            default: () => row.enabled ? '停用' : '启用'
-                        }),
-                        h(NButton, {
-                            size: 'small',
-                            type: 'error',
-                            onClick: () => handleDelete(row)
-                        }, {
-                            default: () => '删除'
+                            default: () => '搜索'
                         })
-                    ]
-                })
+                    ];
+
+                    if (isConnectorRow(row)) {
+                        // 连接器由知识库管理；只读能力（文件管理/搜索/探查）保留，写操作收敛
+                        actions.push(
+                            h(NButton, {
+                                size: 'small',
+                                type: 'info',
+                                onClick: () => handleInspectSource(row)
+                            }, {
+                                default: () => '探查'
+                            }),
+                            h(NButton, {
+                                size: 'small',
+                                type: 'info',
+                                tertiary: true,
+                                onClick: goToKnowledgeBases
+                            }, {
+                                default: () => '去知识库管理'
+                            })
+                        );
+                    } else {
+                        actions.push(
+                            h(NButton, {
+                                size: 'small',
+                                type: 'primary',
+                                tertiary: true,
+                                onClick: () => openLinkModal(row)
+                            }, {
+                                default: () => '挂载到知识库'
+                            }),
+                            h(NButton, {
+                                size: 'small',
+                                onClick: () => handleEdit(row)
+                            }, {
+                                default: () => '编辑'
+                            }),
+                            h(NButton, {
+                                size: 'small',
+                                type: 'info',
+                                onClick: () => handleInspectSource(row)
+                            }, {
+                                default: () => '探查'
+                            }),
+                            h(NButton, {
+                                size: 'small',
+                                type: row.enabled ? 'warning' : 'primary',
+                                onClick: () => handleToggle(row)
+                            }, {
+                                default: () => row.enabled ? '停用' : '启用'
+                            }),
+                            h(NButton, {
+                                size: 'small',
+                                type: 'error',
+                                onClick: () => handleDelete(row)
+                            }, {
+                                default: () => '删除'
+                            })
+                        );
+                    }
+
+                    return h(NSpace, { size: 'small' }, { default: () => actions });
+                }
             }
         ];
 
         const loadSources = async (silent = false) => {
+            if (knowledgeBases.value.length === 0) loadKnowledgeBases();
             if (!silent) loading.value = true;
             try {
                 const response = await sourcesApi.getAll();
@@ -324,7 +502,27 @@ const component = /*@__PURE__*/ _defineComponent({
                         await loadSources();
                     }
                     catch (error) {
-                        message.error(error.response?.data?.error || error.message || '删除失败');
+                        const data = error.response?.data;
+                        if (error.response?.status === 409 && data?.code === 'SourceLinkedToKnowledgeBases') {
+                            const kbs = (data.linkedKnowledgeBases || []).map(k => k.name).join('、');
+                            dialog.warning({
+                                title: '该源已挂载到知识库',
+                                content: `「${source.name}」已挂载到 ${data.linkedKnowledgeBases?.length || 0} 个知识库：${kbs}。是否一并解绑并删除该源？`,
+                                positiveText: '一并解绑并删除',
+                                negativeText: '取消',
+                                onPositiveClick: async () => {
+                                    try {
+                                        await sourcesApi.delete(source.name, deleteData, true);
+                                        message.success(`"${source.name}" 及其关联已删除`);
+                                        await loadSources();
+                                    } catch (err2) {
+                                        message.error(err2.response?.data?.error || err2.message || '删除失败');
+                                    }
+                                }
+                            });
+                            return;
+                        }
+                        message.error(data?.error || error.message || '删除失败');
                     }
                 },
                 onNegativeClick: () => {
@@ -357,7 +555,9 @@ const component = /*@__PURE__*/ _defineComponent({
             message, dialog, formRef, loading, creating, sources, editingSource, editingName,
             newSource, formRules, columns, loadSources, handleCreateSource, resetForm,
             handleToggle, handleEdit, handleInspectSource, handleDelete, showFileManager,
-            fileManagerSource, handleOpenFileManager,
+            knowledgeBases, kbOptions, linkModalVisible, linkTargets, linkKbId, linking,
+            checkedRowKeys, openLinkModal, openBatchLink, handleLink,
+            fileManagerSource, handleOpenFileManager, handleSearchSource,
             get FolderPickerModal() { return FolderPickerModal; },
             get SourceFileManagerDrawer() { return SourceFileManagerDrawer; },
             get NButton() { return NButton; },
@@ -370,7 +570,9 @@ const component = /*@__PURE__*/ _defineComponent({
             get NCard() { return NCard; },
             get NForm() { return NForm; },
             get NFormItem() { return NFormItem; },
-            get NDataTable() { return NDataTable; }
+            get NDataTable() { return NDataTable; },
+            get NModal() { return NModal; },
+            get NSelect() { return NSelect; }
         };
         return __returned__;
     }
@@ -384,6 +586,7 @@ component.template = `
       <n-button text type="primary" style="font-weight: bold; margin-left: 4px;" @click="router.push('/knowledge-bases')">
         知识库管理
       </n-button>
+      。列表中标记为「知识库连接器」的行仅支持只读浏览，其索引、切片与生命周期管理请前往知识库管理操作。
     </n-alert>
 
     <!-- Add Source -->
@@ -421,9 +624,20 @@ component.template = `
     <!-- Sources Table -->
     <n-card title="数据源列表">
       <template #header-extra>
-        <n-button size="small" :loading="loading" @click="loadSources">
-          刷新
-        </n-button>
+        <n-space align="center" :size="8">
+          <n-button
+            v-if="checkedRowKeys.length > 0"
+            size="small"
+            type="primary"
+            secondary
+            @click="openBatchLink"
+          >
+            批量挂载 ({{ checkedRowKeys.length }})
+          </n-button>
+          <n-button size="small" :loading="loading" @click="loadSources">
+            刷新
+          </n-button>
+        </n-space>
       </template>
       <n-data-table
         :columns="columns"
@@ -431,6 +645,7 @@ component.template = `
         :loading="loading"
         :bordered="false"
         :row-key="(row) => row.name"
+        v-model:checked-row-keys="checkedRowKeys"
       />
     </n-card>
 
@@ -447,6 +662,35 @@ component.template = `
       :source="fileManagerSource"
       @file-changed="() => loadSources(true)"
     />
+
+    <!-- 挂载到知识库 -->
+    <n-modal
+      v-model:show="linkModalVisible"
+      preset="card"
+      title="挂载到知识库"
+      style="width: 440px"
+      :bordered="false"
+    >
+      <n-space vertical :size="12">
+        <n-text depth="3" style="font-size: 13px">
+          {{ linkTargets.length === 1 ? '源路径：' + linkTargets[0].path : '已选择 ' + linkTargets.length + ' 个数据源' }}
+        </n-text>
+        <n-select
+          v-model:value="linkKbId"
+          :options="kbOptions"
+          placeholder="选择目标知识库"
+        />
+        <n-text depth="3" style="font-size: 12px">
+          同一路径可挂载到多个知识库；同一知识库内重复挂载会自动跳过。
+        </n-text>
+      </n-space>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="linkModalVisible = false">取消</n-button>
+          <n-button type="primary" :loading="linking" @click="handleLink">确定挂载</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </n-space>
 `;
 

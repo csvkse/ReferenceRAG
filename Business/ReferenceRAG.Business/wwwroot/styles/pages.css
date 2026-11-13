@@ -414,3 +414,50 @@ body.light-theme {
   min-height: 100vh;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
+
+
+/* views/Reader.vue */
+.markdown-preview-content {
+  color: inherit;
+  font-size: 14px;
+}
+.markdown-preview-content h1,
+.markdown-preview-content h2,
+.markdown-preview-content h3,
+.markdown-preview-content h4,
+.markdown-preview-content h5,
+.markdown-preview-content h6 {
+  margin-top: 24px;
+  margin-bottom: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.markdown-preview-content p {
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+.markdown-preview-content pre {
+  background: rgba(0, 0, 0, 0.04);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: 'Cascadia Code', Consolas, Monaco, monospace;
+  margin-bottom: 16px;
+}
+.markdown-preview-content code {
+  background: rgba(0, 0, 0, 0.04);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Cascadia Code', Consolas, Monaco, monospace;
+}
+@keyframes line-pulse {
+  0% {
+    background-color: rgba(255, 220, 40, 0.5);
+  }
+  50% {
+    background-color: rgba(255, 220, 40, 0.25);
+  }
+  100% {
+    background-color: transparent;
+  }
+}

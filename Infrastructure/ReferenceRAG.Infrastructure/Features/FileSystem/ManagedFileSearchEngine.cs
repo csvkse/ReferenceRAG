@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -15,7 +16,7 @@ using ReferenceRAG.Core.Services;
 namespace ReferenceRAG.Infrastructure.Features.FileSystem;
 
 /// <summary>
-/// 纯托管高性能文件搜索引擎（零原生依赖，支持字串/正则/Glob、二进制探测与 Hunk 合并）
+/// 纯托管高性能文件搜索引擎（零原生依赖，支持字串/正则/Glob、多数据源穿透与 Hunk 合并）
 /// </summary>
 public sealed class ManagedFileSearchEngine : IFileSearchEngine
 {
@@ -31,12 +32,79 @@ public sealed class ManagedFileSearchEngine : IFileSearchEngine
     };
 
     private readonly ConfigManager _configManager;
+    private readonly ICatalogStore? _catalogStore;
     private readonly ILogger<ManagedFileSearchEngine>? _logger;
 
-    public ManagedFileSearchEngine(ConfigManager configManager, ILogger<ManagedFileSearchEngine>? logger = null)
+    public ManagedFileSearchEngine(
+        ConfigManager configManager,
+        ICatalogStore? catalogStore = null,
+        ILogger<ManagedFileSearchEngine>? logger = null)
     {
         _configManager = configManager ?? throw new ArgumentNullException(nameof(configManager));
+        _catalogStore = catalogStore;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// 获取当前系统中所有生效的源目录（聚合 ConfigManager.Sources 与 ICatalogStore 中的知识库连接器）
+    /// </summary>
+    private async Task<List<SourceFolder>> GetAllEffectiveSourcesAsync(CancellationToken ct = default)
+    {
+        var config = _configManager.Load();
+        var sources = config.Sources.Where(s => s.Enabled).Select(s => new SourceFolder
+        {
+            Name = s.Name,
+            Path = s.Path,
+            Enabled = s.Enabled,
+            FilePatterns = s.FilePatterns != null && s.FilePatterns.Count > 0 ? s.FilePatterns : new List<string> { "*.md", "*.txt" },
+            Type = s.Type
+        }).ToList();
+
+        if (_catalogStore != null)
+        {
+            try
+            {
+                var kbs = await _catalogStore.ListKnowledgeBasesAsync(ct);
+                foreach (var kb in kbs)
+                {
+                    if (!kb.Enabled) continue;
+                    var connectors = await _catalogStore.GetConnectorsByKnowledgeBaseAsync(kb.Id, ct);
+                    foreach (var conn in connectors)
+                    {
+                        if (!conn.Enabled) continue;
+                        if (!sources.Any(s => s.Path.Equals(conn.TargetPath, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            var patterns = SplitPatterns(conn.FilePattern);
+                            sources.Add(new SourceFolder
+                            {
+                                Name = string.IsNullOrWhiteSpace(kb.Name)
+                                    ? (Path.GetFileName(conn.TargetPath) ?? conn.Id)
+                                    : $"{kb.Name} - {Path.GetFileName(conn.TargetPath)}",
+                                Path = conn.TargetPath,
+                                Enabled = conn.Enabled,
+                                FilePatterns = patterns.Count > 0 ? patterns : new List<string> { "*.md", "*.txt" },
+                                Type = SourceType.Markdown
+                            });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "[ManagedFileSearchEngine] 从 CatalogStore 获取知识库连接器列表失败，已降级仅使用 ConfigManager.Sources");
+            }
+        }
+
+        return sources;
+    }
+
+    private static List<string> SplitPatterns(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return new List<string>();
+        return raw.Split(new[] { ';', ',', '|' }, StringSplitOptions.RemoveEmptyEntries)
+                  .Select(p => p.Trim())
+                  .Where(p => !string.IsNullOrEmpty(p))
+                  .ToList();
     }
 
     /// <summary>
@@ -83,15 +151,14 @@ public sealed class ManagedFileSearchEngine : IFileSearchEngine
             );
         }
 
-        var config = _configManager.Load();
-        var allSources = config.Sources.Where(s => s.Enabled).ToList();
+        var allSources = await GetAllEffectiveSourcesAsync(ct);
 
         // 筛选目标数据源
         List<SourceFolder> targetSources;
         if (query.Sources != null && query.Sources.Count > 0)
         {
             var allowedNames = new HashSet<string>(query.Sources, StringComparer.OrdinalIgnoreCase);
-            targetSources = allSources.Where(s => allowedNames.Contains(s.Name)).ToList();
+            targetSources = allSources.Where(s => allowedNames.Contains(s.Name) || allowedNames.Contains(s.Path)).ToList();
         }
         else
         {
@@ -136,7 +203,11 @@ public sealed class ManagedFileSearchEngine : IFileSearchEngine
                 }
             }
 
-            var fileCandidates = EnumerateFilesSafe(searchDir, query.FilePattern, ct);
+            var patternToUse = string.IsNullOrWhiteSpace(query.FilePattern)
+                ? (source.FilePatterns != null && source.FilePatterns.Count > 0 ? string.Join(';', source.FilePatterns) : "*")
+                : query.FilePattern;
+
+            var fileCandidates = EnumerateFilesSafe(searchDir, patternToUse, ct);
 
             foreach (var filePath in fileCandidates)
             {
@@ -236,15 +307,16 @@ public sealed class ManagedFileSearchEngine : IFileSearchEngine
     /// <summary>
     /// 仅按文件名通配模式快速查找定位文件路径（对标 fd-find）
     /// </summary>
-    public Task<List<string>> FindFilesAsync(string? sourceName, string globPattern, int maxResults = 100, CancellationToken ct = default)
+    public async Task<List<string>> FindFilesAsync(string? sourceName, string globPattern, int maxResults = 100, CancellationToken ct = default)
     {
-        var config = _configManager.Load();
-        var allSources = config.Sources.Where(s => s.Enabled).ToList();
+        var allSources = await GetAllEffectiveSourcesAsync(ct);
 
         List<SourceFolder> targetSources;
         if (!string.IsNullOrWhiteSpace(sourceName))
         {
-            targetSources = allSources.Where(s => string.Equals(s.Name, sourceName, StringComparison.OrdinalIgnoreCase)).ToList();
+            targetSources = allSources.Where(s =>
+                string.Equals(s.Name, sourceName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(s.Path, sourceName, StringComparison.OrdinalIgnoreCase)).ToList();
         }
         else
         {
@@ -270,18 +342,19 @@ public sealed class ManagedFileSearchEngine : IFileSearchEngine
             }
         }
 
-        return Task.FromResult(results);
+        return results;
     }
 
     /// <summary>
-    /// 安全遍历目录文件（浅层剪枝忽略黑名单子目录，避免扫描 .git/node_modules 等深坑）
+    /// 安全遍历目录文件（支持多模式分词、浅层剪枝忽略黑名单子目录，避免扫描 .git/node_modules 等深坑）
     /// </summary>
     private static IEnumerable<string> EnumerateFilesSafe(string rootDirectory, string? filePattern, CancellationToken ct)
     {
         var stack = new Stack<string>();
         stack.Push(rootDirectory);
 
-        var hasPattern = !string.IsNullOrWhiteSpace(filePattern) && filePattern != "*";
+        var patterns = SplitPatterns(filePattern);
+        var hasPattern = patterns.Count > 0 && !patterns.Any(p => p == "*");
 
         while (stack.Count > 0 && !ct.IsCancellationRequested)
         {
@@ -302,7 +375,16 @@ public sealed class ManagedFileSearchEngine : IFileSearchEngine
                     if (hasPattern)
                     {
                         var fileName = Path.GetFileName(file);
-                        if (!FileSystemName.MatchesSimpleExpression(filePattern!, fileName, ignoreCase: true))
+                        var matched = false;
+                        for (var i = 0; i < patterns.Count; i++)
+                        {
+                            if (FileSystemName.MatchesSimpleExpression(patterns[i], fileName, ignoreCase: true))
+                            {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if (!matched)
                         {
                             continue;
                         }

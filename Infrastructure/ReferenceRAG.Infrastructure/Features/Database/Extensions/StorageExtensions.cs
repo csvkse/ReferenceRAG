@@ -98,8 +98,9 @@ public static class StorageExtensions
         services.AddSingleton<IFileSearchEngine>(sp =>
         {
             var configMgr = sp.GetRequiredService<ConfigManager>();
+            var catalogStore = sp.GetService<ReferenceRAG.Core.Features.KnowledgeBase.Storage.ICatalogStore>();
             var logger = sp.GetService<ILogger<ManagedFileSearchEngine>>();
-            return new ManagedFileSearchEngine(configMgr, logger);
+            return new ManagedFileSearchEngine(configMgr, catalogStore, logger);
         });
 
         return services;

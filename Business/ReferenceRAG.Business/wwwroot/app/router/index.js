@@ -28,6 +28,18 @@ const routes = [
                 meta: { title: '向量搜索' }
             },
             {
+                path: 'file-search',
+                name: 'FileSearch',
+                component: () => import('/app/views/FileSearch.js'),
+                meta: { title: '文本搜索' }
+            },
+            {
+                path: 'reader',
+                name: 'Reader',
+                component: () => import('/app/views/Reader.js'),
+                meta: { title: '文本阅读' }
+            },
+            {
                 path: 'knowledge-bases',
                 name: 'KnowledgeBases',
                 component: () => import('/app/views/KnowledgeBases.js'),

@@ -48,6 +48,28 @@ const component = /*@__PURE__*/ _defineComponent({
                 ]
             },
             {
+                label: '文件与阅读',
+                key: 'files-and-reading',
+                icon: renderIcon(DocumentTextOutline),
+                children: [
+                    {
+                        label: '源文件管理',
+                        key: 'Sources',
+                        icon: renderIcon(FolderOutline)
+                    },
+                    {
+                        label: '文本代码搜索',
+                        key: 'FileSearch',
+                        icon: renderIcon(SearchOutline)
+                    },
+                    {
+                        label: '文档阅读器',
+                        key: 'Reader',
+                        icon: renderIcon(BookOutline)
+                    }
+                ]
+            },
+            {
                 label: '数据管理',
                 key: 'data',
                 icon: renderIcon(FolderOutline),

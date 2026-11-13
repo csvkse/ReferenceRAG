@@ -216,4 +216,83 @@ public class FileSearchAndReaderTests : IDisposable
         Assert.Equal(3, range.ReturnedLines);
         Assert.Contains("# 第一章 概述", range.Content);
     }
+
+    [Fact]
+    public async Task ManagedFileSearchEngine_SearchesAcrossCatalogStoreConnectorsAndMultiPatterns()
+    {
+        // 门禁测试: 验证搜索引擎穿透至 CatalogStore 知识库连接器，并正确支持逗号/分号多通配符模式
+        var kbDir = Path.Combine(_testRoot, "kb_novels");
+        Directory.CreateDirectory(kbDir);
+
+        // 写入测试文件（涵盖 小龙女 关键字）
+        var shendiaoFile = Path.Combine(kbDir, "神雕侠侣.md");
+        await File.WriteAllTextAsync(shendiaoFile, """
+            第一回 风月无情
+            越女采莲秋水畔，窄袖轻罗，暗露双金钏。
+            杨过见小龙女容颜绝世，心生敬慕。
+            """, Encoding.UTF8);
+
+        var txtFile = Path.Combine(kbDir, "倚天屠龙记.txt");
+        await File.WriteAllTextAsync(txtFile, "武林至尊，宝刀屠龙，号令天下，莫敢不从。", Encoding.UTF8);
+
+        // 初始化空的 ConfigManager (Sources 为空)
+        var cfg = new ObsidianRagConfig();
+        var configMgr = new ConfigManager(initialConfig: cfg, customConfigPath: Path.Combine(_testRoot, "empty_config.json"));
+        configMgr.Save(cfg);
+
+        // 初始化 CatalogStore 并添加知识库和连接器
+        var catalogDbPath = Path.Combine(_testRoot, "catalog.db");
+        var catalogStore = new ReferenceRAG.Core.Features.KnowledgeBase.Storage.CatalogStore(catalogDbPath);
+        await catalogStore.InitializeAsync();
+
+        var kb = new ReferenceRAG.Core.Features.KnowledgeBase.Domain.KnowledgeBaseDefinition(
+            Id: "kb_jinyong",
+            Name: "金庸武侠测试知识库",
+            Description: "测试知识库",
+            Enabled: true,
+            DesiredConfigRevision: 1,
+            EffectiveConfigRevision: 1,
+            EmbeddingSpecId: "spec_lexical_only",
+            CreatedAt: DateTime.UtcNow,
+            UpdatedAt: DateTime.UtcNow
+        );
+        await catalogStore.SaveKnowledgeBaseAsync(kb);
+
+        var connector = new ReferenceRAG.Core.Features.KnowledgeBase.Domain.ConnectorDefinition(
+            Id: "conn_jinyong",
+            KnowledgeBaseId: "kb_jinyong",
+            Kind: "Directory",
+            TargetPath: kbDir,
+            FilePattern: "*.md, *.txt", // 复合通配符模式（含逗号和空格）
+            ConfigRevision: 1,
+            Enabled: true,
+            CreatedAt: DateTime.UtcNow,
+            UpdatedAt: DateTime.UtcNow
+        );
+        await catalogStore.SaveConnectorAsync(connector);
+
+        var engine = new ManagedFileSearchEngine(configMgr, catalogStore);
+
+        // 1. 验证搜索 "小龙女" 穿透至连接器并成功命中
+        var searchResult = await engine.SearchAsync(new FileSearchQuery
+        {
+            Pattern = "小龙女",
+            IsRegex = false,
+            CaseSensitive = false,
+            ContextLines = 1,
+            MaxMatches = 50
+        });
+
+        Assert.True(searchResult.Success);
+        Assert.Equal(1, searchResult.TotalMatches);
+        Assert.Single(searchResult.Files);
+        Assert.Equal("神雕侠侣.md", searchResult.Files[0].RelativePath);
+        Assert.Contains("小龙女", searchResult.Files[0].Hunks[0].Lines.First(l => l.IsMatch).Text);
+
+        // 2. 验证多通配符 *.md, *.txt 文件定位能力
+        var filesFound = await engine.FindFilesAsync(null, "*.md, *.txt");
+        Assert.Equal(2, filesFound.Count);
+        Assert.Contains(filesFound, f => f.Contains("神雕侠侣.md"));
+        Assert.Contains(filesFound, f => f.Contains("倚天屠龙记.txt"));
+    }
 }

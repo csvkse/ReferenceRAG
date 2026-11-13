@@ -61,6 +61,33 @@ public sealed partial class FileReaderService : IFileReaderService
             fs.Seek(byteOffset, SeekOrigin.Begin);
             currentLine = start; // 信任调用方传入的精确 byteOffset 对应的行号
         }
+        else if (start > 1)
+        {
+            // 极速字节扫描快进：利用 64KB 原生字节缓冲快速定位 '\n'，避开数万次 string 堆分配与 async 状态机开销
+            var skipBuffer = new byte[65536];
+            long currentOffset = 0;
+            while (currentLine < start && !ct.IsCancellationRequested)
+            {
+                var bytesRead = await fs.ReadAsync(skipBuffer.AsMemory(0, skipBuffer.Length), ct);
+                if (bytesRead == 0) break;
+
+                var idx = 0;
+                while (idx < bytesRead && currentLine < start)
+                {
+                    if (skipBuffer[idx] == (byte)'\n')
+                    {
+                        currentLine++;
+                        if (currentLine == start)
+                        {
+                            fs.Seek(currentOffset + idx + 1, SeekOrigin.Begin);
+                            break;
+                        }
+                    }
+                    idx++;
+                }
+                currentOffset += bytesRead;
+            }
+        }
 
         using var reader = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 8192);
 

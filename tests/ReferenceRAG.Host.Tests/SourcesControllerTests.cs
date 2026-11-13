@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
+using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -51,7 +53,8 @@ public class SourcesControllerTests : IDisposable
         }
     }
 
-    private (SourcesController Controller, ConfigManager ConfigManager) CreateController(ObsidianRagConfig config)
+    private (SourcesController Controller, ConfigManager ConfigManager) CreateController(
+        ObsidianRagConfig config, ICatalogStore? catalogStore = null)
     {
         var configManager = new ConfigManager(config);
         configManager.Save(config);
@@ -61,10 +64,75 @@ public class SourcesControllerTests : IDisposable
             _vectorStoreMock.Object,
             _pipelineMock.Object,
             _fileMonitorMock.Object,
-            NullLogger<SourcesController>.Instance
+            NullLogger<SourcesController>.Instance,
+            catalogStore
         );
 
         return (controller, configManager);
+    }
+
+    private static (Mock<ICatalogStore> Catalog, KnowledgeBaseDefinition Kb, ConnectorDefinition Connector)
+        CreateConnectorFixture()
+    {
+        var now = DateTime.UtcNow;
+        var kb = new KnowledgeBaseDefinition(
+            Id: "kb-test",
+            Name: "测试知识库",
+            Description: null,
+            Enabled: true,
+            DesiredConfigRevision: 1,
+            EffectiveConfigRevision: 1,
+            EmbeddingSpecId: "spec_lexical_only",
+            CreatedAt: now,
+            UpdatedAt: now);
+        var connector = new ConnectorDefinition(
+            Id: "conn-test",
+            KnowledgeBaseId: kb.Id,
+            Kind: "LocalFolder",
+            TargetPath: "/app/sources/full",
+            FilePattern: "*.md;*.txt",
+            ConfigRevision: 1,
+            Enabled: true,
+            CreatedAt: now,
+            UpdatedAt: now);
+
+        var catalog = new Mock<ICatalogStore>();
+        catalog.Setup(c => c.ListKnowledgeBasesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<KnowledgeBaseDefinition> { kb });
+        catalog.Setup(c => c.GetConnectorsByKnowledgeBaseAsync(kb.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<ConnectorDefinition> { connector });
+        return (catalog, kb, connector);
+    }
+
+    [Fact]
+    public async Task Get_WithConnectorDisplayName_ReturnsProjectedReadOnlySource()
+    {
+        var initialConfig = new ObsidianRagConfig { Sources = new List<SourceFolder>() };
+        var (catalog, kb, connector) = CreateConnectorFixture();
+        var (controller, _) = CreateController(initialConfig, catalog.Object);
+
+        var result = await controller.Get($"{kb.Name} - full");
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var detail = Assert.IsType<SourceDetail>(ok.Value);
+        Assert.True(detail.IsConnector);
+        Assert.Equal(connector.TargetPath, detail.Path);
+        Assert.Equal(kb.Id, detail.KnowledgeBaseId);
+        Assert.Equal("KnowledgeBaseConnector", detail.Type);
+    }
+
+    [Fact]
+    public async Task Update_WithConnectorDisplayName_ReturnsConflict()
+    {
+        var initialConfig = new ObsidianRagConfig { Sources = new List<SourceFolder>() };
+        var (catalog, kb, _) = CreateConnectorFixture();
+        var (controller, _) = CreateController(initialConfig, catalog.Object);
+
+        var result = await controller.Update($"{kb.Name} - full", new UpdateSourceRequest { Enabled = false });
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        var code = conflict.Value?.GetType().GetProperty("code")?.GetValue(conflict.Value) as string;
+        Assert.Equal("ConnectorManagedByKnowledgeBase", code);
     }
 
     [Fact]
@@ -164,7 +232,7 @@ public class SourcesControllerTests : IDisposable
     }
 
     [Fact]
-    public void Toggle_WithUrlEncodedChineseName_TogglesState()
+    public async Task Toggle_WithUrlEncodedChineseName_TogglesState()
     {
         var initialConfig = new ObsidianRagConfig
         {
@@ -176,7 +244,7 @@ public class SourcesControllerTests : IDisposable
 
         var (controller, configManager) = CreateController(initialConfig);
 
-        var result = controller.Toggle("%E5%B0%8F%E8%AF%B4", new ToggleRequest { Enabled = false });
+        var result = await controller.Toggle("%E5%B0%8F%E8%AF%B4", new ToggleRequest { Enabled = false });
 
         Assert.IsType<OkResult>(result);
         var updatedConfig = configManager.Load();
@@ -207,7 +275,7 @@ public class SourcesControllerTests : IDisposable
     }
 
     [Fact]
-    public void Scan_ReturnsPhysicalDiskDiagnostics_And_HandlesWildcardRules()
+    public async Task Scan_ReturnsPhysicalDiskDiagnostics_And_HandlesWildcardRules()
     {
         var sourceDir = Path.Combine(_tempDir, "ScanDiagDir");
         Directory.CreateDirectory(sourceDir);
@@ -232,7 +300,7 @@ public class SourcesControllerTests : IDisposable
         var (controller, configManager) = CreateController(initialConfig);
 
         // 1. 规则为 *.md 时：磁盘 3 个文件，匹配 1 个，识别出所有磁盘扩展名
-        var scan1 = controller.Scan("DiagSource");
+        var scan1 = await controller.Scan("DiagSource");
         var ok1 = Assert.IsType<OkObjectResult>(scan1.Result);
         var res1 = Assert.IsType<ScanResult>(ok1.Value);
         Assert.Equal(3, res1.TotalDiskFiles);
@@ -246,7 +314,7 @@ public class SourcesControllerTests : IDisposable
         source.FilePatterns = new List<string> { "*.*" };
         configManager.Save(configManager.Load());
 
-        var scan2 = controller.Scan("DiagSource");
+        var scan2 = await controller.Scan("DiagSource");
         var ok2 = Assert.IsType<OkObjectResult>(scan2.Result);
         var res2 = Assert.IsType<ScanResult>(ok2.Value);
         Assert.Equal(3, res2.TotalDiskFiles);
@@ -256,7 +324,7 @@ public class SourcesControllerTests : IDisposable
         source.FilePatterns = new List<string> { " *.c ", " .txt " };
         configManager.Save(configManager.Load());
 
-        var scan3 = controller.Scan("DiagSource");
+        var scan3 = await controller.Scan("DiagSource");
         var ok3 = Assert.IsType<OkObjectResult>(scan3.Result);
         var res3 = Assert.IsType<ScanResult>(ok3.Value);
         Assert.Equal(3, res3.TotalDiskFiles);

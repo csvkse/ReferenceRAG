@@ -61,6 +61,17 @@ public interface IKnowledgeBaseService
         string? filePattern = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// 幂等挂载：同一知识库内已存在相同路径的连接器时直接返回，不重复创建。
+    /// 跨知识库允许同一路径多次挂载。
+    /// </summary>
+    Task<(ConnectorDefinition Connector, bool Created)> EnsureConnectorAsync(
+        string knowledgeBaseId,
+        string kind,
+        string targetPath,
+        string? filePattern = null,
+        CancellationToken ct = default);
+
     Task<ConnectorDefinition> UpdateConnectorAsync(
         string knowledgeBaseId,
         string connectorId,
