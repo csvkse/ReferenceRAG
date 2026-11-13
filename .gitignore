@@ -119,3 +119,6 @@ docs_secret/
 # Local build artifacts & AI workspace data
 *.tar.gz
 .workbuddy-ai/
+
+# 本地临时工作目录（模板抽取、调试脚本等，不入库）
+support/tmp/
