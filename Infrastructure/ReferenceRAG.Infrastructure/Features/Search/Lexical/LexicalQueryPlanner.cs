@@ -33,6 +33,21 @@ public sealed record LexicalQueryPlannerOptions
     /// </summary>
     public double MaxCandidateRatio { get; init; } = 0.35;
 
+    /// <summary>
+    /// 候选集**绝对**上限（文档数）。与 <see cref="MaxCandidateRatio"/> 取小。
+    /// <para>
+    /// 为什么必须同时有绝对上限：比例预算会随语料线性放大。100 万块时 35% = 35 万行，
+    /// 退化会原样复现（200k 合成语料实测 2.5µs/行 → 875ms）。绝对上限把"最坏情况"钉死。
+    /// </para>
+    /// </summary>
+    public int MaxCandidateDocs { get; init; } = 5_000;
+
+    /// <summary>
+    /// 覆盖率重排的最小查询词数。短查询（如「她的他」）词数太少，覆盖率没有区分度，
+    /// 强行重排只会把 bm25 已经排好的顺序打乱。
+    /// </summary>
+    public int CoverageRerankMinTerms { get; init; } = 6;
+
     public static LexicalQueryPlannerOptions Default { get; } = new();
 }
 
@@ -48,7 +63,10 @@ public sealed record LexicalQueryPlan(
     long EstimatedMatchedDocs,
     double CommonTermCutoff,
     bool UsedFallbackAnchors,
-    bool UsedRecallFloor = false)
+    bool UsedRecallFloor = false,
+    int CandidateBudget = 0,
+    bool BudgetExceeded = false,
+    IReadOnlyList<string>? CoverageTerms = null)
 {
     public static LexicalQueryPlan Empty(string? rawQuery = null)
     {
@@ -63,11 +81,19 @@ public sealed record LexicalQueryPlan(
     /// <summary>候选集是否已经退化（估算命中超过语料一半）。用于门禁与埋点告警。</summary>
     public bool IsDegenerate => CorpusSize > 0 && EstimatedMatchedDocs * 2 >= CorpusSize;
 
+    /// <summary>
+    /// 覆盖率重排的词表：锚点优先（稀有词才代表"用户真正在找什么"）；
+    /// 无锚点时回落全部词元，避免小库路径拿不到覆盖率。
+    /// </summary>
+    public IReadOnlyList<string> CoverageBasis => CoverageTerms ?? AnchorTerms;
+
     public string Describe()
     {
         var pruned = PrunedCommonTerms.Count == 0 ? "-" : string.Join("/", PrunedCommonTerms.Take(6));
         return $"anchors={AnchorTerms.Count} pruned={PrunedCommonTerms.Count}({pruned}) " +
                $"est={EstimatedMatchedDocs}/{CorpusSize} near={NearClauses.Count}" +
+               $" budget={CandidateBudget}" +
+               (BudgetExceeded ? " bounded=prefetch" : "") +
                (UsedFallbackAnchors ? " fallback=common" : "") +
                (UsedRecallFloor ? " fallback=recall-floor" : "");
     }
@@ -108,7 +134,8 @@ public static class LexicalQueryPlanner
             var legacy = Or(tokens);
             return new LexicalQueryPlan(
                 tokens, Array.Empty<string>(), Array.Empty<string>(),
-                new[] { legacy }, corpusSize, 0, opt.CommonTermCutoff, false);
+                new[] { legacy }, corpusSize, 0, opt.CommonTermCutoff, false,
+                false, BudgetOf(opt, corpusSize), false, tokens);
         }
 
         int Df(string t) => documentFrequency.TryGetValue(t, out var v) && v > 0 ? v : 0;
@@ -122,9 +149,10 @@ public static class LexicalQueryPlanner
             .ThenByDescending(t => t.Length)
             .ToList();
 
-        // 2) 候选集硬预算：按 df 升序贪心累加，并集上界不得超过 MaxCandidateRatio。
-        //    至少保留 1 个（最稀有的那个），否则宁可返回空也不返回全库。
-        var budget = Math.Max(1.0, opt.MaxCandidateRatio * corpusSize);
+        // 2) 候选集硬预算 = min(绝对上限, 比例预算)。
+        //    绝对上限不可省：比例预算会随语料线性放大（100 万块时 35% = 35 万行），
+        //    退化会原样复现；绝对上限把"最坏情况"钉死在 5000 行。
+        var budget = Math.Max(1.0, Math.Min(opt.MaxCandidateDocs, opt.MaxCandidateRatio * corpusSize));
         var anchors = new List<string>();
         long estimated = 0;
         foreach (var term in rareByDf)
@@ -140,13 +168,20 @@ public static class LexicalQueryPlanner
         if (anchors.Count == 0)
         {
             // 3) 全句都是虚词（如「她的他」）：退回 df 最小的若干词，保证"有结果"优先于"够快"。
-            anchors = tokens
+            //    但兜底同样必须守预算——否则「3 个虚词的 OR」直接命中全库：
+            //    57k 库实测「她的他」est=25983/57733（45% 语料，已超预算），kb.fts.match 181ms。
+            var fallbackCandidates = tokens
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(Df)
                 .ThenByDescending(t => t.Length)
-                .Take(opt.MaxCommonFallbackTerms)
                 .ToList();
-            estimated = anchors.Sum(t => (long)Df(t));
+            // 兜底层不能选 df=0 的词（语料里根本不存在，查了也是空）。
+            var withHits = fallbackCandidates.Where(t => Df(t) > 0).ToList();
+            if (withHits.Count > 0) fallbackCandidates = withHits;
+            var take = Math.Min(opt.MaxCommonFallbackTerms, fallbackCandidates.Count);
+            while (take > 1 && SumDf(fallbackCandidates.Take(take), Df) > budget) take--;
+            anchors = fallbackCandidates.Take(take).ToList();
+            estimated = SumDf(anchors, Df);
             usedFallbackAnchors = true;
         }
 
@@ -168,13 +203,27 @@ public static class LexicalQueryPlanner
             if (nearClauses.Count < 2) nearClauses.Clear();
         }
 
-        // 5) 阶梯查询：严格 → 放宽 → 原文短语（短语只作最后的保底，绝不与全词 OR 并列）。
+        // 5) 阶梯查询：NEAR（相邻）→ AND（多约束）→ OR（锚点）→ 原文短语 → 地板
         var queries = new List<string>();
         if (nearClauses.Count >= 2)
         {
             var head = nearClauses.Take(2).ToList();
             queries.Add($"({string.Join(" AND ", head)}) OR {string.Join(" OR ", nearClauses)}");
         }
+
+        // AND 层：所有锚点必须**同时**命中（Elasticsearch low_freq_operator=and 的等价物）。
+        // 它必须排在纯 OR 层之前：AND 的命中集是 OR 的子集，先试更严格的那层，
+        // 命中够 topK 就直接早停，OR 层根本不执行。合成语料实测 12 词 5000 命中 → 163 命中，
+        // 打分 9.57ms → 3.00ms。
+        if (anchors.Count >= 2)
+        {
+            var andQuery = And(anchors);
+            if (!string.IsNullOrWhiteSpace(andQuery) && !queries.Contains(andQuery))
+            {
+                queries.Add(andQuery);
+            }
+        }
+
         var orQuery = Or(anchors);
         if (!string.IsNullOrWhiteSpace(orQuery) && !queries.Contains(orQuery))
         {
@@ -194,11 +243,16 @@ public static class LexicalQueryPlanner
         var usedRecallFloor = false;
         if (estimated == 0 && pruned.Count > 0)
         {
-            var floorTerms = pruned
+            var floorCandidates = pruned
                 .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(t => Df(t) > 0)   // df=0 的词在本语料不存在，拿它当地板等于返回空
                 .OrderBy(Df)
-                .Take(opt.MaxCommonFallbackTerms)
                 .ToList();
+            // 地板层同样守预算：锚点 df 全 0 时 pruned 里全是虚词，
+            // 3 个虚词的 OR 就是全库扫描。收缩到 df 最小的 1 个，把地板代价钉在"单个词"。
+            var floorTake = Math.Min(opt.MaxCommonFallbackTerms, floorCandidates.Count);
+            while (floorTake > 1 && SumDf(floorCandidates.Take(floorTake), Df) > budget) floorTake--;
+            var floorTerms = floorCandidates.Take(floorTake).ToList();
             var floorQuery = Or(floorTerms);
             if (!string.IsNullOrWhiteSpace(floorQuery) && !queries.Contains(floorQuery))
             {
@@ -207,10 +261,43 @@ public static class LexicalQueryPlanner
             }
         }
 
+        var cappedEstimated = Math.Min(corpusSize, estimated);
+        // 覆盖率基准：锚点（稀有词）才代表"用户真正在找什么"；无锚点时回落全部词元。
+        var coverageTerms = anchors.Count > 0 ? (IReadOnlyList<string>)anchors : tokens;
         return new LexicalQueryPlan(
             anchors, pruned, nearClauses, queries,
-            corpusSize, Math.Min(corpusSize, estimated), opt.CommonTermCutoff, usedFallbackAnchors, usedRecallFloor);
+            corpusSize, cappedEstimated, opt.CommonTermCutoff,
+            usedFallbackAnchors, usedRecallFloor,
+            (int)budget, cappedEstimated > budget, coverageTerms);
     }
+
+    /// <summary>
+    /// 候选预算 = min(绝对上限, 比例预算)，至少 1。
+    /// <para>
+    /// 小库（&lt; <see cref="LexicalQueryPlannerOptions.MinCorpusSizeForPruning"/>）不做预算约束：
+    /// 256 块以内全量 bm25 打分只要几毫秒，而 0.35 × 9 块 = 3 会把候选窗口压到个位数，
+    /// 导致"按 connector / 目录授权过滤"的场景拿不到候选（这是真实回归：
+    /// <c>KnowledgeBaseLexicalRecallFiltersConnectorBeforeTopK</c> 曾因此返回空）。
+    /// </para>
+    /// </summary>
+    private static int BudgetOf(LexicalQueryPlannerOptions opt, int corpusSize)
+    {
+        if (corpusSize < opt.MinCorpusSizeForPruning) return opt.MaxCandidateDocs;
+        return (int)Math.Max(1.0, Math.Min(opt.MaxCandidateDocs, opt.MaxCandidateRatio * corpusSize));
+    }
+
+    private static long SumDf(IEnumerable<string> terms, Func<string, int> df)
+    {
+        long sum = 0;
+        foreach (var t in terms) sum += df(t);
+        return sum;
+    }
+
+    /// <summary>把一组词元拼成 FTS5 的 AND 表达式（每个词加引号锁定，防止被当成语法）。</summary>
+    public static string And(IEnumerable<string> terms)
+        => string.Join(" AND ", terms
+            .Where(t => !string.IsNullOrWhiteSpace(t))
+            .Select(t => $"\"{Escape(t)}\""));
 
     /// <summary>把一组词元拼成 FTS5 的 OR 表达式（每个词加引号锁定，防止被当成语法）。</summary>
     public static string Or(IEnumerable<string> terms)

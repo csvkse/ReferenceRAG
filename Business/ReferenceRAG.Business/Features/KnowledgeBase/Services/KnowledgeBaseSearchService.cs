@@ -310,7 +310,8 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
             EarlyPruned: snapshots.Any(s => s.EarlyPruned),
             Degraded: isDegraded,
             DegradationReason: degradationReason,
-            IndexDegraded: indexDegraded
+            IndexDegraded: indexDegraded,
+            UsedRecallFloor: snapshots.Any(s => s.UsedRecallFloor)
         );
     }
 

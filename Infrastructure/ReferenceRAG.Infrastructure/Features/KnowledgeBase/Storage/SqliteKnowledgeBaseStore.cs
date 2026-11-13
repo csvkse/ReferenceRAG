@@ -1500,7 +1500,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         string folderClause,
         IReadOnlyList<SqliteParameter> folderParams,
         HashSet<string> seenChunkIds,
-        CancellationToken ct)
+        CancellationToken ct,
+        LexicalQueryPlan? plan = null,
+        bool isFloorTier = false)
     {
         using var span = TimingScope.Begin("kb.fts.match", SpanCategory.Io, "FTS5 匹配");
         span.AddAttribute("kb", KnowledgeBaseId);
@@ -1519,8 +1521,21 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             // 现在先在 FTS 内部只取「前 N 个候选的 chunk_id + 分数」，再回填正文：
             // 冷缓存下被读的页数从 O(命中数) 降到 O(候选数)，这是 18s → 亚秒的关键一步。
             // 目录/授权过滤放在外层，若过滤后不足 topK，则指数放大候选窗口重试（保证结果正确性）。
-            var candidateWindow = Math.Clamp(topK * 8, 80, 2000);
-            const int maxCandidates = 2000;
+            //
+            // 候选窗口受查询计划的**绝对预算**约束（P0-1）：比例预算会随语料线性放大，
+            // 绝对上限（5000）把最坏情况钉死。窗口上限同时受 2000 的 IO 约束。
+            var budget = plan is { CandidateBudget: > 0 } ? plan.CandidateBudget : 2000;
+            // 下限 80 是两阶段召回的最小窗口：若把窗口压到 topK 附近，
+            // 一旦外层 connector / 目录授权过滤掉几个候选，就再也补不回来（窗口重试的上限也被压死）。
+            var maxCandidates = Math.Max(Math.Max(topK, 80), Math.Min(2000, budget));
+            var candidateWindow = Math.Min(maxCandidates, Math.Clamp(topK * 8, 80, 2000));
+
+            // 退化查询（估算命中 > 预算）：bm25 排序必须对全部命中行打分，LIMIT 完全无效。
+            // 有界预取 SQL（rowid IN 子查询）实测反而慢 110 倍（FTS5 虚表不支持下推），
+            // 所以这里换成「流式取 chunk_id → 批量回表 → 覆盖率重排」，见 CollectByBoundedPrefetchAsync。
+            var boundedPrefetch = plan is { BudgetExceeded: true } && table == "fts_chunks_lexical";
+            span.AddAttribute("bounded", boundedPrefetch ? "prefetch" : "bm25");
+
             var collected = new List<RecallItem>(topK);
 
             for (int attempt = 0; ; attempt++)
@@ -1528,68 +1543,57 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 collected.Clear();
                 var localSeen = new HashSet<string>(StringComparer.Ordinal);
 
-                using var cmd = conn.CreateCommand();
-                cmd.Transaction = tx;
-                cmd.CommandText = $@"
-                    SELECT c.id, c.document_id, d.source_key, c.text, f.score,
-                           c.document_version, d.connector_id, d.locator,
-                           c.start_line, c.end_line, c.heading_path
-                    FROM (
-                        SELECT chunk_id, {scoreExpr} AS score
-                        FROM {table}
-                        WHERE {table} MATCH @match
-                        ORDER BY score ASC
-                        LIMIT @candidates
-                    ) f
-                    JOIN chunks c ON c.id = f.chunk_id
-                    JOIN documents d ON d.id = c.document_id
-                    WHERE c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}
-                    ORDER BY f.score ASC
-                    LIMIT @topK;
-                ";
-                cmd.Parameters.AddWithValue("@match", ftsQuery);
-                cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@topK", topK);
-                cmd.Parameters.AddWithValue("@candidates", candidateWindow);
-                foreach (var p in folderParams)
+                if (boundedPrefetch)
                 {
-                    cmd.Parameters.AddWithValue(p.ParameterName, p.Value);
+                    collected.AddRange(await CollectByBoundedPrefetchAsync(
+                        conn, tx, table, ftsQuery, request, scopeClause, folderClause,
+                        folderParams, seenChunkIds, localSeen, candidateWindow, ct));
                 }
-
-                using (var reader = await cmd.ExecuteReaderAsync(ct))
+                else
                 {
+                    using var cmd = conn.CreateCommand();
+                    cmd.Transaction = tx;
+                    // ⚠️ 列顺序必须与 ReadRecallItem 严格一致：0~9 是公共列，第 10 列才是 score。
+                    // 两条召回路径（bm25 / 有界预取）的列序必须相同，否则 ConnectorId、StartLine
+                    // 会静默错位——授权过滤读到 document_version，行号读到 locator。
+                    cmd.CommandText = $@"
+                        SELECT c.id, c.document_id, d.source_key, c.text,
+                               c.document_version, d.connector_id, d.locator,
+                               c.start_line, c.end_line, c.heading_path,
+                               f.score
+                        FROM (
+                            SELECT chunk_id, {scoreExpr} AS score
+                            FROM {table}
+                            WHERE {table} MATCH @match
+                            ORDER BY score ASC
+                            LIMIT @candidates
+                        ) f
+                        JOIN chunks c ON c.id = f.chunk_id
+                        JOIN documents d ON d.id = c.document_id
+                        WHERE c.enabled = 1 AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}
+                        ORDER BY f.score ASC
+                        LIMIT @topK;
+                    ";
+                    cmd.Parameters.AddWithValue("@match", ftsQuery);
+                    cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@topK", topK);
+                    cmd.Parameters.AddWithValue("@candidates", candidateWindow);
+                    foreach (var p in folderParams)
+                    {
+                        cmd.Parameters.AddWithValue(p.ParameterName, p.Value);
+                    }
+
+                    using var reader = await cmd.ExecuteReaderAsync(ct);
                     while (await reader.ReadAsync(ct))
                     {
                         var chunkId = reader.GetString(0);
                         // 跨查询去重（seenChunkIds）在窗口重试全部成功后才提交，避免半成品污染后续查询
                         if (seenChunkIds.Contains(chunkId) || !localSeen.Add(chunkId)) continue;
 
-                        var docId = reader.GetString(1);
-                        var sourceKey = reader.GetString(2);
-                        var text = reader.GetString(3);
-                        var bm25Raw = reader.GetDouble(4);
-                        var docVer = reader.GetInt64(5);
-                        var connId = reader.GetString(6);
-                        var startLine = reader.IsDBNull(8) ? 0 : reader.GetInt32(8);
-                        var endLine = reader.IsDBNull(9) ? 0 : reader.GetInt32(9);
-                        var headingPath = reader.IsDBNull(10) ? null : reader.GetString(10);
-
+                        var bm25Raw = reader.GetDouble(10);
                         var score = request.UseLexicalTokenizer ? Math.Abs(bm25Raw) : 1.0 / (1.0 + Math.Max(0, bm25Raw));
 
-                        collected.Add(new RecallItem(
-                            ChunkId: chunkId,
-                            DocumentId: docId,
-                            SourceKey: sourceKey,
-                            Text: text,
-                            Score: score,
-                            ScoreKind: ScoreKind.BM25,
-                            DocumentVersion: docVer,
-                            ConnectorId: connId,
-                            Locator: reader.IsDBNull(7) ? null : reader.GetString(7),
-                            StartLine: startLine,
-                            EndLine: endLine,
-                            HeadingPath: headingPath
-                        ));
+                        collected.Add(ReadRecallItem(reader, score, ScoreKind.BM25));
                     }
                 }
 
@@ -1597,9 +1601,26 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 candidateWindow = Math.Min(maxCandidates, candidateWindow * 4);
             }
 
+            // ── 覆盖率重排（P0-3）──────────────────────────────────────────
+            // 为什么需要：bm25 对"查询词命中数"完全不敏感。命中 9/10 个词的长文档
+            // 可能因为长度归一化而排在一个只命中 2/10 个词的短文档之后。
+            // 只在词数足够（锚点 >= 3）时启用——短查询的覆盖率没有区分度，只会打乱 bm25 顺序。
+            ApplyCoverageRerank(collected, plan);
+
+            // 地板层结果必须能被上层识别：它与精确命中在界面上长得一模一样，
+            // 不标记就等于把"宽松兜底"伪装成"精确匹配"（上一轮遗留的 P1）。
+            if (isFloorTier && collected.Count > 0)
+            {
+                for (int i = 0; i < collected.Count; i++)
+                {
+                    collected[i] = collected[i] with { IsFloor = true };
+                }
+            }
+
             foreach (var item in collected) seenChunkIds.Add(item.ChunkId);
             resultList.AddRange(collected);
             span.AddAttribute("candidates", candidateWindow.ToString());
+            if (isFloorTier) span.AddAttribute("floor", "1");
         }
         catch (SqliteException ex)
         {
@@ -1607,6 +1628,136 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         }
         span.SetOutput(resultList.Count);
         return resultList;
+    }
+
+    /// <summary>
+    /// 退化查询的有界预取：FTS5 的 <c>bm25()</c> 必须对**全部命中行**打分再排序，
+    /// <c>LIMIT</c> 只减少回表、不减少打分（200k 语料实测 LIMIT 10 = 369ms，LIMIT 100000 = 413ms）。
+    /// 而「<c>rowid IN (SELECT ... LIMIT n)</c>」这种写法无法下推到 FTS5 虚表，
+    /// 实测反而从 9.53ms 恶化到 1054.91ms（110 倍）。
+    /// <para>
+    /// 因此退化查询唯一可行的降本方式是**放弃 bm25 排序**：
+    /// 流式取前 N 个 chunk_id（不排序，2000 个 1.02ms）→ <c>json_each</c> 批量回表 → 覆盖率重排。
+    /// 代价是顺序不再由 bm25 决定；但对"锚点全是虚词/命中超预算"的退化查询，
+    /// bm25 顺序本来就没有区分度，覆盖率反而是更好的排序依据。
+    /// </para>
+    /// </summary>
+    private async Task<List<RecallItem>> CollectByBoundedPrefetchAsync(
+        SqliteConnection conn,
+        SqliteTransaction tx,
+        string table,
+        string ftsQuery,
+        RecallRequest request,
+        string scopeClause,
+        string folderClause,
+        IReadOnlyList<SqliteParameter> folderParams,
+        HashSet<string> seenChunkIds,
+        HashSet<string> localSeen,
+        int window,
+        CancellationToken ct)
+    {
+        var items = new List<RecallItem>(Math.Min(window, 256));
+        var ids = new List<string>(Math.Min(window, 256));
+
+        using (var probe = conn.CreateCommand())
+        {
+            probe.Transaction = tx;
+            probe.CommandText = $"SELECT chunk_id FROM {table} WHERE {table} MATCH @match LIMIT @lim";
+            probe.Parameters.AddWithValue("@match", ftsQuery);
+            probe.Parameters.AddWithValue("@lim", window);
+            using var reader = await probe.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                if (reader.IsDBNull(0)) continue;
+                var id = reader.GetString(0);
+                if (seenChunkIds.Contains(id) || !localSeen.Add(id)) continue;
+                ids.Add(id);
+            }
+        }
+
+        if (ids.Count == 0) return items;
+
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $@"
+            SELECT c.id, c.document_id, d.source_key, c.text,
+                   c.document_version, d.connector_id, d.locator,
+                   c.start_line, c.end_line, c.heading_path
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.enabled = 1
+              AND c.id IN (SELECT value FROM json_each(@ids))
+              AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}";
+        cmd.Parameters.AddWithValue("@ids", JsonSerializer.Serialize(ids));
+        cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
+        foreach (var p in folderParams)
+        {
+            cmd.Parameters.AddWithValue(p.ParameterName, p.Value);
+        }
+
+        using var rows = await cmd.ExecuteReaderAsync(ct);
+        while (await rows.ReadAsync(ct))
+        {
+            // 预取路径没有 bm25 分数：Score 先置 0，随后由覆盖率重排覆盖为 coverage。
+            items.Add(ReadRecallItem(rows, 0.0, ScoreKind.BM25));
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// 从「chunk JOIN documents」结果行构造 RecallItem（两条召回路径共用）。
+    /// <para>
+    /// <b>列序契约</b>：0=chunk_id, 1=document_id, 2=source_key, 3=text, 4=document_version,
+    /// 5=connector_id, 6=locator, 7=start_line, 8=end_line, 9=heading_path。
+    /// bm25 路径把 score 放在第 10 列；有界预取路径没有 score，由覆盖率补齐。
+    /// 任何一条 SQL 改列序都必须同步这里，否则 ConnectorId / StartLine 会静默错位。
+    /// </para>
+    /// </summary>
+    private static RecallItem ReadRecallItem(SqliteDataReader reader, double score, ScoreKind kind)
+        => new(
+            ChunkId: reader.GetString(0),
+            DocumentId: reader.GetString(1),
+            SourceKey: reader.GetString(2),
+            Text: reader.GetString(3),
+            Score: score,
+            ScoreKind: kind,
+            DocumentVersion: reader.GetInt64(4),
+            ConnectorId: reader.GetString(5),
+            Locator: reader.IsDBNull(6) ? null : reader.GetString(6),
+            StartLine: reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+            EndLine: reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
+            HeadingPath: reader.IsDBNull(9) ? null : reader.GetString(9));
+
+    /// <summary>
+    /// 覆盖率重排：<c>(coverage desc, score desc)</c>。
+    /// coverage = 命中锚点数 / 锚点总数。锚点数 &lt; 3 时不计算（没有区分度）。
+    /// </summary>
+    private void ApplyCoverageRerank(List<RecallItem> items, LexicalQueryPlan? plan)
+    {
+        if (items.Count == 0 || plan == null) return;
+        var basis = plan.CoverageBasis;
+        if (basis.Count < 3) return;
+
+        var distinct = basis.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        for (int i = 0; i < items.Count; i++)
+        {
+            var text = items[i].Text;
+            int hits = 0;
+            foreach (var term in distinct)
+            {
+                if (text.Contains(term, StringComparison.OrdinalIgnoreCase)) hits++;
+            }
+            var coverage = (double)hits / distinct.Count;
+            // 预取路径的 Score 是占位 0，用覆盖率补齐，保证融合/排序有可用的信号。
+            var score = items[i].Score > 0 ? items[i].Score : coverage;
+            items[i] = items[i] with { Coverage = coverage, Score = score };
+        }
+
+        items.Sort((a, b) =>
+        {
+            var byCoverage = (b.Coverage ?? 0).CompareTo(a.Coverage ?? 0);
+            return byCoverage != 0 ? byCoverage : b.Score.CompareTo(a.Score);
+        });
     }
 
     public async Task<RecallSnapshot> RecallAsync(RecallRequest request, CancellationToken ct = default)
@@ -1787,6 +1938,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         }
 
         var seenChunkIds = new HashSet<string>(StringComparer.Ordinal);
+        var usedRecallFloorHit = false;
         if (useLexicalTable && !lexicalReady)
         {
             // 降级通道：词法倒排索引尚未补齐时，用关键词 LIKE 扫描兜底（毫秒级，绝不阻塞在分词建索引上）
@@ -1797,10 +1949,15 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         }
         else
         {
-            foreach (var ftsQuery in queriesToTry)
+            for (int qi = 0; qi < queriesToTry.Count; qi++)
             {
                 if (bm25Items.Count >= request.TopK) break;
-                var retrieved = await ExecuteLexicalQueryInternalAsync(conn, tx, table, ftsQuery, request, scopeClause, folderClause, folderParams, seenChunkIds, ct);
+                // 地板层永远是阶梯的最后一级：前面所有层都不足 topK 时才会执行到这里。
+                var isFloorTier = lexicalQueryPlan is { UsedRecallFloor: true } && qi == queriesToTry.Count - 1;
+                var retrieved = await ExecuteLexicalQueryInternalAsync(
+                    conn, tx, table, queriesToTry[qi], request, scopeClause, folderClause,
+                    folderParams, seenChunkIds, ct, lexicalQueryPlan, isFloorTier);
+                if (isFloorTier && retrieved.Count > 0) usedRecallFloorHit = true;
                 bm25Items.AddRange(retrieved);
             }
         }
@@ -1815,7 +1972,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 return new RecallSnapshot(
                     KnowledgeBaseId, readRevision, contentGeneration, vectorGeneration,
                     bm25Items.Take(request.TopK).ToList(),
-                    Degraded: isDegraded, DegradationReason: degradeReason, EarlyPruned: true);
+                    Degraded: isDegraded, DegradationReason: degradeReason, EarlyPruned: true,
+                    UsedRecallFloor: usedRecallFloorHit);
             }
         }
 
@@ -1950,7 +2108,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
 
         return new RecallSnapshot(
             KnowledgeBaseId, readRevision, contentGeneration, vectorGeneration, finalItems,
-            Degraded: isDegraded, DegradationReason: degradeReason);
+            Degraded: isDegraded, DegradationReason: degradeReason,
+            UsedRecallFloor: usedRecallFloorHit);
 
     }
 

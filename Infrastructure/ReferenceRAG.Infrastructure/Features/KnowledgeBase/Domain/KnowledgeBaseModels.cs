@@ -306,7 +306,15 @@ public sealed record RecallItem(
     string? Locator = null,
     int StartLine = 0,
     int EndLine = 0,
-    string? HeadingPath = null);
+    string? HeadingPath = null,
+    /// <summary>
+    /// 查询词覆盖率（命中锚点数 / 锚点总数，0~1）。null 表示本次未计算
+    /// （短查询无区分度、或走了向量/融合路径）。
+    /// 用途：把"宽松兜底"与"精确命中"在界面上区分开，避免地板层结果被误认为精确匹配。
+    /// </summary>
+    double? Coverage = null,
+    /// <summary>该结果来自召回地板层（锚点内容词在本语料不存在时的宽松兜底）。</summary>
+    bool IsFloor = false);
 
 /// <summary>
 /// 某库检索返回的快照
@@ -319,7 +327,9 @@ public sealed record RecallSnapshot(
     IReadOnlyList<RecallItem> Items,
     bool Degraded = false,
     string? DegradationReason = null,
-    bool EarlyPruned = false);
+    bool EarlyPruned = false,
+    /// <summary>本次召回是否触发了「召回地板」（宽松兜底）层，供上层透出给前端提示。</summary>
+    bool UsedRecallFloor = false);
 
 /// <summary>
 /// 知识库索引 Manifest（保存在 kb.db 内部）

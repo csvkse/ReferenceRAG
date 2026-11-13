@@ -229,4 +229,10 @@ public sealed record CrossKnowledgeBaseSearchResponse(
     /// </summary>
     bool IndexDegraded = false,
     /// <summary>本次跨库检索的全链路耗时链（扇出 / 各库召回 / 融合），未开启时为 null。</summary>
-    ReferenceRAG.Core.Tracing.TimingChain? TimingChain = null);
+    ReferenceRAG.Core.Tracing.TimingChain? TimingChain = null,
+    /// <summary>
+    /// 本次召回是否触发了词法「召回地板」：查询的内容词在本语料中不存在，
+    /// 只能回落到虚词做宽松兜底。前端应提示"未找到匹配内容，以下为宽松结果"，
+    /// 否则这些结果会被误认为精确命中（上一轮遗留的 P1）。
+    /// </summary>
+    bool UsedRecallFloor = false);
