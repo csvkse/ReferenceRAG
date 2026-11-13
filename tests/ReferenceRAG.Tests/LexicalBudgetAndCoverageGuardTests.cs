@@ -289,6 +289,49 @@ public class LexicalBudgetAndCoverageGuardTests
         finally { Cleanup(dir); }
     }
 
+    // ---------------- G8-9：FTS5 段合并与 automerge 配置 ----------------
+
+    [Fact]
+    public async Task G8_FtsSegments_MustBeMergedAndAutomergeConfigured()
+    {
+        // 真实事故：881MB 库上「zzzzzzqqq」（0 命中）239ms、「量子」（0 命中）223ms，
+        // 而「纠缠」（有命中）只要 4ms。根因不是查询退化，是 **FTS5 段碎片化**——
+        // 数百次 commit 留下数百个 segment，"词不存在"要在每个 segment 的 term 索引里各查一次。
+        var dir = NewDir("g8-segments");
+        var dbPath = Path.Combine(dir, "kb.db");
+        try
+        {
+            using var store = new SqliteKnowledgeBaseStore("kb_g8seg", dbPath);
+            await store.InitializeAsync();
+            await SeedCoverageCorpusAsync(store, 400);
+
+            // 1) automerge 必须被显式配置（默认 4 对 200 块/批的写入节奏太保守）
+            var automerge = await ScalarAsync(dbPath,
+                "SELECT v FROM fts_chunks_lexical_config WHERE k='automerge'");
+            Assert.Equal(8L, automerge);
+
+            // 2) optimize 必须可用且幂等
+            Assert.True(await store.OptimizeLexicalIndexAsync(), "optimize 执行失败");
+            Assert.True(await store.OptimizeLexicalIndexAsync(), "optimize 必须可重复执行");
+
+            // 3) optimize 不得改变检索结果（它是物理重排，不是逻辑变更）
+            var after = await store.RecallAsync(new RecallRequest(
+                "江湖 客栈 秘籍 师父 徒弟 内功", TopK: 10, UseLexicalTokenizer: true, AllowDegrade: true));
+            Assert.NotEmpty(after.Items);
+            Assert.All(after.Items, i => Assert.NotNull(i.ChunkId));
+
+            // 4) 0 命中查询在合并后必须明显快于"逐 segment 查 term 索引"的量级
+            var sw = Stopwatch.StartNew();
+            var miss = await store.RecallAsync(new RecallRequest(
+                "zzzzqqqq不存在的词", TopK: 10, UseLexicalTokenizer: true, AllowDegrade: true));
+            sw.Stop();
+            Assert.Empty(miss.Items);
+            Assert.True(sw.ElapsedMilliseconds < 300,
+                $"0 命中查询耗时 {sw.ElapsedMilliseconds}ms，疑似段未合并");
+        }
+        finally { Cleanup(dir); }
+    }
+
     // ---------------- helpers ----------------
 
     /// <summary>

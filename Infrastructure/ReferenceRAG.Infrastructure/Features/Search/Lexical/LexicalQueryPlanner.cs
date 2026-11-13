@@ -90,7 +90,10 @@ public sealed record LexicalQueryPlan(
     public string Describe()
     {
         var pruned = PrunedCommonTerms.Count == 0 ? "-" : string.Join("/", PrunedCommonTerms.Take(6));
-        return $"anchors={AnchorTerms.Count} pruned={PrunedCommonTerms.Count}({pruned}) " +
+        // 锚点词本身也要打出来：只看 anchors=3 无法判断"这 3 个词到底是不是用户想找的东西"，
+        // 而排查 0 结果时这是第一个要看的信息（df 全 0 还是被剪光了）。
+        var anchorsDesc = AnchorTerms.Count == 0 ? "-" : string.Join("/", AnchorTerms.Take(4));
+        return $"anchors={AnchorTerms.Count}({anchorsDesc}) pruned={PrunedCommonTerms.Count}({pruned}) " +
                $"est={EstimatedMatchedDocs}/{CorpusSize} near={NearClauses.Count}" +
                $" budget={CandidateBudget}" +
                (BudgetExceeded ? " bounded=prefetch" : "") +

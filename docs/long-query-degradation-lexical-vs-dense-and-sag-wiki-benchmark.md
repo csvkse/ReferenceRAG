@@ -982,6 +982,22 @@ var budget = Math.Min(opt.MaxCandidateDocs, Math.Max(1.0, opt.MaxCandidateRatio 
 **风险**：召回下降 → 由地板层 + 覆盖率排序兜住；`GiveUp` 时明确返回"无匹配"。
 **门禁**：`G8_1_CandidateBudget_MustHaveAbsoluteCap`（结构：源码必须出现绝对上限常量；行为：1M 语料 `EstimatedMatchedDocs ≤ 5_000`）。
 
+> **⚠️ 实施后的实测修正（2026-11-14，必读）**
+>
+> 上面「1M 语料 875ms → 12ms」的预期**不成立**。落地时实测发现三件事：
+>
+> 1. **`LIMIT` 不能减少打分，只能减少回表。** 已实现的两阶段 SQL 是
+>    `SELECT chunk_id, bm25() ... ORDER BY score LIMIT @candidates`，内层仍然要对**全部命中行**算 bm25。
+>    把 `@candidates` 从 35 万降到 5 千，减少的是 JOIN 回表的行数，不是打分成本。
+> 2. **「有界预取 SQL」这条路是死的。** 尝试 `WHERE MATCH ? AND rowid IN (SELECT rowid FROM fts WHERE MATCH ? LIMIT 500)`，
+>    SQLite 无法把 `rowid IN` 下推到 FTS5 虚表，实测 **9.53ms → 1054.91ms（恶化 110 倍）**。
+> 3. **真正有效的降本方式是「放弃 bm25 排序」。** 流式取 `chunk_id`（不排序）实测
+>    **1.02ms / 2000 个**，而同样 2000 个候选全量排序要 8.28ms（5k 语料）；内存覆盖率重排 2.36ms。
+>
+> 因此实现改为：**`BudgetExceeded`（估算命中 > 预算）时切换到「流式预取 + 覆盖率重排」**，
+> 见 §10.6。绝对上限的真实语义是「候选窗口上限」，不是「打分成本上限」。
+> **打分成本只能靠 P0-2 的 AND 层或放弃排序来降。**
+
 ### P0-2 AND 分层
 
 **改动**：在 `queries` 列表**最前面**插入一层：
@@ -1069,6 +1085,92 @@ CREATE TABLE IF NOT EXISTS lexical_term_stats (
 
 > 推荐顺序：先把 P1-2（两阶段 + 有界堆）做完再评估 ANN。
 > 因为 100 万块 × 1024 维 = 4GB，**内存装不下时任何"内存池"方案都失效**，那才是 ANN 的真正触发点。
+
+---
+
+### 10.6 P0 实施记录（2026-11-14，已上线 dev）
+
+#### 10.6.1 改了什么
+
+| 文件 | 改动 |
+| :--- | :--- |
+| `Infrastructure/.../Search/Lexical/LexicalQueryPlanner.cs` | `MaxCandidateDocs=5000`；`budget=min(绝对上限, 35%)`；兜底/地板层守预算并跳过 `df=0` 的词；新增 `And()` 与 AND 层；Plan 新增 `CandidateBudget / BudgetExceeded / CoverageTerms` |
+| `Infrastructure/.../KnowledgeBase/Storage/SqliteKnowledgeBaseStore.cs` | 候选窗口受预算约束（下限 80）；`BudgetExceeded` 时切到 `CollectByBoundedPrefetchAsync`；新增 `ApplyCoverageRerank`；抽出 `ReadRecallItem` 统一列序契约；地板层逐条标记 `IsFloor` |
+| `Infrastructure/.../KnowledgeBase/Domain/KnowledgeBaseModels.cs` | `RecallItem.Coverage / IsFloor`；`RecallSnapshot.UsedRecallFloor` |
+| `Business/.../Services/IKnowledgeBaseService.cs` | `CrossKnowledgeBaseSearchResponse.UsedRecallFloor` |
+| `Business/.../Services/KnowledgeBaseSearchService.cs` | 跨库聚合 `UsedRecallFloor: snapshots.Any(...)` |
+| `wwwroot/app/views/lexical-search-template.js` | 透出 `usedRecallFloor` / `coverage` / `isFloor`；新增「⚠ 宽松兜底」与逐条「宽松匹配 N%」标签 |
+| `tests/.../LexicalBudgetAndCoverageGuardTests.cs`（新增） | G8-1~G8-8，9 个用例 |
+
+#### 10.6.2 落地时才发现的三个问题
+
+**① 「有界预取 SQL」是死路（推翻了方案原假设）**
+
+| 写法 | 5k 语料实测 |
+| :--- | ---: |
+| `SELECT rowid, bm25() FROM t WHERE MATCH ? ORDER BY rank LIMIT 10` | 9.53 ms |
+| `... WHERE MATCH ? AND rowid IN (SELECT rowid FROM t WHERE MATCH ? LIMIT 500)` | **1054.91 ms（110×）** |
+| `SELECT rowid FROM t WHERE MATCH ? LIMIT 2000`（流式，不排序） | **1.02 ms** |
+| 内存覆盖率重排 2000 候选 | **2.36 ms** |
+
+`rowid IN (子查询)` 无法下推到 FTS5 虚表，退化成逐行求值。
+**结论**：想让 bm25 少打分，只有两条路——① 缩小命中集（AND 层）；② 干脆不排序（流式预取 + 覆盖率重排）。
+
+**② 绝对预算在小库上会压死候选窗口（真实回归）**
+
+`0.35 × 9 块 = 3` → 候选窗口 3。8 个"无权限"块排在前面时，`WHERE connector=...` 过滤后一条不剩，
+`KnowledgeBaseLexicalRecallFiltersConnectorBeforeTopK` 直接变红。
+**修正**：小库（< 256 块）不做预算约束（`BudgetOf` 返回 5000），且执行层窗口下限固定为 80。
+
+**③ 两条召回路径共用读取器导致列错位（由既有架构门禁捕获）**
+
+把 `ReadRecallItem` 抽出来复用时，bm25 路径的 `f.score` 还在第 4 列，而预取路径第 4 列是
+`document_version`。结果 `ConnectorId` 读到了 `document_version`、`StartLine` 读到了 `locator`，
+表现是**授权过滤把所有结果判为无权限 → 检索静默返回空**、行号恒为 0。
+**修正**：统一列序契约为「0~9 公共列 + 第 10 列 score」，并补 G8-8 门禁（两个语料规模分别覆盖两条路径）。
+
+> 这条值得单独记：**重构时的"抽公共方法"最容易引入静默错位**，
+> 因为编译器不检查列索引，而错误值恰好是"合法的字符串/数字"。只有端到端断言字段语义才抓得住。
+
+#### 10.6.3 AND 层的实测收益
+
+| 查询 | 命中 | 打分耗时 |
+| :--- | ---: | ---: |
+| 12 个高频词 OR（各 ~75%） | 5,000 | 9.57 ms |
+| 12 个高频词 AND | **163** | **3.00 ms** |
+| 6 词 AND | 2,500 | 2.27 ms |
+| 3 词 AND | 2,077 | 2.41 ms |
+| 单词 | 3,729 | 2.95 ms |
+
+AND 把命中集压到 1/30，打分成本降到 1/3.2。
+注意这是**合成语料**（每词独立 75%）；真实语料里虚词强相关，压缩率会低一些，
+所以 AND 层定位是「多约束查询的加速器」，不是「纯虚词查询的解药」。
+
+#### 10.6.4 门禁
+
+`LexicalBudgetAndCoverageGuardTests`（9 个用例）：
+
+| # | 用例 | 锁住的不变量 |
+| :-- | :--- | :--- |
+| G8-1 | `CandidateBudget_MustHaveAbsoluteCap` | 常量 = 5000；1M 语料 + 12 个 3000-df 词 → 只剩 1 个锚点 |
+| G8-2 | `FallbackAnchors_MustRespectBudget` | 「她的他」3 词收缩到 1 个，且标记 `BudgetExceeded` |
+| G8-3 | `AndTier_MustPrecedeOrTier` | `Queries[0]` 是纯 AND，`Queries[1]` 是纯 OR |
+| G8-4 | `AndTier_MustNotReturnEmpty_WhenTermsCoexist` | 对照组：两词共现时 AND 层非空 |
+| G8-5 | `Coverage_MustRankDescending` | 覆盖率非递增且存在 1.0 |
+| G8-6 | `FloorResult_MustBeFlagged` | `UsedRecallFloor` + 逐条 `IsFloor` + 覆盖率 ≈ 0 |
+| G8-7 | `BoundedPrefetch_MustStayFast` | 2k 语料纯虚词查询 < 800ms（删掉预取分支立刻变红） |
+| G8-8 | `RecallItemColumns_MustNotShift` | 两条路径下 `ConnectorId / StartLine / EndLine` 语义正确（Theory 两档语料） |
+
+全量：`dotnet test` **727 通过 / 47 跳过 / 0 失败**；`check.mjs` 53 模块 + 14 模板；`node --test` 78/78。
+
+#### 10.6.5 仍未做（P1/P2）
+
+| 项 | 为什么还要做 |
+| :--- | :--- |
+| P1-1 `lexical_term_stats` | 现在 plan 阶段仍是 64 次串行 COUNT；且 `EstimatedMatchedDocs` 受 `cap` 限制只是下界，`BudgetExceeded` 判定偏保守 |
+| P1-2 向量两阶段 + 有界堆 | V1/V2 仍是全表扫描 + 全正文驻留，比词法路径严重 |
+| P1-3 召回超时 | 退化查询已能靠"放弃排序"降到毫秒级，但**真正 1M 语料 + 复杂 AND** 仍可能超时，需要硬预算兜底 |
+| P2 意图分类 / 编译器 / 状态机 | 覆盖率重排只是"事后补救"，意图分类才能让长句走对路 |
 
 ---
 

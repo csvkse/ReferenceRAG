@@ -430,7 +430,10 @@ public class KnowledgeBasesController : ControllerBase
         {
             await using var lease = await _storageManager.AcquireLeaseAsync(id, StorageAccess.ReadWrite, ct);
             var removed = await lease.Store.RepairLexicalIndexAsync(ct);
-            return Ok(new { success = true, removedRows = removed });
+            // 去重之后顺手合并 FTS5 段：段碎片化会让"词不存在"的查询从 4ms 涨到 230ms
+            // （每个 segment 都要各查一次 term 索引）。运维一次调用把索引修干净。
+            var optimized = await lease.Store.OptimizeLexicalIndexAsync(ct);
+            return Ok(new { success = true, removedRows = removed, optimized });
         }
         catch (KeyNotFoundException ex)
         {

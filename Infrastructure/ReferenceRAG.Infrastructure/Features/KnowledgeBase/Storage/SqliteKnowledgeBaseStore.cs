@@ -158,6 +158,13 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     text
                 );
 
+                -- 更激进的自动段合并（默认 4）：本表按 200 块/批写入，默认值来不及合并，
+                -- 段数上千后，查询一个不存在的词要在每个 segment 各查一次 term 索引（实测 230ms）。
+                -- 注意语法：FTS5 的配置命令必须写成 (表名, rank) VALUES('键', 值)，
+                -- 写成 VALUES('automerge=8') 会报 SQL logic error。
+                INSERT INTO fts_chunks_lexical(fts_chunks_lexical, rank) VALUES('automerge', 8);
+                INSERT INTO fts_chunks_lexical(fts_chunks_lexical, rank) VALUES('crisismerge', 32);
+
                 CREATE TABLE IF NOT EXISTS graph_nodes (
                     id        TEXT PRIMARY KEY,
                     title     TEXT NOT NULL DEFAULT '',
@@ -567,6 +574,10 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 span.SetDetail($"补齐 {processed}/{total} 块，{batchNo} 批");
             }
 
+            // 段合并：数百次 commit 会留下数百个 segment，"词不存在"的查询要在每个 segment
+            // 的 term 索引里各查一次（实测 230ms vs 有命中 4ms）。补齐收尾一次性合并。
+            await OptimizeLexicalIndexAsync(ct);
+
             span.SetOutput(processed);
             _logger?.LogInformation(
                 "[SqliteKnowledgeBaseStore] 词法索引补齐完成: {KbId}，{Processed}/{Total} 块，{Batches} 批，耗时 {Elapsed}ms",
@@ -598,7 +609,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             cmd.CommandText = @"
                 CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks_lexical USING fts5(
                     chunk_id UNINDEXED, document_id UNINDEXED, title, heading, text
-                );";
+                );
+                INSERT INTO fts_chunks_lexical(fts_chunks_lexical, rank) VALUES('automerge', 8);
+                INSERT INTO fts_chunks_lexical(fts_chunks_lexical, rank) VALUES('crisismerge', 32);";
             await cmd.ExecuteNonQueryAsync(ct);
         }
         finally { _writeGate.Release(); }
@@ -855,9 +868,48 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         finally { _writeGate.Release(); }
     }
 
-    private static async Task<bool> HasLexicalIndexAsync(SqliteConnection conn, SqliteTransaction tx, CancellationToken ct)
+    /// <summary>
+    /// 合并 FTS5 段（<c>optimize</c>）。
+    /// <para>
+    /// <b>为什么必须做：</b>FTS5 每次写入事务产生一个 segment。57k 块按 200 块/批写入 =
+    /// 数百个 segment，每个 segment 都有自己的 term 索引。查询一个**不存在**的词时，
+    /// 要在每个 segment 的 term B-tree 里各查一次——实测 881MB 库上
+    /// 「zzzzzzqqq」239ms、「量子」223ms，而「纠缠」（有命中）只要 4ms。
+    /// </para>
+    /// <para>
+    /// 这不是查询退化，是**索引碎片化**。合并成单个 segment 后 term 查找变成一次 B-tree 查找。
+    /// 只在后台补齐收尾与运维端点调用，读路径绝不触发（optimize 会重写整个倒排表）。
+    /// </para>
+    /// </summary>
+    public async Task<bool> OptimizeLexicalIndexAsync(CancellationToken ct = default)
     {
-        using var cmd = conn.CreateCommand();
+        await InitializeAsync(ct);
+        using var span = TimingScope.Begin("kb.lexical-index.optimize", SpanCategory.Io, "FTS5 段合并");
+        var sw = Stopwatch.StartNew();
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO fts_chunks_lexical(fts_chunks_lexical) VALUES('optimize')";
+            await cmd.ExecuteNonQueryAsync(ct);
+            span.SetDetail($"段合并完成 {sw.ElapsedMilliseconds}ms");
+            _logger?.LogInformation(
+                "[SqliteKnowledgeBaseStore] 词法索引段合并完成: {KbId}，耗时 {Elapsed}ms",
+                KnowledgeBaseId, sw.ElapsedMilliseconds);
+            return true;
+        }
+        catch (SqliteException ex)
+        {
+            span.Fail(ex);
+            _logger?.LogWarning(ex, "[SqliteKnowledgeBaseStore] 词法索引段合并失败: {KbId}", KnowledgeBaseId);
+            return false;
+        }
+        finally { _writeGate.Release(); }
+    }
+
+    private static async Task<bool> HasLexicalIndexAsync(SqliteConnection conn, SqliteTransaction tx, CancellationToken ct)
+    {        using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name='fts_chunks_lexical'";
         var sql = (string?)await cmd.ExecuteScalarAsync(ct);
@@ -1677,6 +1729,12 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
 
         if (ids.Count == 0) return items;
 
+        // ⚠️ 必须用参数化 IN，不能用 `id IN (SELECT value FROM json_each(@ids))`：
+        // 后者 SQLite 无法把它下推成 chunks.id 的主键查找，退化为全表扫描 57k 行，
+        // 实测 80 个候选回表要 134ms（比 bm25 全量打分还慢）。
+        var idNames = new string[ids.Count];
+        for (int i = 0; i < ids.Count; i++) idNames[i] = $"@id{i}";
+
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = $@"
@@ -1686,9 +1744,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE c.enabled = 1
-              AND c.id IN (SELECT value FROM json_each(@ids))
+              AND c.id IN ({string.Join(",", idNames)})
               AND (@connector IS NULL OR d.connector_id=@connector) {scopeClause} {folderClause}";
-        cmd.Parameters.AddWithValue("@ids", JsonSerializer.Serialize(ids));
+        for (int i = 0; i < ids.Count; i++) cmd.Parameters.AddWithValue(idNames[i], ids[i]);
         cmd.Parameters.AddWithValue("@connector", (object?)request.ConnectorId ?? DBNull.Value);
         foreach (var p in folderParams)
         {

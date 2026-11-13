@@ -58,6 +58,14 @@ public interface IKnowledgeBaseStore
     /// <returns>被清理的行数。</returns>
     Task<int> RepairLexicalIndexAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// 合并 FTS5 段（<c>optimize</c>）。段碎片化会让「查询一个不存在的词」退化为
+    /// 逐 segment 查 term 索引（实测 230ms vs 有命中 4ms）。
+    /// 仅在后台补齐收尾或运维端点调用，读路径禁止调用（会重写整个倒排表）。
+    /// </summary>
+    /// <returns>是否成功。</returns>
+    Task<bool> OptimizeLexicalIndexAsync(CancellationToken ct = default);
+
     Task<IndexManifest> GetManifestAsync(CancellationToken ct = default);
 
     Task<CommitResult> CommitDocumentAsync(IndexBatch batch, CancellationToken ct = default);
