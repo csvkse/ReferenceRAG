@@ -309,7 +309,7 @@ FTS5 虚拟表**没有唯一约束**，重复插入不会报错，只会静默�
 
 | 系统 | 机制 | 高频词怎么处理 | 与本项目的关系 |
 | :--- | :--- | :--- | :--- |
-| **Elasticsearch / Lucene** | `common terms query`（`cutoff_frequency` + `low_freq_operator=and` + `minimum_should_match.high_freq`） | 高频词**不参与打分**、不要求必须命中；低频词作为强约束 | ✅ **本方案直接对齐**（df 阈值 + 稀有词作锚点） |
+| **Elasticsearch / Lucene** | `common terms query`（`cutoff_frequency` + `low_freq_operator=and` + `minimum_should_match.high_freq`） | 高频词**不参与打分**、不要求必须命中；低频词作为强约束 | ✅ **思想对齐**（df 阈值 + 稀有词作锚点）<br>⚠️ **API 已在 ES 8.0 移除**（release notes #42654），现行做法是 `bool.must`（低频强约束）+ `bool.should`（高频只加分）。见 `docs/long-query-degradation-lexical-vs-dense-and-sag-wiki-benchmark.md` §9.2 |
 | **Lucene（8.x+）** | Block-Max WAND（BMW） | 用块级得分上界跳过"注定落选"的文档，top-k 评估不需要遍历全部候选 | ⏳ FTS5 无此能力，只能靠**限制候选集**近似 |
 | **Meilisearch** | 有序 ranking rules（`words`/`typo`/`proximity`…）+ `pagination.maxTotalHits` | 先按"命中词数"分层，再逐级排序；结果集有硬上限 | ✅ 参考其"分层 + 硬上限"思想（本方案的阶梯松弛 + 候选预算） |
 | **Typesense** | 字段权重 + `num_typos` + 结果集上限 | 依赖字段权重与候选上限 | 参考 |
@@ -877,6 +877,7 @@ SELECT COUNT(*) FROM fts_chunks_lexical WHERE fts_chunks_lexical MATCH '<expr>';
 
 | 文档 | 关联点 |
 | :--- | :--- |
+| `docs/long-query-degradation-lexical-vs-dense-and-sag-wiki-benchmark.md` | **后续**：同类退化风险审计（L1~L5 / V1~V3 / F1）、词法 vs 向量本质差异、SAG-Wiki 源码级借鉴、P0~P2 演进方案 |
 | `docs/lexical-first-query-latency-and-request-timing-chain-architecture-study.md` | 上一轮"读路径建索引 16s"根因与耗时链 v2（本轮的前提） |
 | `docs/search-duration-and-trace-breakdown-investigation.md` | `ModelLoadMs` / `Bm25Ms` 指标来源 |
 | `docs/lexical-vs-vector-retrieval-benchmark-and-architecture-study.md` | 词法 vs 向量召回基准 |
