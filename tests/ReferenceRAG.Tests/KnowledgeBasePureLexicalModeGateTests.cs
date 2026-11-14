@@ -333,11 +333,13 @@ SQLite FTS5 支持多字段加权与 BM25F 算法，毫秒级召回。
     [Fact]
     public async Task Gate6_UpgradePureLexical_ToModel_ReverseCompatibilityGate()
     {
+        var fakeResolver = new FakeEmbeddingAdapterResolver();
         var kbService = new KnowledgeBaseService(
             _catalog,
             _storageManager,
             logger: NullLogger<KnowledgeBaseService>.Instance,
-            configManager: _configManager
+            configManager: _configManager,
+            adapterResolver: fakeResolver
         );
 
         // 1. 创建使用 1200 Tokens 切片的纯词法库
@@ -348,7 +350,7 @@ SQLite FTS5 支持多字段加权与 BM25F 算法，毫秒级召回。
             chunkingSpecId: "spec_chunk_lexical_code"
         );
 
-        // 2. 尝试绑定 512 上限的小模型：必须触发反向兼容门禁拦截！
+        // 2. 尝试绑定 512 上限的小模型：必须触发反向兼容门禁拦截（入队即抛，不产生作业）！
         var smallSpec = new EmbeddingSpec(
             Id: "spec_small_limit512",
             ModelName: "bge-small-zh-v1.5",
@@ -358,13 +360,13 @@ SQLite FTS5 支持多字段加权与 BM25F 算法，毫秒级召回。
         );
         await _catalog.SaveEmbeddingSpecAsync(smallSpec);
 
-        var reindexResult = await kbService.TriggerModelReindexAsync(kb.Id, "spec_small_limit512");
-        Assert.False(reindexResult.Success);
-        Assert.Contains("小于当前知识库分段规格", reindexResult.Message);
-        Assert.Contains("1200", reindexResult.Message);
-        Assert.Contains("512", reindexResult.Message);
+        var gateEx = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => kbService.TriggerModelReindexJobAsync(kb.Id, "spec_small_limit512"));
+        Assert.Contains("小于当前知识库分段规格", gateEx.Message);
+        Assert.Contains("1200", gateEx.Message);
+        Assert.Contains("512", gateEx.Message);
 
-        // 3. 尝试绑定 8192 上限的大模型（bge-m3）：应顺利放行
+        // 3. 尝试绑定 8192 上限的大模型（bge-m3）：应顺利放行（作业化：202 入队 → 后台完成）
         var largeSpec = new EmbeddingSpec(
             Id: "spec_large_limit8192",
             ModelName: "BAAI/bge-m3",
@@ -374,8 +376,10 @@ SQLite FTS5 支持多字段加权与 BM25F 算法，毫秒级召回。
         );
         await _catalog.SaveEmbeddingSpecAsync(largeSpec);
 
-        var successReindex = await kbService.TriggerModelReindexAsync(kb.Id, "spec_large_limit8192");
-        Assert.True(successReindex.Success);
+        var job = await kbService.TriggerModelReindexJobAsync(kb.Id, "spec_large_limit8192");
+        Assert.Equal(JobOperation.Reindex, job.Operation);
+        var terminal = await ReindexJobTestHelpers.AwaitTerminalAsync(_catalog, job.Id);
+        Assert.Equal(JobStatus.Succeeded, terminal.Status);
 
         var updatedKb = await _catalog.GetKnowledgeBaseAsync(kb.Id);
         Assert.NotNull(updatedKb);

@@ -3,6 +3,7 @@
   <ItemGroup>
     <Compile Include="../../Host/ReferenceRAG.DesktopHost/StartupWindowSizing.cs" Link="Desktop/StartupWindowSizing.cs" />
     <Compile Include="../../Host/ReferenceRAG.DesktopHost/StartupWindowCoordinator.cs" Link="Desktop/StartupWindowCoordinator.cs" />
+    <Compile Include="../ReferenceRAG.Tests/ReindexJobTestFakes.cs" Link="Shared/ReindexJobTestFakes.cs" />
     <ProjectReference Include="../../Host/ReferenceRAG.ApiHost/ReferenceRAG.ApiHost.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />

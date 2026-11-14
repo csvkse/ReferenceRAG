@@ -147,11 +147,13 @@ public class KnowledgeBaseModelLifecycleGateTests : IDisposable
     [Fact]
     public async Task Gate3_BlueGreenShadowReindexing_ShouldRecomputeAndPromoteWithoutDowntime()
     {
+        var fakeResolver = new FakeEmbeddingAdapterResolver();
         var service = new KnowledgeBaseService(
             catalog: _catalog,
             storageManager: _storageManager,
             logger: NullLogger<KnowledgeBaseService>.Instance,
-            configManager: _configManager
+            configManager: _configManager,
+            adapterResolver: fakeResolver
         );
 
         var kb = await service.CreateKnowledgeBaseAsync("BlueGreenKB", "Reindex Test");
@@ -172,17 +174,26 @@ public class KnowledgeBaseModelLifecycleGateTests : IDisposable
         );
         await service.SaveEmbeddingSpecAsync(targetSpec);
 
-        // 执行蓝绿影子重构索引
-        var result = await service.TriggerModelReindexAsync(kb.Id, targetSpec.Id);
+        // 执行蓝绿影子重构索引（作业化：入队即返回，后台独立工作器完成）
+        var job = await service.TriggerModelReindexJobAsync(kb.Id, targetSpec.Id);
+        Assert.Equal(JobOperation.Reindex, job.Operation);
+        var terminal = await ReindexJobTestHelpers.AwaitTerminalAsync(_catalog, job.Id);
 
-        Assert.True(result.Success);
-        Assert.True(result.ProcessedChunks >= 1);
-        Assert.Equal(targetSpec.Id, result.TargetEmbeddingSpecId);
+        Assert.Equal(JobStatus.Succeeded, terminal.Status);
+        Assert.True(terminal.ProcessedUnits >= 1);
+        Assert.True(fakeResolver.Stats.EncodedTexts >= 1);
 
         // 验证知识库规格已切换
         var updatedKb = await service.GetKnowledgeBaseAsync(kb.Id);
         Assert.NotNull(updatedKb);
         Assert.Equal(targetSpec.Id, updatedKb.EmbeddingSpecId);
+
+        // 验证新代次向量已生效（真实非零 8d 向量，维度与规格一致）
+        var status = await service.GetReindexStatusAsync(kb.Id);
+        Assert.Null(status.ActiveJob);
+        Assert.Equal(targetSpec.Id, status.Generation.ActiveSpecId);
+        Assert.True(status.Generation.ActiveVectorCount >= 1);
+        Assert.False(status.Generation.ShadowExists);
 
         // 验证检索在重构后正常运行
         var searchService = new KnowledgeBaseSearchService(

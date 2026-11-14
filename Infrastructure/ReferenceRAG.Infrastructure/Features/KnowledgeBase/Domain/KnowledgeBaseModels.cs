@@ -344,7 +344,8 @@ public sealed record IndexManifest(
     string? TargetEmbeddingSpecHash,
     long CorpusCohortSetRevision,
     int ActiveVectorCount,
-    DateTime UpdatedAt);
+    DateTime UpdatedAt,
+    string? PreviousEmbeddingSpecHash = null);
 
 /// <summary>
 /// 作业定义（存储于 Catalog）
@@ -458,12 +459,54 @@ public sealed record UpdateKnowledgeBaseRequest(
 /// <summary>
 /// 知识库模型蓝绿影子重构索引结果
 /// </summary>
-public sealed record ModelReindexResult(
-    string KnowledgeBaseId,
-    string TargetEmbeddingSpecId,
+/// <summary>
+/// 作业操作类型常量（JobDefinition.Operation）
+/// </summary>
+public static class JobOperation
+{
+    public const string Sync = "sync";
+    public const string Reindex = "reindex";
+}
+
+/// <summary>
+/// 同知识库已有进行中的重构作业（单飞冲突 → HTTP 409）
+/// </summary>
+public sealed class KnowledgeBaseJobConflictException : InvalidOperationException
+{
+    public KnowledgeBaseJobConflictException(string message) : base(message) { }
+}
+
+/// <summary>
+/// 蓝绿影子重构进度（每批回调）
+/// </summary>
+public sealed record ShadowReindexProgress(int ProcessedChunks, int TotalChunks);
+
+/// <summary>
+/// 蓝绿影子重构执行结果
+/// </summary>
+public sealed record ShadowReindexResult(
     int ProcessedChunks,
-    bool Success,
-    string Message);
+    int TotalChunks,
+    long NewVectorGeneration,
+    int ResumedChunks);
+
+/// <summary>
+/// 向量代次与影子/旧代表状态（供前端进度抽屉与回滚按钮裁决）
+/// </summary>
+public sealed record VectorGenerationInfo(
+    string? ActiveSpecId,
+    string? PreviousSpecId,
+    bool CanRollback,
+    int ActiveVectorCount,
+    bool ShadowExists,
+    int ShadowRowCount);
+
+/// <summary>
+/// 知识库重构作业面板状态：活跃作业 + 物理代次信息
+/// </summary>
+public sealed record ReindexJobStatus(
+    JobDefinition? ActiveJob,
+    VectorGenerationInfo Generation);
 
 /// <summary>
 /// 知识库重新分段请求

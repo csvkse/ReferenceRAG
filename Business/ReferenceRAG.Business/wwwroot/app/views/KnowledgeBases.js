@@ -50,6 +50,237 @@ const component = /*@__PURE__*/ _defineComponent({
         const selectedTargetSpecId = ref('');
         const reindexing = ref(false);
 
+        // ==================== 重构索引作业进度抽屉 ====================
+        const showReindexDrawer = ref(false);
+        const reindexKb = ref(null);
+        const reindexJob = ref(null);
+        const reindexGeneration = ref(null);
+        const reindexCancelling = ref(false);
+        const reindexRollingBack = ref(false);
+        const reindexStatusMap = ref({});
+        const reindexSpeed = ref(0);
+        const reindexEtaText = ref('估算中…');
+        let reindexPollTimer = null;
+        let reindexLastProcessed = 0;
+        let reindexLastTickAt = 0;
+
+        const REINDEX_STATUS_LABELS = {
+            Queued: '排队中', Running: '重构进行中', Cancelling: '正在取消',
+            Succeeded: '重构完成', PartiallySucceeded: '部分完成', Failed: '重构失败', Cancelled: '已取消'
+        };
+        const REINDEX_PHASE_LABELS = {
+            None: '就绪', Planning: '规划准备', Embedding: '向量编码',
+            Validating: '门禁校验', Publishing: '原子切换'
+        };
+        const REINDEX_ACTIVE_STATUSES = ['Queued', 'Running', 'Cancelling'];
+
+        const normalizeReindexJob = (raw) => {
+            if (!raw) return null;
+            const statusNames = ['Queued', 'Running', 'WaitingForInput', 'Cancelling', 'Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled'];
+            const phaseNames = ['None', 'Scanning', 'Probing', 'Parsing', 'Profiling', 'Planning', 'Chunking', 'Rendering', 'Embedding', 'Projecting', 'Validating', 'Publishing', 'Quiescing', 'Invalidating', 'Building'];
+            return {
+                ...raw,
+                status: typeof raw.status === 'number' ? (statusNames[raw.status] || 'Queued') : (raw.status || 'Queued'),
+                phase: typeof raw.phase === 'number' ? (phaseNames[raw.phase] || 'None') : (raw.phase || 'None'),
+                processedUnits: raw.processedUnits || 0,
+                totalUnits: raw.totalUnits || 0
+            };
+        };
+
+        const reindexActive = computed(() => REINDEX_ACTIVE_STATUSES.includes(reindexJob.value?.status));
+        const reindexStatusLabel = computed(() => REINDEX_STATUS_LABELS[reindexJob.value?.status] || '无作业');
+        const reindexPhaseLabel = computed(() => REINDEX_PHASE_LABELS[reindexJob.value?.phase] || reindexJob.value?.phase || '就绪');
+        const reindexPercent = computed(() => {
+            const j = reindexJob.value;
+            if (!j) return 0;
+            if (j.status === 'Succeeded') return 100;
+            if (!j.totalUnits) return 0;
+            return Math.min(99, Math.round(j.processedUnits * 100 / j.totalUnits));
+        });
+        const reindexProgressStatus = computed(() => {
+            const s = reindexJob.value?.status;
+            if (s === 'Succeeded') return 'success';
+            if (s === 'Failed') return 'error';
+            if (s === 'Cancelled') return 'warning';
+            return 'default';
+        });
+        const reindexPhaseSteps = computed(() => {
+            const order = ['Planning', 'Embedding', 'Publishing'];
+            const labels = { Planning: '规划准备', Embedding: '向量编码', Publishing: '原子切换' };
+            const phase = reindexJob.value?.phase;
+            const status = reindexJob.value?.status;
+            const currentIdx = status === 'Succeeded' ? order.length : Math.max(0, order.indexOf(phase));
+            return order.map((key, i) => ({
+                key,
+                label: labels[key],
+                state: status === 'Failed' && i === currentIdx ? 'failed'
+                    : i < currentIdx || status === 'Succeeded' ? 'done'
+                    : i === currentIdx && REINDEX_ACTIVE_STATUSES.includes(status) ? 'active' : 'pending'
+            }));
+        });
+        const reindexSpeedText = computed(() => reindexSpeed.value > 0 ? `${reindexSpeed.value.toFixed(1)} 切片/秒` : '—');
+
+        const updateReindexMetrics = (job) => {
+            const now = Date.now();
+            if (reindexLastTickAt > 0 && job.processedUnits > reindexLastProcessed) {
+                const dt = (now - reindexLastTickAt) / 1000;
+                if (dt > 0.2) {
+                    const inst = (job.processedUnits - reindexLastProcessed) / dt;
+                    reindexSpeed.value = reindexSpeed.value > 0 ? reindexSpeed.value * 0.7 + inst * 0.3 : inst;
+                }
+            }
+            reindexLastProcessed = job.processedUnits;
+            reindexLastTickAt = now;
+            if (job.status === 'Succeeded') {
+                reindexEtaText.value = '已完成';
+            } else if (reindexSpeed.value > 0 && job.totalUnits > job.processedUnits) {
+                const secs = Math.round((job.totalUnits - job.processedUnits) / reindexSpeed.value);
+                reindexEtaText.value = secs >= 3600 ? `约 ${(secs / 3600).toFixed(1)} 小时`
+                    : secs >= 60 ? `约 ${Math.ceil(secs / 60)} 分钟` : `约 ${secs} 秒`;
+            } else {
+                reindexEtaText.value = '估算中…';
+            }
+        };
+
+        const stopReindexPolling = () => {
+            if (reindexPollTimer) {
+                clearInterval(reindexPollTimer);
+                reindexPollTimer = null;
+            }
+        };
+
+        const pollReindexStatus = async () => {
+            if (!reindexKb.value) return;
+            const kbId = reindexKb.value.id;
+            try {
+                const res = await knowledgeBasesApi.getReindexStatus(kbId);
+                const data = res.data || {};
+                const activeJob = normalizeReindexJob(data.activeJob);
+                const prevStatus = reindexJob.value?.status;
+
+                if (activeJob) {
+                    reindexJob.value = activeJob;
+                    updateReindexMetrics(activeJob);
+                } else if (reindexJob.value && REINDEX_ACTIVE_STATUSES.includes(reindexJob.value.status)) {
+                    // 活跃作业消失 → 拉取终态快照用于结果展示
+                    try {
+                        const jr = await knowledgeBasesApi.getJob(reindexJob.value.id);
+                        reindexJob.value = normalizeReindexJob(jr.data);
+                    } catch (e) {
+                        reindexJob.value = { ...reindexJob.value, status: 'Succeeded' };
+                    }
+                }
+                reindexGeneration.value = data.generation || null;
+                reindexStatusMap.value = {
+                    ...reindexStatusMap.value,
+                    [kbId]: { activeJob, generation: data.generation || null }
+                };
+
+                const cur = reindexJob.value;
+                if (cur && !REINDEX_ACTIVE_STATUSES.includes(cur.status)) {
+                    stopReindexPolling();
+                    if (prevStatus && REINDEX_ACTIVE_STATUSES.includes(prevStatus)) {
+                        if (cur.status === 'Succeeded') {
+                            message.success(`重构完成：${cur.processedUnits} 个切片向量已原子切换至新代次`);
+                            await loadKnowledgeBases();
+                        } else if (cur.status === 'Failed') {
+                            message.error('重构失败: ' + (cur.errorMessage || '未知错误'));
+                        } else if (cur.status === 'Cancelled') {
+                            message.warning('重构作业已取消，影子表已清理');
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn('轮询重构状态失败:', err);
+            }
+        };
+
+        const openReindexDrawer = async (kb, job = null) => {
+            reindexKb.value = kb;
+            reindexJob.value = normalizeReindexJob(job);
+            reindexGeneration.value = null;
+            reindexSpeed.value = 0;
+            reindexEtaText.value = '估算中…';
+            reindexLastProcessed = 0;
+            reindexLastTickAt = 0;
+            showReindexDrawer.value = true;
+            stopReindexPolling();
+            await pollReindexStatus();
+            if (reindexActive.value) {
+                reindexPollTimer = setInterval(pollReindexStatus, 1500);
+            }
+        };
+
+        const handleCancelReindex = () => {
+            if (!reindexJob.value?.id) return;
+            dialog.warning({
+                title: '确认取消重构作业？',
+                content: '取消后将清理影子表，本次已编码的向量不会保留；旧代索引不受影响，可随时重新触发重构。',
+                positiveText: '确认取消',
+                negativeText: '继续执行',
+                onPositiveClick: async () => {
+                    reindexCancelling.value = true;
+                    try {
+                        await knowledgeBasesApi.cancelJob(reindexJob.value.id);
+                        message.info('已发送取消请求，等待作业安全停止…');
+                    } catch (err) {
+                        message.error('取消失败: ' + (err.response?.data?.message || err.message));
+                    } finally {
+                        reindexCancelling.value = false;
+                    }
+                }
+            });
+        };
+
+        const handleRollbackReindex = () => {
+            if (!reindexKb.value) return;
+            dialog.warning({
+                title: '回滚至上一代向量索引？',
+                content: `将知识库「${reindexKb.value.name}」恢复为切换前的上一代向量索引（${reindexGeneration.value?.previousSpecId || '上一规格'}），当前新代向量将被丢弃。词法索引与切片文本不受影响。`,
+                positiveText: '确认回滚',
+                negativeText: '取消',
+                onPositiveClick: async () => {
+                    reindexRollingBack.value = true;
+                    try {
+                        await knowledgeBasesApi.rollbackReindex(reindexKb.value.id);
+                        message.success('已回滚至上一代向量索引');
+                        await pollReindexStatus();
+                        await loadKnowledgeBases();
+                    } catch (err) {
+                        message.error('回滚失败: ' + (err.response?.data?.message || err.message));
+                    } finally {
+                        reindexRollingBack.value = false;
+                    }
+                }
+            });
+        };
+
+        const reindexBadgePercent = (kbId) => {
+            const j = reindexStatusMap.value[kbId]?.activeJob;
+            if (!j) return 0;
+            if (!j.totalUnits) return 0;
+            return Math.min(99, Math.round(j.processedUnits * 100 / j.totalUnits));
+        };
+
+        // 卡片徽标：拉取各库重构状态；发现进行中作业且抽屉未打开时不打断用户，仅点亮徽标
+        const refreshReindexBadges = async () => {
+            const map = {};
+            await Promise.all(knowledgeBases.value.map(async (kb) => {
+                try {
+                    const res = await knowledgeBasesApi.getReindexStatus(kb.id);
+                    map[kb.id] = {
+                        activeJob: normalizeReindexJob(res.data?.activeJob),
+                        generation: res.data?.generation || null
+                    };
+                } catch (e) {
+                    map[kb.id] = null;
+                }
+            }));
+            reindexStatusMap.value = map;
+        };
+
+        onUnmounted(stopReindexPolling);
+
         const createForm = ref({
             name: '',
             description: '',
@@ -233,6 +464,7 @@ const component = /*@__PURE__*/ _defineComponent({
             } finally {
                 loading.value = false;
             }
+            await refreshReindexBadges();
         };
 
         // 读取来源页带过来的定位参数：?kb=<id>&connector=<connectorId>&path=<path>
@@ -282,19 +514,31 @@ const component = /*@__PURE__*/ _defineComponent({
             showSwitchModelModal.value = true;
         };
 
-        // 提交触发零停机蓝绿影子重构
+        // 提交触发零停机蓝绿影子重构（作业化：202 入队后立即打开进度抽屉，后台独立执行）
         const handleTriggerReindex = async () => {
             if (!switchModelTargetKb.value) return;
+            if (!selectedTargetSpecId.value || selectedTargetSpecId.value === 'spec_lexical_only') {
+                message.warning('请选择目标向量模型规格（降级纯词法请使用「解绑模型」）');
+                return;
+            }
             reindexing.value = true;
+            const targetKb = switchModelTargetKb.value;
             try {
-                const res = await knowledgeBasesApi.reindex(switchModelTargetKb.value.id, {
+                const res = await knowledgeBasesApi.reindex(targetKb.id, {
                     targetEmbeddingSpecId: selectedTargetSpecId.value
                 });
-                message.success(res.data?.message || '已成功触发零停机蓝绿影子重构！');
+                const job = normalizeReindexJob(res.data);
                 showSwitchModelModal.value = false;
-                await loadKnowledgeBases();
+                message.success('重构作业已入队，后台独立执行（不受页面超时影响）');
+                await openReindexDrawer(targetKb, job);
             } catch (err) {
-                message.error('重构失败: ' + (err.response?.data?.message || err.message));
+                if (err.response?.status === 409) {
+                    message.warning(err.response?.data?.message || '该知识库已有进行中的重构作业');
+                    showSwitchModelModal.value = false;
+                    await openReindexDrawer(targetKb);
+                } else {
+                    message.error('重构入队失败: ' + (err.response?.data?.message || err.message));
+                }
             } finally {
                 reindexing.value = false;
             }
@@ -957,6 +1201,10 @@ const component = /*@__PURE__*/ _defineComponent({
             route, focusConnectorId, isFocusedConnector, getConnectorOrigin, viewInSourceManagement, syncFromRoute,
             chunkingSpecs, chunkingSpecOptions, driftMap, showSwitchModelModal, switchModelTargetKb, selectedTargetSpecId,
             reindexing, openSwitchModelModal, handleTriggerReindex, handleUnbindModel, allEmbeddingModelOptions, loadChunkingSpecs,
+            showReindexDrawer, reindexKb, reindexJob, reindexGeneration, reindexCancelling, reindexRollingBack,
+            reindexStatusMap, reindexSpeed, reindexSpeedText, reindexEtaText, reindexActive, reindexStatusLabel,
+            reindexPhaseLabel, reindexPercent, reindexProgressStatus, reindexPhaseSteps, reindexBadgePercent,
+            openReindexDrawer, stopReindexPolling, handleCancelReindex, handleRollbackReindex, refreshReindexBadges,
             showRechunkModal, rechunkTargetKb, selectedRechunkSpecId, rechunking, openRechunkModal, handleTriggerRechunk,
             showEditModal, updatingKb, editForm, openEditModal, handleUpdateKbSubmit, handleToggleKb,
             showEditConnectorModal, updatingConn, editConnForm, openEditConnectorModal, handleUpdateConnectorSubmit,
@@ -1022,9 +1270,14 @@ component.template = `
         <n-gi v-for="kb in knowledgeBases" :key="kb.id">
           <n-card :title="kb.name" hoverable>
             <template #header-extra>
-              <n-tag :type="kb.enabled ? 'success' : 'default'" size="small">
-                {{ kb.enabled ? '已就绪' : '停用' }}
-              </n-tag>
+              <n-space :size="6" align="center">
+                <n-tag v-if="reindexStatusMap[kb.id]?.activeJob" size="small" type="warning" round style="cursor: pointer" @click="openReindexDrawer(kb, reindexStatusMap[kb.id].activeJob)">
+                  ⏳ 重构中 {{ reindexBadgePercent(kb.id) }}%
+                </n-tag>
+                <n-tag :type="kb.enabled ? 'success' : 'default'" size="small">
+                  {{ kb.enabled ? '已就绪' : '停用' }}
+                </n-tag>
+              </n-space>
             </template>
 
             <n-space vertical :size="12">
@@ -1080,6 +1333,10 @@ component.template = `
                   <n-button size="small" secondary @click="openEditModal(kb)">
                     <template #icon><n-icon :component="CreateOutline" /></template>
                     编辑
+                  </n-button>
+                  <n-button v-if="reindexStatusMap[kb.id]?.generation?.canRollback && !reindexStatusMap[kb.id]?.activeJob" size="small" secondary type="warning" @click="openReindexDrawer(kb)">
+                    <template #icon><n-icon :component="RefreshOutline" /></template>
+                    代次
                   </n-button>
                   <n-button size="small" type="primary" secondary @click="router.push('/search')">
                     <template #icon><n-icon :component="SearchOutline" /></template>
@@ -1274,6 +1531,114 @@ component.template = `
         </n-space>
       </template>
     </n-modal>
+
+    <!-- 重构索引作业进度抽屉 -->
+    <n-drawer v-model:show="showReindexDrawer" :width="520" placement="right" @after-leave="stopReindexPolling">
+      <n-drawer-content :title="'重构索引进度 - ' + (reindexKb?.name || '')" closable>
+        <div class="reindex-drawer-body">
+          <div class="reindex-hero" :class="'is-' + (reindexJob?.status || 'idle').toLowerCase()">
+            <div class="reindex-hero-icon">
+              {{ reindexJob?.status === 'Succeeded' ? '✓' : reindexJob?.status === 'Failed' ? '✕' : reindexJob?.status === 'Cancelled' ? '◼' : reindexActive ? '⚡' : '◇' }}
+            </div>
+            <div class="reindex-hero-text">
+              <div class="reindex-hero-title">{{ reindexStatusLabel }}</div>
+              <div class="reindex-hero-sub">
+                {{ reindexPhaseLabel }}<span v-if="reindexActive"> · 预计剩余 {{ reindexEtaText }}</span>
+              </div>
+            </div>
+            <n-tag v-if="reindexJob?.id" size="small" :bordered="false" class="reindex-job-id">{{ reindexJob.id }}</n-tag>
+          </div>
+
+          <n-progress
+            type="line"
+            :percentage="reindexPercent"
+            :status="reindexProgressStatus"
+            :processing="reindexActive"
+            :height="16"
+            :border-radius="8"
+            indicator-placement="inside"
+          />
+
+          <div class="reindex-stats">
+            <div class="reindex-stat">
+              <b>{{ reindexJob?.processedUnits ?? 0 }}</b>
+              <span>已处理切片</span>
+            </div>
+            <div class="reindex-stat">
+              <b>{{ reindexJob?.totalUnits ?? 0 }}</b>
+              <span>切片总数</span>
+            </div>
+            <div class="reindex-stat">
+              <b>{{ reindexSpeedText }}</b>
+              <span>编码速度</span>
+            </div>
+            <div class="reindex-stat">
+              <b>{{ reindexEtaText }}</b>
+              <span>预计剩余</span>
+            </div>
+          </div>
+
+          <div class="reindex-phases">
+            <div v-for="step in reindexPhaseSteps" :key="step.key" class="reindex-phase" :class="'is-' + step.state">
+              <span class="reindex-phase-dot"></span>
+              <span class="reindex-phase-label">{{ step.label }}</span>
+            </div>
+          </div>
+
+          <n-alert v-if="reindexJob?.status === 'Failed'" type="error" title="作业失败" style="margin-bottom: 12px;">
+            {{ reindexJob.errorMessage || '未知错误' }}
+          </n-alert>
+          <n-alert v-else-if="reindexJob?.status === 'Cancelled'" type="warning" style="margin-bottom: 12px;">
+            作业已取消，影子表已清理。旧代索引全程未受影响，可随时重新触发重构。
+          </n-alert>
+          <n-alert v-else-if="reindexActive" type="info" style="margin-bottom: 12px;">
+            零停机蓝绿影子重构：编码期间旧代索引持续服务检索；全部切片通过门禁后在单事务内原子换表。可关闭抽屉，作业在后端独立执行，重新打开页面可续看进度。
+          </n-alert>
+          <n-alert v-else-if="reindexJob?.status === 'Succeeded'" type="success" style="margin-bottom: 12px;">
+            重构完成，新代向量已原子生效。上一代索引已保留，如有异常可在下方一键回滚。
+          </n-alert>
+          <n-alert v-else type="default" style="margin-bottom: 12px;">
+            当前没有进行中的重构作业。
+          </n-alert>
+
+          <n-descriptions v-if="reindexGeneration" :column="1" size="small" label-placement="left" bordered>
+            <n-descriptions-item label="当前生效规格">
+              <n-text code>{{ reindexGeneration.activeSpecId || '无 (纯词法)' }}</n-text>
+            </n-descriptions-item>
+            <n-descriptions-item label="生效向量数">{{ reindexGeneration.activeVectorCount }}</n-descriptions-item>
+            <n-descriptions-item label="影子表">
+              <n-tag size="small" :type="reindexGeneration.shadowExists ? 'warning' : 'default'" :bordered="false">
+                {{ reindexGeneration.shadowExists ? reindexGeneration.shadowRowCount + ' 行 (重构中/可续跑)' : '无' }}
+              </n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item label="上一代规格">
+              <n-text code>{{ reindexGeneration.previousSpecId || '无' }}</n-text>
+            </n-descriptions-item>
+          </n-descriptions>
+        </div>
+
+        <template #footer>
+          <n-space justify="space-between" align="center" style="width: 100%;">
+            <n-button
+              v-if="reindexGeneration?.canRollback && !reindexActive"
+              type="warning"
+              secondary
+              :loading="reindexRollingBack"
+              @click="handleRollbackReindex"
+            >
+              回滚至上一代
+            </n-button>
+            <span v-else></span>
+            <n-space>
+              <n-button v-if="reindexActive" type="error" secondary :loading="reindexCancelling" @click="handleCancelReindex">
+                取消作业
+              </n-button>
+              <n-button @click="showReindexDrawer = false">关闭</n-button>
+            </n-space>
+          </n-space>
+        </template>
+      </n-drawer-content>
+    </n-drawer>
 
     <!-- 连接器管理抽屉 -->
     <n-drawer v-model:show="showConnectorDrawer" :width="560" placement="right">

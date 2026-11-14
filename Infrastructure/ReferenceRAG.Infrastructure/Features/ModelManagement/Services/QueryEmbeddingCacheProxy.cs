@@ -93,6 +93,12 @@ public sealed class QueryEmbeddingCacheProxy : IEmbeddingService, IModelRuntimeT
             return await _inner.EncodeAsync(text, mode, cancellationToken);
         }
 
+        // 仅缓存查询向量：Document/Symmetric 直通，避免入库文本污染 LRU 并在模型切换后返回陈旧向量
+        if (mode != EmbeddingMode.Query)
+        {
+            return await _inner.EncodeAsync(text, mode, cancellationToken);
+        }
+
         // 超大文本 (>4KB) 避免长驻 LRU 缓存，直接调用底层
         if (text.Length > 4096)
         {
@@ -123,6 +129,12 @@ public sealed class QueryEmbeddingCacheProxy : IEmbeddingService, IModelRuntimeT
     {
         var textList = texts as IList<string> ?? texts.ToList();
         if (textList.Count == 0) return Array.Empty<float[]>();
+
+        // 仅缓存查询向量：Document/Symmetric 批量直通底层
+        if (mode != EmbeddingMode.Query)
+        {
+            return await _inner.EncodeBatchAsync(textList, mode, cancellationToken);
+        }
 
         var results = new float[textList.Count][];
         var missIndices = new List<int>();

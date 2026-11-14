@@ -320,6 +320,8 @@ export const knowledgeBasesApi = {
     deleteChunkingSpec: (specId) => api.delete(`/knowledge-bases/chunking-specs/${encodeURIComponent(specId)}`),
     checkDrift: (id) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/drift`),
     reindex: (id, data = {}) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/reindex`, data),
+    getReindexStatus: (id) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/reindex/status`),
+    rollbackReindex: (id) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/reindex/rollback`),
     rechunk: (id, data = {}) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/rechunk`, data),
     unbindModel: (id) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/unbind-model`),
     getJob: (jobId) => api.get(`/jobs/${encodeURIComponent(jobId)}`),

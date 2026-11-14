@@ -155,13 +155,33 @@ public interface IKnowledgeBaseStore
     Task<bool> DeleteChunkByIdAsync(string chunkId, CancellationToken ct = default);
 
     /// <summary>
-    /// 蓝绿影子重构索引：在保持当前向量检索零停机的情况下，在影子表中重算所有向量并原子切换
+    /// 蓝绿影子重构索引：在保持当前向量检索零停机的情况下，在影子表中重算所有向量并原子切换。
+    /// 影子表按 chunk_id + source_version 续跑（崩溃残留可复用）；运行期写路径自动维护影子一致性，
+    /// 切换前在写栅栏内追平脏切片后单事务换表，并保留上一代 chunk_vectors_old 供回滚。
+    /// 每批执行数量 + 维度 + 非零 + 有限值验收，任一不满足即抛异常（调用方负责清理影子表）。
     /// </summary>
-    Task<int> ExecuteShadowModelReindexAsync(
+    Task<ShadowReindexResult> ExecuteShadowModelReindexAsync(
         Func<IReadOnlyList<string>, Task<IReadOnlyList<float[]>>> vectorProvider,
         string newSpecHash,
         int newDimension,
+        IProgress<ShadowReindexProgress>? progress = null,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// 清理影子表（作业失败/取消后的终态清理；崩溃路径不调用，残留供下次续跑）。
+    /// </summary>
+    Task DropShadowVectorTableAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// 回滚到上一代向量（chunk_vectors_old → chunk_vectors），返回恢复的规格 Id；
+    /// 无旧代时返回 null。回滚消耗旧代（一次性）。
+    /// </summary>
+    Task<string?> RollbackVectorGenerationAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// 读取向量代次信息（活跃/上一代规格、旧代可回滚、影子表残留），只读不写。
+    /// </summary>
+    Task<VectorGenerationInfo> GetVectorGenerationInfoAsync(CancellationToken ct = default);
 }
 
 /// <summary>

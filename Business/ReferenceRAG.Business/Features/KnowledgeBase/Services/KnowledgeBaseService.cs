@@ -5,6 +5,7 @@ using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Jobs;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Features.ModelManagement.Runtime;
+using ReferenceRAG.Core.Features.ModelManagement.Services;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Features.ModelManagement.Adapters;
 using ReferenceRAG.Core.Models;
@@ -25,8 +26,8 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
     private readonly IModelManager? _modelManager;
     private readonly IEmbeddingService? _embeddingService;
     private readonly IMarkdownChunker? _markdownChunker;
-    private readonly Dictionary<string, CancellationTokenSource> _runningJobs = new();
-    private readonly object _jobsLock = new();
+    private readonly KnowledgeBaseJobCoordinator _coordinator;
+    private readonly IEmbeddingAdapterResolver? _adapterResolver;
 
     public KnowledgeBaseService(
         ICatalogStore catalog,
@@ -37,7 +38,9 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         ConfigManager? configManager = null,
         IModelManager? modelManager = null,
         IEmbeddingService? embeddingService = null,
-        IMarkdownChunker? markdownChunker = null)
+        IMarkdownChunker? markdownChunker = null,
+        KnowledgeBaseJobCoordinator? jobCoordinator = null,
+        IEmbeddingAdapterResolver? adapterResolver = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _storageManager = storageManager ?? throw new ArgumentNullException(nameof(storageManager));
@@ -48,6 +51,8 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         _modelManager = modelManager;
         _embeddingService = embeddingService;
         _markdownChunker = markdownChunker;
+        _coordinator = jobCoordinator ?? new KnowledgeBaseJobCoordinator();
+        _adapterResolver = adapterResolver;
     }
 
     public async Task<KnowledgeBaseDefinition> CreateKnowledgeBaseAsync(
@@ -657,12 +662,9 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
 
         await _catalog.SaveJobAsync(job, ct);
 
-        // 注册取消源并启动后台工作流
+        // 注册取消源并启动后台工作流（协调器为 Singleton，跨请求可取消）
         var cts = new CancellationTokenSource();
-        lock (_jobsLock)
-        {
-            _runningJobs[jobId] = cts;
-        }
+        _coordinator.Register(jobId, cts);
 
         var enableEmbedding = _configManager?.Load().Indexing.EmbeddingEnabled ?? true;
         _ = Task.Run(async () =>
@@ -675,10 +677,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
             }
             finally
             {
-                lock (_jobsLock)
-                {
-                    _runningJobs.Remove(jobId);
-                }
+                _coordinator.Unregister(jobId);
                 cts.Dispose();
                 await connectorInstance.DisposeAsync();
             }
@@ -699,13 +698,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
 
     public async Task<bool> CancelJobAsync(string jobId, CancellationToken ct = default)
     {
-        CancellationTokenSource? cts;
-        lock (_jobsLock)
-        {
-            _runningJobs.TryGetValue(jobId, out cts);
-        }
-
-        if (cts != null)
+        if (_coordinator.TryGetCts(jobId, out var cts) && cts != null)
         {
             cts.Cancel();
             var smLogger = _loggerFactory?.CreateLogger<JobStateMachine>();
@@ -1172,8 +1165,8 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         );
     }
 
-    // ==================== 蓝绿影子重构索引 ====================
-    public async Task<ModelReindexResult> TriggerModelReindexAsync(
+    // ==================== 蓝绿影子重构索引（作业化） ====================
+    public async Task<JobDefinition> TriggerModelReindexJobAsync(
         string knowledgeBaseId,
         string? targetSpecId = null,
         CancellationToken ct = default)
@@ -1182,20 +1175,19 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         if (kb == null)
             throw new KeyNotFoundException($"知识库不存在: {knowledgeBaseId}");
 
-        EmbeddingSpec? targetSpec = null;
-        if (!string.IsNullOrWhiteSpace(targetSpecId))
-        {
-            targetSpec = await _catalog.GetEmbeddingSpecAsync(targetSpecId, ct);
-        }
+        if (string.IsNullOrWhiteSpace(targetSpecId))
+            throw new InvalidOperationException("必须显式指定目标向量模型规格 (targetEmbeddingSpecId)，禁止静默回退全局模型。");
+
+        var targetSpec = await _catalog.GetEmbeddingSpecAsync(targetSpecId, ct);
         if (targetSpec == null)
         {
             var allSpecs = await ListEmbeddingSpecsAsync(ct);
-            targetSpec = allSpecs.FirstOrDefault(s => s.Id == targetSpecId) ?? allSpecs.FirstOrDefault();
+            targetSpec = allSpecs.FirstOrDefault(s => string.Equals(s.Id, targetSpecId, StringComparison.OrdinalIgnoreCase));
         }
         if (targetSpec == null)
-        {
-            throw new InvalidOperationException("未找到可用的目标向量模型规格。");
-        }
+            throw new InvalidOperationException($"目标向量模型规格未找到: {targetSpecId}");
+        if (string.Equals(targetSpec.Id, "spec_lexical_only", StringComparison.OrdinalIgnoreCase) || targetSpec.Dimension == 0)
+            throw new InvalidOperationException("目标规格为纯词法（无向量），请使用解绑模型接口而非重构索引。");
 
         // 校验目标模型上下文长度是否兼容当前知识库的分段 Token 上限（反向相容性防御门禁）
         var currentChunkSpec = await _catalog.GetChunkingSpecAsync(kb.ChunkingSpecId, ct)
@@ -1215,75 +1207,200 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
 
             if (currentChunkSpec.MaxTokens > targetLimit)
             {
-                return new ModelReindexResult(
-                    KnowledgeBaseId: knowledgeBaseId,
-                    TargetEmbeddingSpecId: targetSpec.Id,
-                    ProcessedChunks: 0,
-                    Success: false,
-                    Message: $"目标模型 '{targetSpec.ModelName}' 最大上下文上限 ({targetLimit} tokens) 小于当前知识库分段规格 ({currentChunkSpec.MaxTokens} tokens)。切换后将引发严重截断或向量生成失败，请先调整知识库分段规格并重新分段。"
-                );
+                throw new InvalidOperationException(
+                    $"目标模型 '{targetSpec.ModelName}' 最大上下文上限 ({targetLimit} tokens) 小于当前知识库分段规格 ({currentChunkSpec.MaxTokens} tokens)。切换后将引发严重截断或向量生成失败，请先调整知识库分段规格并重新分段。");
             }
         }
 
-        await _catalog.SaveEmbeddingSpecAsync(targetSpec, ct);
-
-        Func<IReadOnlyList<string>, Task<IReadOnlyList<float[]>>> vectorProvider = async texts =>
+        // 单飞占位：同知识库已有进行中 reindex → 409 冲突
+        var jobId = Guid.NewGuid().ToString("N")[..16];
+        var cts = new CancellationTokenSource(); // 独立于 HTTP 请求生命周期
+        if (!_coordinator.TryBeginReindex(knowledgeBaseId, jobId, cts))
         {
-            if (_modelRouter != null)
-            {
-                try
-                {
-                    await using var modelLease = await _modelRouter.AcquireLeaseAsync<IEmbeddingBackendAdapter>(
-                        new ModelSelection(targetSpec.Id, "embedding"),
-                        new WorkloadContext($"reindex_{knowledgeBaseId}", Priority: -1),
-                        ct);
-                    if (modelLease?.Client != null)
-                    {
-                        var rawVectors = await modelLease.Client.EncodeBatchAsync(texts, null, ct);
-                        return rawVectors;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning(ex, "通过 ModelRouter 获取目标模型适配器编码失败，尝试回退全局嵌入服务");
-                }
-            }
+            cts.Dispose();
+            var activeId = _coordinator.GetActiveReindexJobId(knowledgeBaseId);
+            throw new KnowledgeBaseJobConflictException($"知识库已有进行中的重构索引作业 ({activeId})，请等待完成或先取消。");
+        }
 
-            if (_embeddingService != null)
+        var job = new JobDefinition(
+            Id: jobId,
+            Operation: JobOperation.Reindex,
+            KnowledgeBaseId: knowledgeBaseId,
+            ExpectedIndexEpoch: 1,
+            Status: JobStatus.Queued,
+            Phase: OperationPhase.Planning,
+            TotalUnits: 0,
+            ProcessedUnits: 0,
+            IdempotencyKey: $"{knowledgeBaseId}:reindex:{targetSpec.Id}",
+            ErrorMessage: null,
+            CreatedAt: DateTime.UtcNow,
+            FinishedAt: null
+        );
+
+        try
+        {
+            await _catalog.SaveJobAsync(job, ct);
+            await _catalog.SaveEmbeddingSpecAsync(targetSpec, ct);
+        }
+        catch
+        {
+            _coordinator.EndReindex(knowledgeBaseId, jobId);
+            cts.Dispose();
+            throw;
+        }
+
+        _ = Task.Run(() => RunReindexWorkerAsync(job, targetSpec, cts));
+
+        _logger?.LogInformation("[KnowledgeBaseService] 知识库 {KbId} 重构索引作业已入队: {JobId} → {SpecId}",
+            knowledgeBaseId, jobId, targetSpec.Id);
+        return job;
+    }
+
+    private async Task RunReindexWorkerAsync(JobDefinition job, EmbeddingSpec targetSpec, CancellationTokenSource cts)
+    {
+        var knowledgeBaseId = job.KnowledgeBaseId;
+        var sm = new JobStateMachine(job, _catalog, _loggerFactory?.CreateLogger<JobStateMachine>());
+        try
+        {
+            await sm.TransitionToAsync(OperationPhase.Planning, JobStatus.Running, ct: cts.Token);
+
+            if (_adapterResolver == null)
+                throw new InvalidOperationException("嵌入适配器解析器未注册，无法按目标规格创建真实编码器。");
+
+            await using var adapter = await _adapterResolver.CreateForSpecAsync(targetSpec, cts.Token);
+            await sm.TransitionToAsync(OperationPhase.Embedding, ct: cts.Token);
+
+            Func<IReadOnlyList<string>, Task<IReadOnlyList<float[]>>> vectorProvider = async texts =>
+                await adapter.EncodeBatchAsync(texts, targetSpec.DocumentPrefix, cts.Token);
+
+            var progress = new Progress<ShadowReindexProgress>(p => _ = ReportReindexProgressAsync(sm, p));
+
+            await using var lease = await _storageManager.AcquireLeaseAsync(knowledgeBaseId, StorageAccess.ReadWrite, cts.Token);
+            var result = await lease.Store.ExecuteShadowModelReindexAsync(
+                vectorProvider,
+                targetSpec.Id,
+                targetSpec.Dimension,
+                progress,
+                cts.Token);
+
+            await sm.TransitionToAsync(OperationPhase.Publishing, ct: cts.Token);
+            var freshKb = await _catalog.GetKnowledgeBaseAsync(knowledgeBaseId, cts.Token)
+                ?? throw new InvalidOperationException($"知识库不存在: {knowledgeBaseId}");
+            var updatedKb = freshKb with
             {
-                var res = await _embeddingService.EncodeBatchAsync(texts, EmbeddingMode.Document, ct);
-                return res;
-            }
-            var dim = targetSpec.Dimension > 0 ? targetSpec.Dimension : 1024;
-            return texts.Select(_ => new float[dim]).ToList();
-        };
+                EmbeddingSpecId = targetSpec.Id,
+                DesiredConfigRevision = freshKb.DesiredConfigRevision + 1,
+                EffectiveConfigRevision = freshKb.EffectiveConfigRevision + 1,
+                UpdatedAt = DateTime.UtcNow
+            };
+            await _catalog.SaveKnowledgeBaseAsync(updatedKb, cts.Token);
+
+            await sm.UpdateProgressAsync(result.TotalChunks, result.TotalChunks, cts.Token);
+            await sm.TransitionToAsync(OperationPhase.None, JobStatus.Succeeded, ct: CancellationToken.None);
+
+            _logger?.LogInformation(
+                "[KnowledgeBaseService] 知识库 {KbId} 蓝绿影子重构索引完成: 共 {Total} 切片（续跑 {Resumed}），新代次 {Gen}，规格 {Spec}",
+                knowledgeBaseId, result.TotalChunks, result.ResumedChunks, result.NewVectorGeneration, targetSpec.Id);
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            await TryDropShadowAsync(knowledgeBaseId);
+            await sm.TransitionToAsync(OperationPhase.None, JobStatus.Cancelled, "用户取消了重构索引作业", CancellationToken.None);
+            _logger?.LogInformation("[KnowledgeBaseService] 知识库 {KbId} 重构索引作业 {JobId} 已取消", knowledgeBaseId, job.Id);
+        }
+        catch (Exception ex)
+        {
+            await TryDropShadowAsync(knowledgeBaseId);
+            await sm.TransitionToAsync(OperationPhase.None, JobStatus.Failed, ex.Message, CancellationToken.None);
+            _logger?.LogError(ex, "[KnowledgeBaseService] 知识库 {KbId} 重构索引作业 {JobId} 失败", knowledgeBaseId, job.Id);
+        }
+        finally
+        {
+            _coordinator.EndReindex(knowledgeBaseId, job.Id);
+            cts.Dispose();
+        }
+    }
+
+    private static async Task ReportReindexProgressAsync(JobStateMachine sm, ShadowReindexProgress p)
+    {
+        try
+        {
+            await sm.UpdateProgressAsync(p.ProcessedChunks, p.TotalChunks, CancellationToken.None);
+        }
+        catch
+        {
+            // 进度写入失败不影响重构主流程
+        }
+    }
+
+    private async Task TryDropShadowAsync(string knowledgeBaseId)
+    {
+        try
+        {
+            await using var lease = await _storageManager.AcquireLeaseAsync(knowledgeBaseId, StorageAccess.ReadWrite, CancellationToken.None);
+            await lease.Store.DropShadowVectorTableAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "[KnowledgeBaseService] 清理知识库 {KbId} 影子表失败（下次触发将自动重建）", knowledgeBaseId);
+        }
+    }
+
+    public async Task<KnowledgeBaseDefinition> RollbackModelReindexAsync(string knowledgeBaseId, CancellationToken ct = default)
+    {
+        var kb = await _catalog.GetKnowledgeBaseAsync(knowledgeBaseId, ct)
+            ?? throw new KeyNotFoundException($"知识库不存在: {knowledgeBaseId}");
+
+        if (_coordinator.GetActiveReindexJobId(knowledgeBaseId) != null)
+            throw new KnowledgeBaseJobConflictException("重构索引作业进行中，禁止回滚向量代次。");
 
         await using var lease = await _storageManager.AcquireLeaseAsync(knowledgeBaseId, StorageAccess.ReadWrite, ct);
-        var processed = await lease.Store.ExecuteShadowModelReindexAsync(
-            vectorProvider,
-            targetSpec.Id,
-            targetSpec.Dimension,
-            ct);
+        var previousSpecId = await lease.Store.RollbackVectorGenerationAsync(ct);
+        if (previousSpecId == null)
+            throw new InvalidOperationException("没有可回滚的上一代向量索引（chunk_vectors_old 不存在）。");
 
         var updatedKb = kb with
         {
-            EmbeddingSpecId = targetSpec.Id,
+            EmbeddingSpecId = previousSpecId,
             DesiredConfigRevision = kb.DesiredConfigRevision + 1,
             EffectiveConfigRevision = kb.EffectiveConfigRevision + 1,
             UpdatedAt = DateTime.UtcNow
         };
         await _catalog.SaveKnowledgeBaseAsync(updatedKb, ct);
 
-        _logger?.LogInformation("[KnowledgeBaseService] 知识库 {KbId} 蓝绿影子重构索引完成，处理 {Count} 个切片至规格 {Spec}",
-            knowledgeBaseId, processed, targetSpec.Id);
+        _logger?.LogInformation("[KnowledgeBaseService] 知识库 {KbId} 向量代次已回滚至规格 {Spec}", knowledgeBaseId, previousSpecId);
+        return updatedKb;
+    }
 
-        return new ModelReindexResult(
-            KnowledgeBaseId: knowledgeBaseId,
-            TargetEmbeddingSpecId: targetSpec.Id,
-            ProcessedChunks: processed,
-            Success: true,
-            Message: $"成功完成蓝绿影子重构索引，已处理并迁移 {processed} 个切片向量至规格 [{targetSpec.Id}]。"
-        );
+    public async Task<ReindexJobStatus> GetReindexStatusAsync(string knowledgeBaseId, CancellationToken ct = default)
+    {
+        var kb = await _catalog.GetKnowledgeBaseAsync(knowledgeBaseId, ct)
+            ?? throw new KeyNotFoundException($"知识库不存在: {knowledgeBaseId}");
+
+        await using var lease = await _storageManager.AcquireLeaseAsync(knowledgeBaseId, StorageAccess.ReadOnly, ct);
+        var generation = await lease.Store.GetVectorGenerationInfoAsync(ct);
+
+        var jobs = await _catalog.ListJobsAsync(knowledgeBaseId, ct);
+        var active = jobs
+            .Where(j => j.Operation == JobOperation.Reindex &&
+                        j.Status is JobStatus.Queued or JobStatus.Running or JobStatus.Cancelling)
+            .OrderByDescending(j => j.CreatedAt)
+            .FirstOrDefault();
+
+        if (active != null && _coordinator.GetActiveReindexJobId(knowledgeBaseId) == null)
+        {
+            // 进程重启后的孤儿作业：标记中断；影子表保留，重新触发可断点续跑
+            active = active with
+            {
+                Status = JobStatus.Failed,
+                ErrorMessage = "进程重启导致作业中断；影子表已保留，重新触发可断点续跑。",
+                FinishedAt = DateTime.UtcNow
+            };
+            await _catalog.SaveJobAsync(active, ct);
+            active = null;
+        }
+
+        return new ReindexJobStatus(active, generation);
     }
 
     // ==================== 全库重新分段与重索引 ====================

@@ -96,6 +96,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     vector_generation INTEGER NOT NULL DEFAULT 1,
                     active_spec_hash TEXT,
                     target_spec_hash TEXT,
+                    previous_spec_hash TEXT,
                     cohort_set_revision INTEGER NOT NULL DEFAULT 1,
                     active_vector_count INTEGER NOT NULL DEFAULT 0,
                     lexical_generation INTEGER NOT NULL DEFAULT 0,
@@ -262,6 +263,13 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 await alterTokVer.ExecuteNonQueryAsync(ct);
             }
             catch (SqliteException) { }
+            try
+            {
+                using var alterPrevSpec = conn.CreateCommand();
+                alterPrevSpec.CommandText = "ALTER TABLE kb_manifest ADD COLUMN previous_spec_hash TEXT;";
+                await alterPrevSpec.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException) { }
 
             _initialized = true;
             _logger?.LogInformation("[SqliteKnowledgeBaseStore] kb.db 初始化完成: {KbId} ({DbPath})", KnowledgeBaseId, _dbPath);
@@ -280,7 +288,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         cmd.CommandText = @"
             SELECT kb_id, index_epoch, read_revision, content_generation,
                    vector_generation, active_spec_hash, target_spec_hash,
-                   cohort_set_revision, active_vector_count, updated_at
+                   cohort_set_revision, active_vector_count, updated_at, previous_spec_hash
             FROM kb_manifest
             WHERE kb_id = @id;
         ";
@@ -298,7 +306,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 TargetEmbeddingSpecHash: reader.IsDBNull(6) ? null : reader.GetString(6),
                 CorpusCohortSetRevision: reader.GetInt64(7),
                 ActiveVectorCount: reader.GetInt32(8),
-                UpdatedAt: DateTime.Parse(reader.GetString(9))
+                UpdatedAt: DateTime.Parse(reader.GetString(9)),
+                PreviousEmbeddingSpecHash: reader.IsDBNull(10) ? null : reader.GetString(10)
             );
         }
 
@@ -1234,6 +1243,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 cleanCmd.Parameters.AddWithValue("@doc_id", docId);
                 await cleanCmd.ExecuteNonQueryAsync(ct);
             }
+            await InvalidateShadowRowsAsync(conn, tx, chunkId: null, documentId: docId, connectorId: null, ct);
             // 无条件维护词法倒排索引：InitializeAsync 已保证表存在；
             // 历史上这里用 if (hasLexicalIndex) 条件跳过，导致"索引永远缺一段，直到首次查询现场构建 16 秒"。
             {
@@ -2243,6 +2253,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
 
             if (docId == null) return false;
 
+            await InvalidateShadowRowsAsync(conn, tx, chunkId: null, documentId: docId, connectorId: null, ct);
+
             if (await HasLexicalIndexAsync(conn, tx, ct))
             {
                 using var lexicalDelete = conn.CreateCommand();
@@ -2287,7 +2299,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         cmd.CommandText = @"
             SELECT kb_id, index_epoch, read_revision, content_generation,
                    vector_generation, active_spec_hash, target_spec_hash,
-                   cohort_set_revision, active_vector_count, updated_at
+                   cohort_set_revision, active_vector_count, updated_at, previous_spec_hash
             FROM kb_manifest LIMIT 1;
         ";
         using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -2303,7 +2315,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 TargetEmbeddingSpecHash: reader.IsDBNull(6) ? null : reader.GetString(6),
                 CorpusCohortSetRevision: reader.GetInt64(7),
                 ActiveVectorCount: reader.GetInt32(8),
-                UpdatedAt: DateTime.Parse(reader.GetString(9))
+                UpdatedAt: DateTime.Parse(reader.GetString(9)),
+                PreviousEmbeddingSpecHash: reader.IsDBNull(10) ? null : reader.GetString(10)
             );
         }
         return new IndexManifest("default", 1, 1, 1, 1, null, null, 1, 0, DateTime.UtcNow);
@@ -2977,6 +2990,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             using var tx = conn.BeginTransaction();
             var hasLexical = await HasLexicalIndexAsync(conn, tx, ct);
 
+            await InvalidateShadowRowsAsync(conn, tx, chunkId: null, documentId: documentId, connectorId: null, ct);
+
             using var cleanCmd = conn.CreateCommand();
             cleanCmd.Transaction = tx;
             cleanCmd.CommandText = @"
@@ -3048,6 +3063,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 DELETE FROM documents WHERE connector_id = @c_id;
             ";
             cleanCmd.Parameters.AddWithValue("@c_id", connectorId);
+            await InvalidateShadowRowsAsync(conn, tx, chunkId: null, documentId: null, connectorId: connectorId, ct);
             var affected = await cleanCmd.ExecuteNonQueryAsync(ct);
 
             // 递增知识库版本代次与写入代次栅栏
@@ -3660,6 +3676,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 enabled = r.GetInt32(3) == 1;
             }
 
+            await InvalidateShadowRowsAsync(conn, tx, chunkId: chunkId, documentId: null, connectorId: null, ct);
+
             var tokenCount = newText.Length;
 
             // 1. 更新 chunks
@@ -3800,6 +3818,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             cmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
             cmd.Parameters.AddWithValue("@kbId", KnowledgeBaseId);
             var affected = await cmd.ExecuteNonQueryAsync(ct);
+            await InvalidateShadowRowsAsync(conn, tx: null, chunkId: chunkId, documentId: null, connectorId: null, ct);
             return affected > 0;
         }
         finally
@@ -3817,6 +3836,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             using var conn = CreateConnection();
             using var tx = conn.BeginTransaction();
             var hasLexical = await HasLexicalIndexAsync(conn, tx, ct);
+
+            await InvalidateShadowRowsAsync(conn, tx, chunkId: chunkId, documentId: null, connectorId: null, ct);
 
             using var cleanCmd = conn.CreateCommand();
             cleanCmd.Transaction = tx;
@@ -3861,160 +3882,441 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
     }
 
     /// <summary>
-    /// 蓝绿影子重构索引：在保持当前向量检索零停机的情况下，在影子表中重算所有向量并原子切换
+    /// 蓝绿影子重构索引：读路径全程服务旧代；影子表按 chunk_id + source_version 续跑；
+    /// 运行期写路径自动失效影子行（脏标记），切换前在写栅栏内追平脏切片后单事务换表；
+    /// 保留上一代 chunk_vectors_old 供回滚；SIMD 池提交后惰性按代次刷新。
     /// </summary>
-    public async Task<int> ExecuteShadowModelReindexAsync(
+    public async Task<ShadowReindexResult> ExecuteShadowModelReindexAsync(
         Func<IReadOnlyList<string>, Task<IReadOnlyList<float[]>>> vectorProvider,
         string newSpecHash,
         int newDimension,
+        IProgress<ShadowReindexProgress>? progress = null,
         CancellationToken ct = default)
     {
         await InitializeAsync(ct);
 
-        // 1. 获取所有有效分块清单（读操作，不阻塞并发搜索）
-        var chunkPayloads = new List<(string ChunkId, string DocumentId, string Text)>();
-        using (var readConn = CreateConnection(readOnly: true))
-        {
-            using var readCmd = readConn.CreateCommand();
-            readCmd.CommandText = "SELECT id, document_id, COALESCE(embedding_text, text) FROM chunks WHERE enabled = 1 ORDER BY ordinal ASC";
-            using var reader = await readCmd.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                chunkPayloads.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
-            }
-        }
+        const int batchSize = 32;
+        int totalChunks;
+        int resumedChunks;
+        var pending = new List<(string ChunkId, string DocumentId, string Text, long DocVersion)>();
 
-        if (chunkPayloads.Count == 0)
-        {
-            return 0;
-        }
-
-        // 2. 准备影子表 chunk_vectors_shadow
+        // 1. 准备影子表：崩溃残留且 cohort/维度完全匹配时续跑，否则重建
         await _writeGate.WaitAsync(ct);
         try
         {
-            using var prepConn = CreateConnection();
-            using var prepCmd = prepConn.CreateCommand();
-            prepCmd.CommandText = @"
-                CREATE TABLE IF NOT EXISTS chunk_vectors_shadow (
-                    chunk_id TEXT PRIMARY KEY,
-                    document_id TEXT NOT NULL,
-                    dimension INTEGER NOT NULL,
-                    vector_blob BLOB NOT NULL,
-                    producer_cohort TEXT,
-                    created_at TEXT NOT NULL
-                );
-                DELETE FROM chunk_vectors_shadow;
-            ";
-            await prepCmd.ExecuteNonQueryAsync(ct);
+            using var conn = CreateConnection();
+            var reusable = false;
+            if (await ShadowTableExistsAsync(conn, null, ct))
+            {
+                using var matchCmd = conn.CreateCommand();
+                matchCmd.CommandText = @"
+                    SELECT COUNT(1) FROM chunk_vectors_shadow
+                    WHERE producer_cohort IS NOT @cohort
+                       OR (@dim > 0 AND dimension != @dim);
+                ";
+                matchCmd.Parameters.AddWithValue("@cohort", newSpecHash);
+                matchCmd.Parameters.AddWithValue("@dim", newDimension);
+                reusable = Convert.ToInt64(await matchCmd.ExecuteScalarAsync(ct)) == 0;
+            }
+
+            using var prepCmd = conn.CreateCommand();
+            if (reusable)
+            {
+                _logger?.LogInformation("[SqliteKnowledgeBaseStore] 检测到匹配的影子表残留，启用断点续跑: {KbId} (Spec={Spec})", KnowledgeBaseId, newSpecHash);
+            }
+            else
+            {
+                prepCmd.CommandText = @"
+                    DROP TABLE IF EXISTS chunk_vectors_shadow;
+                    CREATE TABLE chunk_vectors_shadow (
+                        chunk_id TEXT PRIMARY KEY,
+                        document_id TEXT NOT NULL,
+                        dimension INTEGER NOT NULL,
+                        vector_blob BLOB NOT NULL,
+                        producer_cohort TEXT,
+                        source_version INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX idx_chunk_vectors_shadow_doc ON chunk_vectors_shadow(document_id);
+                ";
+                await prepCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            using var totalCmd = conn.CreateCommand();
+            totalCmd.CommandText = "SELECT COUNT(1) FROM chunks WHERE enabled = 1;";
+            totalChunks = Convert.ToInt32(await totalCmd.ExecuteScalarAsync(ct));
+
+            pending = await QueryShadowPendingChunksAsync(conn, null, ct);
+            resumedChunks = totalChunks - pending.Count;
         }
         finally
         {
             _writeGate.Release();
         }
 
-        // 3. 分批调用向量计算并写入影子表（批处理，允许并发读）
-        const int batchSize = 32;
-        var now = DateTime.UtcNow.ToString("O");
-        for (int i = 0; i < chunkPayloads.Count; i += batchSize)
+        // 2. 分批编码待处理切片并写入影子表（批间允许并发读写）
+        var processed = resumedChunks;
+        progress?.Report(new ShadowReindexProgress(processed, totalChunks));
+        for (int i = 0; i < pending.Count; i += batchSize)
         {
             ct.ThrowIfCancellationRequested();
-            var batch = chunkPayloads.Skip(i).Take(batchSize).ToList();
-            var texts = batch.Select(b => b.Text).ToList();
-            var vectors = await vectorProvider(texts);
+            var batch = pending.Skip(i).Take(batchSize).ToList();
+            var vectors = await vectorProvider(batch.Select(b => b.Text).ToList());
+            ValidateVectorBatch(vectors, batch.Count, newDimension);
+            await UpsertShadowBatchAsync(batch, vectors, newSpecHash, ct);
+            processed += batch.Count;
+            progress?.Report(new ShadowReindexProgress(processed, totalChunks));
+        }
 
-            if (vectors.Count != batch.Count)
+        // 3. 追平运行期脏写入 → 写栅栏内原子换表（线性化切换点）
+        progress?.Report(new ShadowReindexProgress(totalChunks, totalChunks));
+        const int maxCatchUpRounds = 64;
+        long newVectorGen = 1;
+        for (int round = 0; ; round++)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (round >= maxCatchUpRounds)
             {
-                throw new InvalidOperationException($"影子索引生成异常: 期望 {batch.Count} 个向量，实际返回 {vectors.Count} 个。");
+                throw new InvalidOperationException("影子索引追平未收敛：入库写入速率持续高于编码速率，请在低峰期重试重构。");
             }
 
+            List<(string ChunkId, string DocumentId, string Text, long DocVersion)> dirty;
             await _writeGate.WaitAsync(ct);
             try
             {
                 using var conn = CreateConnection();
-                using var tx = conn.BeginTransaction();
-                using var insertCmd = conn.CreateCommand();
-                insertCmd.Transaction = tx;
-                insertCmd.CommandText = @"
-                    INSERT INTO chunk_vectors_shadow (chunk_id, document_id, dimension, vector_blob, created_at)
-                    VALUES (@chunk_id, @doc_id, @dimension, @vector_blob, @created_at)
-                    ON CONFLICT(chunk_id) DO UPDATE SET
-                        document_id = excluded.document_id,
-                        dimension = excluded.dimension,
-                        vector_blob = excluded.vector_blob,
-                        created_at = excluded.created_at;
-                ";
-                var pChunkId = insertCmd.Parameters.Add("@chunk_id", SqliteType.Text);
-                var pDocId = insertCmd.Parameters.Add("@doc_id", SqliteType.Text);
-                var pDim = insertCmd.Parameters.Add("@dimension", SqliteType.Integer);
-                var pBlob = insertCmd.Parameters.Add("@vector_blob", SqliteType.Blob);
-                var pCreated = insertCmd.Parameters.Add("@created_at", SqliteType.Text);
-
-                for (int j = 0; j < batch.Count; j++)
+                dirty = await QueryShadowPendingChunksAsync(conn, null, ct);
+                if (dirty.Count == 0)
                 {
-                    var vec = vectors[j];
-                    pChunkId.Value = batch[j].ChunkId;
-                    pDocId.Value = batch[j].DocumentId;
-                    pDim.Value = vec.Length > 0 ? vec.Length : newDimension;
-                    pBlob.Value = MemoryMarshal.Cast<float, byte>(vec.AsSpan()).ToArray();
-                    pCreated.Value = now;
-                    await insertCmd.ExecuteNonQueryAsync(ct);
+                    newVectorGen = await SwapShadowTableAsync(conn, newSpecHash, ct);
+                    break;
                 }
-                tx.Commit();
             }
             finally
             {
                 _writeGate.Release();
             }
+
+            for (int i = 0; i < dirty.Count; i += batchSize)
+            {
+                ct.ThrowIfCancellationRequested();
+                var batch = dirty.Skip(i).Take(batchSize).ToList();
+                var vectors = await vectorProvider(batch.Select(b => b.Text).ToList());
+                ValidateVectorBatch(vectors, batch.Count, newDimension);
+                await UpsertShadowBatchAsync(batch, vectors, newSpecHash, ct);
+            }
         }
 
-        // 4. 原子切换影子表与主表，更新 manifest
-        long newVectorGen = 1;
+        return new ShadowReindexResult(totalChunks, totalChunks, newVectorGen, resumedChunks);
+    }
+
+    /// <summary>
+    /// 每批切前验收：数量对齐 + 维度一致 + 有限值 + 非零（拒绝模拟/兜底假向量写入）。
+    /// </summary>
+    private static void ValidateVectorBatch(IReadOnlyList<float[]> vectors, int expectedCount, int expectedDimension)
+    {
+        if (vectors.Count != expectedCount)
+        {
+            throw new InvalidOperationException($"影子索引生成异常: 期望 {expectedCount} 个向量，实际返回 {vectors.Count} 个。");
+        }
+
+        for (int i = 0; i < vectors.Count; i++)
+        {
+            var vec = vectors[i];
+            if (expectedDimension > 0 && vec.Length != expectedDimension)
+            {
+                throw new InvalidOperationException($"影子索引维度门禁失败: 第 {i} 个向量维度 {vec.Length} != 目标规格维度 {expectedDimension}。拒绝切换，请检查目标模型是否就绪。");
+            }
+
+            var norm = 0.0;
+            for (int j = 0; j < vec.Length; j++)
+            {
+                if (!float.IsFinite(vec[j]))
+                {
+                    throw new InvalidOperationException($"影子索引数值门禁失败: 第 {i} 个向量含 NaN/Infinity。拒绝切换。");
+                }
+                norm += (double)vec[j] * vec[j];
+            }
+            if (norm <= 1e-12)
+            {
+                throw new InvalidOperationException($"影子索引零向量门禁失败: 第 {i} 个向量为全零（模型未就绪或兜底假向量）。拒绝切换。");
+            }
+        }
+    }
+
+    private static async Task<List<(string ChunkId, string DocumentId, string Text, long DocVersion)>> QueryShadowPendingChunksAsync(
+        SqliteConnection conn, SqliteTransaction? tx, CancellationToken ct)
+    {
+        var list = new List<(string, string, string, long)>();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = @"
+            SELECT c.id, c.document_id, COALESCE(c.embedding_text, c.text), c.document_version
+            FROM chunks c
+            LEFT JOIN chunk_vectors_shadow s
+                ON s.chunk_id = c.id AND s.source_version = c.document_version
+            WHERE c.enabled = 1 AND s.chunk_id IS NULL
+            ORDER BY c.ordinal ASC;
+        ";
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3)));
+        }
+        return list;
+    }
+
+    private async Task UpsertShadowBatchAsync(
+        List<(string ChunkId, string DocumentId, string Text, long DocVersion)> batch,
+        IReadOnlyList<float[]> vectors,
+        string specHash,
+        CancellationToken ct)
+    {
+        var now = DateTime.UtcNow.ToString("O");
         await _writeGate.WaitAsync(ct);
         try
         {
             using var conn = CreateConnection();
             using var tx = conn.BeginTransaction();
-
-            using var swapCmd = conn.CreateCommand();
-            swapCmd.Transaction = tx;
-            swapCmd.CommandText = @"
-                DROP TABLE IF EXISTS chunk_vectors_old;
-                ALTER TABLE chunk_vectors RENAME TO chunk_vectors_old;
-                ALTER TABLE chunk_vectors_shadow RENAME TO chunk_vectors;
-                DROP TABLE IF EXISTS chunk_vectors_old;
-
-                UPDATE kb_manifest
-                SET index_epoch = index_epoch + 1,
-                    vector_generation = vector_generation + 1,
-                    read_revision = read_revision + 1,
-                    active_spec_hash = @specHash,
-                    target_spec_hash = @specHash,
-                    active_vector_count = (SELECT COUNT(1) FROM chunk_vectors),
-                    updated_at = @now
-                WHERE kb_id = @id;
-
-                SELECT vector_generation FROM kb_manifest WHERE kb_id = @id;
+            using var insertCmd = conn.CreateCommand();
+            insertCmd.Transaction = tx;
+            insertCmd.CommandText = @"
+                INSERT INTO chunk_vectors_shadow (chunk_id, document_id, dimension, vector_blob, producer_cohort, source_version, created_at)
+                VALUES (@chunk_id, @doc_id, @dimension, @vector_blob, @cohort, @source_version, @created_at)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    document_id = excluded.document_id,
+                    dimension = excluded.dimension,
+                    vector_blob = excluded.vector_blob,
+                    producer_cohort = excluded.producer_cohort,
+                    source_version = excluded.source_version,
+                    created_at = excluded.created_at;
             ";
-            swapCmd.Parameters.AddWithValue("@specHash", newSpecHash);
-            swapCmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
-            swapCmd.Parameters.AddWithValue("@id", KnowledgeBaseId);
-            var scalar = await swapCmd.ExecuteScalarAsync(ct);
-            if (scalar != null && scalar != DBNull.Value)
+            var pChunkId = insertCmd.Parameters.Add("@chunk_id", SqliteType.Text);
+            var pDocId = insertCmd.Parameters.Add("@doc_id", SqliteType.Text);
+            var pDim = insertCmd.Parameters.Add("@dimension", SqliteType.Integer);
+            var pBlob = insertCmd.Parameters.Add("@vector_blob", SqliteType.Blob);
+            var pCohort = insertCmd.Parameters.Add("@cohort", SqliteType.Text);
+            var pVersion = insertCmd.Parameters.Add("@source_version", SqliteType.Integer);
+            var pCreated = insertCmd.Parameters.Add("@created_at", SqliteType.Text);
+
+            for (int j = 0; j < batch.Count; j++)
             {
-                newVectorGen = Convert.ToInt64(scalar);
+                var vec = vectors[j];
+                pChunkId.Value = batch[j].ChunkId;
+                pDocId.Value = batch[j].DocumentId;
+                pDim.Value = vec.Length;
+                pBlob.Value = MemoryMarshal.Cast<float, byte>(vec.AsSpan()).ToArray();
+                pCohort.Value = specHash;
+                pVersion.Value = batch[j].DocVersion;
+                pCreated.Value = now;
+                await insertCmd.ExecuteNonQueryAsync(ct);
             }
-
             tx.Commit();
-
-            // 5. 立即重新载入内存 SIMD 投影池
-            await EnsureTensorProjectionPoolLoadedAsync(conn, null, newVectorGen, ct);
         }
         finally
         {
             _writeGate.Release();
         }
+    }
 
-        return chunkPayloads.Count;
+    /// <summary>
+    /// 写栅栏内单事务换表：保留上一代 chunk_vectors_old，记录 previous_spec_hash，
+    /// 提交后仅失效内存池（读路径按 vectorGeneration 惰性重载，不在事务外做致命操作）。
+    /// </summary>
+    private async Task<long> SwapShadowTableAsync(SqliteConnection conn, string newSpecHash, CancellationToken ct)
+    {
+        using var tx = conn.BeginTransaction();
+        using var swapCmd = conn.CreateCommand();
+        swapCmd.Transaction = tx;
+        swapCmd.CommandText = @"
+            DROP TABLE IF EXISTS chunk_vectors_old;
+            ALTER TABLE chunk_vectors RENAME TO chunk_vectors_old;
+            ALTER TABLE chunk_vectors_shadow RENAME TO chunk_vectors;
+            DROP INDEX IF EXISTS idx_chunk_vectors_doc;
+            DROP INDEX IF EXISTS idx_chunk_vectors_shadow_doc;
+            CREATE INDEX idx_chunk_vectors_doc ON chunk_vectors(document_id);
+
+            UPDATE kb_manifest
+            SET index_epoch = index_epoch + 1,
+                vector_generation = vector_generation + 1,
+                read_revision = read_revision + 1,
+                previous_spec_hash = active_spec_hash,
+                active_spec_hash = @specHash,
+                target_spec_hash = @specHash,
+                active_vector_count = (SELECT COUNT(1) FROM chunk_vectors),
+                updated_at = @now
+            WHERE kb_id = @id;
+
+            SELECT vector_generation FROM kb_manifest WHERE kb_id = @id;
+        ";
+        swapCmd.Parameters.AddWithValue("@specHash", newSpecHash);
+        swapCmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+        swapCmd.Parameters.AddWithValue("@id", KnowledgeBaseId);
+        var scalar = await swapCmd.ExecuteScalarAsync(ct);
+        var newVectorGen = scalar != null && scalar != DBNull.Value ? Convert.ToInt64(scalar) : 1;
+        tx.Commit();
+
+        InMemoryTensorProjectionPool.GetOrCreate(KnowledgeBaseId).Invalidate();
+        _logger?.LogInformation("[SqliteKnowledgeBaseStore] 影子表原子切换完成: {KbId} → Generation {Gen} (Spec={Spec})，上一代已保留供回滚", KnowledgeBaseId, newVectorGen, newSpecHash);
+        return newVectorGen;
+    }
+
+    private static async Task<bool> ShadowTableExistsAsync(SqliteConnection conn, SqliteTransaction? tx, CancellationToken ct)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='chunk_vectors_shadow';";
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct)) > 0;
+    }
+
+    /// <summary>
+    /// 影子一致性维护（双写脏标记）：写路径变更切片后删除对应影子行，
+    /// 缺失的影子行即「待目标模型重编码」，由切换前追平循环收敛。
+    /// 影子表不存在（无重构运行）时零开销直通。
+    /// </summary>
+    private static async Task InvalidateShadowRowsAsync(
+        SqliteConnection conn, SqliteTransaction? tx,
+        string? chunkId, string? documentId, string? connectorId,
+        CancellationToken ct)
+    {
+        if (!await ShadowTableExistsAsync(conn, tx, ct)) return;
+
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        if (chunkId != null)
+        {
+            cmd.CommandText = "DELETE FROM chunk_vectors_shadow WHERE chunk_id = @id;";
+            cmd.Parameters.AddWithValue("@id", chunkId);
+        }
+        else if (documentId != null)
+        {
+            cmd.CommandText = "DELETE FROM chunk_vectors_shadow WHERE document_id = @id;";
+            cmd.Parameters.AddWithValue("@id", documentId);
+        }
+        else
+        {
+            cmd.CommandText = "DELETE FROM chunk_vectors_shadow WHERE document_id IN (SELECT id FROM documents WHERE connector_id = @id);";
+            cmd.Parameters.AddWithValue("@id", connectorId!);
+        }
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DropShadowVectorTableAsync(CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DROP TABLE IF EXISTS chunk_vectors_shadow;";
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+    }
+
+    public async Task<string?> RollbackVectorGenerationAsync(CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            using var conn = CreateConnection();
+            using (var existCmd = conn.CreateCommand())
+            {
+                existCmd.CommandText = "SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='chunk_vectors_old';";
+                if (Convert.ToInt64(await existCmd.ExecuteScalarAsync(ct)) == 0) return null;
+            }
+
+            var manifest = await GetManifestInternalAsync(conn, null, ct);
+            var previousSpec = manifest.PreviousEmbeddingSpecHash;
+            if (string.IsNullOrEmpty(previousSpec))
+            {
+                using var cohortCmd = conn.CreateCommand();
+                cohortCmd.CommandText = @"
+                    SELECT producer_cohort FROM chunk_vectors_old
+                    WHERE producer_cohort IS NOT NULL AND producer_cohort NOT IN ('manual', 'hitl_edit')
+                    LIMIT 1;
+                ";
+                previousSpec = (string?)await cohortCmd.ExecuteScalarAsync(ct);
+            }
+            if (string.IsNullOrEmpty(previousSpec)) previousSpec = "spec_lexical_only";
+
+            using var tx = conn.BeginTransaction();
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = @"
+                DROP TABLE IF EXISTS chunk_vectors;
+                ALTER TABLE chunk_vectors_old RENAME TO chunk_vectors;
+                DROP TABLE IF EXISTS chunk_vectors_shadow;
+                CREATE INDEX IF NOT EXISTS idx_chunk_vectors_doc ON chunk_vectors(document_id);
+
+                UPDATE kb_manifest
+                SET index_epoch = index_epoch + 1,
+                    vector_generation = vector_generation + 1,
+                    read_revision = read_revision + 1,
+                    active_spec_hash = @prev,
+                    target_spec_hash = @prev,
+                    previous_spec_hash = NULL,
+                    active_vector_count = (SELECT COUNT(1) FROM chunk_vectors),
+                    updated_at = @now
+                WHERE kb_id = @id;
+            ";
+            cmd.Parameters.AddWithValue("@prev", previousSpec);
+            cmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+            cmd.Parameters.AddWithValue("@id", KnowledgeBaseId);
+            await cmd.ExecuteNonQueryAsync(ct);
+            tx.Commit();
+
+            InMemoryTensorProjectionPool.GetOrCreate(KnowledgeBaseId).Invalidate();
+            _logger?.LogInformation("[SqliteKnowledgeBaseStore] 向量代次回滚完成: {KbId} → Spec {Spec}", KnowledgeBaseId, previousSpec);
+            return previousSpec;
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+    }
+
+    public async Task<VectorGenerationInfo> GetVectorGenerationInfoAsync(CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        using var conn = CreateConnection(readOnly: true);
+
+        var manifest = await GetManifestInternalAsync(conn, null, ct);
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT
+                (SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='chunk_vectors_old'),
+                (SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='chunk_vectors_shadow'),
+                (SELECT COUNT(1) FROM chunk_vectors);
+        ";
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        await reader.ReadAsync(ct);
+        var hasOld = reader.GetInt64(0) > 0;
+        var hasShadow = reader.GetInt64(1) > 0;
+        var activeCount = reader.GetInt32(2);
+        await reader.CloseAsync();
+
+        var shadowRows = 0;
+        if (hasShadow)
+        {
+            using var shadowCmd = conn.CreateCommand();
+            shadowCmd.CommandText = "SELECT COUNT(1) FROM chunk_vectors_shadow;";
+            shadowRows = Convert.ToInt32(await shadowCmd.ExecuteScalarAsync(ct));
+        }
+
+        return new VectorGenerationInfo(
+            ActiveSpecId: manifest.ActiveEmbeddingSpecHash,
+            PreviousSpecId: hasOld ? manifest.PreviousEmbeddingSpecHash : null,
+            CanRollback: hasOld,
+            ActiveVectorCount: activeCount,
+            ShadowExists: hasShadow,
+            ShadowRowCount: shadowRows);
     }
 }

@@ -221,13 +221,17 @@ public class KnowledgeBaseChunkingModelCouplingGateTests : IDisposable
         );
 
         // 2. 尝试将模型切换为 512 上限的 small 模型（未重分段前，旧分块 1500 tokens 会溢出）
-        var reindexResult = await kbService.TriggerModelReindexAsync(kb.Id, "spec_small_down");
+        // 作业化语义：入队阶段同步抛异常拦截（HTTP 400），不产生任何后台作业
+        var gateEx = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => kbService.TriggerModelReindexJobAsync(kb.Id, "spec_small_down"));
 
         // 3. 断言反向相容性门禁阻断生效
-        Assert.False(reindexResult.Success);
-        Assert.Contains("小于当前知识库分段规格", reindexResult.Message);
-        Assert.Contains("1500", reindexResult.Message);
-        Assert.Contains("512", reindexResult.Message);
+        Assert.Contains("小于当前知识库分段规格", gateEx.Message);
+        Assert.Contains("1500", gateEx.Message);
+        Assert.Contains("512", gateEx.Message);
+
+        var jobs = await _catalog.ListJobsAsync(kb.Id);
+        Assert.DoesNotContain(jobs, j => j.Operation == JobOperation.Reindex);
     }
 
     [Fact]

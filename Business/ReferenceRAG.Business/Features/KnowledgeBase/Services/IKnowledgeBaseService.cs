@@ -42,7 +42,17 @@ public interface IKnowledgeBaseService
 
     Task<ConfigDriftResult> CheckConfigDriftAsync(string knowledgeBaseId, CancellationToken ct = default);
 
-    Task<ModelReindexResult> TriggerModelReindexAsync(string knowledgeBaseId, string? targetSpecId = null, CancellationToken ct = default);
+    /// <summary>
+    /// 蓝绿影子重构索引作业化入口：校验 + 单飞占位后立即返回 Queued 作业（HTTP 202），
+    /// 实际编码在独立后台任务中执行，与请求生命周期解耦。
+    /// </summary>
+    Task<JobDefinition> TriggerModelReindexJobAsync(string knowledgeBaseId, string? targetSpecId = null, CancellationToken ct = default);
+
+    /// <summary>回滚到上一代向量索引（chunk_vectors_old 存在时可用）。</summary>
+    Task<KnowledgeBaseDefinition> RollbackModelReindexAsync(string knowledgeBaseId, CancellationToken ct = default);
+
+    /// <summary>重构作业面板状态：活跃作业 + 物理代次/影子/旧代表信息。</summary>
+    Task<ReindexJobStatus> GetReindexStatusAsync(string knowledgeBaseId, CancellationToken ct = default);
 
     Task<KnowledgeBaseDefinition> UnbindModelAsync(string knowledgeBaseId, CancellationToken ct = default);
 

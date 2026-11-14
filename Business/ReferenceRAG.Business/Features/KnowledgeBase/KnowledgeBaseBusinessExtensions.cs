@@ -7,6 +7,8 @@ public static class KnowledgeBaseBusinessExtensions
 {
     public static IServiceCollection AddKnowledgeBaseServices(this IServiceCollection services)
     {
+        // 进程级作业协调器：Scoped 服务跨请求共享 CTS 注册表与 reindex 单飞占位
+        services.AddSingleton<KnowledgeBaseJobCoordinator>();
         services.AddScoped<IKnowledgeBaseService, KnowledgeBaseService>();
         services.AddScoped<IKnowledgeBaseSearchService, KnowledgeBaseSearchService>();
         services.AddScoped<IKnowledgeBaseChatService, KnowledgeBaseChatService>();

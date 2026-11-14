@@ -46,6 +46,7 @@ public static class ModelManagementExtensions
         });
 
         services.AddSingleton<IModelAssetResolver, ModelAssetResolver>();
+        services.AddSingleton<IEmbeddingAdapterResolver, SpecEmbeddingAdapterResolver>();
 
         services.AddSingleton<IEmbeddingService>(sp =>
         {

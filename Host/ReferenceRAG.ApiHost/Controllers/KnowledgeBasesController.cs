@@ -461,20 +461,28 @@ public class KnowledgeBasesController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// 蓝绿影子重构索引（作业化）：校验 + 单飞占位后立即 202 返回 Queued 作业，
+    /// 实际编码在独立后台任务执行，与 HTTP 请求生命周期解耦（根治 60s 超时 + RequestAborted 取消）。
+    /// </summary>
     [HttpPost("{id}/reindex")]
-    public async Task<ActionResult<ModelReindexResult>> TriggerModelReindex(
+    public async Task<ActionResult<JobDefinition>> TriggerModelReindex(
         string id,
         [FromBody] TriggerReindexRequest? request,
         CancellationToken ct)
     {
         try
         {
-            var result = await _kbService.TriggerModelReindexAsync(id, request?.TargetEmbeddingSpecId, ct);
-            return Ok(result);
+            var job = await _kbService.TriggerModelReindexJobAsync(id, request?.TargetEmbeddingSpecId, ct);
+            return Accepted($"/api/jobs/{job.Id}", job);
         }
         catch (KeyNotFoundException ex)
         {
             return NotFound(new { message = ex.Message });
+        }
+        catch (KnowledgeBaseJobConflictException ex)
+        {
+            return Conflict(new { message = ex.Message });
         }
         catch (InvalidOperationException ex)
         {
@@ -482,7 +490,50 @@ public class KnowledgeBasesController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "知识库 {Id} 蓝绿影子重构索引失败", id);
+            _logger.LogError(ex, "知识库 {Id} 蓝绿影子重构索引入队失败", id);
+            return StatusCode(500, new { message = ex.Message });
+        }
+    }
+
+    /// <summary>重构作业面板状态：活跃作业 + 向量代次/影子/旧代表信息（前端进度抽屉轮询）。</summary>
+    [HttpGet("{id}/reindex/status")]
+    public async Task<ActionResult<ReindexJobStatus>> GetReindexStatus(string id, CancellationToken ct)
+    {
+        try
+        {
+            var status = await _kbService.GetReindexStatusAsync(id, ct);
+            return Ok(status);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+    }
+
+    /// <summary>回滚到上一代向量索引（保留的 chunk_vectors_old 存在时可用）。</summary>
+    [HttpPost("{id}/reindex/rollback")]
+    public async Task<ActionResult<KnowledgeBaseDefinition>> RollbackModelReindex(string id, CancellationToken ct)
+    {
+        try
+        {
+            var kb = await _kbService.RollbackModelReindexAsync(id, ct);
+            return Ok(kb);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (KnowledgeBaseJobConflictException ex)
+        {
+            return Conflict(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "知识库 {Id} 向量代次回滚失败", id);
             return StatusCode(500, new { message = ex.Message });
         }
     }

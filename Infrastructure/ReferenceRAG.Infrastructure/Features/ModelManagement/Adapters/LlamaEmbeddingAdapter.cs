@@ -30,6 +30,8 @@ public sealed class LlamaEmbeddingAdapter : IEmbeddingBackendAdapter
     private uint _seqMax = 16;
     private bool _disposed;
 
+    private const int WindowOverlapTokens = 64;
+
     public string BackendType => "llama";
     public string ModelPath => _modelPath;
     public string ModelName => _modelName;
@@ -215,25 +217,36 @@ public sealed class LlamaEmbeddingAdapter : IEmbeddingBackendAdapter
                 var finalText = string.IsNullOrEmpty(prefix) ? text : $"{prefix}{text}";
                 var tokens = _context.Tokenize(finalText, true);
 
-                // 若单条文本超出批次最大 token 预算，进行安全截断
+                // 超出批次 token 预算时滑窗切分 + 均值池化，禁止静默截断丢失尾部语义
+                IReadOnlyList<LLamaToken[]> windows;
                 if (tokens.Length > _batchTokenCapacity)
                 {
-                    tokens = tokens[..(int)_batchTokenCapacity];
+                    windows = SplitTokenWindows(tokens, (int)_batchTokenCapacity, WindowOverlapTokens);
+                    _logger.LogWarning(
+                        "[LlamaEmbedding] 文本超出批次容量，启用滑窗均值池化: Model={Model}, Tokens={Tokens}, Capacity={Capacity}, Windows={Windows}",
+                        _modelName, tokens.Length, _batchTokenCapacity, windows.Count);
                 }
-
-                var nextSeqId = currentSeqs.Count;
-
-                // 若添加该序列会超出批次 token 上限或超出多序列最大槽位数 (SeqMax)，先提交解码当前子批次
-                if (subBatch.TokenCount + tokens.Length > _batchTokenCapacity || nextSeqId >= _seqMax)
+                else
                 {
-                    FlushSubBatch(subBatch, currentSeqs, output);
-                    subBatch.Clear();
-                    currentSeqs.Clear();
-                    nextSeqId = 0;
+                    windows = new[] { tokens };
                 }
 
-                subBatch.AddRange(tokens, 0, (LLamaSeqId)nextSeqId, true);
-                currentSeqs.Add((i, nextSeqId));
+                foreach (var window in windows)
+                {
+                    var nextSeqId = currentSeqs.Count;
+
+                    // 若添加该序列会超出批次 token 上限或超出多序列最大槽位数 (SeqMax)，先提交解码当前子批次
+                    if (subBatch.TokenCount + window.Length > _batchTokenCapacity || nextSeqId >= _seqMax)
+                    {
+                        FlushSubBatch(subBatch, currentSeqs, output);
+                        subBatch.Clear();
+                        currentSeqs.Clear();
+                        nextSeqId = 0;
+                    }
+
+                    subBatch.AddRange(window, 0, (LLamaSeqId)nextSeqId, true);
+                    currentSeqs.Add((i, nextSeqId));
+                }
             }
 
             // 提交并解码剩余子批次
@@ -264,7 +277,8 @@ public sealed class LlamaEmbeddingAdapter : IEmbeddingBackendAdapter
             throw new InvalidOperationException($"LLama 解码批次失败: {decodeResult} (Model: {_modelName})");
         }
 
-        // 提取每条序列对应的池化嵌入向量并进行单位归一化
+        // 提取每条序列的池化嵌入并 L2 归一化；同一文本的多个滑窗按均值聚合
+        var windowSums = new Dictionary<int, (float[] Sum, int Count)>();
         foreach (var (textIndex, seqId) in currentSeqs)
         {
             var raw = _context.NativeHandle.GetEmbeddingsSeq((LLamaSeqId)seqId);
@@ -278,7 +292,6 @@ public sealed class LlamaEmbeddingAdapter : IEmbeddingBackendAdapter
                 sumSquares += val * val;
             }
 
-            // L2 归一化 (Unit Normalization)
             var norm = MathF.Sqrt(sumSquares);
             if (norm > 1e-10f)
             {
@@ -289,11 +302,74 @@ public sealed class LlamaEmbeddingAdapter : IEmbeddingBackendAdapter
                 }
             }
 
-            output[textIndex] = vec;
+            if (windowSums.TryGetValue(textIndex, out var acc))
+            {
+                for (int j = 0; j < vec.Length; j++)
+                {
+                    acc.Sum[j] += vec[j];
+                }
+                windowSums[textIndex] = (acc.Sum, acc.Count + 1);
+            }
+            else
+            {
+                windowSums[textIndex] = (vec, 1);
+            }
+        }
+
+        foreach (var (textIndex, (sum, count)) in windowSums)
+        {
+            if (count > 1)
+            {
+                var inv = 1.0f / count;
+                for (int j = 0; j < sum.Length; j++)
+                {
+                    sum[j] *= inv;
+                }
+            }
+
+            var sumSquares = 0f;
+            for (int j = 0; j < sum.Length; j++)
+            {
+                sumSquares += sum[j] * sum[j];
+            }
+            var norm = MathF.Sqrt(sumSquares);
+            if (norm > 1e-10f)
+            {
+                var invNorm = 1.0f / norm;
+                for (int j = 0; j < sum.Length; j++)
+                {
+                    sum[j] *= invNorm;
+                }
+            }
+
+            output[textIndex] = sum;
         }
 
         // 清空 KV 缓存为下一批次腾出空间，上下文常驻在显存中零释放与零重新分配
         _context.NativeHandle.MemoryClear(true);
+    }
+
+    /// <summary>
+    /// 将超长 token 序列切分为带重叠的滑动窗口（每窗 ≤ capacity）。
+    /// 纯函数，供门禁测试直接验证：全覆盖、无越界、窗口数正确。
+    /// </summary>
+    public static IReadOnlyList<T[]> SplitTokenWindows<T>(T[] tokens, int capacity, int overlap = 64)
+    {
+        if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity), "窗口容量必须为正");
+        if (tokens.Length <= capacity) return new[] { tokens };
+
+        overlap = Math.Clamp(overlap, 0, capacity / 2);
+        var stride = capacity - overlap;
+        var windows = new List<T[]>();
+        for (int start = 0; start < tokens.Length; start += stride)
+        {
+            var len = Math.Min(capacity, tokens.Length - start);
+            var window = new T[len];
+            Array.Copy(tokens, start, window, 0, len);
+            windows.Add(window);
+            if (start + len >= tokens.Length) break;
+        }
+        return windows;
     }
 
     public int CountTokens(string text)
