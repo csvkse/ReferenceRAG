@@ -184,6 +184,30 @@ CI 防回归 wiring：G1-G6 进 `dotnet test` 默认套件；G7 进既有生产�
 > - 内置浏览器面板处于隐藏态，截图与 naive-ui 虚拟列表可视化渲染不可用（`visibilityState=hidden`）；改用结构化快照 + 运行时断言完成验收，下拉选项数据经组件状态核实正确（5 项含 mock 规格），选择经 v-model 响应式驱动。
 > - 跨库检索端点 `/api/knowledge-base-search` 使用**全局**查询编码器（本隔离实例无真实全局模型 → 模拟 384d），与按库绑定的 16d mock 向量维度不一致 → 向量路 0 命中。此为既有检索服务架构特性，**与本次重构正确性无关**（库级混合检索由 G6 以匹配适配器证明）；生产环境全局模型与库模型维度一致时不复现。
 
+### 8.4 生产部署记录（2026-11-14）
+
+| 项 | 值 |
+| :--- | :--- |
+| 部署提交 | `90e615578b25`（`feature/v2-knowledgebase-dualchannel`，已推送 origin） |
+| 生产镜像 | `referencerag:deploy-90e615578b25`（sha256 前缀 `a1290c942b77`，834MB，通用 CPU+Vulkan 配方） |
+| 构建方式 | 沿用既有正式流程：`git archive HEAD` → ssh exec 通道流式传入正式宿主 → 宿主上 `docker build -f support/deploy/docker/Dockerfile`（后台构建 + 日志轮询） |
+| 容器重建 | `scripts/deploy-linux.ps1 -Mode Official -EnvFile env/.envprod -Image referencerag:deploy-90e615578b25`；复用重建前刷新的 `/tmp/referencerag-prod.env` 快照（chmod 600），ROCm 设备（`/dev/kfd`+`/dev/dri`）与全部挂载（data/models/logs、`/lwt` 源卷）原样保留 |
+| 回滚锚点 | `referencerag:deploy-968045f90602`（sha256 前缀 `da76af95c659`）保留在正式宿主，一条 `docker run` 可回退 |
+
+部署后验证（全部只读，**未触发生产 reindex**）：
+
+| 检查 | 结果 |
+| :--- | :--- |
+| 镜像 sha256 核对（防「healthy 但旧代码」坑） | 容器 `.Image` == 新构建镜像 ID，running/healthy |
+| 健康探针 `/api/system/health` | 200 healthy |
+| 新前端生效 | `/app/views/KnowledgeBases.js` 含全部 5 个重构抽屉标记（openReindexDrawer/pollReindexStatus/handleCancelReindex/handleRollbackReindex/reindexGeneration） |
+| 数据卷完整性 | 知识库目录原样：`dadd847d18b54162`「默认知识库」纯词法绑定不变 |
+| 新端点 | `GET …/reindex/status` 200（ActiveJob/Generation 结构）；`GET /api/jobs` 200（历史 sync 作业保留） |
+| 检索回归 | 跨库词法检索 3 命中 RRF，无退化 |
+| 浏览器验收（`<PROD_HOST>:5123`） | 登录 → 知识库页无异常渲染 → 「绑定模型」弹窗展示新作业化文案（后台影子分批/词法不受影响/原子切换）+ 配置健康 🟢 Aligned + 3 个真实规格选项（bge-small-zh 512d / BGE M3 1024d / 纯词法 0d）→ 取消关闭，控制台无错误，未产生任何作业 |
+
+> 生产观察：新 `reindex/status` 端点暴露了**原始故障残留**——`ShadowExists=true, ShadowRowCount=320`（当初同步 reindex 超时中断留下的影子表碎片，旧代码下不可见）。按 P2 续跑规则，下次授权触发 reindex 时将按 `source_version + producer_cohort` 判定续跑或重建，无需人工清理；活跃代 0 向量、纯词法检索全程不受影响。
+
 ## 参考来源
 
 - [Elastic: Changing Mapping with Zero Downtime](https://www.elastic.co/blog/changing-mapping-with-zero-downtime)
