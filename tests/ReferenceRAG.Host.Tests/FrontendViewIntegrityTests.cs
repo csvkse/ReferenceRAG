@@ -309,7 +309,9 @@ public sealed class FrontendViewIntegrityTests
                 string? resolvedPath = null;
                 if (importMap.TryGetValue(specifier, out var mapped))
                 {
-                    resolvedPath = Path.GetFullPath(Path.Combine(wwwroot, mapped.TrimStart('/')));
+                    // importmap 值携带 ?v=<vendorVersion> 缓存击穿查询，定位磁盘文件前剥离
+                    var physical = mapped.Split('?')[0];
+                    resolvedPath = Path.GetFullPath(Path.Combine(wwwroot, physical.TrimStart('/')));
                 }
                 else if (specifier.StartsWith('/'))
                 {

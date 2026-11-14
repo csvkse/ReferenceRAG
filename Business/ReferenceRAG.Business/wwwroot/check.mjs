@@ -144,21 +144,23 @@ export function extractImportMap(rootDirectory) {
 }
 
 /**
- * 依据 importmap、根目录或相对路径解析模块规范名对应的绝对物理路径
+ * 依据 importmap、根目录或相对路径解析模块规范名对应的绝对物理路径。
+ * 剥离 ?v= 等版本查询（P2-1 vendor 强缓存），使带版本的 URL 仍映射到真实物理文件。
  */
 export function resolveModuleSpecifier(rootDirectory, fromFile, specifier, importMap = {}) {
+  const stripQuery = (p) => p.split('?')[0];
   if (specifier in importMap) {
-    const mapped = importMap[specifier];
+    const mapped = stripQuery(importMap[specifier]);
     if (mapped.startsWith('/')) {
       return path.resolve(rootDirectory, mapped.slice(1));
     }
     return path.resolve(rootDirectory, mapped);
   }
   if (specifier.startsWith('/')) {
-    return path.resolve(rootDirectory, specifier.slice(1));
+    return path.resolve(rootDirectory, stripQuery(specifier).slice(1));
   }
   if (specifier.startsWith('.')) {
-    return path.resolve(path.dirname(fromFile), specifier);
+    return path.resolve(path.dirname(fromFile), stripQuery(specifier));
   }
   return null;
 }

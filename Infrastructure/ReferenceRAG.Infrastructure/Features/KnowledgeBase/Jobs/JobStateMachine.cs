@@ -11,6 +11,7 @@ public sealed class JobStateMachine
 {
     private readonly ICatalogStore _catalog;
     private readonly ILogger<JobStateMachine>? _logger;
+    private readonly Func<JobDefinition, Task>? _changed;
     private readonly object _stateLock = new();
 
     public JobDefinition CurrentJob { get; private set; }
@@ -22,11 +23,29 @@ public sealed class JobStateMachine
     public JobStateMachine(
         JobDefinition initialJob,
         ICatalogStore catalog,
-        ILogger<JobStateMachine>? logger = null)
+        ILogger<JobStateMachine>? logger = null,
+        Func<JobDefinition, Task>? changed = null)
     {
         CurrentJob = initialJob ?? throw new ArgumentNullException(nameof(initialJob));
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _logger = logger;
+        _changed = changed;
+    }
+
+    /// <summary>
+    /// 持久化后通知订阅者（广播失败仅记录，绝不影响状态机主流程）
+    /// </summary>
+    private async Task NotifyChangedAsync(JobDefinition job)
+    {
+        if (_changed == null) return;
+        try
+        {
+            await _changed(job);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "[JobStateMachine] 任务 {JobId} 变更通知失败（不影响主流程）", job.Id);
+        }
     }
 
     /// <summary>
@@ -68,6 +87,7 @@ public sealed class JobStateMachine
         _logger?.LogInformation("[JobStateMachine] 任务 {JobId} 状态跃迁 -> Status: {Status}, Phase: {Phase}",
             JobId, updated.Status, updated.Phase);
 
+        await NotifyChangedAsync(updated);
         return true;
     }
 
@@ -76,6 +96,7 @@ public sealed class JobStateMachine
     /// </summary>
     public async Task<bool> RequestCancelAsync(CancellationToken ct = default)
     {
+        JobDefinition updated;
         lock (_stateLock)
         {
             if (CurrentJob.Status is JobStatus.Succeeded or JobStatus.Failed or JobStatus.Cancelled)
@@ -85,16 +106,18 @@ public sealed class JobStateMachine
 
             if (CurrentJob.Status == JobStatus.Queued)
             {
-                CurrentJob = CurrentJob with { Status = JobStatus.Cancelled, FinishedAt = DateTime.UtcNow };
+                updated = CurrentJob with { Status = JobStatus.Cancelled, FinishedAt = DateTime.UtcNow };
             }
             else
             {
-                CurrentJob = CurrentJob with { Status = JobStatus.Cancelling };
+                updated = CurrentJob with { Status = JobStatus.Cancelling };
             }
+            CurrentJob = updated;
         }
 
-        await _catalog.SaveJobAsync(CurrentJob, ct);
-        _logger?.LogInformation("[JobStateMachine] 任务 {JobId} 请求取消，当前状态: {Status}", JobId, CurrentJob.Status);
+        await _catalog.SaveJobAsync(updated, ct);
+        _logger?.LogInformation("[JobStateMachine] 任务 {JobId} 请求取消，当前状态: {Status}", JobId, updated.Status);
+        await NotifyChangedAsync(updated);
         return true;
     }
 
@@ -103,15 +126,22 @@ public sealed class JobStateMachine
     /// </summary>
     public async Task UpdateProgressAsync(int processedUnits, int? totalUnits = null, CancellationToken ct = default)
     {
+        JobDefinition updated;
         lock (_stateLock)
         {
-            CurrentJob = CurrentJob with
+            if (CurrentJob.Status is JobStatus.Succeeded or JobStatus.Failed or JobStatus.Cancelled)
+            {
+                return;
+            }
+            updated = CurrentJob with
             {
                 ProcessedUnits = processedUnits,
                 TotalUnits = totalUnits ?? CurrentJob.TotalUnits
             };
+            CurrentJob = updated;
         }
 
-        await _catalog.SaveJobAsync(CurrentJob, ct);
+        await _catalog.SaveJobAsync(updated, ct);
+        await NotifyChangedAsync(updated);
     }
 }

@@ -1,1 +1,1 @@
-{"name":"reference-rag-ui","private":true,"type":"module","scripts":{"test":"node --test tests/*.test.mjs","check":"node check.mjs"}}
+{"name":"reference-rag-ui","private":true,"type":"module","scripts":{"test":"node --import ./tests/importmap-loader.mjs --test tests/*.test.mjs","check":"node check.mjs","e2e:mobile":"node tests/e2e-mobile.mjs"},"devDependencies":{"playwright-core":"^1.56.0"}}

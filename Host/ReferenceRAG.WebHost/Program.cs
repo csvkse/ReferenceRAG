@@ -15,6 +15,8 @@ using System.Text;
 using ReferenceRAG.ApiHost.Configuration;
 using ReferenceRAG.ApiHost.Diagnostics;
 using ReferenceRAG.ApiHost.Transport;
+using Microsoft.AspNetCore.ResponseCompression;
+using System.IO.Compression;
 
 #region 必备环境配置
 // Set working directory to application directory (important for Windows Service)
@@ -145,6 +147,23 @@ if (enableCors)
 }
 #endregion
 
+#region 响应压缩（P2-1）
+// Brotli 优先 + Gzip 兜底，压缩前端 JS/CSS/JSON/SVG 静态资源与 API 响应。
+// 默认 MIME 白名单已含 text/css、application/json、image/svg+xml；额外补 text/javascript
+// （.NET 10 对 .js 的默认 Content-Type），确保 naive-ui 等大体积 vendor 脚本命中压缩。
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(new[] { "text/javascript" }).Distinct();
+});
+// Brotli Optimal：Fastest 实测 naive-ui 传输 568KB 超出 G-M8 500KB 预算，故取 Optimal；
+// vendor immutable 强缓存使压缩成本仅发生在每客户端每版本首次加载。Gzip Optimal 兜底。
+builder.Services.Configure<BrotliCompressionProviderOptions>(options => options.Level = CompressionLevel.Optimal);
+builder.Services.Configure<GzipCompressionProviderOptions>(options => options.Level = CompressionLevel.Optimal);
+#endregion
+
 var app = builder.Build();
 
 #region 中间件管理
@@ -156,9 +175,23 @@ if (enableCors) app.UseCors();
 // 需在 MCP / Swagger / 静态文件 / 鉴权之前，才能覆盖它们的异常。
 app.UseGlobalExceptionHandler();
 
-// 静态文件服务（Vue 前端）：优先伺服物理静态资源
+// 响应压缩（P2-1）：必须在静态文件中间件之前，才能对 JS/CSS/JSON 响应体生效。
+app.UseResponseCompression();
+
+// 静态文件服务（Vue 前端）：优先伺服物理静态资源。
+// vendor/* 携带 ?v= 版本查询、内容随版本恒定 → 一年强缓存 immutable；
+// 其余应用代码（app.js / core / app / styles / index.html）保持 no-cache，发布即生效。
 app.UseDefaultFiles();
-app.UseStaticFiles(new StaticFileOptions { OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache" });
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = context =>
+    {
+        var requestPath = context.Context.Request.Path.Value ?? string.Empty;
+        context.Context.Response.Headers.CacheControl = requestPath.StartsWith("/vendor/", StringComparison.OrdinalIgnoreCase)
+            ? "public,max-age=31536000,immutable"
+            : "no-cache";
+    }
+});
 
 // 启用路由中间件（使 context.GetEndpoint() 生效，供后续鉴权探测 [AllowAnonymous] 等特性元数据）
 app.UseRouting();

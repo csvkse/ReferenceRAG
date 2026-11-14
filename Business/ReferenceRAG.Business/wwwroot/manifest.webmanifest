@@ -1,0 +1,17 @@
+{
+  "name": "ReferenceRAG 知识库检索",
+  "short_name": "ReferenceRAG",
+  "description": "本地知识库语义检索与管理服务",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#18a058",
+  "background_color": "#1a1a1a",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

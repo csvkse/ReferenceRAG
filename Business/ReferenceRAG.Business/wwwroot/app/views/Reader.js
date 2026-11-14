@@ -9,7 +9,7 @@ import {
     BookOutline, FolderOutline, RefreshOutline, DocumentTextOutline,
     CloseOutline, OpenOutline, ArrowDownOutline
 } from '@vicons/ionicons5';
-import { marked } from '/vendor/marked.js';
+import { marked } from 'marked';
 import { fileSystemApi, sourcesApi } from '/app/api/index.js';
 import { ReaderStateMachine, ReaderState } from '/app/services/reader/ReaderStateMachine.js';
 import { ReaderTier, ReaderStrategyFactory, ViewerMode, TIER_LIMITS } from '/app/services/reader/ReaderViewerStrategy.js';
@@ -686,7 +686,7 @@ const component = /*@__PURE__*/ _defineComponent({
 });
 
 component.template = `
-  <div style="display: flex; flex-direction: column; height: calc(100vh - 100px); gap: 12px">
+  <div style="display: flex; flex-direction: column; height: calc(100dvh - 100px); gap: 12px">
     <!-- 顶部工作台操作与状态栏 -->
     <n-card size="small" style="flex-shrink: 0">
       <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px">
@@ -759,7 +759,7 @@ component.template = `
       >
         <n-tabs v-model:value="sidebarTab" size="small" justify-content="space-evenly">
           <n-tab-pane name="toc" tab="文档大纲 (TOC)">
-            <div style="overflow-y: auto; height: calc(100vh - 240px); padding-right: 4px">
+            <div style="overflow-y: auto; height: calc(100dvh - 240px); padding-right: 4px">
               <n-empty v-if="headings.length === 0" description="本文档无层级大纲" size="small" style="margin-top: 30px" />
               <div v-else style="display: flex; flex-direction: column; gap: 4px">
                 <div
@@ -788,7 +788,7 @@ component.template = `
           </n-tab-pane>
 
           <n-tab-pane name="files" tab="同级文件">
-            <div style="overflow-y: auto; height: calc(100vh - 240px); padding-right: 4px">
+            <div style="overflow-y: auto; height: calc(100dvh - 240px); padding-right: 4px">
               <n-empty v-if="siblingFiles.length === 0" description="未发现同级文件" size="small" style="margin-top: 30px" />
               <div v-else style="display: flex; flex-direction: column; gap: 4px">
                 <div

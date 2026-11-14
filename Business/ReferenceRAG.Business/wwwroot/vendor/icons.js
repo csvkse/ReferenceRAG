@@ -23,6 +23,7 @@ export {default as KeyOutline} from './icons/KeyOutline.js';
 export {default as LayersOutline} from './icons/LayersOutline.js';
 export {default as LogOutOutline} from './icons/LogOutOutline.js';
 export {default as LogoMarkdown} from './icons/LogoMarkdown.js';
+export {default as MenuOutline} from './icons/MenuOutline.js';
 export {default as MoonOutline} from './icons/MoonOutline.js';
 export {default as OpenOutline} from './icons/OpenOutline.js';
 export {default as OptionsOutline} from './icons/OptionsOutline.js';

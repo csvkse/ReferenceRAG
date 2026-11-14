@@ -1,4 +1,4 @@
-import { marked } from '../vendor/marked.js';
+import { marked } from 'marked';
 
 const tags = new Set('P BR HR H1 H2 H3 H4 H5 H6 STRONG EM DEL S PRE CODE BLOCKQUOTE UL OL LI TABLE THEAD TBODY TR TH TD A SPAN DIV DETAILS SUMMARY'.split(' '));
 

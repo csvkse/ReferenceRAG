@@ -296,7 +296,7 @@ component.template = `
         <n-space vertical :size="16">
           <!-- 运行形态与支持平台 -->
           <n-card title="🖥️ 跨平台架构与运行形态">
-            <n-grid :cols="3" :x-gap="12" :y-gap="12" responsive="screen">
+            <n-grid cols="1 s:2 m:3" :x-gap="12" :y-gap="12" responsive="screen">
               <n-grid-item>
                 <n-card size="small" embedded title="Windows 桌面端 (DesktopHost)">
                   <n-space vertical :size="8">
@@ -454,7 +454,7 @@ component.template = `
 
           <!-- 核心引擎与底层依赖 -->
           <n-card title="⚙️ 核心计算引擎与底层依赖架构">
-            <n-grid :cols="3" :x-gap="12" :y-gap="12" responsive="screen">
+            <n-grid cols="1 s:2 m:3" :x-gap="12" :y-gap="12" responsive="screen">
               <n-grid-item>
                 <n-card size="small" embedded title="ONNX Runtime 引擎">
                   <n-space vertical :size="6">

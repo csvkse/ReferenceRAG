@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using ReferenceRAG.Business.Features.Indexing.Contracts;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Features.ModelManagement.Adapters;
@@ -203,5 +205,30 @@ internal static class ReindexJobTestHelpers
             await Task.Delay(25);
         }
         throw new TimeoutException($"重构作业 {jobId} 未在超时内到达终态（最后状态: {last?.Status.ToString() ?? "null"}）");
+    }
+}
+
+/// <summary>
+/// G-M6 广播门禁桩：记录每次 (事件名, JSON 载荷)，可选注入发布异常验证主流程韧性。
+/// 载荷在记录时即序列化为 JsonElement，复刻 SignalR 线上格式（camelCase + 字符串枚举）。
+/// </summary>
+internal sealed class FakeIndexEventPublisher : IIndexEventPublisher
+{
+    private readonly List<(string Name, JsonElement Payload)> _events = new();
+    private readonly object _lock = new();
+
+    public Exception? ThrowOnPublish { get; set; }
+
+    public IReadOnlyList<(string Name, JsonElement Payload)> Events
+    {
+        get { lock (_lock) return _events.ToArray(); }
+    }
+
+    public Task PublishAsync(string name, object payload, CancellationToken cancellationToken = default)
+    {
+        var element = JsonSerializer.SerializeToElement(payload);
+        lock (_lock) _events.Add((name, element));
+        if (ThrowOnPublish != null) throw ThrowOnPublish;
+        return Task.CompletedTask;
     }
 }

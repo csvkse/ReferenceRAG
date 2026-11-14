@@ -21,6 +21,9 @@ export const InvalidationRegistry = {
   // 模型下载：刷新模型列表、模型状态与硬件可用性
   ModelDownload: ['models_list', 'model_status', 'cuda_availability'],
 
+  // 知识库重构索引：刷新知识库列表（含向量模型/统计徽标）、向量统计、仪表盘
+  Reindex: ['knowledge_bases', 'vector_index', 'dashboard_stats'],
+
   // 默认兜底
   Default: ['sources', 'vector_index', 'dashboard_stats']
 };

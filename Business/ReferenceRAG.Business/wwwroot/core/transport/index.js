@@ -1,4 +1,4 @@
-import axios from '../../vendor/axios.js';
+import axios from 'axios';
 import {createIpcTransport} from './ipc.js';
 export const isDesktop=globalThis.location?.protocol==='app:';
 const nativeFetch=globalThis.fetch.bind(globalThis);

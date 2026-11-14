@@ -396,7 +396,7 @@ component.template = `
     </n-card>
 
     <!-- Clear Confirm Dialog -->
-    <n-modal v-model:show="showClearDialog" preset="dialog" title="清空索引确认">
+    <n-modal v-model:show="showClearDialog" preset="dialog" title="清空索引确认" style="max-width: 95vw">
       <n-alert type="error">
         <template #header>警告</template>
         清空索引将删除词法索引数据，此操作不可恢复！

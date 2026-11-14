@@ -62,6 +62,16 @@ try {
         Pop-Location
     }
 
+    # G-M5 移动端静态门禁 + G-M8 性能预算静态部分（网络部分需隔离服务，见 scripts/check-perf.mjs --base-url）
+    node (Join-Path $RepoRoot "scripts\check-mobile.mjs")
+    if ($LASTEXITCODE -ne 0) {
+        throw "G-M5 mobile static gate failed with code $LASTEXITCODE"
+    }
+    node (Join-Path $RepoRoot "scripts\check-perf.mjs") --static-only
+    if ($LASTEXITCODE -ne 0) {
+        throw "G-M8 performance static gate failed with code $LASTEXITCODE"
+    }
+
     # ── 3. 后端契约门禁与核心回归测试 ──
     Write-Section "3/4 Backend Quality Gate Contract & Regression Tests"
     if ($Full) {

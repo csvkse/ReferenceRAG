@@ -802,8 +802,10 @@ test('index.html importmap and vendor icons integrity: KeyOutline and all used i
     const rootDir = path.resolve(testDir, '..');
     const importMap = extractImportMap(rootDir);
 
-    // 1. 验证 @vicons/ionicons5 映射到 /vendor/icons.js
-    assert.equal(importMap['@vicons/ionicons5'], '/vendor/icons.js');
+    // 1. 验证 @vicons/ionicons5 映射到 /vendor/icons.js（P2-1：携带 ?v= 版本查询以启用 immutable 强缓存）
+    const iconsMapped = importMap['@vicons/ionicons5'];
+    assert.equal(iconsMapped.split('?')[0], '/vendor/icons.js');
+    assert.ok(/\?v=\d+$/.test(iconsMapped), 'vendor importmap URL must carry a ?v=<n> version query for immutable caching');
 
     // 2. 验证物理文件及 KeyOutline.js 均存在
     const iconsJsPath = path.join(rootDir, 'vendor/icons.js');

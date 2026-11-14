@@ -2,7 +2,8 @@ import './core/transport/index.js';
 import {createApp, nextTick} from 'vue';
 import {createPinia} from './core/state.js';
 import * as naive from 'naive-ui';
-import * as icons from './vendor/icons.js';
+import * as icons from '@vicons/ionicons5';
+import { MobileCardList } from './app/components/MobileCardList.js';
 import {notifyDesktopReady} from './shared/desktop-startup.js';
 
 export function showRuntimeError(title, message) {
@@ -35,6 +36,7 @@ try {
   const app=createApp(App);
   for(const [name,component] of Object.entries(icons)) app.component(name,component);
   for(const [name,component] of Object.entries(naive)) if(/^N[A-Z]/.test(name) && component?.name) app.component(name,component);
+  app.component('MobileCardList', MobileCardList);
   app.config.errorHandler=(error)=>{console.error('[Vue Runtime Error]', error); showRuntimeError('组件渲染或操作异常', error?.message || String(error));};
   app.use(createPinia()); app.use(router);
   await router.isReady(); app.mount('#app');

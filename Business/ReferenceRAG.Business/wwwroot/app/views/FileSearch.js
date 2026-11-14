@@ -13,6 +13,7 @@ import { fileSystemApi, sourcesApi } from '/app/api/index.js';
 import { SearchHitAdapter } from '/app/services/reader/SearchHitAdapter.js';
 import { TextLayout, resolveLineStyle, resolveGutterStyle, resolveRowStyle } from '/app/services/reader/TextLayoutStrategy.js';
 import { LayoutPreferenceKey, readLayoutPreference, writeLayoutPreference } from '/app/services/reader/LayoutPreference.js';
+import { useBreakpoints } from '/core/responsive.js';
 
 const component = /*@__PURE__*/ _defineComponent({
     name: 'FileSearch',
@@ -21,6 +22,7 @@ const component = /*@__PURE__*/ _defineComponent({
         const router = useRouter();
         const route = useRoute();
         const message = useMessage();
+        const { isMobile } = useBreakpoints();
 
         const searchQuery = ref('');
         const isRegex = ref(false);
@@ -236,6 +238,7 @@ const component = /*@__PURE__*/ _defineComponent({
         });
 
         const __returned__ = {
+            isMobile,
             searchQuery, isRegex, caseSensitive, selectedSources, subPath, filePattern,
             contextLines, maxMatches, showAdvanced, wrapLines, lineTextStyle, rowStyle, gutterStyle,
             searching, searched, searchError,
@@ -298,7 +301,7 @@ component.template = `
         <!-- 模式开关与高级选项切换 -->
         <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px">
           <n-space align="center" :size="16">
-            <n-tooltip trigger="hover">
+            <n-tooltip :trigger="isMobile ? 'click' : 'hover'">
               <template #trigger>
                 <n-space align="center" :size="4" style="cursor: pointer">
                   <n-switch v-model:value="isRegex" size="small" />
@@ -308,7 +311,7 @@ component.template = `
               启用基于 .NET 10 NonBacktracking 的线性时间正则扫描，防 ReDoS 攻击
             </n-tooltip>
 
-            <n-tooltip trigger="hover">
+            <n-tooltip :trigger="isMobile ? 'click' : 'hover'">
               <template #trigger>
                 <n-space align="center" :size="4" style="cursor: pointer">
                   <n-switch v-model:value="caseSensitive" size="small" />
@@ -330,7 +333,7 @@ component.template = `
         <!-- 高级折叠面板 -->
         <n-collapse-transition :show="showAdvanced">
           <n-divider style="margin: 8px 0 12px" />
-          <n-grid :cols="4" :x-gap="16" :y-gap="12">
+          <n-grid cols="1 s:2 m:4" responsive="screen" :x-gap="16" :y-gap="12">
             <n-gi>
               <n-form-item label="限制数据源">
                 <n-select

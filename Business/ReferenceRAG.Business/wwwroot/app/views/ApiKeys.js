@@ -544,6 +544,7 @@ component.template = `
 
       <n-data-table
         :columns="columns"
+        :scroll-x="1360"
         :data="keys"
         :loading="loading"
         :bordered="false"

@@ -3,12 +3,14 @@ import { ref, computed, onMounted, onUnmounted, watch, h } from 'vue';
 import { useMessage, NTag, NBadge } from 'naive-ui';
 import { DocumentTextOutline, RefreshOutline, CopyOutline, ArrowDownOutline, SearchOutline, CheckmarkCircleOutline, AlertCircleOutline } from '@vicons/ionicons5';
 import { logsApi } from '/app/api/index.js';
+import { useBreakpoints } from '/core/responsive.js';
 
 const component = /*@__PURE__*/ _defineComponent({
     __name: 'Logs',
     setup(__props, { expose: __expose }) {
         __expose();
         const message = useMessage();
+        const { isMobile } = useBreakpoints();
 
         const activeTab = ref('files'); // 'files' | 'operations'
 
@@ -288,6 +290,7 @@ const component = /*@__PURE__*/ _defineComponent({
         });
 
         const __returned__ = {
+            isMobile,
             activeTab, filesLoading, files, fileSearch, activeFileName,
             contentLoading, logContent, isTruncated, tailLines, logKeyword,
             autoRefreshInterval, terminalRef, autoScroll, tailOptions, autoRefreshOptions,
@@ -308,10 +311,10 @@ const component = /*@__PURE__*/ _defineComponent({
 });
 
 component.template = `
-  <div style="display: flex; flex-direction: column; gap: 16px; height: calc(100vh - 120px)">
+  <div style="display: flex; flex-direction: column; gap: 16px; height: calc(100dvh - 120px)">
     <n-card :bordered="false" size="small" style="flex-shrink: 0">
-      <div style="display: flex; align-items: center; justify-content: space-between">
-        <n-tabs v-model:value="activeTab" type="segment" style="width: 280px">
+      <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px">
+        <n-tabs v-model:value="activeTab" type="segment" :style="isMobile ? 'width: 100%' : 'width: 280px'">
           <n-tab-pane name="files" tab="系统运行日志" />
           <n-tab-pane name="operations" tab="操作审计日志" />
         </n-tabs>
@@ -328,9 +331,9 @@ component.template = `
     </n-card>
 
     <!-- Tab 1: 系统运行日志 -->
-    <div v-show="activeTab === 'files'" style="display: flex; gap: 16px; flex: 1; min-height: 0">
-      <!-- 左侧：日志文件列表 -->
-      <n-card :bordered="false" size="small" style="width: 320px; flex-shrink: 0; display: flex; flex-direction: column" content-style="display: flex; flex-direction: column; height: 100%; padding: 12px">
+    <div v-show="activeTab === 'files'" :style="isMobile ? 'display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0' : 'display: flex; gap: 16px; flex: 1; min-height: 0'">
+      <!-- 左侧：日志文件列表（移动态置顶折叠为短列表） -->
+      <n-card :bordered="false" size="small" :style="isMobile ? 'width: 100%; flex-shrink: 0; max-height: 38dvh; display: flex; flex-direction: column' : 'width: 320px; flex-shrink: 0; display: flex; flex-direction: column'" content-style="display: flex; flex-direction: column; height: 100%; padding: 12px">
         <div style="margin-bottom: 12px; display: flex; gap: 8px">
           <n-input v-model:value="fileSearch" placeholder="过滤文件名..." clearable size="small">
             <template #prefix><n-icon :component="SearchOutline" /></template>
@@ -375,10 +378,10 @@ component.template = `
       </n-card>
 
       <!-- 右侧：日志终端与工具栏 -->
-      <n-card :bordered="false" size="small" style="flex: 1; display: flex; flex-direction: column; min-width: 0" content-style="display: flex; flex-direction: column; height: 100%; padding: 12px">
+      <n-card :bordered="false" size="small" style="flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0" content-style="display: flex; flex-direction: column; height: 100%; padding: 12px">
         <!-- 顶部工具栏 -->
         <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 12px">
-          <div style="display: flex; align-items: center; gap: 8px">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
             <n-select v-model:value="tailLines" :options="tailOptions" size="small" style="width: 140px" @update:value="loadFileContent(false)" />
             <n-select v-model:value="autoRefreshInterval" :options="autoRefreshOptions" size="small" style="width: 150px" />
             <n-input v-model:value="logKeyword" placeholder="行内关键字过滤..." size="small" clearable style="width: 180px">
@@ -443,8 +446,8 @@ component.template = `
     <!-- Tab 2: 操作审计日志 -->
     <div v-show="activeTab === 'operations'" style="flex: 1; display: flex; flex-direction: column; min-height: 0">
       <n-card :bordered="false" size="small" style="flex: 1; display: flex; flex-direction: column" content-style="display: flex; flex-direction: column; height: 100%; padding: 16px">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px">
-          <div style="display: flex; align-items: center; gap: 8px">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 16px">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
             <n-input v-model:value="opKeyword" placeholder="搜索操作、对象或详情..." clearable size="small" style="width: 260px" @keyup.enter="handleOpSearch">
               <template #prefix><n-icon :component="SearchOutline" /></template>
             </n-input>
@@ -455,8 +458,11 @@ component.template = `
         </div>
 
         <div style="flex: 1; overflow-y: auto; margin-bottom: 16px">
+          <mobile-card-list v-if="isMobile" :columns="opColumns" :data="opItems" :loading="opLoading" title-key="action" empty-text="暂无审计记录" />
           <n-data-table
+            v-else
             :columns="opColumns"
+            :scroll-x="1060"
             :data="opItems"
             :loading="opLoading"
             size="small"

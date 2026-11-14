@@ -48,6 +48,60 @@ body.light-theme {
   color: #63e2b7;
 }
 
+/* MainLayout 响应式外壳：移动端抽屉式侧栏 + 平板图标栏 + 桌面常驻 */
+.app-shell[data-v-74870106] {
+  height: 100vh;
+  height: 100dvh;
+}
+.app-header[data-v-74870106] {
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.header-left[data-v-74870106] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.header-breadcrumb[data-v-74870106] {
+  min-width: 0;
+  overflow: hidden;
+}
+.header-breadcrumb[data-v-74870106] .n-breadcrumb {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.header-breadcrumb[data-v-74870106] .n-breadcrumb-item:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.header-actions[data-v-74870106] {
+  flex-shrink: 0;
+}
+.app-content[data-v-74870106] {
+  overflow: auto;
+}
+.mobile-menu-btn[data-v-74870106] {
+  min-width: 44px;
+  min-height: 44px;
+  flex-shrink: 0;
+}
+.sider-mask[data-v-74870106] {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: rgba(0, 0, 0, 0.45);
+}
+.app-sider--mobile[data-v-74870106] {
+  z-index: 3;
+  overflow: hidden;
+}
+
 /* views/ApiHelp.vue */
 
 /* API 端点卡片 */
@@ -412,6 +466,8 @@ body.light-theme {
   justify-content: center;
   align-items: center;
   min-height: 100vh;
+  min-height: 100dvh;
+  padding: 16px;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 
@@ -475,10 +531,18 @@ body.light-theme {
   flex-direction: column;
   gap: 16px;
   max-height: calc(100vh - 180px);
+  max-height: calc(100dvh - 180px);
   overflow-y: auto;
   padding-right: 4px;
   scrollbar-width: thin;
   scrollbar-color: rgba(99, 226, 183, 0.3) transparent;
+}
+@media (max-width: 767px) {
+  .reindex-drawer-body {
+    max-height: none;
+    overflow-y: visible;
+    padding-right: 0;
+  }
 }
 .reindex-drawer-body::-webkit-scrollbar {
   width: 8px;
@@ -672,4 +736,71 @@ body.light-theme .reindex-drawer-body::-webkit-scrollbar-thumb:hover {
 }
 .reindex-phase.is-done .reindex-phase-label {
   color: var(--rx-accent);
+}
+
+/* P2-3: 移动态卡片列表（MobileCardList，复用 n-data-table 列渲染） */
+.mobile-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mobile-card-item {
+  border-radius: 10px;
+}
+.mobile-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--mc-border, rgba(255, 255, 255, 0.08));
+  overflow-wrap: anywhere;
+}
+.mobile-card-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mobile-card-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.mobile-card-label {
+  flex: 0 0 auto;
+  min-width: 68px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--mc-dim, rgba(255, 255, 255, 0.5));
+}
+.mobile-card-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.mobile-card-actions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--mc-border, rgba(255, 255, 255, 0.08));
+}
+.mobile-card-actions .n-space {
+  width: 100%;
+}
+body.light-theme {
+  --mc-border: rgba(0, 0, 0, 0.08);
+  --mc-dim: rgba(0, 0, 0, 0.5);
+}
+
+/* P2-2: 移动态触控目标——按钮最小 44×44px 命中区（仅 <768px，桌面像素级不变） */
+@media (max-width: 767px) {
+  .n-button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .n-tabs-tab {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
 }

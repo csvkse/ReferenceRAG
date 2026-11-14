@@ -1,5 +1,6 @@
 using ReferenceRAG.Core.Interfaces;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Business.Features.Indexing.Contracts;
 using ReferenceRAG.Core.Features.KnowledgeBase.Connectors;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Jobs;
@@ -28,6 +29,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
     private readonly IMarkdownChunker? _markdownChunker;
     private readonly KnowledgeBaseJobCoordinator _coordinator;
     private readonly IEmbeddingAdapterResolver? _adapterResolver;
+    private readonly IIndexEventPublisher? _eventPublisher;
 
     public KnowledgeBaseService(
         ICatalogStore catalog,
@@ -40,7 +42,8 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         IEmbeddingService? embeddingService = null,
         IMarkdownChunker? markdownChunker = null,
         KnowledgeBaseJobCoordinator? jobCoordinator = null,
-        IEmbeddingAdapterResolver? adapterResolver = null)
+        IEmbeddingAdapterResolver? adapterResolver = null,
+        IIndexEventPublisher? eventPublisher = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _storageManager = storageManager ?? throw new ArgumentNullException(nameof(storageManager));
@@ -53,6 +56,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         _markdownChunker = markdownChunker;
         _coordinator = jobCoordinator ?? new KnowledgeBaseJobCoordinator();
         _adapterResolver = adapterResolver;
+        _eventPublisher = eventPublisher;
     }
 
     public async Task<KnowledgeBaseDefinition> CreateKnowledgeBaseAsync(
@@ -700,14 +704,17 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
     {
         if (_coordinator.TryGetCts(jobId, out var cts) && cts != null)
         {
-            cts.Cancel();
             var smLogger = _loggerFactory?.CreateLogger<JobStateMachine>();
             var job = await _catalog.GetJobAsync(jobId, ct);
             if (job != null)
             {
-                var sm = new JobStateMachine(job, _catalog, smLogger);
+                var sm = new JobStateMachine(job, _catalog, smLogger,
+                    changed: j => BroadcastReindexJobAsync(j, CancellationToken.None));
+                // 先持久化 Cancelling 再信号取消：worker 被唤醒后写入的 Cancelled 终态必然在后，
+                // 避免两个状态机实例竞态导致 Cancelling 覆盖 Cancelled 而永久卡死。
                 await sm.RequestCancelAsync(ct);
             }
+            cts.Cancel();
             return true;
         }
 
@@ -1249,6 +1256,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
             throw;
         }
 
+        await PublishReindexEventAsync("ReindexJobStarted", job, ct);
         _ = Task.Run(() => RunReindexWorkerAsync(job, targetSpec, cts));
 
         _logger?.LogInformation("[KnowledgeBaseService] 知识库 {KbId} 重构索引作业已入队: {JobId} → {SpecId}",
@@ -1259,7 +1267,8 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
     private async Task RunReindexWorkerAsync(JobDefinition job, EmbeddingSpec targetSpec, CancellationTokenSource cts)
     {
         var knowledgeBaseId = job.KnowledgeBaseId;
-        var sm = new JobStateMachine(job, _catalog, _loggerFactory?.CreateLogger<JobStateMachine>());
+        var sm = new JobStateMachine(job, _catalog, _loggerFactory?.CreateLogger<JobStateMachine>(),
+            changed: j => BroadcastReindexJobAsync(j, CancellationToken.None));
         try
         {
             await sm.TransitionToAsync(OperationPhase.Planning, JobStatus.Running, ct: cts.Token);
@@ -1331,6 +1340,46 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         {
             // 进度写入失败不影响重构主流程
         }
+    }
+
+    /// <summary>
+    /// 广播 reindex 作业事件（Started/Progress/Completed）。失败仅记录，绝不影响作业主流程。
+    /// status/phase 显式 ToString()，保证 SignalR 与 REST 一致输出字符串枚举。
+    /// </summary>
+    private async Task PublishReindexEventAsync(string eventName, JobDefinition job, CancellationToken ct)
+    {
+        if (_eventPublisher == null) return;
+        try
+        {
+            var payload = new
+            {
+                jobId = job.Id,
+                knowledgeBaseId = job.KnowledgeBaseId,
+                operation = job.Operation,
+                status = job.Status.ToString(),
+                phase = job.Phase.ToString(),
+                processedUnits = job.ProcessedUnits,
+                totalUnits = job.TotalUnits,
+                percent = job.TotalUnits > 0 ? Math.Round(100.0 * job.ProcessedUnits / job.TotalUnits, 1) : 0,
+                errorMessage = job.ErrorMessage,
+                createdAt = job.CreatedAt,
+                finishedAt = job.FinishedAt
+            };
+            await _eventPublisher.PublishAsync(eventName, payload, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "[KnowledgeBaseService] 广播 {Event} 失败（作业 {JobId}，不影响主流程）", eventName, job.Id);
+        }
+    }
+
+    /// <summary>
+    /// 状态机变更通知回调：终态 → Completed，其余 → Progress。
+    /// </summary>
+    private Task BroadcastReindexJobAsync(JobDefinition job, CancellationToken ct)
+    {
+        var isTerminal = job.Status is JobStatus.Succeeded or JobStatus.PartiallySucceeded or JobStatus.Failed or JobStatus.Cancelled;
+        return PublishReindexEventAsync(isTerminal ? "ReindexJobCompleted" : "ReindexJobProgress", job, ct);
     }
 
     private async Task TryDropShadowAsync(string knowledgeBaseId)

@@ -5,6 +5,7 @@ import { useMessage, useDialog, NButton, NSpace, NTag, NPopconfirm, NInput, NInp
 import { sourcesApi, knowledgeBasesApi } from '/app/api/index.js';
 import { isDesktop, selectFolder } from '/core/platform.js';
 import { JobCenter } from '/core/jobs/JobCenter.js';
+import { useBreakpoints } from '/core/responsive.js';
 import FolderPickerModal from '/app/components/FolderPickerModal.js';
 import SourceFileManagerDrawer from '/app/components/SourceFileManagerDrawer.js';
 
@@ -18,6 +19,7 @@ const component = /*@__PURE__*/ _defineComponent({
         const route = useRoute();
         const message = useMessage();
         const dialog = useDialog();
+        const { isMobile } = useBreakpoints();
         const formRef = ref(null);
         const loading = ref(false);
         const creating = ref(false);
@@ -706,6 +708,7 @@ const component = /*@__PURE__*/ _defineComponent({
         });
 
         const __returned__ = {
+            isMobile,
             router, route, isDesktop, selectDirectory, showFolderPicker, handleFolderSelected,
             message, dialog, formRef, loading, creating, sources, editingSource, editingName,
             newSource, formRules, columns, loadSources, handleCreateSource, resetForm,
@@ -807,8 +810,20 @@ component.template = `
       <n-alert v-if="highlightedPath" type="success" :show-icon="false" style="margin-bottom: 10px;">
         已从知识库管理定位到源路径：<n-text code>{{ highlightedPath }}</n-text>
       </n-alert>
-      <n-data-table
+      <mobile-card-list
+        v-if="isMobile"
         :columns="columns"
+        :data="sources"
+        :loading="loading"
+        :row-key="(row) => row.name"
+        :row-props="rowProps"
+        title-key="name"
+        empty-text="暂无源"
+      />
+      <n-data-table
+        v-else
+        :columns="columns"
+        :scroll-x="1260"
         :data="sources"
         :loading="loading"
         :bordered="false"
@@ -837,7 +852,7 @@ component.template = `
       v-model:show="linkModalVisible"
       preset="card"
       title="挂载到知识库"
-      style="width: 440px"
+      style="width: 440px; max-width: 95vw"
       :bordered="false"
     >
       <n-space vertical :size="12">
@@ -866,7 +881,7 @@ component.template = `
       v-model:show="showReconcilePanel"
       preset="card"
       title="挂载漂移对账"
-      style="width: 880px"
+      style="width: 880px; max-width: 95vw"
       :bordered="false"
     >
       <n-space vertical :size="12">

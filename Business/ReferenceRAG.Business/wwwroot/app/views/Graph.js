@@ -346,7 +346,7 @@ component.template = `
 
       <n-card :bordered="false" style="padding: 0">
         <n-space justify="space-between" align="center">
-          <n-grid :cols="6" :x-gap="12" style="flex: 1">
+          <n-grid cols="2 s:3 m:6" responsive="screen" :x-gap="12" style="flex: 1">
             <n-grid-item>
               <n-statistic label="节点总数" :value="stats.nodeCount" />
             </n-grid-item>
@@ -510,6 +510,7 @@ component.template = `
           <n-tab-pane name="nodes" :tab="\`节点 (\${filteredTraversalNodes.length}/\${traversalResult.nodes.length})\`">
             <n-data-table
               :columns="nodeColumns"
+              :scroll-x="600"
               :data="filteredTraversalNodes"
               :pagination="{ pageSize: 20 }"
               size="small"
@@ -519,6 +520,7 @@ component.template = `
           <n-tab-pane name="edges" :tab="\`边 (\${traversalResult.edges.length})\`">
             <n-data-table
               :columns="edgeColumns"
+              :scroll-x="560"
               :data="traversalResult.edges"
               :pagination="{ pageSize: 20 }"
               size="small"
@@ -529,7 +531,7 @@ component.template = `
 
       <n-empty v-else-if="!traversing && !searching" description="搜索节点或输入节点 ID 开始遍历知识图谱" />
     <!-- 手动干预模态框 -->
-    <n-modal v-model:show="showAddModal" preset="card" title="知识图谱人工干预" style="max-width: 520px">
+    <n-modal v-model:show="showAddModal" preset="card" title="知识图谱人工干预" style="max-width: min(520px, 95vw)">
       <n-tabs v-model:value="addTargetType" type="segment" style="margin-bottom: 16px">
         <n-tab-pane name="node" tab="新增/修正实体节点" />
         <n-tab-pane name="edge" tab="新增/修正关系边" />

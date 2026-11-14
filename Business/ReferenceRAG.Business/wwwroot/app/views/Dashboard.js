@@ -172,7 +172,7 @@ const component = /*@__PURE__*/ _defineComponent({
 component.template = `
   <n-space vertical :size="20">
     <!-- Stats Cards -->
-    <n-grid :cols="4" :x-gap="20" :y-gap="20">
+    <n-grid cols="1 s:2 m:4" responsive="screen" :x-gap="20" :y-gap="20">
       <n-gi>
         <n-card>
           <n-statistic label="知识库总数" :value="knowledgeBases?.length || 0">
@@ -263,6 +263,7 @@ component.template = `
       </template>
       <n-data-table
         :columns="kbColumns"
+        :scroll-x="800"
         :data="knowledgeBases"
         :loading="loadingKbs"
         :bordered="false"

@@ -1,10 +1,15 @@
 import { defineComponent as _defineComponent } from 'vue';
-import { ref, onMounted, onUnmounted, onActivated, h, computed, nextTick } from 'vue';
+import { ref, onMounted, onUnmounted, onActivated, onDeactivated, h, computed, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { NTag, NButton, useMessage, useDialog } from 'naive-ui';
 import { BookOutline, CubeOutline, FolderOutline, GridOutline, LayersOutline, PlayOutline, TrashOutline, RefreshOutline, AddOutline, SearchOutline, SettingsOutline, CreateOutline, DocumentTextOutline, CheckmarkCircleOutline } from '@vicons/ionicons5';
 import { knowledgeBasesApi, sourcesApi, modelsApi } from '/app/api/index.js';
 import { isDesktop, selectFolder } from '/core/platform.js';
+import { useBreakpoints } from '/core/responsive.js';
+import { JobCenter } from '/core/jobs/JobCenter.js';
+import { useAsyncJob } from '/core/jobs/useAsyncJob.js';
+import { createReindexDrawerMachine } from '/core/jobs/ReindexDrawerMachine.js';
+import { normalizeReindexJob, toReindexShape, isTerminalStatus } from '/core/jobs/reindex-model.js';
 import FolderPickerModal from '/app/components/FolderPickerModal.js';
 
 const component = /*@__PURE__*/ _defineComponent({
@@ -17,6 +22,7 @@ const component = /*@__PURE__*/ _defineComponent({
         const route = useRoute();
         const message = useMessage();
         const dialog = useDialog();
+        const { isMobile } = useBreakpoints();
 
         // 双向关联定位：从源管理跳转过来时自动打开对应 KB 的连接器抽屉并高亮目标连接器
         const focusConnectorId = ref('');
@@ -48,76 +54,38 @@ const component = /*@__PURE__*/ _defineComponent({
         const showSwitchModelModal = ref(false);
         const switchModelTargetKb = ref(null);
         const selectedTargetSpecId = ref('');
-        const reindexing = ref(false);
+        const unbinding = ref(false);
 
-        // ==================== 重构索引作业进度抽屉 ====================
+        // ==================== 重构索引作业进度抽屉（显式 FSM + JobCenter 推送，P1-3/5） ====================
         const showReindexDrawer = ref(false);
         const reindexKb = ref(null);
-        const reindexJob = ref(null);
-        const reindexGeneration = ref(null);
-        const reindexCancelling = ref(false);
-        const reindexRollingBack = ref(false);
-        const reindexStatusMap = ref({});
+        const reindexGenerationMap = ref({});   // kbId -> generation（回滚资格，一次性拉取，非轮询）
         const reindexSpeed = ref(0);
         const reindexEtaText = ref('估算中…');
-        let reindexPollTimer = null;
         let reindexLastProcessed = 0;
         let reindexLastTickAt = 0;
+        let reindexUnsubscribe = null;
+        let unbindKbRefresh = null;
 
-        const REINDEX_STATUS_LABELS = {
-            Queued: '排队中', Running: '重构进行中', Cancelling: '正在取消',
-            Succeeded: '重构完成', PartiallySucceeded: '部分完成', Failed: '重构失败', Cancelled: '已取消'
-        };
-        const REINDEX_PHASE_LABELS = {
-            None: '就绪', Planning: '规划准备', Embedding: '向量编码',
-            Validating: '门禁校验', Publishing: '原子切换'
-        };
-        const REINDEX_ACTIVE_STATUSES = ['Queued', 'Running', 'Cancelling'];
+        const machine = createReindexDrawerMachine();
+        const reindexKbKey = computed(() => reindexKb.value ? `kb:${reindexKb.value.id}` : 'global');
+        // useAsyncJob 承载乐观入队（runJob：registerStartedJob → replaceJobId → 失败清理）
+        const reindexAsyncJob = useAsyncJob(reindexKbKey, { defaultJobType: 'Reindex' });
 
-        const normalizeReindexJob = (raw) => {
-            if (!raw) return null;
-            const statusNames = ['Queued', 'Running', 'WaitingForInput', 'Cancelling', 'Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled'];
-            const phaseNames = ['None', 'Scanning', 'Probing', 'Parsing', 'Profiling', 'Planning', 'Chunking', 'Rendering', 'Embedding', 'Projecting', 'Validating', 'Publishing', 'Quiescing', 'Invalidating', 'Building'];
-            return {
-                ...raw,
-                status: typeof raw.status === 'number' ? (statusNames[raw.status] || 'Queued') : (raw.status || 'Queued'),
-                phase: typeof raw.phase === 'number' ? (phaseNames[raw.phase] || 'None') : (raw.phase || 'None'),
-                processedUnits: raw.processedUnits || 0,
-                totalUnits: raw.totalUnits || 0
-            };
-        };
-
-        const reindexActive = computed(() => REINDEX_ACTIVE_STATUSES.includes(reindexJob.value?.status));
-        const reindexStatusLabel = computed(() => REINDEX_STATUS_LABELS[reindexJob.value?.status] || '无作业');
-        const reindexPhaseLabel = computed(() => REINDEX_PHASE_LABELS[reindexJob.value?.phase] || reindexJob.value?.phase || '就绪');
-        const reindexPercent = computed(() => {
-            const j = reindexJob.value;
-            if (!j) return 0;
-            if (j.status === 'Succeeded') return 100;
-            if (!j.totalUnits) return 0;
-            return Math.min(99, Math.round(j.processedUnits * 100 / j.totalUnits));
-        });
-        const reindexProgressStatus = computed(() => {
-            const s = reindexJob.value?.status;
-            if (s === 'Succeeded') return 'success';
-            if (s === 'Failed') return 'error';
-            if (s === 'Cancelled') return 'warning';
-            return 'default';
-        });
-        const reindexPhaseSteps = computed(() => {
-            const order = ['Planning', 'Embedding', 'Publishing'];
-            const labels = { Planning: '规划准备', Embedding: '向量编码', Publishing: '原子切换' };
-            const phase = reindexJob.value?.phase;
-            const status = reindexJob.value?.status;
-            const currentIdx = status === 'Succeeded' ? order.length : Math.max(0, order.indexOf(phase));
-            return order.map((key, i) => ({
-                key,
-                label: labels[key],
-                state: status === 'Failed' && i === currentIdx ? 'failed'
-                    : i < currentIdx || status === 'Succeeded' ? 'done'
-                    : i === currentIdx && REINDEX_ACTIVE_STATUSES.includes(status) ? 'active' : 'pending'
-            }));
-        });
+        // 模板绑定全部由 FSM 派生（消灭四布尔耦合）
+        const reindexJob = machine.job;
+        const reindexGeneration = machine.generation;
+        const reindexActive = machine.isActive;
+        const reindexStatusLabel = machine.statusText;
+        const reindexPhaseLabel = machine.phaseText;
+        const reindexPercent = machine.percent;
+        const reindexProgressStatus = machine.progressStatus;
+        const reindexPhaseSteps = machine.phaseSteps;
+        const reindexCancelling = machine.cancelling;
+        const reindexRollingBack = machine.rollingBack;
+        const reindexing = machine.enqueuing;
+        const canCancel = machine.canCancel;
+        const canRollback = machine.canRollback;
         const reindexSpeedText = computed(() => reindexSpeed.value > 0 ? `${reindexSpeed.value.toFixed(1)} 切片/秒` : '—');
 
         const updateReindexMetrics = (job) => {
@@ -142,91 +110,110 @@ const component = /*@__PURE__*/ _defineComponent({
             }
         };
 
-        const stopReindexPolling = () => {
-            if (reindexPollTimer) {
-                clearInterval(reindexPollTimer);
-                reindexPollTimer = null;
+        // 一次性拉取代次信息（回滚资格 + 续看种子），非轮询
+        const loadGeneration = async (kbId) => {
+            try {
+                const res = await knowledgeBasesApi.getReindexStatus(kbId);
+                const generation = res.data?.generation || null;
+                machine.setGeneration(generation);
+                reindexGenerationMap.value = { ...reindexGenerationMap.value, [kbId]: generation };
+                const activeJob = res.data?.activeJob ? toReindexShape(normalizeReindexJob(res.data.activeJob)) : null;
+                return { generation, activeJob };
+            } catch (e) {
+                return { generation: null, activeJob: null };
             }
         };
 
-        const pollReindexStatus = async () => {
-            if (!reindexKb.value) return;
-            const kbId = reindexKb.value.id;
-            try {
-                const res = await knowledgeBasesApi.getReindexStatus(kbId);
-                const data = res.data || {};
-                const activeJob = normalizeReindexJob(data.activeJob);
-                const prevStatus = reindexJob.value?.status;
-
-                if (activeJob) {
-                    reindexJob.value = activeJob;
-                    updateReindexMetrics(activeJob);
-                } else if (reindexJob.value && REINDEX_ACTIVE_STATUSES.includes(reindexJob.value.status)) {
-                    // 活跃作业消失 → 拉取终态快照用于结果展示
-                    try {
-                        const jr = await knowledgeBasesApi.getJob(reindexJob.value.id);
-                        reindexJob.value = normalizeReindexJob(jr.data);
-                    } catch (e) {
-                        reindexJob.value = { ...reindexJob.value, status: 'Succeeded' };
-                    }
-                }
-                reindexGeneration.value = data.generation || null;
-                reindexStatusMap.value = {
-                    ...reindexStatusMap.value,
-                    [kbId]: { activeJob, generation: data.generation || null }
-                };
-
-                const cur = reindexJob.value;
-                if (cur && !REINDEX_ACTIVE_STATUSES.includes(cur.status)) {
-                    stopReindexPolling();
-                    if (prevStatus && REINDEX_ACTIVE_STATUSES.includes(prevStatus)) {
-                        if (cur.status === 'Succeeded') {
-                            message.success(`重构完成：${cur.processedUnits} 个切片向量已原子切换至新代次`);
-                            await loadKnowledgeBases();
-                        } else if (cur.status === 'Failed') {
-                            message.error('重构失败: ' + (cur.errorMessage || '未知错误'));
-                        } else if (cur.status === 'Cancelled') {
-                            message.warning('重构作业已取消，影子表已清理');
-                        }
-                    }
-                }
-            } catch (err) {
-                console.warn('轮询重构状态失败:', err);
+        const handleTerminal = (shape) => {
+            const r = machine.send('TERMINAL', { job: shape });
+            if (!r.ok) return;   // 已终态/非法 → 不重复 toast
+            if (shape.status === 'Succeeded') {
+                message.success(`重构完成：${shape.processedUnits} 个切片向量已原子切换至新代次`);
+                reindexEtaText.value = '已完成';
+            } else if (shape.status === 'PartiallySucceeded') {
+                message.warning(`重构部分完成：${shape.processedUnits}/${shape.totalUnits} 个切片成功`);
+            } else if (shape.status === 'Failed') {
+                message.error('重构失败: ' + (shape.errorMessage || '未知错误'));
+            } else if (shape.status === 'Cancelled') {
+                message.warning('重构作业已取消，影子表已清理');
             }
+            // 终态后拉取代次以启用回滚（knowledge_bases 列表刷新由 JobCenter 失效标签自动触发）
+            if (reindexKb.value) loadGeneration(reindexKb.value.id);
+        };
+
+        const unsubscribeReindex = () => {
+            if (reindexUnsubscribe) { reindexUnsubscribe(); reindexUnsubscribe = null; }
+        };
+
+        const subscribeReindex = (kbKey) => {
+            unsubscribeReindex();
+            reindexUnsubscribe = JobCenter.subscribeJob(kbKey, {
+                onProgress: (u) => {
+                    const shape = toReindexShape(u);
+                    if (isTerminalStatus(shape.status)) { handleTerminal(shape); return; }
+                    const st = machine.state.value;
+                    if (st === 'active' || st === 'cancelling' || st === 'enqueuing') {
+                        machine.send('PROGRESS', { job: shape });
+                        updateReindexMetrics(shape);
+                    }
+                },
+                onCompleted: (u) => handleTerminal(toReindexShape(u)),
+                onFailed: (u) => handleTerminal(toReindexShape(u))
+            });
         };
 
         const openReindexDrawer = async (kb, job = null) => {
             reindexKb.value = kb;
-            reindexJob.value = normalizeReindexJob(job);
-            reindexGeneration.value = null;
             reindexSpeed.value = 0;
             reindexEtaText.value = '估算中…';
             reindexLastProcessed = 0;
             reindexLastTickAt = 0;
             showReindexDrawer.value = true;
-            stopReindexPolling();
-            await pollReindexStatus();
-            if (reindexActive.value) {
-                reindexPollTimer = setInterval(pollReindexStatus, 1500);
-            }
+            machine.reset();
+            subscribeReindex(`kb:${kb.id}`);
+            const { generation, activeJob } = await loadGeneration(kb.id);
+            // await 后读取实时作业，避免拉取代次期间作业终态导致的水合陈旧
+            const live = JobCenter.getExactJob(`kb:${kb.id}`);
+            const shape = live ? toReindexShape(live)
+                : (job ? toReindexShape(normalizeReindexJob(job)) : activeJob);
+            machine.hydrate(shape, generation);
+            if (shape) updateReindexMetrics(shape);
+        };
+
+        // 关抽屉不停作业：保持 FSM 状态，仅暂停本抽屉观测（作业仍在 JobCenter/后端运行）
+        const onReindexDrawerClosed = () => {
+            machine.send('CLOSE');
+            unsubscribeReindex();
         };
 
         const handleCancelReindex = () => {
-            if (!reindexJob.value?.id) return;
+            const job = machine.carrier.job;
+            if (!job?.id) return;
             dialog.warning({
                 title: '确认取消重构作业？',
                 content: '取消后将清理影子表，本次已编码的向量不会保留；旧代索引不受影响，可随时重新触发重构。',
                 positiveText: '确认取消',
                 negativeText: '继续执行',
                 onPositiveClick: async () => {
-                    reindexCancelling.value = true;
+                    machine.send('CANCEL', { job });
                     try {
-                        await knowledgeBasesApi.cancelJob(reindexJob.value.id);
+                        await knowledgeBasesApi.cancelJob(job.id);
+                        machine.send('CANCEL_ACK');
                         message.info('已发送取消请求，等待作业安全停止…');
                     } catch (err) {
-                        message.error('取消失败: ' + (err.response?.data?.message || err.message));
-                    } finally {
-                        reindexCancelling.value = false;
+                        if (err.response?.status === 404) {
+                            // 作业已结束（G-d 修复）：拉取终态快照，info 而非 error
+                            let snapshot = job;
+                            try {
+                                const jr = await knowledgeBasesApi.getJob(job.id);
+                                snapshot = toReindexShape(normalizeReindexJob(jr.data));
+                            } catch (e) { /* 快照拉取失败则沿用当前 job */ }
+                            machine.send('CANCEL_404', { job: snapshot });
+                            message.info('作业已结束');
+                        } else {
+                            machine.send('CANCEL_FAIL');
+                            message.error('取消失败: ' + (err.response?.data?.message || err.message));
+                        }
                     }
                 }
             });
@@ -234,52 +221,50 @@ const component = /*@__PURE__*/ _defineComponent({
 
         const handleRollbackReindex = () => {
             if (!reindexKb.value) return;
+            const gen = machine.carrier.generation;
             dialog.warning({
                 title: '回滚至上一代向量索引？',
-                content: `将知识库「${reindexKb.value.name}」恢复为切换前的上一代向量索引（${reindexGeneration.value?.previousSpecId || '上一规格'}），当前新代向量将被丢弃。词法索引与切片文本不受影响。`,
+                content: `将知识库「${reindexKb.value.name}」恢复为切换前的上一代向量索引（${gen?.previousSpecId || '上一规格'}），当前新代向量将被丢弃。词法索引与切片文本不受影响。`,
                 positiveText: '确认回滚',
                 negativeText: '取消',
                 onPositiveClick: async () => {
-                    reindexRollingBack.value = true;
+                    const r = machine.send('ROLLBACK', { generation: gen });
+                    if (!r.ok) { message.warning('当前不可回滚'); return; }
                     try {
                         await knowledgeBasesApi.rollbackReindex(reindexKb.value.id);
                         message.success('已回滚至上一代向量索引');
-                        await pollReindexStatus();
+                        const { generation } = await loadGeneration(reindexKb.value.id);
+                        machine.send('ROLLBACK_DONE', { generation });
                         await loadKnowledgeBases();
                     } catch (err) {
+                        machine.send('ROLLBACK_FAIL');
                         message.error('回滚失败: ' + (err.response?.data?.message || err.message));
-                    } finally {
-                        reindexRollingBack.value = false;
                     }
                 }
             });
         };
 
+        // 卡片徽标：直接读 JobCenter 精确作业（无 global 兜底），推送驱动响应式
+        const kbActiveJob = (kbId) => JobCenter.getExactJob(`kb:${kbId}`);
         const reindexBadgePercent = (kbId) => {
-            const j = reindexStatusMap.value[kbId]?.activeJob;
+            const j = kbActiveJob(kbId);
             if (!j) return 0;
-            if (!j.totalUnits) return 0;
-            return Math.min(99, Math.round(j.processedUnits * 100 / j.totalUnits));
+            return Math.min(99, Math.round(j.progressPercent ?? 0));
         };
 
-        // 卡片徽标：拉取各库重构状态；发现进行中作业且抽屉未打开时不打断用户，仅点亮徽标
-        const refreshReindexBadges = async () => {
+        // 一次性拉取各库代次（回滚资格）；进行中徽标由 JobCenter 推送驱动，无需逐库轮询
+        const refreshReindexGenerations = async () => {
             const map = {};
             await Promise.all(knowledgeBases.value.map(async (kb) => {
                 try {
                     const res = await knowledgeBasesApi.getReindexStatus(kb.id);
-                    map[kb.id] = {
-                        activeJob: normalizeReindexJob(res.data?.activeJob),
-                        generation: res.data?.generation || null
-                    };
+                    map[kb.id] = res.data?.generation || null;
                 } catch (e) {
                     map[kb.id] = null;
                 }
             }));
-            reindexStatusMap.value = map;
+            reindexGenerationMap.value = map;
         };
-
-        onUnmounted(stopReindexPolling);
 
         const createForm = ref({
             name: '',
@@ -464,7 +449,7 @@ const component = /*@__PURE__*/ _defineComponent({
             } finally {
                 loading.value = false;
             }
-            await refreshReindexBadges();
+            await refreshReindexGenerations();
         };
 
         // 读取来源页带过来的定位参数：?kb=<id>&connector=<connectorId>&path=<path>
@@ -521,26 +506,30 @@ const component = /*@__PURE__*/ _defineComponent({
                 message.warning('请选择目标向量模型规格（降级纯词法请使用「解绑模型」）');
                 return;
             }
-            reindexing.value = true;
             const targetKb = switchModelTargetKb.value;
+            const kbKey = `kb:${targetKb.id}`;
+            // 入队期间暂停抽屉观测，避免 runJob 乐观清理误触终态回调
+            unsubscribeReindex();
+            machine.send('ENQUEUE');
             try {
-                const res = await knowledgeBasesApi.reindex(targetKb.id, {
-                    targetEmbeddingSpecId: selectedTargetSpecId.value
-                });
-                const job = normalizeReindexJob(res.data);
+                const res = await reindexAsyncJob.runJob(
+                    () => knowledgeBasesApi.reindex(targetKb.id, { targetEmbeddingSpecId: selectedTargetSpecId.value }),
+                    { jobType: 'Reindex', targetResource: kbKey, message: '重构作业入队中…' }
+                );
                 showSwitchModelModal.value = false;
                 message.success('重构作业已入队，后台独立执行（不受页面超时影响）');
-                await openReindexDrawer(targetKb, job);
+                machine.send('ENQUEUED', { job: toReindexShape(normalizeReindexJob(res.data)) });
+                await openReindexDrawer(targetKb, res.data);
             } catch (err) {
                 if (err.response?.status === 409) {
+                    machine.send('ENQUEUE_409');
                     message.warning(err.response?.data?.message || '该知识库已有进行中的重构作业');
                     showSwitchModelModal.value = false;
                     await openReindexDrawer(targetKb);
                 } else {
+                    machine.send('ENQUEUE_FAIL');
                     message.error('重构入队失败: ' + (err.response?.data?.message || err.message));
                 }
-            } finally {
-                reindexing.value = false;
             }
         };
 
@@ -553,7 +542,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 positiveText: '确认解绑降级',
                 negativeText: '取消',
                 onPositiveClick: async () => {
-                    reindexing.value = true;
+                    unbinding.value = true;
                     try {
                         const res = await knowledgeBasesApi.unbindModel(switchModelTargetKb.value.id);
                         message.success(res.data?.message || '已成功解绑模型，知识库已切换为纯词法检索模式');
@@ -562,7 +551,7 @@ const component = /*@__PURE__*/ _defineComponent({
                     } catch (err) {
                         message.error('解绑模型失败: ' + (err.response?.data?.message || err.message));
                     } finally {
-                        reindexing.value = false;
+                        unbinding.value = false;
                     }
                 }
             });
@@ -1188,23 +1177,36 @@ const component = /*@__PURE__*/ _defineComponent({
         };
 
         onMounted(async () => {
+            await JobCenter.initialize();
+            unbindKbRefresh = JobCenter.registerRefresher('knowledge_bases', () => loadKnowledgeBases());
             await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs(), loadChunkingSpecs()]);
             await syncFromRoute();
         });
 
         onActivated(async () => {
+            if (reindexKb.value && showReindexDrawer.value) subscribeReindex(`kb:${reindexKb.value.id}`);
             await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs(), loadChunkingSpecs()]);
             await syncFromRoute();
         });
 
+        // keep-alive 失活：暂停本抽屉观测（JobCenter 全局推送/心跳不受影响）
+        onDeactivated(() => { unsubscribeReindex(); });
+
+        onUnmounted(() => {
+            unsubscribeReindex();
+            if (unbindKbRefresh) { unbindKbRefresh(); unbindKbRefresh = null; }
+        });
+
         const __returned__ = {
+            isMobile,
             route, focusConnectorId, isFocusedConnector, getConnectorOrigin, viewInSourceManagement, syncFromRoute,
             chunkingSpecs, chunkingSpecOptions, driftMap, showSwitchModelModal, switchModelTargetKb, selectedTargetSpecId,
-            reindexing, openSwitchModelModal, handleTriggerReindex, handleUnbindModel, allEmbeddingModelOptions, loadChunkingSpecs,
+            reindexing, unbinding, openSwitchModelModal, handleTriggerReindex, handleUnbindModel, allEmbeddingModelOptions, loadChunkingSpecs,
             showReindexDrawer, reindexKb, reindexJob, reindexGeneration, reindexCancelling, reindexRollingBack,
-            reindexStatusMap, reindexSpeed, reindexSpeedText, reindexEtaText, reindexActive, reindexStatusLabel,
+            reindexGenerationMap, reindexSpeed, reindexSpeedText, reindexEtaText, reindexActive, reindexStatusLabel,
             reindexPhaseLabel, reindexPercent, reindexProgressStatus, reindexPhaseSteps, reindexBadgePercent,
-            openReindexDrawer, stopReindexPolling, handleCancelReindex, handleRollbackReindex, refreshReindexBadges,
+            canCancel, canRollback, kbActiveJob,
+            openReindexDrawer, onReindexDrawerClosed, handleCancelReindex, handleRollbackReindex, refreshReindexGenerations,
             showRechunkModal, rechunkTargetKb, selectedRechunkSpecId, rechunking, openRechunkModal, handleTriggerRechunk,
             showEditModal, updatingKb, editForm, openEditModal, handleUpdateKbSubmit, handleToggleKb,
             showEditConnectorModal, updatingConn, editConnForm, openEditConnectorModal, handleUpdateConnectorSubmit,
@@ -1266,12 +1268,12 @@ component.template = `
 
     <!-- 知识库卡片网格 -->
     <n-spin :show="loading">
-      <n-grid :cols="3" :x-gap="16" :y-gap="16">
+      <n-grid cols="1 s:2 m:3" responsive="screen" :x-gap="16" :y-gap="16">
         <n-gi v-for="kb in knowledgeBases" :key="kb.id">
           <n-card :title="kb.name" hoverable>
             <template #header-extra>
               <n-space :size="6" align="center">
-                <n-tag v-if="reindexStatusMap[kb.id]?.activeJob" size="small" type="warning" round style="cursor: pointer" @click="openReindexDrawer(kb, reindexStatusMap[kb.id].activeJob)">
+                <n-tag v-if="kbActiveJob(kb.id)" size="small" type="warning" round style="cursor: pointer" @click="openReindexDrawer(kb)">
                   ⏳ 重构中 {{ reindexBadgePercent(kb.id) }}%
                 </n-tag>
                 <n-tag :type="kb.enabled ? 'success' : 'default'" size="small">
@@ -1334,7 +1336,7 @@ component.template = `
                     <template #icon><n-icon :component="CreateOutline" /></template>
                     编辑
                   </n-button>
-                  <n-button v-if="reindexStatusMap[kb.id]?.generation?.canRollback && !reindexStatusMap[kb.id]?.activeJob" size="small" secondary type="warning" @click="openReindexDrawer(kb)">
+                  <n-button v-if="reindexGenerationMap[kb.id]?.canRollback && !kbActiveJob(kb.id)" size="small" secondary type="warning" @click="openReindexDrawer(kb)">
                     <template #icon><n-icon :component="RefreshOutline" /></template>
                     代次
                   </n-button>
@@ -1364,7 +1366,7 @@ component.template = `
     </n-spin>
 
     <!-- 新建知识库向导模态框 -->
-    <n-modal v-model:show="showCreateModal" preset="card" title="新建知识库 (New Knowledge Base)" style="width: 680px;" :mask-closable="false">
+    <n-modal v-model:show="showCreateModal" preset="card" title="新建知识库 (New Knowledge Base)" style="width: 680px; max-width: 95vw;" :mask-closable="false">
       <n-form label-placement="top">
         <n-form-item label="知识库名称" required>
           <n-input v-model:value="createForm.name" placeholder="例如：企业核心技术文档库 / 法律合同审查库" />
@@ -1449,7 +1451,7 @@ component.template = `
 
         <n-divider title-placement="left">初始数据连接器 (可选)</n-divider>
 
-        <n-grid :cols="2" :x-gap="12">
+        <n-grid cols="1 s:2" responsive="screen" :x-gap="12">
           <n-gi>
             <n-form-item label="本地目标文件夹路径">
               <n-input-group style="width: 100%;">
@@ -1516,7 +1518,7 @@ component.template = `
               v-if="switchModelTargetKb?.embeddingSpecId !== 'spec_lexical_only'"
               type="warning"
               secondary
-              :loading="reindexing"
+              :loading="unbinding"
               @click="handleUnbindModel"
             >
               解绑模型 (降级为纯词法)
@@ -1533,7 +1535,7 @@ component.template = `
     </n-modal>
 
     <!-- 重构索引作业进度抽屉 -->
-    <n-drawer v-model:show="showReindexDrawer" :width="520" placement="right" @after-leave="stopReindexPolling">
+    <n-drawer v-model:show="showReindexDrawer" :placement="isMobile ? 'bottom' : 'right'" :width="isMobile ? '100%' : 520" :height="isMobile ? '85dvh' : '100%'" @after-leave="onReindexDrawerClosed">
       <n-drawer-content :title="'重构索引进度 - ' + (reindexKb?.name || '')" closable>
         <div class="reindex-drawer-body">
           <div class="reindex-hero" :class="'is-' + (reindexJob?.status || 'idle').toLowerCase()">
@@ -1620,7 +1622,7 @@ component.template = `
         <template #footer>
           <n-space justify="space-between" align="center" style="width: 100%;">
             <n-button
-              v-if="reindexGeneration?.canRollback && !reindexActive"
+              v-if="canRollback"
               type="warning"
               secondary
               :loading="reindexRollingBack"
@@ -1630,7 +1632,7 @@ component.template = `
             </n-button>
             <span v-else></span>
             <n-space>
-              <n-button v-if="reindexActive" type="error" secondary :loading="reindexCancelling" @click="handleCancelReindex">
+              <n-button v-if="reindexActive" type="error" secondary :loading="reindexCancelling" :disabled="!canCancel" @click="handleCancelReindex">
                 取消作业
               </n-button>
               <n-button @click="showReindexDrawer = false">关闭</n-button>
@@ -1641,7 +1643,7 @@ component.template = `
     </n-drawer>
 
     <!-- 连接器管理抽屉 -->
-    <n-drawer v-model:show="showConnectorDrawer" :width="560" placement="right">
+    <n-drawer v-model:show="showConnectorDrawer" :placement="isMobile ? 'bottom' : 'right'" :width="isMobile ? '100%' : 560" :height="isMobile ? '85dvh' : '100%'">
       <n-drawer-content :title="'连接器管理 - ' + (currentKb?.name || '')">
         <n-space vertical :size="16">
           <n-alert type="info">
@@ -1685,7 +1687,7 @@ component.template = `
                         <n-tag size="small" type="default" :bordered="false" round>
                           来源：{{ getConnectorOrigin(conn) }}
                         </n-tag>
-                        <n-tooltip trigger="hover">
+                        <n-tooltip :trigger="isMobile ? 'click' : 'hover'">
                           <template #trigger>
                             <n-tag size="small" :type="getReachabilityTagType(conn)" :bordered="false" round style="cursor: pointer;">
                               {{ getReachabilityText(conn) }}
@@ -1738,8 +1740,8 @@ component.template = `
     />
   
     <!-- 编辑知识库模态框 -->
-    <n-modal v-model:show="showEditModal" preset="card" title="编辑知识库设置" style="max-width: 560px">
-      <n-form :model="editForm" label-placement="left" label-width="110">
+    <n-modal v-model:show="showEditModal" preset="card" title="编辑知识库设置" style="width: 560px; max-width: 95vw;">
+      <n-form :model="editForm" :label-placement="isMobile ? 'top' : 'left'" label-width="110">
         <n-form-item label="知识库名称" required>
           <n-input v-model:value="editForm.name" placeholder="请输入知识库名称" />
         </n-form-item>
@@ -1806,8 +1808,8 @@ component.template = `
     </n-modal>
 
     <!-- 编辑连接器模态框 -->
-    <n-modal v-model:show="showEditConnectorModal" preset="card" title="编辑连接器规则" style="max-width: 540px">
-      <n-form :model="editConnForm" label-placement="left" label-width="100">
+    <n-modal v-model:show="showEditConnectorModal" preset="card" title="编辑连接器规则" style="width: 540px; max-width: 95vw;">
+      <n-form :model="editConnForm" :label-placement="isMobile ? 'top' : 'left'" label-width="100">
         <n-form-item label="目标路径" required>
           <n-input v-model:value="editConnForm.targetPath" placeholder="本地绝对路径" />
         </n-form-item>
@@ -1827,14 +1829,14 @@ component.template = `
     </n-modal>
 
     <!-- 文档与切片精细化治理抽屉 (Documents & Chunks HITL Explorer) -->
-    <n-drawer v-model:show="showExplorerDrawer" :width="900" placement="right">
+    <n-drawer v-model:show="showExplorerDrawer" :placement="isMobile ? 'bottom' : 'right'" :width="isMobile ? '100%' : 900" :height="isMobile ? '90dvh' : '100%'">
       <n-drawer-content :title="'知识库治理与切片微调 - ' + (explorerKb ? explorerKb.name : '')" closable>
         <n-tabs v-model:value="explorerTab" type="line" animated>
           <!-- 文档视图 -->
           <n-tab-pane name="documents" tab="收录文档列表">
             <n-space vertical :size="12">
-              <n-space justify="space-between" align="center">
-                <n-input v-model:value="docSearch" placeholder="搜索文档名或路径..." clearable @keydown.enter="loadExplorerDocuments" style="width: 300px">
+              <n-space :vertical="isMobile" justify="space-between" align="center">
+                <n-input v-model:value="docSearch" placeholder="搜索文档名或路径..." clearable @keydown.enter="loadExplorerDocuments" :style="{ width: isMobile ? '100%' : '300px' }">
                   <template #prefix><n-icon :component="SearchOutline" /></template>
                 </n-input>
                 <n-space>
@@ -1893,9 +1895,9 @@ component.template = `
           <!-- 切片管理与纠错视图 -->
           <n-tab-pane name="chunks" tab="切片管理与纠错 (HITL)">
             <n-space vertical :size="12">
-              <n-space justify="space-between" align="center">
+              <n-space :vertical="isMobile" justify="space-between" align="center">
                 <n-space align="center" :size="12">
-                  <n-input v-model:value="chunkSearch" placeholder="搜索切片内容..." clearable @keydown.enter="loadExplorerChunks" style="width: 260px">
+                  <n-input v-model:value="chunkSearch" placeholder="搜索切片内容..." clearable @keydown.enter="loadExplorerChunks" :style="{ width: isMobile ? '100%' : '260px' }">
                     <template #prefix><n-icon :component="SearchOutline" /></template>
                   </n-input>
                   <n-tag v-if="chunkDocFilter" closable @close="chunkDocFilter = null; loadExplorerChunks()">
@@ -1994,7 +1996,7 @@ component.template = `
     </n-drawer>
 
     <!-- 手动添加切片模态框 -->
-    <n-modal v-model:show="showAddChunkModal" preset="card" title="手动补充知识分段" style="max-width: 600px">
+    <n-modal v-model:show="showAddChunkModal" preset="card" title="手动补充知识分段" style="width: 600px; max-width: 95vw;">
       <n-form :model="newChunkForm" label-placement="top">
         <n-form-item label="分段文本内容 (将即时计算向量并加入 BM25 索引)" required>
           <n-input
@@ -2014,7 +2016,7 @@ component.template = `
     </n-modal>
 
     <!-- 手动录入单篇文档模态框 -->
-    <n-modal v-model:show="showAddDocModal" preset="card" title="录入单篇文档并自动分块" style="max-width: 640px">
+    <n-modal v-model:show="showAddDocModal" preset="card" title="录入单篇文档并自动分块" style="width: 640px; max-width: 95vw;">
       <n-form :model="newDocForm" label-placement="top">
         <n-form-item label="文档标识或路径 (SourceKey)" required>
           <n-input v-model:value="newDocForm.sourceKey" placeholder="例如: docs/quickstart.md 或 manual/faq.txt" />
