@@ -364,7 +364,7 @@ Brotli 取 **Optimal** 而非 Fastest：Fastest 实测 naive-ui 传输 568.3KB �
 - [x] 取消竞态：作业恰在取消前完成 → info「作业已结束」+ 终态快照（FSM CANCEL_404 转移，G-M2 单测断言）
 - [x] 多 KB 并行：各自卡片忙碌徽标独立（getExactJob 精确匹配，E2E 断言徽标存在）
 - [x] curl 静态资源：br/gzip 命中、vendor immutable、首屏 ≤800KB（G-M8 全绿）
-- [x] G-M1..G-M9 全绿 + 既有前端用例/核心/Host 门禁不回归（前端 113/113；Host.Tests 457/457；核心 792 中 743 通过、47 跳过、2 失败——`QueryEmbeddingCacheProxy_*` 2 例在干净 HEAD 上同样失败，属存量问题，与本次改动无关）
+- [x] G-M1..G-M9 全绿 + 既有前端用例/核心/Host 门禁不回归（前端 113/113；Host.Tests 457/457；核心 745 通过 / 47 跳过 / 0 失败）。`QueryEmbeddingCacheProxy_*` 2 例存量失败已修复：根因是测试未按生产策略传 `EmbeddingMode.Query`（缓存仅收 Query 模式向量，Symmetric/Document 直通以防入库文本污染 LRU 与模型切换后返回陈旧向量），且批量用例漏配 `EncodeAsync` mock 导致 loose mock 返回 null 入缓存
 - [x] P2-5（可选）按约定跳过：MapStaticAssets 与既有静态资源管线不兼容风险低但无收益（ResponseCompression 已达标）；naive-ui tree-shake 与底部 tab bar 属独立改版，另行评审
 
 ---

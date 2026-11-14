@@ -72,23 +72,34 @@ public class SearchPerformanceAndAccuracyTests
 
         var proxy = new QueryEmbeddingCacheProxy(mockInner.Object, maxCapacity: 10);
 
-        // 第一次调用：未命中缓存
-        var vec1 = await proxy.EncodeAsync("金庸武侠小说?", CancellationToken.None);
+        // 缓存策略：仅 Query 模式入 LRU；Symmetric/Document 直通（避免入库文本污染并在模型切换后返回陈旧向量）
+        var symVec = await proxy.EncodeAsync("金庸武侠小说?", EmbeddingMode.Symmetric, CancellationToken.None);
         Assert.Equal(1, encodeCallCount);
+        Assert.Equal(0, proxy.CachedCount);
+
+        // 第一次 Query 调用：未命中缓存
+        var vec1 = await proxy.EncodeAsync("金庸武侠小说?", EmbeddingMode.Query, CancellationToken.None);
+        Assert.Equal(2, encodeCallCount);
         Assert.Equal(1, proxy.CachedCount);
 
         // 第二次调用规范化变体：应当命中缓存，不增加 encodeCallCount
-        var vec2 = await proxy.EncodeAsync("金庸武侠小说？", CancellationToken.None);
-        Assert.Equal(1, encodeCallCount);
+        var vec2 = await proxy.EncodeAsync("金庸武侠小说？", EmbeddingMode.Query, CancellationToken.None);
+        Assert.Equal(2, encodeCallCount);
         Assert.Equal(vec1, vec2);
+        Assert.Equal(1, proxy.CachedCount);
+
+        // Symmetric 再次直通底层：计数增加但缓存条数不变
+        await proxy.EncodeAsync("另一段文档文本", EmbeddingMode.Symmetric, CancellationToken.None);
+        Assert.Equal(3, encodeCallCount);
+        Assert.Equal(1, proxy.CachedCount);
 
         // 模型重载时清空缓存
         await proxy.ReloadModelAsync("new_path", "new_model");
         Assert.Equal(0, proxy.CachedCount);
 
         // 再次调用应当重新编码
-        await proxy.EncodeAsync("金庸武侠小说", CancellationToken.None);
-        Assert.Equal(2, encodeCallCount);
+        await proxy.EncodeAsync("金庸武侠小说", EmbeddingMode.Query, CancellationToken.None);
+        Assert.Equal(4, encodeCallCount);
     }
 
     [Fact]
@@ -96,6 +107,9 @@ public class SearchPerformanceAndAccuracyTests
     {
         var mockInner = new Mock<IEmbeddingService>();
         mockInner.Setup(x => x.ModelName).Returns("bge-m3");
+
+        mockInner.Setup(x => x.EncodeAsync(It.IsAny<string>(), It.IsAny<EmbeddingMode>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string t, EmbeddingMode m, CancellationToken ct) => new float[] { t.Length });
 
         mockInner.Setup(x => x.EncodeBatchAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<EmbeddingMode>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IEnumerable<string> texts, EmbeddingMode m, CancellationToken ct) =>
@@ -105,14 +119,17 @@ public class SearchPerformanceAndAccuracyTests
 
         var proxy = new QueryEmbeddingCacheProxy(mockInner.Object, maxCapacity: 50);
 
-        // 先预热一条
-        await proxy.EncodeAsync("越女剑", CancellationToken.None);
+        // 先预热一条（Query 模式才入缓存）
+        await proxy.EncodeAsync("越女剑", EmbeddingMode.Query, CancellationToken.None);
 
         // 批量编码 3 条，其中一条已在缓存中
         var batch = new[] { "越女剑", "连城诀", "雪山飞狐" };
-        var results = await proxy.EncodeBatchAsync(batch, CancellationToken.None);
+        var results = await proxy.EncodeBatchAsync(batch, EmbeddingMode.Query, CancellationToken.None);
 
         Assert.Equal(3, results.Length);
         Assert.Equal(3, proxy.CachedCount);
+
+        // 已缓存条目的向量应来自缓存而非重新编码（长度即编码结果的标识）
+        Assert.Equal(new float[] { "越女剑".Length }, results[0]);
     }
 }
