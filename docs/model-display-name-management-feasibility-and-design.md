@@ -502,12 +502,19 @@ _displayNames.TrySet(ModelUrn.ForProvider("prov_sf", "BAAI/bge-m3"), "硅基流�
 
 **身份隔离回归**（本功能的核心不变量）：`DisplayName_NeverAltersEmbeddingSpecModelName` 与 `DisplayName_DoesNotAffectModelIdentityComparison` 两例锁定——展示名覆盖绝不写入 `EmbeddingSpec.ModelName`，绝不参与漂移判定。
 
-### 10.4 待办
+### 10.4 生产验收（部署 `referencerag:deploy-8f6da8b` 后实测）
+
+- 健康检查 `/api/system/health` → 200;容器内前端模块含 `display-name`/`hasCustomName` 标记。
+- `PUT /api/Models/bge-m3/display-name` → 成功;快照与模型列表同步显示自定义名;`DELETE` 重置后恢复预定义名 `BGE M3`。
+- **重启保持**：覆盖写入卷挂载配置 `{DataPath}/appsettings.json` 的 `modelDisplayNames` 节（实测 PUT 后磁盘含 `"local:bge-m3": "PersistCheck"`，DELETE 后清空）;该文件位于持久卷，容器重建不丢失。
+- **漂移判定不受影响**：默认知识库 drift 接口在改名前后完全一致;`CurrentEmbeddingModel="BGE M3"` 与 `GlobalDefaultEmbeddingModel="bge-m3"` 的展示名/规范 ID 差异经 `ModelIdentity` 规范化后不再触发「偏离(建议重排)」（状态 `Customized` 源于合法的自定义分块策略，`CanUpgrade=false`）。
+
+### 10.5 待办
 
 - [x] 评审本方案
 - [x] 实施 P1-P4
 - [x] 门禁 + 全量回归 + 浏览器验收
-- [ ] 部署后在生产验证：本地模型自定义名称 + 重启保持 + 漂移判定不受影响
+- [x] 部署后在生产验证：本地模型自定义名称 + 重启保持 + 漂移判定不受影响
 
 ---
 
