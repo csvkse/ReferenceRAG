@@ -764,7 +764,11 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
                 {
                     result.Add(new EmbeddingSpec(
                         Id: specId,
-                        ModelName: m.DisplayName ?? m.Name,
+                        // ModelName 必须是规范 ID（m.Name）而非展示名（m.DisplayName）：
+                        // 该字段是模型身份键，与全局配置 Embedding.ModelName 及 Spec Id 同源比较；
+                        // 存入展示名会使漂移检测恒不相等（"BGE M3" vs "bge-m3"），
+                        // 导致已对齐的模型被误报为「偏离(建议重排)」。展示名仅用于 UI 呈现。
+                        ModelName: m.Name,
                         Dimension: m.Dimension > 0 ? m.Dimension : 512,
                         Metric: "cosine",
                         MaxTokens: m.MaxSequenceLength > 0 ? m.MaxSequenceLength : 512,
@@ -792,7 +796,9 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
                             {
                                 result.Add(new EmbeddingSpec(
                                     Id: specId,
-                                    ModelName: $"{prov.Name} / {mod.DisplayName ?? mod.ModelId}",
+                                    // 同 local_* 分支：ModelName 承载模型身份，须用规范 ModelId；
+                                    // Provider 名另由 IngestionBackend 等字段承载，不混入身份键。
+                                    ModelName: mod.ModelId,
                                     Dimension: mod.Dimension > 0 ? mod.Dimension : 1024,
                                     Metric: "cosine",
                                     MaxTokens: mod.MaxTokens > 0 ? mod.MaxTokens : 8192,
@@ -1136,7 +1142,10 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
             );
         }
 
-        bool modelMatches = string.Equals(currentModel, globalModel, StringComparison.OrdinalIgnoreCase);
+        // 模型身份比较必须走规范化键：Spec.ModelName 与全局配置可能分别来自
+        // DisplayName（"BGE M3"）与规范 ID（"bge-m3"）两种称谓体系，
+        // 直接字符串比较会把同一模型误判为偏离。历史数据已含展示名，故不能仅靠上游修正。
+        bool modelMatches = ModelIdentity.IsSameModel(currentModel, globalModel);
         bool chunkMatches = string.Equals(currentChunk, globalChunkMode, StringComparison.OrdinalIgnoreCase);
 
         DriftStatus status;
