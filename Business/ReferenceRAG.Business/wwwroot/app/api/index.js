@@ -186,6 +186,12 @@ export const modelsApi = {
     probeDimension: (data) => api.post('/Models/probe-dimension', data),
     // 模型启用/停用运营状态切换
     toggleEnabled: (modelName, enabled) => api.post(`/Models/${encodeURIComponent(modelName)}/toggle-enabled`, { enabled }),
+    // 模型展示名（仅影响显示，不改变模型身份与索引）
+    setDisplayName: (modelName, displayName, providerId = null) =>
+        api.put(`/Models/${encodeURIComponent(modelName)}/display-name`, { displayName, providerId }),
+    resetDisplayName: (modelName, providerId = null) =>
+        api.delete(`/Models/${encodeURIComponent(modelName)}/display-name`, { params: providerId ? { providerId } : {} }),
+    getDisplayNames: () => api.get('/Models/display-names'),
     // 集中式模型服务商管理 (Model Providers)
     getProviders: () => api.get('/Models/providers'),
     saveProvider: (data) => api.post('/Models/providers', data),

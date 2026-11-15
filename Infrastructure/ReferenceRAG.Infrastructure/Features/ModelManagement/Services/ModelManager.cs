@@ -1,4 +1,6 @@
+using ReferenceRAG.Core.Features.ModelManagement.Helpers;
 using ReferenceRAG.Core.Features.ModelManagement.Protobuf;
+using ReferenceRAG.Core.Features.ModelManagement.Services;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Infrastructure.Features.ModelManagement.Download.Adapters;
@@ -278,6 +280,11 @@ public interface IModelManager
     void RefreshLocalModels();
 
     /// <summary>
+    /// 模型展示名覆盖注册表（用户自定义名称，仅影响 UI 呈现，不参与身份比较）
+    /// </summary>
+    ModelDisplayNameRegistry DisplayNames { get; }
+
+    /// <summary>
     /// 切换同一模型的特定变体版本（如 Q4_K_M, Q8_0, ONNX 等）
     /// </summary>
     Task<bool> SwitchModelVariantAsync(string modelName, string variantFileName, bool isRerank = false);
@@ -449,6 +456,13 @@ public class ModelManager : IModelManager, IDisposable
     private ModelInfo? _currentRerankModel;
     private ModelInfo? _currentChatModel;
     private bool _disposed;
+
+    /// <summary>
+    /// 模型展示名覆盖注册表（用户自定义名称，以 ModelUrn 为键）。
+    /// 与 ModelInfo.DisplayName（硬编码/扫描推导）解耦：registry 填充后统一应用，
+    /// 后续扫描不会覆写用户设置。仅影响 UI 呈现，不参与身份比较。
+    /// </summary>
+    private readonly ModelDisplayNameRegistry _displayNames;
 
     // 事件声明
     public event EventHandler<ModelPathChangedEventArgs>? ModelPathChanged;
@@ -1328,7 +1342,8 @@ public class ModelManager : IModelManager, IDisposable
     {
         _modelsPath = Path.GetFullPath(modelsPath);
         _configManager = configManager;
-        
+        _displayNames = new ModelDisplayNameRegistry(configManager);
+
         InitializeRegistry();
     }
 
@@ -1340,6 +1355,9 @@ public class ModelManager : IModelManager, IDisposable
 
         // 先扫描目录，填充 IsDownloaded + LocalPath
         ScanLocalModels();
+
+        // 应用用户自定义展示名（须在扫描后：扫描会以目录名重建未注册条目）
+        ApplyDisplayNameOverrides();
 
         // 再根据配置设置 _currentModel / _currentRerankModel（此时 LocalPath 已正确）
         CheckConfiguredModel();
@@ -1391,7 +1409,43 @@ public class ModelManager : IModelManager, IDisposable
     public void RefreshLocalModels()
     {
         ScanLocalModels();
+        ApplyDisplayNameOverrides();
     }
+
+    /// <summary>
+    /// 应用用户自定义展示名覆盖。
+    /// 单一应用点：扫描逻辑多分支（预注册/未注册/loose gguf）逐一修改易遗漏，
+    /// 后置统一应用既保证覆盖生效，又避免扫描重建时覆写用户设置。
+    /// </summary>
+    private void ApplyDisplayNameOverrides()
+    {
+        // 权威 fallback 源：预定义模型的 DisplayName（本地模型名相同的条目）。
+        // 不能直接用 model.DisplayName 作为 fallback——它可能已被上一次覆盖污染，
+        // 导致 Reset 后无法回退到系统推导名（自我延续）。
+        var predefined = PredefinedModels
+            .Where(p => !string.IsNullOrEmpty(p.Name))
+            .GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().DisplayName, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (name, model) in _modelRegistry)
+        {
+            var urn = ModelUrn.ForLocal(name);
+            var fallback = predefined.TryGetValue(name, out var pre) && !string.IsNullOrEmpty(pre)
+                ? pre
+                : model.DisplayName;
+
+            var resolved = _displayNames.Resolve(urn, fallback);
+            if (!string.IsNullOrEmpty(resolved))
+            {
+                model.DisplayName = resolved;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 获取展示名覆盖注册表（供控制器与测试使用）。
+    /// </summary>
+    public ModelDisplayNameRegistry DisplayNames => _displayNames;
 
     private static readonly System.Text.RegularExpressions.Regex QuantRegex = new(
         @"(Q\d+_[A-Z0-9_]+|q\d+_[a-z0-9_]+|int8|int4|fp16|fp32|f16|f32)",
@@ -2529,6 +2583,9 @@ public class ModelManager : IModelManager, IDisposable
             model.IsDownloaded = false;
             model.LocalPath = null;
             model.ModelSizeBytes = 0;
+
+            // 联动清理展示名覆盖：模型已从本地移除，保留自定义名称无意义且会造成配置堆积
+            _displayNames.Reset(ModelUrn.ForLocal(modelName));
 
             Console.WriteLine($"[ModelManager] 模型已删除: {model.DisplayName}");
             return Task.FromResult(true);

@@ -96,6 +96,14 @@ public class ObsidianRagConfig
     public List<string> DisabledModels { get; set; } = new();
 
     /// <summary>
+    /// 模型展示名覆盖表（键为 ModelUrn 字符串形式，如 "local:bge-m3" /
+    /// "provider:prov_sf:BAAI/bge-m3"；值为用户自定义展示名）。
+    /// 仅影响 UI 呈现，绝不参与身份比较（EmbeddingSpec.ModelName / 配置漂移判定不受影响）。
+    /// 缺省为空字典，行为与未启用时完全一致。
+    /// </summary>
+    public Dictionary<string, string> ModelDisplayNames { get; set; } = new();
+
+    /// <summary>
     /// TypeSafe AI System One (Jev) 极速认知决策引擎配置
     /// </summary>
     public SystemOneConfig SystemOne { get; set; } = new();

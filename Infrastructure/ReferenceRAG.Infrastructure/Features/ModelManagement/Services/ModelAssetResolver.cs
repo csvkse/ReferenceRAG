@@ -100,7 +100,9 @@ public sealed class ModelAssetResolver : IModelAssetResolver
                 return new ResolvedModelAsset
                 {
                     Urn = urn,
-                    DisplayName = $"{urn.ProviderId} / {urn.ModelId}",
+                    // 服务商已不存在，仍尊重用户可能已设置的自定义名称
+                    DisplayName = _modelManager?.DisplayNames.Resolve(urn, $"{urn.ProviderId} / {urn.ModelId}")
+                                  ?? $"{urn.ProviderId} / {urn.ModelId}",
                     ModelType = expectedType,
                     IsLocal = false,
                     IsReady = false,
@@ -115,7 +117,11 @@ public sealed class ModelAssetResolver : IModelAssetResolver
             return new ResolvedModelAsset
             {
                 Urn = urn,
-                DisplayName = mod?.DisplayName ?? $"{prov.Name} / {urn.ModelId}",
+                // 展示名优先级：用户覆盖 → RegisteredModelAsset.DisplayName → "Provider / ModelId"
+                DisplayName = _modelManager?.DisplayNames.Resolve(
+                                  urn,
+                                  mod?.DisplayName ?? $"{prov.Name} / {urn.ModelId}")
+                              ?? mod?.DisplayName ?? $"{prov.Name} / {urn.ModelId}",
                 ModelType = mod?.ModelType ?? expectedType,
                 IsLocal = false,
                 IsReady = isReady,
@@ -227,7 +233,11 @@ public sealed class ModelAssetResolver : IModelAssetResolver
 
                 localGroup.Options.Add(new ModelCatalogOption
                 {
-                    Label = m.DisplayName ?? m.Name,
+                    // 与 ModelManager.ApplyDisplayNameOverrides 同一解析策略：用户覆盖优先
+                    Label = _modelManager?.DisplayNames.Resolve(
+                                ModelUrn.ForLocal(m.Name),
+                                m.DisplayName ?? m.Name)
+                            ?? m.DisplayName ?? m.Name,
                     Value = ModelUrn.ForLocal(m.Name).ToString(),
                     IsLocal = true,
                     Details = details,
@@ -267,7 +277,11 @@ public sealed class ModelAssetResolver : IModelAssetResolver
 
                         provGroup.Options.Add(new ModelCatalogOption
                         {
-                            Label = mod.DisplayName ?? mod.ModelId,
+                            // 展示名优先级：用户覆盖（ModelDisplayNameRegistry）→ RegisteredModelAsset.DisplayName → ModelId
+                            Label = _modelManager?.DisplayNames.Resolve(
+                                        ModelUrn.ForProvider(prov.Id, mod.ModelId),
+                                        mod.DisplayName ?? mod.ModelId)
+                                    ?? mod.DisplayName ?? mod.ModelId,
                             Value = ModelUrn.ForProvider(prov.Id, mod.ModelId).ToString(),
                             IsLocal = false,
                             Details = details,

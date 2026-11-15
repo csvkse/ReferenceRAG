@@ -1,3 +1,4 @@
+using ReferenceRAG.Core.Features.ModelManagement.Helpers;
 using ReferenceRAG.Core.Features.ModelManagement.Services;
 using Microsoft.AspNetCore.Mvc;
 using ReferenceRAG.Business.Features.Chat.Services;
@@ -1618,7 +1619,84 @@ public async Task<ActionResult<ModelDownloadOptions>> GetRerankDownloadOptions(s
     }
 
     /// <summary>
-    /// 获取所有集中式模型供应商列表（API Key 已脱敏）
+    /// 设置模型展示名（本地或在线服务商模型）。
+    /// 仅影响 UI 呈现，不改变模型身份，也不影响已建索引与配置漂移判定。
+    /// </summary>
+    [HttpPut("{modelName}/display-name")]
+    public ActionResult SetModelDisplayName(string modelName, [FromBody] SetDisplayNameRequest? request)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.DisplayName))
+        {
+            return BadRequest(new { error = "模型名称不能为空" });
+        }
+
+        // 在线模型需 providerId 定位身份；本地模型留空
+        var urn = string.IsNullOrWhiteSpace(request.ProviderId)
+            ? ModelUrn.ForLocal(modelName)
+            : ModelUrn.ForProvider(request.ProviderId, modelName);
+
+        if (!_modelManager.DisplayNames.TrySet(urn, request.DisplayName, out var error))
+        {
+            return BadRequest(new { error = error ?? "设置模型名称失败" });
+        }
+
+        // 本地模型立即刷新 registry 展示名，使后续列表读取即时生效
+        if (urn.IsLocal)
+        {
+            _modelManager.RefreshLocalModels();
+        }
+
+        return Ok(new
+        {
+            success = true,
+            modelName = modelName,
+            providerId = request.ProviderId,
+            displayName = request.DisplayName.Trim()
+        });
+    }
+
+    /// <summary>
+    /// 清除模型展示名覆盖，回退到系统推导名（预定义 DisplayName / 目录名 / ModelId）
+    /// </summary>
+    [HttpDelete("{modelName}/display-name")]
+    public ActionResult ResetModelDisplayName(string modelName, [FromQuery] string? providerId = null)
+    {
+        var urn = string.IsNullOrWhiteSpace(providerId)
+            ? ModelUrn.ForLocal(modelName)
+            : ModelUrn.ForProvider(providerId, modelName);
+
+        var removed = _modelManager.DisplayNames.Reset(urn);
+
+        if (urn.IsLocal)
+        {
+            _modelManager.RefreshLocalModels();
+        }
+
+        return Ok(new
+        {
+            success = true,
+            removed = removed,
+            modelName = modelName,
+            providerId = providerId
+        });
+    }
+
+    /// <summary>
+    /// 查询当前全部展示名覆盖（供管理页标记「已自定义」）
+    /// </summary>
+    [HttpGet("display-names")]
+    public ActionResult GetModelDisplayNames()
+    {
+        return Ok(new
+        {
+            success = true,
+            displayNames = _modelManager.DisplayNames.Snapshot()
+        });
+    }
+
+    /// <summary>
+    /// 获取所有集中式模型供应商列表（API Key 已脱敏）。
+    /// 每个模型附带 displayName（用户自定义优先）与 hasCustomName 标记。
     /// </summary>
     [HttpGet("providers")]
     public ActionResult GetModelProviders()
@@ -1633,10 +1711,27 @@ public async Task<ActionResult<ModelDownloadOptions>> GetRerankDownloadOptions(s
                 baseUrl = p.BaseUrl,
                 enabled = p.Enabled,
                 hasApiKey = !string.IsNullOrWhiteSpace(p.ApiKey),
-                apiKeyMasked = string.IsNullOrWhiteSpace(p.ApiKey) 
-                    ? "" 
+                apiKeyMasked = string.IsNullOrWhiteSpace(p.ApiKey)
+                    ? ""
                     : (p.ApiKey.Length > 8 ? $"{p.ApiKey[..4]}****{p.ApiKey[^4..]}" : "********"),
-                models = p.Models ?? new List<RegisteredModelAsset>()
+                models = (p.Models ?? new List<RegisteredModelAsset>())
+                    .Select(m =>
+                    {
+                        var urn = ModelUrn.ForProvider(p.Id, m.ModelId);
+                        return new
+                        {
+                            m.ModelId,
+                            m.ModelType,
+                            m.Dimension,
+                            m.MaxTokens,
+                            m.Enabled,
+                            m.LastProbedAt,
+                            // 用户自定义名称优先，其次 RegisteredModelAsset.DisplayName，最后 ModelId
+                            displayName = _modelManager.DisplayNames.Resolve(urn, m.DisplayName ?? m.ModelId),
+                            hasCustomName = _modelManager.DisplayNames.HasOverride(urn)
+                        };
+                    })
+                    .ToList()
             })
             .ToList();
 
@@ -2018,6 +2113,11 @@ public sealed record DiscoverRemoteModelsRequest(string BaseUrl, string? ApiKey 
 public sealed record ProbeDimensionRequest(string BaseUrl, string ModelName, string? ApiKey = null);
 
 public sealed record ToggleModelEnabledRequest(bool? Enabled = null);
+
+/// <summary>
+/// 设置模型展示名请求。本地模型 ProviderId 留空；在线模型须传服务商 Id。
+/// </summary>
+public sealed record SetDisplayNameRequest(string DisplayName, string? ProviderId = null);
 
 public sealed record SaveModelProviderRequest(string? Id, string Name, string? ProviderType, string BaseUrl, string? ApiKey = null, bool? Enabled = null);
 
