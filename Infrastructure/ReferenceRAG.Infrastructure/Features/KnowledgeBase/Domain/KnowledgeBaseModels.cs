@@ -127,6 +127,19 @@ public sealed record ConnectorDetailDto(
     string? DiagnosticMessage = null) : ConnectorDefinition(Id, KnowledgeBaseId, Kind, TargetPath, FilePattern, ConfigRevision, Enabled, CreatedAt, UpdatedAt);
 
 /// <summary>
+/// 连接器物理统计快照（跨库聚合用轻量读模型：不含可达性探测与诊断信息）。
+/// </summary>
+public sealed record ConnectorStatsSnapshot(
+    string KnowledgeBaseId,
+    string ConnectorId,
+    string TargetPath,
+    string? FilePattern,
+    bool Enabled,
+    int DocumentCount,
+    int ChunkCount,
+    DateTime UpdatedAt);
+
+/// <summary>
 /// 知识库词法统计指标
 /// </summary>
 public sealed record KnowledgeBaseLexicalStats(

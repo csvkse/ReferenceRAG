@@ -82,18 +82,63 @@ public class SourcesController : ControllerBase
     }
 
     /// <summary>
+    /// 按路径聚合各知识库连接器的物理统计。
+    /// 计数口径必须来自 per-KB kb.db（物理隔离架构下旧单库 vectors.db 已不再收到新写入，
+    /// 其快照既会漏算仅挂载在知识库中的路径，也会把已漂移的历史值当成实时值）。
+    /// </summary>
+    private async Task<Dictionary<string, PathStats>> LoadPathStatsAsync(CancellationToken ct)
+    {
+        if (_kbService == null) return new(StringComparer.OrdinalIgnoreCase);
+
+        var map = new Dictionary<string, PathStats>(StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<ConnectorStatsSnapshot> snapshots;
+        try
+        {
+            snapshots = await _kbService.GetConnectorStatsSnapshotAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[SourcesController] 获取知识库连接器统计快照失败，源计数降级为 0");
+            return map;
+        }
+
+        foreach (var snap in snapshots)
+        {
+            var key = NormalizePathKey(snap.TargetPath);
+            if (!map.TryGetValue(key, out var stats))
+            {
+                stats = new PathStats();
+                map[key] = stats;
+            }
+            stats.FileCount += snap.DocumentCount;
+            stats.ChunkCount += snap.ChunkCount;
+            if (stats.LastIndexed == null || snap.UpdatedAt > stats.LastIndexed)
+            {
+                stats.LastIndexed = snap.UpdatedAt;
+            }
+        }
+        return map;
+    }
+
+    private sealed class PathStats
+    {
+        public int FileCount;
+        public int ChunkCount;
+        public DateTime? LastIndexed;
+    }
+
+    /// <summary>
     /// 获取所有源
     /// </summary>
     [HttpGet]
     public async Task<ActionResult<List<SourceDetail>>> GetAll()
     {
         var config = _configManager.Load();
-        var statsMap = (await _vectorStore.GetSourceStatsAsync())
-            .ToDictionary(s => s.Source, StringComparer.OrdinalIgnoreCase);
+        var pathStats = await LoadPathStatsAsync(default);
 
         var sources = config.Sources.Select(s =>
         {
-            statsMap.TryGetValue(s.Name, out var stat);
+            pathStats.TryGetValue(NormalizePathKey(s.Path), out var stat);
             return new SourceDetail
             {
                 Name = s.Name,
@@ -143,6 +188,7 @@ public class SourcesController : ControllerBase
 
             if (!sources.Any(s => s.Path.Equals(conn.TargetPath, StringComparison.OrdinalIgnoreCase)))
             {
+                pathStats.TryGetValue(NormalizePathKey(conn.TargetPath), out var stat);
                 sources.Add(new SourceDetail
                 {
                     Name = BuildConnectorDisplayName(conn),
@@ -150,9 +196,9 @@ public class SourcesController : ControllerBase
                     Type = "KnowledgeBaseConnector",
                     Enabled = conn.Enabled,
                     FilePatterns = SplitPatterns(conn.FilePattern),
-                    FileCount = 0,
-                    ChunkCount = 0,
-                    LastIndexed = conn.UpdatedAt,
+                    FileCount = stat?.FileCount ?? 0,
+                    ChunkCount = stat?.ChunkCount ?? 0,
+                    LastIndexed = stat?.LastIndexed ?? conn.UpdatedAt,
                     IsConnector = true,
                     KnowledgeBaseId = conn.KnowledgeBaseId,
                     ConnectorId = conn.ConnectorId,
@@ -404,9 +450,8 @@ public class SourcesController : ControllerBase
         if (source == null)
             return NotFound(new { error = $"源 '{name}' 不存在" });
 
-        var statsMap = (await _vectorStore.GetSourceStatsAsync())
-            .ToDictionary(s => s.Source, StringComparer.OrdinalIgnoreCase);
-        statsMap.TryGetValue(source.Name, out var stat);
+        var pathStats = await LoadPathStatsAsync(default);
+        pathStats.TryGetValue(NormalizePathKey(source.Path), out var stat);
 
         return Ok(new SourceDetail
         {

@@ -145,12 +145,12 @@ const component = /*@__PURE__*/ _defineComponent({
             value: kb.id
         })));
 
-        const loadKnowledgeBases = async () => {
+        const loadKnowledgeBases = async (silent = false) => {
             try {
                 const res = await knowledgeBasesApi.getAll();
                 knowledgeBases.value = (res.data || []).filter(kb => kb.enabled !== false);
             } catch (err) {
-                console.warn('加载知识库列表失败:', err);
+                if (!silent) console.warn('加载知识库列表失败:', err);
             }
         };
 
@@ -377,17 +377,15 @@ const component = /*@__PURE__*/ _defineComponent({
                 title: '文件数',
                 key: 'fileCount',
                 width: 100,
-                render: (row) => isConnectorRow(row)
-                    ? '-'
-                    : (row.fileCount != null ? row.fileCount.toLocaleString() : '-')
+                // 连接器行同样展示物理计数：计数已由 per-KB kb.db 聚合而来，
+                // 只读行掩盖数字只会让用户以为「又没统计」。
+                render: (row) => (row.fileCount != null ? row.fileCount.toLocaleString() : '-')
             },
             {
                 title: '分块数',
                 key: 'chunkCount',
                 width: 100,
-                render: (row) => isConnectorRow(row)
-                    ? '-'
-                    : (row.chunkCount != null ? row.chunkCount.toLocaleString() : '-')
+                render: (row) => (row.chunkCount != null ? row.chunkCount.toLocaleString() : '-')
             },
             {
                 title: '操作',
@@ -478,7 +476,6 @@ const component = /*@__PURE__*/ _defineComponent({
         ];
 
         const loadSources = async (silent = false) => {
-            if (knowledgeBases.value.length === 0) loadKnowledgeBases();
             if (!silent) loading.value = true;
             try {
                 const response = await sourcesApi.getAll();
@@ -490,6 +487,12 @@ const component = /*@__PURE__*/ _defineComponent({
             finally {
                 if (!silent) loading.value = false;
             }
+        };
+
+        // 挂载下拉的知识库选项必须与知识库页保持同步：
+        // 本视图被 keep-alive 缓存，创建/删除知识库不会重建实例，故每次激活都静默重拉。
+        const refreshSourceAndKbOptions = async () => {
+            await Promise.all([loadSources(true), loadKnowledgeBases(true)]);
         };
 
         const handleCreateSource = async () => {
@@ -685,13 +688,15 @@ const component = /*@__PURE__*/ _defineComponent({
         };
 
         let unbindSources = null;
+        let unbindKbOptions = null;
         onMounted(async () => {
             syncFromRoute();
-            loadSources();
+            await refreshSourceAndKbOptions();
             loadLatestDrift();
             try {
                 await JobCenter.initialize();
                 unbindSources = JobCenter.registerRefresher('sources', () => loadSources(true));
+                unbindKbOptions = JobCenter.registerRefresher('knowledge_bases', () => loadKnowledgeBases(true));
             } catch (err) {
                 console.warn('JobCenter 初始化失败:', err);
             }
@@ -699,11 +704,12 @@ const component = /*@__PURE__*/ _defineComponent({
 
         onUnmounted(() => {
             unbindSources?.();
+            unbindKbOptions?.();
         });
 
         onActivated(() => {
             syncFromRoute();
-            loadSources(true);
+            refreshSourceAndKbOptions();
             loadLatestDrift();
         });
 
@@ -712,6 +718,7 @@ const component = /*@__PURE__*/ _defineComponent({
             router, route, isDesktop, selectDirectory, showFolderPicker, handleFolderSelected,
             message, dialog, formRef, loading, creating, sources, editingSource, editingName,
             newSource, formRules, columns, loadSources, handleCreateSource, resetForm,
+            loadKnowledgeBases, refreshSourceAndKbOptions,
             handleToggle, handleEdit, handleInspectSource, handleDelete, showFileManager,
             knowledgeBases, kbOptions, linkModalVisible, linkTargets, linkKbId, linking,
             checkedRowKeys, openLinkModal, openBatchLink, handleLink,
@@ -802,7 +809,7 @@ component.template = `
               <n-tag size="tiny" type="warning" :bordered="false" round>{{ reconcileIssues.length }}</n-tag>
             </template>
           </n-button>
-          <n-button size="small" :loading="loading" @click="loadSources">
+          <n-button size="small" :loading="loading" @click="refreshSourceAndKbOptions">
             刷新
           </n-button>
         </n-space>

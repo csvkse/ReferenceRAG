@@ -534,6 +534,38 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         }
     }
 
+    public async Task<IReadOnlyList<ConnectorStatsSnapshot>> GetConnectorStatsSnapshotAsync(CancellationToken ct = default)
+    {
+        var kbs = await _catalog.ListKnowledgeBasesAsync(ct);
+        var result = new List<ConnectorStatsSnapshot>();
+        foreach (var kb in kbs)
+        {
+            ct.ThrowIfCancellationRequested();
+            var connectors = await _catalog.GetConnectorsByKnowledgeBaseAsync(kb.Id, ct);
+            if (connectors.Count == 0) continue;
+
+            var kbStats = new List<ConnectorStatsSnapshot>(connectors.Count);
+            try
+            {
+                await using var lease = await _storageManager.AcquireLeaseAsync(kb.Id, StorageAccess.ReadOnly, ct);
+                foreach (var c in connectors)
+                {
+                    var (docCount, chunkCount) = await lease.Store.GetConnectorStatsAsync(c.Id, ct);
+                    kbStats.Add(new ConnectorStatsSnapshot(
+                        kb.Id, c.Id, c.TargetPath, c.FilePattern, c.Enabled, docCount, chunkCount, c.UpdatedAt));
+                }
+            }
+            catch (Exception ex)
+            {
+                // 单库统计失败不应污染其余知识库：跳过该库并记录告警。
+                _logger?.LogWarning(ex, "[KnowledgeBaseService] 连接器统计快照跳过知识库 {KbId}: {Message}", kb.Id, ex.Message);
+                continue;
+            }
+            result.AddRange(kbStats);
+        }
+        return result;
+    }
+
     private static (ConnectorReachabilityState State, bool IsReachable, string? Message) ProbeDirectory(string targetPath, string kind)
     {
         if (string.IsNullOrWhiteSpace(targetPath))

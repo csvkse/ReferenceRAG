@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted, onActivated, onDeactivated, h, computed, n
 import { useRouter, useRoute } from 'vue-router';
 import { NTag, NButton, useMessage, useDialog } from 'naive-ui';
 import { BookOutline, CubeOutline, FolderOutline, GridOutline, LayersOutline, PlayOutline, TrashOutline, RefreshOutline, AddOutline, SearchOutline, SettingsOutline, CreateOutline, DocumentTextOutline, CheckmarkCircleOutline } from '@vicons/ionicons5';
-import { knowledgeBasesApi, sourcesApi, modelsApi } from '/app/api/index.js';
+import { knowledgeBasesApi, sourcesApi, modelsApi, indexApi } from '/app/api/index.js';
 import { isDesktop, selectFolder } from '/core/platform.js';
 import { useBreakpoints } from '/core/responsive.js';
 import { JobCenter } from '/core/jobs/JobCenter.js';
@@ -277,19 +277,27 @@ const component = /*@__PURE__*/ _defineComponent({
             initialPattern: '*.md,*.txt,*.pdf'
         });
 
+        const bindingModeOptions = [
+            { label: '🌟 系统默认模板 (极速零配置)', value: 'default' },
+            { label: '💻 本地已就绪模型 (Local ONNX)', value: 'local' },
+            { label: '🌐 在线服务商模型 (Cloud Providers)', value: 'online' },
+            { label: '⚡ 纯词法检索 (免模型/零显存)', value: 'lexical' }
+        ];
+
         const chunkingSpecOptions = computed(() => {
             if (chunkingSpecs.value.length === 0) {
                 return [
-                    { label: '段落自然凝聚 (DiscourseParagraph) - spec_chunk_lexical_paragraph', value: 'spec_chunk_lexical_paragraph' },
+                    { label: '段落自然凝聚 (DiscourseParagraph)', value: 'spec_chunk_lexical_paragraph' },
                     { label: '均衡自适应 (Balanced) - 默认推荐', value: 'spec_chunk_default' },
-                    { label: '代码优先自适应 (CodeFirst) - 保护Markdown与代码块', value: 'spec_chunk_code_first' },
+                    { label: '代码优先自适应 (CodeFirst) - 保护 Markdown 与代码块', value: 'spec_chunk_code_first' },
                     { label: '高密度自适应 (PrecisionDense) - 细粒度事实问答', value: 'spec_chunk_precision_dense' },
-                    { label: '细粒度滑动窗口 (SlidingWindow) - spec_chunk_lexical_dense', value: 'spec_chunk_lexical_dense' },
+                    { label: '细粒度滑动窗口 (SlidingWindow)', value: 'spec_chunk_lexical_dense' },
                     { label: '长篇叙事自适应 (DeepNarrative) - 大段落连续上下文', value: 'spec_chunk_narrative' }
                 ];
             }
+            // 下拉标签同样只呈现策略身份；内部 spec id 交由 tooltip/详情承载。
             return chunkingSpecs.value.map(s => ({
-                label: `${s.strategyType || s.StrategyType || s.id} (${s.mode || s.Mode}) - ${s.id}`,
+                label: `${s.strategyType || s.StrategyType || s.id} (${s.mode || s.Mode})`,
                 value: s.id || s.Id
             }));
         });
@@ -308,10 +316,76 @@ const component = /*@__PURE__*/ _defineComponent({
             return list;
         });
 
+        const specById = computed(() => {
+            const map = {};
+            for (const s of embeddingSpecs.value) {
+                if (s?.id) map[s.id] = s;
+            }
+            return map;
+        });
+
+        // 卡片主标签必须呈现「模型名 (维度)」，内部规格 ID（尤其是自动固化的
+        // spec_emb_<kbId> 快照）只在 tooltip 中出现——它属于实现细节，不是用户可读身份。
+        const kbModelLabel = (kb) => {
+            if (kb.embeddingSpecId === 'spec_lexical_only') return '纯词法 (FTS5 BM25)';
+            const spec = specById.value[kb.embeddingSpecId];
+            const name = spec?.modelName || spec?.ModelName;
+            const dim = spec?.dimension || spec?.Dimension;
+            if (!name) return kb.embeddingSpecId;
+            return dim ? `${name} (${dim}d)` : name;
+        };
+
+        const kbModelHint = (kb) => {
+            if (kb.embeddingSpecId === 'spec_lexical_only') return '免模型 / 零显存';
+            const spec = specById.value[kb.embeddingSpecId];
+            const base = `规格 ID：${kb.embeddingSpecId}`;
+            return spec?.maxTokens || spec?.MaxTokens ? `${base} · 上限 ${spec.maxTokens || spec.MaxTokens} tokens` : base;
+        };
+
+        // 「系统默认模板」实际固化的是**全局当前模型**，而不是列表里的 'default-spec' 占位条目
+        // （后者是固定示例值 bge-small-zh-v1.5/512d，与实际快照可能不一致）。
+        // 权威来源是 /index/models/current，读取真实 ModelName + Dimension 以免误导用户。
+        const currentGlobalModel = ref(null);
+        const loadCurrentGlobalModel = async () => {
+            try {
+                const res = await indexApi.getCurrentModel();
+                const data = res.data || {};
+                currentGlobalModel.value = {
+                    name: data.modelName || data.ModelName,
+                    dim: data.dimension || data.Dimension
+                };
+            } catch (err) {
+                console.warn('获取当前全局模型失败:', err);
+                currentGlobalModel.value = null;
+            }
+        };
+
+        const defaultTemplateModelLabel = computed(() => {
+            const cur = currentGlobalModel.value;
+            if (cur?.name) return `${cur.name}${cur.dim ? ` (${cur.dim}d)` : ''}`;
+            const spec = specById.value['default-spec'];
+            const name = spec?.modelName || spec?.ModelName;
+            const dim = spec?.dimension || spec?.Dimension;
+            return name ? `${name}${dim ? ` (${dim}d)` : ''}` : '当前全局默认嵌入模型';
+        });
+
+        // 分段策略同样存在自动快照（spec_chunk_<kbId>），主标签显示策略名而非裸 ID。
+        const chunkingSpecLabel = (kb) => {
+            const id = kb.chunkingSpecId || 'spec_chunk_default';
+            const spec = chunkingSpecs.value.find(s => (s.id || s.Id) === id);
+            return (spec?.strategyType || spec?.StrategyType) || id;
+        };
+
+        const chunkingSpecHint = (kb) => {
+            const id = kb.chunkingSpecId || 'spec_chunk_default';
+            const spec = chunkingSpecs.value.find(s => (s.id || s.Id) === id);
+            const max = spec?.maxTokens || spec?.MaxTokens;
+            return max ? `规格 ID：${id} · 上限 ${max} tokens` : `规格 ID：${id}`;
+        };
+
         const localSpecs = computed(() => {
             return embeddingSpecs.value.filter(s => s.id.startsWith('local_') || s.searchBackend === 'LocalOnnx');
         });
-
         const onlineSpecs = computed(() => {
             return embeddingSpecs.value.filter(s => s.id.startsWith('prov_') || s.ingestionBackend === 'OpenAiApi');
         });
@@ -696,7 +770,9 @@ const component = /*@__PURE__*/ _defineComponent({
                 createForm.value.name = '';
                 createForm.value.description = '';
                 createForm.value.initialFolder = '';
-                await loadKnowledgeBases();
+                // 新建库会固化 spec_emb_<kbId> 快照；必须重拉规格表，
+                // 否则卡片无法把该快照 ID 映射成「模型名 (维度)」而回退显示裸 ID。
+                await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs()]);
             } catch (err) {
                 console.error('创建知识库失败:', err);
                 message.error('创建失败: ' + (err.response?.data?.message || err.message));
@@ -1179,13 +1255,13 @@ const component = /*@__PURE__*/ _defineComponent({
         onMounted(async () => {
             await JobCenter.initialize();
             unbindKbRefresh = JobCenter.registerRefresher('knowledge_bases', () => loadKnowledgeBases());
-            await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs(), loadChunkingSpecs()]);
+            await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs(), loadChunkingSpecs(), loadCurrentGlobalModel()]);
             await syncFromRoute();
         });
 
         onActivated(async () => {
             if (reindexKb.value && showReindexDrawer.value) subscribeReindex(`kb:${reindexKb.value.id}`);
-            await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs(), loadChunkingSpecs()]);
+            await Promise.all([loadKnowledgeBases(), loadEmbeddingSpecs(), loadChunkingSpecs(), loadCurrentGlobalModel()]);
             await syncFromRoute();
         });
 
@@ -1221,6 +1297,8 @@ const component = /*@__PURE__*/ _defineComponent({
             
 
             router, message, dialog, loading, knowledgeBases, connectorsMap, embeddingSpecs, localSpecs, onlineSpecs, goToModelManagement, resetCreateForm,
+            bindingModeOptions, specById, kbModelLabel, kbModelHint, defaultTemplateModelLabel,
+            chunkingSpecLabel, chunkingSpecHint, currentGlobalModel, loadCurrentGlobalModel,
             showCreateModal, creating, fetchingModels, probingDimension, remoteModelOptions, createForm,
             showConnectorDrawer, currentKb, currentConnectors, loadingConnectors, newConnectorPath, newConnectorPattern,
             showFolderPicker, folderPickerTarget, handleFolderSelected, selectInitialDirectory, selectConnectorDirectory,
@@ -1291,10 +1369,15 @@ component.template = `
                 </n-descriptions-item>
                 <n-descriptions-item label="绑定模型">
                   <n-space align="center" :size="4">
-                    <n-tag :type="kb.embeddingSpecId === 'spec_lexical_only' ? 'success' : 'info'" size="small">
-                      <template #icon><n-icon :component="CubeOutline" /></template>
-                      {{ kb.embeddingSpecId === 'spec_lexical_only' ? '纯词法 (FTS5 BM25)' : kb.embeddingSpecId }}
-                    </n-tag>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-tag :type="kb.embeddingSpecId === 'spec_lexical_only' ? 'success' : 'info'" size="small" style="cursor: help;">
+                          <template #icon><n-icon :component="CubeOutline" /></template>
+                          {{ kbModelLabel(kb) }}
+                        </n-tag>
+                      </template>
+                      {{ kbModelHint(kb) }}
+                    </n-tooltip>
                     <n-tag v-if="kb.embeddingSpecId === 'spec_lexical_only'" size="small" type="info" :bordered="false" round>免模型/0显存</n-tag>
                     <n-tag v-else-if="driftMap[kb.id]?.status === 'Aligned'" size="small" type="success" :bordered="false" round>对齐</n-tag>
                     <n-tag v-else-if="driftMap[kb.id]?.status === 'Drifted'" size="small" type="warning" round style="cursor: pointer" @click="openSwitchModelModal(kb)">偏离(建议重排)</n-tag>
@@ -1302,10 +1385,15 @@ component.template = `
                   </n-space>
                 </n-descriptions-item>
                 <n-descriptions-item label="分段策略">
-                  <n-tag size="small" type="default">
-                    <template #icon><n-icon :component="LayersOutline" /></template>
-                    {{ kb.chunkingSpecId || 'spec_chunk_default' }}
-                  </n-tag>
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-tag size="small" type="default" style="cursor: help;">
+                        <template #icon><n-icon :component="LayersOutline" /></template>
+                        {{ chunkingSpecLabel(kb) }}
+                      </n-tag>
+                    </template>
+                    {{ chunkingSpecHint(kb) }}
+                  </n-tooltip>
                 </n-descriptions-item>
                 <n-descriptions-item label="连接器通道">
                   <n-text depth="2">{{ (connectorsMap[kb.id] || []).length }} 个数据源挂载</n-text>
@@ -1379,18 +1467,22 @@ component.template = `
         <n-divider title-placement="left">向量空间规范 (Embedding & Vector Space)</n-divider>
 
         <n-form-item label="模型来源模式">
-          <n-radio-group v-model:value="createForm.bindingMode" name="bindingMode">
-            <n-radio-button value="default">🌟 系统默认模板 (极速零配置)</n-radio-button>
-            <n-radio-button value="local">💻 本地已就绪模型 (Local ONNX)</n-radio-button>
-            <n-radio-button value="online">🌐 在线服务商模型 (Cloud Providers)</n-radio-button>
-            <n-radio-button value="lexical">⚡ 纯词法检索 (免模型/零显存)</n-radio-button>
-          </n-radio-group>
+          <n-select
+            v-model:value="createForm.bindingMode"
+            :options="bindingModeOptions"
+            class="binding-mode-select"
+            style="width: 100%;"
+          />
         </n-form-item>
 
         <!-- 模式一：系统默认模板 -->
         <div v-if="createForm.bindingMode === 'default'">
           <n-alert type="info" style="margin-bottom: 12px;">
             直接继承系统默认嵌入模型与宿主机 GPU/CPU 硬件加速。适合绝大多数通用知识库场景，零门槛秒级创建。
+            <div style="margin-top: 6px;">
+              本次将固化为：<b>{{ defaultTemplateModelLabel }}</b>
+              <span style="opacity: .75;">（创建后仍可通过「更换模型」随时切换）</span>
+            </div>
           </n-alert>
         </div>
 

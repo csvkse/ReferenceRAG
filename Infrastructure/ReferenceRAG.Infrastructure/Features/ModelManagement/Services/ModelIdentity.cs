@@ -31,10 +31,15 @@ public static partial class ModelIdentity
     [GeneratedRegex(@"[-_]?(q\d+[_a-z0-9]*|v\d+(\.\d+)*)$")]
     private static partial Regex VariantSuffixRegex();
 
+    // 尾部维度括注（如 "BGE-M3 (1024d)"、"bge-m3 (1024 d)"）：维度属于 Spec 字段而非身份，
+    // 历史 Spec.ModelName 曾把 "模型 (维度d)" 整体写入，若不剥离会与规范 ID 恒不相等。
+    [GeneratedRegex(@"\s*\(\s*dim\s*\d+\s*\)\s*$|\s*\(\s*\d+\s*d\s*\)\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex DimensionAnnotationRegex();
+
     /// <summary>
     /// 规范化模型名为可比较的身份键。
-    /// 依次执行：去首尾空白 → 取末段（剥离 "Provider / " 前缀）→ 转小写 →
-    /// 剥离量化/版本后缀 → 剔除所有非字母数字字符。
+    /// 依次执行：去首尾空白 → 取末段（剥离 "Provider / " 前缀）→ 剥离尾部维度括注 →
+    /// 剥离厂商路径前缀（"BAAI/"）→ 转小写 → 剥离量化/版本后缀 → 剔除所有非字母数字字符。
     /// </summary>
     public static string NormalizeKey(string? modelName)
     {
@@ -47,6 +52,16 @@ public static partial class ModelIdentity
         if (sepIndex >= 0 && sepIndex + ProviderSeparator.Length < value.Length)
         {
             value = value[(sepIndex + ProviderSeparator.Length)..].Trim();
+        }
+
+        // 剥离尾部维度括注（"BGE-M3 (1024d)" → "BGE-M3"）
+        value = DimensionAnnotationRegex().Replace(value, string.Empty);
+
+        // 剥离厂商路径前缀（"BAAI/bge-m3" → "bge-m3"）：组织标识不参与身份比较
+        var slashIndex = value.LastIndexOf('/');
+        if (slashIndex >= 0 && slashIndex + 1 < value.Length)
+        {
+            value = value[(slashIndex + 1)..].Trim();
         }
 
         value = value.ToLowerInvariant();

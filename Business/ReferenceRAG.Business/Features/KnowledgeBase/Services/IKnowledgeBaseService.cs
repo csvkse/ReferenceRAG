@@ -92,6 +92,12 @@ public interface IKnowledgeBaseService
 
     Task<IReadOnlyList<ConnectorDetailDto>> GetConnectorsAsync(string knowledgeBaseId, CancellationToken ct = default);
 
+    /// <summary>
+    /// 全库连接器物理统计快照（只读租约直读各库 kb.db，不做目录可达性探测）。
+    /// 源管理读模型的计数口径必须以此为准——旧单库 vectors.db 在物理隔离架构下已不再收到新写入。
+    /// </summary>
+    Task<IReadOnlyList<ConnectorStatsSnapshot>> GetConnectorStatsSnapshotAsync(CancellationToken ct = default);
+
     Task<bool> DeleteConnectorAsync(string knowledgeBaseId, string connectorId, bool cascade = true, CancellationToken ct = default);
 
     /// <summary>

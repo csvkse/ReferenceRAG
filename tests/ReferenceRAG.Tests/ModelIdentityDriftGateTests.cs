@@ -40,6 +40,13 @@ public class ModelIdentityDriftGateTests
     // 厂商前缀（"Provider / Model" 形式）剥离后仅比较模型本体
     [InlineData("SiliconFlow / BGE M3", "bge-m3")]
     [InlineData("OpenAI / text-embedding-3-small", "text-embedding-3-small")]
+    // 多级厂商路径 + 尾部维度括注（dev 环境实测形态：Spec.ModelName 混存全路径与维度）
+    [InlineData("SiliconFlow / BAAI / BGE-M3 (1024d)", "BAAI/bge-m3")]
+    [InlineData("BAAI/bge-m3", "bge-m3")]
+    [InlineData("Qwen/Qwen3-Embedding-4B", "Qwen3-Embedding-4B")]
+    [InlineData("Pro/BAAI/bge-m3", "BAAI/bge-m3")]
+    [InlineData("bge-m3 (1024d)", "bge-m3")]
+    [InlineData("bge-m3 (1024 d)", "bge-m3")]
     // 大小写与空白无关
     [InlineData("  BGE   M3  ", "bge-m3")]
     public void ModelIdentity_DisplayNameAndCanonicalId_ShouldBeSameModel(string left, string right)
