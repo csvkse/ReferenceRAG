@@ -160,7 +160,25 @@
 
 **顺带修复的同类身份问题（根因同一类）**：`ModelIdentity.NormalizeKey` 仅剥离 `" / "` 分隔符，遇到 dev 真实形态 `SiliconFlow / BAAI / BGE-M3 (1024d)` 会失败（多级 `" / "` + 尾部维度括注 + 厂商路径 `BAAI/` 均未处理）。已扩展规范化规则（尾部 `(1024d)` 括注、厂商路径前缀），新增 8 例参数化门禁；`text-embedding-3-small` 与 `text-embedding-3` 仍正确判为不同模型。
 
-### 5.4 遗留说明
+### 5.4 正式环境验收（部署 `referencerag:deploy-039f0fb` 后实测）
+
+镜像远端构建（`git archive HEAD` → `docker build`）后以 `-Image` 部署；容器 healthy，health 200，容器内前端含 `kbModelLabel`/`binding-mode-select`/`refreshSourceAndKbOptions` 标记。
+
+| 验收项 | 实测 |
+| :--- | :--- |
+| 源计数（与连接器求和逐行比对） | `Temp 165/24,776`、`仙侠 17/44,189`——**全部一致**（修复前仙侠为 `0/0`，Temp 为过期的 `26,945`） |
+| 深链 4 条 | 均 200 + `text/html`（原返回 401 JSON） |
+| 知识库卡片 | `bge-m3 (1024d)` / `纯词法 (FTS5 BM25)`，无裸 spec id;分段策略显示 `SlidingWindow` |
+| 「偏离(建议重排)」误报 | 默认知识库徽标消失（`当前组件 bge-m3` 与全局 `bge-m3` 判等）；状态为 `定制`（只因分块策略不同，属预期） |
+| 新建向导 | 1600px 与 390px 均零溢出；下拉控件；提示 `本次将固化为：bge-m3` |
+| keep-alive 挂载下拉 | 新建临时库后回源管理，下拉立即可见（`["QA临时挂载库","你好","仙侠","默认知识库"]`），随后清理（204） |
+| 展示名生产回归 | PUT 成功 → 列表显示自定义名 +「自定义」标记 → 改名期间 drift 保持 `Customized` → DELETE 重置 |
+| 移动端 390px（sources/knowledge-bases/models） | 零横向溢出 |
+| 控制台 | 零错误 |
+
+浏览器验收脚本：[bin/acceptance/.run/e2e-prod-acceptance.mjs](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/bin/acceptance/.run/e2e-prod-acceptance.mjs)（20 项断言全过）。部署后按约定删除上一版镜像，仅保留当前版本。
+
+### 5.5 遗留说明
 
 - `IndexController.summary`、`BM25IndexController` 仍按旧单库 `IVectorStore` 统计（属遗留 v1 检索链路统计口径，非本次 UX 缺陷范围）；其数字在纯 KB 架构下会偏小，后续若纳入仪表盘统一口径可复用本次 `GetConnectorStatsSnapshotAsync`。
 - 计数为**跨库求和**语义：同一路径挂到多个知识库时，列表显示所有连接器的合计（与 Qdrant/Weaviate 以集合为统计单元的口径一致）。
