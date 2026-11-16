@@ -51,7 +51,8 @@
          会导致 CS0200，且 Swashbuckle 运行时抛 MissingMethodException。 -->
     <PackageVersion Include="Microsoft.OpenApi" Version="2.12.2" />
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
-    <PackageVersion Include="McpHelper.Core" Version="1.0.9" />
+    <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
+    <PackageVersion Include="McpHelper.Core" Version="2.1.0" />
     <PackageVersion Include="System.Management" Version="10.0.12" />
     <PackageVersion Include="TemporaryDiagnostics.AspNetCore" Version="1.0.3" />
     <PackageVersion Include="TemporaryDiagnostics.Core" Version="1.0.3" />

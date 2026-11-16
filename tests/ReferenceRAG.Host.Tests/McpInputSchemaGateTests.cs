@@ -40,7 +40,7 @@ public sealed class McpInputSchemaGateTests
         var registry = (IMcpToolRegistry)sp.GetService(
             typeof(McpToolRegistry).Assembly.GetTypes().First(t => t.Name == "IMcpToolRegistry"))!;
 
-        McpInputSchemaEnricher.Enrich(registry);
+        // schema 由 SDK 2.1.0 在 RegisterLocalTool 时生成，无需宿主补齐
         return registry;
     }
 
@@ -130,7 +130,7 @@ public sealed class McpInputSchemaGateTests
 
         var catalogNames = ReferenceRAG.Core.Services.McpCatalogRegistry.GetCatalog()
             .SelectMany(c => c.Tools)
-            .Select(t => McpInputSchemaEnricher.ToSnakeCase(t.Name))
+            .Select(t => System.Text.Json.JsonNamingPolicy.SnakeCaseLower.ConvertName(t.Name))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var missingInRegistry = catalogNames.Where(n => !registered.Contains(n)).ToList();
@@ -143,12 +143,28 @@ public sealed class McpInputSchemaGateTests
     }
 
     [Fact]
-    public void ToSnakeCase_MatchesMcpHelperNaming()
+    public void RegisteredNames_MatchBclSnakeCaseLower()
     {
-        Assert.Equal("semantic_search", McpInputSchemaEnricher.ToSnakeCase("SemanticSearch"));
-        Assert.Equal("knowledge_base_drill_down", McpInputSchemaEnricher.ToSnakeCase("KnowledgeBaseDrillDown"));
-        Assert.Equal("ping", McpInputSchemaEnricher.ToSnakeCase("Ping"));
-        Assert.Equal("graph_search_by_title", McpInputSchemaEnricher.ToSnakeCase("GraphSearchByTitle"));
+        // SDK 2.1.0 起工具名由 JsonNamingPolicy.SnakeCaseLower 派生（历史手写实现在缩写上分叉）
+        string Derived(string methodName) =>
+            System.Text.Json.JsonNamingPolicy.SnakeCaseLower.ConvertName(methodName);
+
+        Assert.Equal("semantic_search", Derived("SemanticSearch"));
+        Assert.Equal("knowledge_base_drill_down", Derived("KnowledgeBaseDrillDown"));
+        Assert.Equal("ping", Derived("Ping"));
+        Assert.Equal("graph_search_by_title", Derived("GraphSearchByTitle"));
+        Assert.Equal("get_ip_address", Derived("GetIPAddress"));
+    }
+
+    [Fact]
+    public void EveryRegisteredTool_HasAiReadableDescriptions()
+    {
+        var registry = BuildRegistry();
+        foreach (var (name, descriptor) in registry.GetAllTools())
+        {
+            Assert.False(string.IsNullOrWhiteSpace(descriptor.Description),
+                $"{name} 缺少 description，模型无法判断用途");
+        }
     }
 
     [Theory]
@@ -168,14 +184,15 @@ public sealed class McpInputSchemaGateTests
 
     private static MethodInfo? FindMethodForTool(string snakeName)
     {
-        var assembly = typeof(McpInputSchemaEnricher).Assembly;
+        var assembly = typeof(McpInputSchemaGateTests).Assembly;
         foreach (var type in assembly.GetTypes())
         {
             if (type.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolTypeAttribute>() is null) continue;
             foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance))
             {
                 if (m.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolAttribute>() is null) continue;
-                if (McpInputSchemaEnricher.ToSnakeCase(m.Name) == snakeName) return m;
+                if (System.Text.Json.JsonNamingPolicy.SnakeCaseLower.ConvertName(
+                        m.Name.EndsWith("Async") ? m.Name[..^5] : m.Name) == snakeName) return m;
             }
         }
         return null;

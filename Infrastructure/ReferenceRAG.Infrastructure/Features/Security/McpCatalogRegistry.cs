@@ -173,6 +173,29 @@ public static class McpCatalogRegistry
     }
 
     /// <summary>
+    /// 反查工具的风险等级（"Read" / "Execute" / "Dangerous"），供协议 annotations 使用。
+    /// </summary>
+    public static string? GetRiskLevel(string toolName)
+    {
+        if (string.IsNullOrWhiteSpace(toolName)) return null;
+
+        // 目录用 PascalCase（GetFileTree），协议工具名是 snake_case（get_file_tree）：
+        // 归一化后比较，避免两套命名互相查不到。
+        static string Key(string value) =>
+            string.Concat(value.Where(char.IsLetterOrDigit)).ToLowerInvariant();
+
+        var target = Key(toolName);
+        foreach (var category in Categories)
+        {
+            foreach (var tool in category.Tools)
+            {
+                if (Key(tool.Name) == target) return tool.RiskLevel;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
     /// 检查指定工具名称是否为系统内已知工具
     /// </summary>
     public static bool IsKnownTool(string toolName)

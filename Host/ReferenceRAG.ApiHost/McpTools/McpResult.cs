@@ -1,31 +1,18 @@
-using System.Collections.Generic;
-using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace ReferenceRAG.Service.McpTools;
 
 /// <summary>
-/// MCP 工具结果信封（Adapter + State Machine）。
+/// 工具结果输出助手（SDK 2.1.0 起，信封语义由 <c>McpHelper</c> 的类型化结果负责）。
 ///
-/// 背景：McpHelper 的适配层把工具返回的字符串当成 <c>CallToolResult</c> 反序列化，
-/// 因此有两个必须遵守的协议约束（均已生产实测）：
-///
-/// 1. 工具 JSON 顶层 **不能** 出现 <c>content</c>（会与协议保留字段冲突，结果被整段吞成空数组）。
-///    <c>read_note_content</c> 曾因此完全失效。
-/// 2. 业务失败必须返回 <c>{"content":[...],"isError":true}</c> 才是协议层可判别的失败；
-///    否则客户端只能靠解析 JSON 文本猜测。
-///
-/// 成功的工具结果仍然是"纯业务 JSON"，但会经过保留字段清洗（见 <see cref="Sanitize"/>）。
+/// 历史背景（已由 SDK 修复）：旧适配层把工具返回字符串直接当 <c>CallToolResult</c> 反序列化，
+/// 于是「工具顶层叫 content」会被吞成空数组、失败也无法被协议层识别。
+/// SDK 修复后，<c>McpToolResult</c> 只在 content 为数组或带 isError 时才视为信封，
+/// 其余一律当业务负载并同时填 structuredContent —— 因此这里不再需要清洗保留字段。
 /// </summary>
 public static class McpResult
 {
-    /// <summary>CallToolResult 的保留字段：出现在工具顶层 JSON 时会被协议层覆盖。</summary>
-    public static readonly IReadOnlyList<string> ReservedTopLevelKeys = new[]
-    {
-        "content", "result", "isError", "structuredContent", "_meta", "meta"
-    };
-
     private static readonly JsonSerializerOptions PrettyOptions = new()
     {
         WriteIndented = true,
@@ -34,13 +21,13 @@ public static class McpResult
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
-    /// <summary>成功：返回业务 JSON（已移除非法的顶层保留字段）。</summary>
-    public static string Ok(object payload) => Sanitize(JsonSerializer.Serialize(payload, PrettyOptions));
+    /// <summary>成功：业务 JSON（SDK 会把它作为 text 块并填入 structuredContent）。</summary>
+    public static string Ok(object payload) => JsonSerializer.Serialize(payload, PrettyOptions);
 
     /// <summary>成功：已经是完整 JSON 文本时使用。</summary>
-    public static string OkRaw(string json) => Sanitize(json);
+    public static string OkRaw(string json) => json;
 
-    /// <summary>失败：返回协议可判别的 <c>isError:true</c> 信封。</summary>
+    /// <summary>失败：输出协议信封，SDK 据此设置 <c>isError=true</c>。</summary>
     public static string Fail(string? error, string? errorCode = null)
     {
         var body = new JsonObject
@@ -50,7 +37,7 @@ public static class McpResult
         };
         if (!string.IsNullOrWhiteSpace(errorCode)) body["errorCode"] = errorCode;
 
-        var envelope = new JsonObject
+        return new JsonObject
         {
             ["content"] = new JsonArray
             {
@@ -60,45 +47,12 @@ public static class McpResult
                     ["text"] = body.ToJsonString(PrettyOptions)
                 }
             },
-            ["isError"] = true
-        };
-        return envelope.ToJsonString(PrettyOptions);
-    }
-
-    /// <summary>
-    /// 把工具自己的顶层保留字段挪到 <c>payload</c> 下，避免被协议层覆盖。
-    /// 这里只做一次轻量重写：绝大多数工具不会命中，命中即为契约违规。
-    /// </summary>
-    public static string Sanitize(string json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return json;
-
-        JsonNode? node;
-        try
-        {
-            node = JsonNode.Parse(json);
-        }
-        catch
-        {
-            // 非 JSON 文本（少数工具直接返回 Markdown），保持原样
-            return json;
-        }
-
-        if (node is not JsonObject obj) return json;
-
-        var displaced = new JsonObject();
-        foreach (var key in ReservedTopLevelKeys)
-        {
-            if (!obj.TryGetPropertyValue(key, out var value)) continue;
-            obj.Remove(key);
-            displaced[key] = value?.DeepClone();
-        }
-
-        if (displaced.Count > 0)
-        {
-            obj["payload"] = displaced;
-        }
-
-        return obj.ToJsonString(PrettyOptions);
+            ["isError"] = true,
+            ["structuredContent"] = new JsonObject
+            {
+                ["success"] = false,
+                ["errorCode"] = errorCode ?? "error"
+            }
+        }.ToJsonString(PrettyOptions);
     }
 }

@@ -101,34 +101,30 @@ public sealed class McpToolContractHardeningGateTests : IDisposable
     }
 
     [Fact]
-    public void Ok_Envelope_RelocatesReservedTopLevelFields()
+    public void Ok_PreservesBusinessJson_Verbatim()
     {
-        // read_note_content 曾返回顶层 content，被协议层覆盖成空数组
+        // SDK 2.1.0 起只有「content 是数组 / 带 isError」才当信封，
+        // 因此工具自带的顶层 content 字段可作为业务负载原样保留。
         var json = McpResult.OkRaw("""{"success":true,"content":"BODY","text":"keep"}""");
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.False(root.TryGetProperty("content", out _), "顶层不得出现协议保留字段 content");
         Assert.Equal("keep", root.GetProperty("text").GetString());
-        Assert.Equal("BODY", root.GetProperty("payload").GetProperty("content").GetString());
+        Assert.Equal("BODY", root.GetProperty("content").GetString());
+        Assert.False(root.TryGetProperty("payload", out _), "不再需要 payload 迁移");
     }
 
     [Fact]
-    public void ToolSources_MustNotReturnTopLevelContentOrIsError()
+    public void Fail_Envelope_CarriesStructuredErrorCode()
     {
-        // 静态防线：工具实现里一旦再出现顶层 content，运行期就会被 McpResult.Sanitize 兜住，
-        // 但这里直接禁止以减少隐式行为。
-        var dir = FindRepoRoot();
-        var files = Directory.GetFiles(Path.Combine(dir, "Host", "ReferenceRAG.ApiHost", "McpTools"), "*.cs");
-        var offenders = new List<string>();
-        foreach (var file in files)
-        {
-            if (Path.GetFileName(file) is "McpResult.cs" or "McpInputSchemaEnricher.cs") continue;
-            var text = File.ReadAllText(file);
-            if (System.Text.RegularExpressions.Regex.IsMatch(text, @"JsonSerializer\.Serialize\(new\s*\{[^}]*content\s*="))
-                offenders.Add(Path.GetFileName(file));
-        }
-        Assert.True(offenders.Count == 0, "以下工具仍以顶层 content 返回（会被协议层吞掉）：" + string.Join(",", offenders));
+        // 失败信封同时给出 structuredContent，客户端可分支处理而无需解析文本
+        var json = McpResult.Fail("bad input", "invalid_argument");
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.True(root.GetProperty("isError").GetBoolean());
+        Assert.Equal("invalid_argument",
+            root.GetProperty("structuredContent").GetProperty("errorCode").GetString());
     }
 
     // ───────────────────────── G-MCP-5 文件沙箱 ─────────────────────────

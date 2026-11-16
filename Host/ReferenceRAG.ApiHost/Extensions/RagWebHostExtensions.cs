@@ -122,15 +122,21 @@ public static class RagWebHostExtensions
         app.Services.GetRequiredService<ReferenceRAG.Infrastructure.Features.Database.DataDirectoryLease>().Acquire(dataConfig.DataPath ?? "data");
         StaticLogger.LoggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
 
-        // MCP 工具描述符的参数 schema 由第三方 SSE 适配层留空（它只读描述文本）。
-        // 这里按方法签名就地补齐，使 tools/list 返回合规 JSON Schema。
+        // MCP 的 inputSchema / 注解 / 结果信封现在由 McpHelper 2.1.0 内部生成
+        // （McpToolSchemaBuilder + ToolAnnotations + 类型化 McpToolResult），宿主不再需要补偿层。
         var mcpRegistry = app.Services.GetService<McpHelper.McpTools.IMcpToolRegistry>();
         if (mcpRegistry is not null)
         {
-            var result = ReferenceRAG.Service.McpTools.McpInputSchemaEnricher.Enrich(mcpRegistry);
-            app.Logger.LogInformation(
-                "[MCP] inputSchema 已补齐 {Enriched} 个工具，未匹配方法 {Missing} 个",
-                result.EnrichedCount, result.MissingCount);
+            // 注解数据源：既有 McpCatalogRegistry 的 RiskLevel（Read/Execute/Dangerous）
+            // → 协议 annotations。未在 [McpServerTool] 上显式声明时以此为准。
+            foreach (var (name, descriptor) in mcpRegistry.GetAllTools())
+            {
+                var risk = ReferenceRAG.Core.Services.McpCatalogRegistry.GetRiskLevel(name);
+                if (risk is not null) descriptor.Metadata["RiskLevel"] = risk;
+            }
+
+            var toolCount = mcpRegistry.GetAllTools().Count;
+            app.Logger.LogInformation("[MCP] 已注册工具 {Count} 个（schema/注解由 SDK 生成）", toolCount);
         }
 
         app.UseAuthorization();
