@@ -349,3 +349,26 @@ bool TryResolve(string nameOrPath, out SourceDescriptor);
 | :--- | :--- |
 | Host | **489/489** |
 | 核心 | **799 通过 / 47 跳过 / 0 失败** |
+
+### 9.5 正式环境复验（`referencerag:deploy-fe58970`）
+
+生产宿主独立构建（`docker build` → sha256 `d6b68798…9687aa`），容器 `reference-rag` healthy。
+
+| 验收项 | 实测 |
+| :--- | :--- |
+| `get_note_outline(/etc/passwd)` | `isError` + `path_denied`（修复前 `success:true, 966B`） |
+| `get_note_outline(/app/data/appsettings.json)` | `isError` + `path_denied`（修复前 `success:true, 8835B`） |
+| `get_note_outline(/tmp/../etc/passwd)` | `isError`（点段穿越同样被规范化后拒绝） |
+| `read_note_content(真实 locator, 1-3 行)` | `ok`，`text` 返回 333 字符真实正文（修复前恒为空） |
+| 4 个源名 × 2 工具 | `Temp` / `Notes - Note` / `Notes - 【VNote】` / `Notes - TNote` 全部 `tree=ok info=ok`（修复前 `get_file_tree` 对连接器名 FAIL） |
+| 口径一致 | `Temp`：`list_sources 165/24,776` 与 `get_source_info 165/24,776` 完全一致（修复前 `26,945/0`） |
+| 失败语义 | 不存在的文件 / 未知库均返回 `isError:true` |
+| 性能 | `get_index_status` **16–25ms**（原 1.2–1.5s）、`list_sources` **68–71ms**（原 240–2,400ms）、`get_system_stats` **6–30ms** |
+| 输入边界 | `embed_text(40,000 字符)` → `isError` + `too_large`;`topK=900` → 回显 `requestedTopK=900 / effectiveTopK=50` |
+
+### 9.6 明确未做
+
+- **协议级 `annotations`**：McpHelper 1.0.9 与 2.0.1 的 `tools/list` 元素字段均为 `name/description/inputSchema`，DLL 内无 `annotations` / `readOnlyHint` 字符串，`[McpServerTool(ReadOnly=true)]` 不会透出。要补齐必须切到官方 `ModelContextProtocol.AspNetCore` 2.2.0（已在本机 NuGet 缓存中），那会改动传输层与 9 处既有文档示例，单独立项。
+- **`Accept: application/json` 单值协商**：McpHelper SSE 层强制要求同时接受 `application/json` 与 `text/event-stream`，否则 406。属适配层行为，未改。
+- **`list_files.sourceId` 语义**：参数仍按「旧索引源名 / KB 路径关键词」双重语义，未拆分。已在 §2.6 记录，待与产品确认命名后再改。
+- **会话（`Mcp-Session-Id`）与 `DELETE /api/mcp`**：适配层无会话语义，仍为无状态 SSE。对无状态用法无害。
