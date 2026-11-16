@@ -211,7 +211,7 @@ public static class McpCatalogRegistry
             {
                 new("GetIndexStatus", "获取当前索引状态，按物理知识库逐库统计分块数、文档数、向量数。",
                     "Read", "index",
-                    WhenToUse: "确认索引是否建完、或检索结果为空时排查索引问题使用。",
+                    WhenToUse: "确认索引是否建完，或检索结果为空、需要排查索引问题时使用。",
                     UseInstead: "要看具体文件清单用 list_files；要看系统配置用 get_system_stats。",
                     Limits: "无参；30 秒缓存，首调较慢。"),
                 new("GetDocumentInfo", "按切片 ID 反查它属于哪个文件：返回内容片段、行号与所属文件路径。",
@@ -248,7 +248,7 @@ public static class McpCatalogRegistry
             {
                 new("Ping", "测试 MCP 通道双向连通性，返回 pong。",
                     "Read", "system",
-                    WhenToUse: "只是确认服务是否活着、通道是否通（最快的一次往返）。",
+                    WhenToUse: "只是确认服务是否活着、通道是否通时使用（最快的一次往返）。",
                     UseInstead: "要看版本与服务信息用 get_service_info；要看模型与配置用 get_system_stats。",
                     Limits: "无参，无外部依赖。"),
                 new("GetServiceInfo", "获取 ReferenceRAG MCP 服务的名称、版本、传输方式与端点。",

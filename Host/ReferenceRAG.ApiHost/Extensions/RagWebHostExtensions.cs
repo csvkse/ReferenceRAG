@@ -154,7 +154,10 @@ public static class RagWebHostExtensions
         var webRootPath = app.Environment.WebRootPath;
         if (!string.IsNullOrEmpty(webRootPath) && File.Exists(Path.Combine(webRootPath, "index.html")))
         {
-            foreach (var route in new[] { "/", "/login", "/dashboard", "/search", "/sources", "/knowledge-bases", "/api-keys", "/settings", "/performance", "/api-help", "/models", "/system", "/bm25-index", "/guide", "/graph", "/chat", "/logs", "/file-search", "/reader" })
+            // 这些路径必须与前端 router 的 path 完全一致：后端只负责把 index.html 交出去，
+            // 由 Vue Router 匹配。此前这里写 /api-keys 而 router 是 apikeys，
+            // 导致深链 /api-keys 返回 200 但页面空白（路由匹配不上）。
+            foreach (var route in new[] { "/", "/login", "/dashboard", "/search", "/sources", "/knowledge-bases", "/apikeys", "/settings", "/performance", "/api-help", "/models", "/system", "/bm25-index", "/guide", "/graph", "/chat", "/logs", "/file-search", "/reader" })
                 app.MapGet(route, () => Results.File(Path.Combine(webRootPath, "index.html"), "text/html"));
 
             app.MapFallbackToFile("index.html");

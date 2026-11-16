@@ -113,6 +113,7 @@ const routes = [
             },
             {
                 path: 'apikeys',
+                alias: '/api-keys',
                 name: 'ApiKeys',
                 component: () => import('/app/views/ApiKeys.js'),
                 meta: { title: 'API 授权' }
