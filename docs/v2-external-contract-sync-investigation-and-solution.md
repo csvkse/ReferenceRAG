@@ -297,3 +297,42 @@ public async Task<string> SemanticSearch(
 ### 7.5 真机复验结果
 
 `bin/acceptance/.run/e2e-realdevice-acceptance.mjs` **33/33 通过**（脚本两处断言口径同步修正：空知识库存在时逐库探测非空库；Guide 的 MCP 章节位于懒渲染标签页，需先点击再断言）。对话链路实测：`获取目录结构` / `查询状态` 均原样回显 kb.db 真值（57,733 分块 / 32 篇文档 / 3 个连接器）；`搜索知识库：独孤九剑` 正常触发 + 总结。
+
+---
+
+## 8. 正式环境部署与验收（`referencerag:deploy-d3a3b14`）
+
+正式宿主为独立 Docker daemon，镜像必须在正式宿主上构建（见既有部署坑记录）：
+
+```bash
+git archive HEAD -o prod-src.tar.gz
+ssh <prod> "cat > /opt/prod-src.tar.gz" < prod-src.tar.gz
+ssh <prod> "rm -rf /opt/referencerag-build && mkdir -p /opt/referencerag-build \
+            && tar -xzf /opt/prod-src.tar.gz -C /opt/referencerag-build \
+            && cd /opt/referencerag-build \
+            && docker build -f support/deploy/docker/Dockerfile -t referencerag:deploy-d3a3b14 ."
+.\scripts\deploy-linux.ps1 -Mode Official -EnvFile env/.envprod -Image referencerag:deploy-d3a3b14
+```
+
+容器 `reference-rag` 实测镜像 sha256 = `f7136e72…57ffa8`（与构建产物一致，排除 tag 复用）。
+
+### 8.1 生产实测（`bin/acceptance/.run/e2e-prod-contract-acceptance.mjs`，33/33）
+
+| 验收项 | 实测 |
+| :--- | :--- |
+| `tools/list` | 25 个工具；5 个无参工具 `additionalProperties:false`；检索/源/文件 6 类工具均含 `knowledgeBaseIds`；`get_document_info` 含 `knowledgeBaseId` |
+| `get_index_status` | 2 个库：Notes `237,721 分块 / 6,777 文档 / 0 向量`（纯词法，原会误报为空）；默认知识库 `24,776 分块 / 165 文档 / 24,776 向量`;合计 262,497 |
+| `list_sources` | 4 行计数各不相同：`165/24,776`、`4975/206,806`、`1208/26,617`、`594/4,298`（原每行复制全局 940） |
+| 检索端到端 | `semantic_search`（Notes 限定）命中切片 → `knowledge_base_drill_down` 展开 → `get_document_info(chunkId, knowledgeBaseId)` 定位成功 |
+| 库隔离 | `lexical_search("独孤九剑", 限定默认知识库)` 返回 0 条 —— 该词只存在于 Notes 库，证明范围收敛真实生效 |
+| Guide 页面 | MCP 章节 9 个工具名与运行时清单一致；显示 `/api/mcp` 端点 |
+| 仪表盘 | 无裸 `prov_*` / `spec_emb_*`；知识库表列显示 `纯词法 (FTS5 BM25)` / `bge-m3 (1024d)` |
+| 源管理 | 4 行计数，零 0/0 行 |
+| 移动端 390px | `/dashboard`、`/guide`、`/sources`、`/knowledge-bases` 零横向溢出 |
+| 控制台 | 零错误 |
+| 对话回显 | `获取目录结构` 输出真实连接器与目录层级（含 `.agents/skills`、`1 工作/参考` 等真实路径）；`查询状态` 输出逐库真值合计 262,497 分块 / 24,776 向量 |
+
+### 8.2 已知遗留（非本次范围）
+
+- 对话检索结果为空时，Phase 2 仍可能生成解释性文字（含少量模型自述）；属模型行为，未做硬性拦截。
+- `/api/index/summary`、`/api/bm25index/summary` 仍按旧单库 `IVectorStore` 统计（前端仪表盘已改用连接器求和，不再消费该字段）。
