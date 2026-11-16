@@ -170,6 +170,8 @@ public sealed class McpInputSchemaGateTests
     [Theory]
     [InlineData("list_sources", "knowledgeBaseIds")]
     [InlineData("list_files", "knowledgeBaseIds")]
+    [InlineData("list_files", "connectorId")]
+    [InlineData("list_files", "pathKeyword")]
     [InlineData("get_document_info", "knowledgeBaseId")]
     public void IndexAndSourceTools_ExposeKnowledgeBaseScope(string toolName, string parameter)
     {
@@ -181,6 +183,32 @@ public sealed class McpInputSchemaGateTests
         Assert.True(props!.ContainsKey(parameter), $"{toolName} 缺少 {parameter} 参数");
         Assert.Equal("string", props[parameter]!["type"]?.GetValue<string>());
     }
+
+    [Fact]
+    public void ListFiles_NoLongerExposesAmbiguousSourceId()
+    {
+        // sourceId 曾是「旧索引源名 / KB 路径关键词」双语义，KB 分支还走未转义 LIKE。
+        // 拆成 connectorId（精确）+ pathKeyword（模糊）后，旧参数必须消失，否则模型会继续用它。
+        var registry = BuildRegistry();
+        var props = registry.GetAllTools()["list_files"].InputSchema!["properties"] as System.Text.Json.Nodes.JsonObject;
+        Assert.NotNull(props);
+        Assert.False(props!.ContainsKey("sourceId"), "sourceId 双语义参数必须删除，避免静默换语义");
+    }
+
+    [Fact]
+    public void ListFiles_DeclaresOutputSchema()
+    {
+        var registry = BuildRegistry();
+        var outputSchema = registry.GetAllTools()["list_files"].OutputSchema;
+        Assert.NotNull(outputSchema);
+        var props = outputSchema!["properties"] as System.Text.Json.Nodes.JsonObject;
+        Assert.NotNull(props);
+        foreach (var field in new[] { "success", "count", "totalMatched", "truncated", "appliedFilters", "files" })
+        {
+            Assert.True(props!.ContainsKey(field), $"outputSchema 缺少 {field}（字段名必须是 camelCase 与实际输出一致）");
+        }
+    }
+
 
     private static MethodInfo? FindMethodForTool(string snakeName)
     {

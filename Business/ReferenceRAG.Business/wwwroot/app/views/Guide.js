@@ -669,7 +669,7 @@ component.template = `
                   <tr>
                     <td><n-text code>list_files</n-text> / <n-text code>get_document_info</n-text></td>
                     <td>知识库文档清单 / 单切片详情</td>
-                    <td>knowledgeBaseIds, limit / chunkId, knowledgeBaseId</td>
+                    <td>knowledgeBaseIds, connectorId, pathKeyword, limit / chunkId, knowledgeBaseId</td>
                   </tr>
                   <tr>
                     <td><n-text code>get_file_tree</n-text> / <n-text code>read_note_content</n-text> / <n-text code>get_note_outline</n-text></td>

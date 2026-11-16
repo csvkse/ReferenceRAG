@@ -221,12 +221,15 @@ public class IndexStatusTools
     /// 列出索引中的文件。
     /// 在需要浏览知识库中有哪些文件时使用。
     /// </summary>
-    /// <param name="sourceId">数据源名称（可选），用于过滤特定数据源的文件</param>
+    /// <param name="connectorId">连接器 ID（精确过滤），可来自 list_sources</param>
+    /// <param name="pathKeyword">路径关键词（sourceKey / locator 子串，LIKE 已 ESCAPE）</param>
     /// <param name="limit">返回数量限制，默认20</param>
-    [McpServerTool, Description("列出知识库中已索引的文件（文档 ID、路径、切片数）。传 knowledgeBaseId 读物理知识库；否则读数据源过滤后的旧索引。")]
+    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(ListFilesResult))]
+    [Description("列出知识库中已索引的文件（文档 ID、路径、切片数）。支持按 connectorId 精确过滤，或按 pathKeyword 做路径子串过滤（可叠加）。")]
     public async Task<string> ListFiles(
         [Description("目标知识库 ID 的 JSON 数组，如 [\"kb_a\"]（可选）。留空表示全部已启用知识库")] string? knowledgeBaseIds = null,
-        [Description("旧索引的数据源名称（可选）。仅当未提供 knowledgeBaseIds 时生效")] string? sourceId = null,
+        [Description("连接器 ID（可选，精确匹配）。可由 list_sources 的 connectorId 字段获得")] string? connectorId = null,
+        [Description("路径关键词（可选，sourceKey / locator 的子串匹配，% 与 _ 按字面处理）")] string? pathKeyword = null,
         [Description("返回文件数量限制，默认20")] int limit = 20)
     {
         using var scope = _serviceProvider.CreateScope();
@@ -236,74 +239,85 @@ public class IndexStatusTools
         }
 
         var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
-        if (kbService != null)
+        if (kbService == null)
         {
-            try
-            {
-                var requested = string.IsNullOrWhiteSpace(knowledgeBaseIds)
-                    ? new List<string>()
-                    : JsonSerializer.Deserialize<List<string>>(knowledgeBaseIds) ?? new List<string>();
-                var kbs = await kbService.ListKnowledgeBasesAsync();
-                var targetKbs = requested.Count > 0
-                    ? kbs.Where(k => requested.Contains(k.Id, StringComparer.OrdinalIgnoreCase)).ToList()
-                    : kbs.Where(k => k.Enabled).ToList();
-
-                var rows = new List<object>();
-                foreach (var kb in targetKbs)
-                {
-                    var (docs, _) = await kbService.GetDocumentsAsync(kb.Id, page: 1, pageSize: limit, search: sourceId);
-                    foreach (var d in docs)
-                    {
-                        rows.Add(new
-                        {
-                            knowledgeBaseId = kb.Id,
-                            knowledgeBaseName = kb.Name,
-                            documentId = d.Id,
-                            sourceKey = d.SourceKey,
-                            locator = d.Locator,
-                            chunkCount = d.ChunkCount,
-                            updatedAt = d.UpdatedAt
-                        });
-                    }
-                    if (rows.Count >= limit) break;
-                }
-
-                return McpResult.Ok(new
-                {
-                    success = true,
-                    count = Math.Min(rows.Count, limit),
-                    files = rows.Take(limit)
-                });
-            }
-            catch (Exception ex)
-            {
-                return McpResult.Fail(ex.Message);
-            }
+            // 知识库服务不可用时不再回落到旧索引：旧路径的 sourceId 语义与此处不同，
+            // 静默换语义比直接失败更难排查。
+            return McpResult.Fail("知识库服务不可用，无法列出文件", "knowledge_base_unavailable");
         }
-
-        var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
 
         try
         {
-            var allFiles = await vectorStore.GetAllFilesAsync();
+            var requested = string.IsNullOrWhiteSpace(knowledgeBaseIds)
+                ? new List<string>()
+                : JsonSerializer.Deserialize<List<string>>(knowledgeBaseIds) ?? new List<string>();
+            var kbs = await kbService.ListKnowledgeBasesAsync();
+            var targetKbs = requested.Count > 0
+                ? kbs.Where(k => requested.Contains(k.Id, StringComparer.OrdinalIgnoreCase)).ToList()
+                : kbs.Where(k => k.Enabled).ToList();
 
-            var files = string.IsNullOrEmpty(sourceId)
-                ? allFiles
-                : allFiles.Where(f => f.Source?.Equals(sourceId, StringComparison.OrdinalIgnoreCase) == true);
+            if (requested.Count > 0 && targetKbs.Count == 0)
+                return McpResult.Fail($"未找到指定知识库: {knowledgeBaseIds}", "knowledge_base_not_found");
 
-            var fileList = files.Take(limit).ToList();
+            // connectorId 必须能解析到具体连接器，否则过滤条件等同失效；
+            // 直接报错而不是返回 0 条，调用方才能区分"没命中"与"参数错"。
+            if (!string.IsNullOrWhiteSpace(connectorId))
+            {
+                var matched = false;
+                foreach (var kb in targetKbs)
+                {
+                    if ((await kbService.GetConnectorsAsync(kb.Id))
+                        .Any(c => string.Equals(c.Id, connectorId, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched)
+                    return McpResult.Fail(
+                        $"未找到连接器: {connectorId}（可由 list_sources 查看合法 connectorId）",
+                        "connector_not_found");
+            }
 
+            var rows = new List<object>();
+            var totalMatched = 0;
+            // 不提前 break：totalMatched 必须是全部目标库的合计，否则 truncated 判定会漏算。
+            foreach (var kb in targetKbs)
+            {
+                var (docs, total) = await kbService.GetDocumentsAsync(
+                    kb.Id, page: 1, pageSize: limit, search: pathKeyword, connectorId: connectorId);
+                totalMatched += total;
+                if (rows.Count >= limit) continue;
+                foreach (var d in docs)
+                {
+                    rows.Add(new
+                    {
+                        knowledgeBaseId = kb.Id,
+                        knowledgeBaseName = kb.Name,
+                        connectorId = d.ConnectorId,
+                        documentId = d.Id,
+                        sourceKey = d.SourceKey,
+                        locator = d.Locator,
+                        chunkCount = d.ChunkCount,
+                        updatedAt = d.UpdatedAt
+                    });
+                    if (rows.Count >= limit) break;
+                }
+            }
+
+            var files = rows.Take(limit).ToList();
             return McpResult.Ok(new
             {
                 success = true,
-                count = fileList.Count,
-                files = fileList.Select(f => new
+                appliedFilters = new
                 {
-                    id = f.Id,
-                    path = f.Path,
-                    title = f.Title,
-                    source = f.Source
-                })
+                    connectorId = string.IsNullOrWhiteSpace(connectorId) ? null : connectorId,
+                    pathKeyword = string.IsNullOrWhiteSpace(pathKeyword) ? null : pathKeyword
+                },
+                count = files.Count,
+                totalMatched,
+                truncated = totalMatched > files.Count,
+                files
             });
         }
         catch (Exception ex)

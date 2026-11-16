@@ -2896,16 +2896,19 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
         if (!string.IsNullOrWhiteSpace(connectorId))
             whereClauses.Add("d.connector_id = @connectorId");
         if (!string.IsNullOrWhiteSpace(search))
-            whereClauses.Add("(d.source_key LIKE @search OR d.locator LIKE @search)");
+            // ESCAPE 必须显式声明：否则 % 与 _ 会被当作通配符，
+            // 一个"过滤条件"退化成"匹配全库"（source_key 无索引，全表 LIKE 也是 DoS 面）。
+            whereClauses.Add("(d.source_key LIKE @search ESCAPE '\\' OR d.locator LIKE @search ESCAPE '\\')");
 
         var whereSql = whereClauses.Count > 0 ? "WHERE " + string.Join(" AND ", whereClauses) : "";
+        var searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{EscapeLikePattern(search)}%";
 
         int totalCount = 0;
         using (var countCmd = conn.CreateCommand())
         {
             countCmd.CommandText = $"SELECT COUNT(*) FROM documents d {whereSql};";
             if (!string.IsNullOrWhiteSpace(connectorId)) countCmd.Parameters.AddWithValue("@connectorId", connectorId);
-            if (!string.IsNullOrWhiteSpace(search)) countCmd.Parameters.AddWithValue("@search", $"%{search}%");
+            if (searchPattern != null) countCmd.Parameters.AddWithValue("@search", searchPattern);
             totalCount = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct));
         }
 
@@ -2923,7 +2926,7 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 LIMIT @limit OFFSET @offset;
             ";
             if (!string.IsNullOrWhiteSpace(connectorId)) queryCmd.Parameters.AddWithValue("@connectorId", connectorId);
-            if (!string.IsNullOrWhiteSpace(search)) queryCmd.Parameters.AddWithValue("@search", $"%{search}%");
+            if (searchPattern != null) queryCmd.Parameters.AddWithValue("@search", searchPattern);
             queryCmd.Parameters.AddWithValue("@limit", pageSize);
             queryCmd.Parameters.AddWithValue("@offset", offset);
 
