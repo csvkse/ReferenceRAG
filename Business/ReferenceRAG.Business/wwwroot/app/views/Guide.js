@@ -596,6 +596,21 @@ component.template = `
 
               <n-divider />
 
+              <n-text strong>客户端会自动收到服务端指令（instructions）</n-text>
+              <n-alert type="success" :show-icon="false" style="margin-top: 8px;">
+                <n-space vertical :size="6">
+                  <n-text>握手（initialize）时服务端会下发一段跨工具硬约束，AI 助手无需你手动提示就知道：</n-text>
+                  <n-text depth="3">1. 不确定有哪些源/库时先调 <n-text code>list_sources</n-text>，不要凭空猜 sourceName / knowledgeBaseId</n-text>
+                  <n-text depth="3">2. 检索四选一：概念用 semantic_search、精确词用 lexical_search、两者都要用 hybrid_search、已定库用 knowledge_base_search；同一关键词既可能指库切片也可能指源码文件时，按「要读已索引笔记还是源码文件」裁决</n-text>
+                  <n-text depth="3">3. 检索返回 chunkId + knowledgeBaseId：读正文用 knowledge_base_drill_down，查所属文件用 get_document_info</n-text>
+                  <n-text depth="3">4. 文件路径必须在 list_sources / get_file_tree 给出的根目录内，越界会被沙箱拒绝（path_denied）</n-text>
+                  <n-text depth="3">5. 各工具 topK / limit / maxMatches 均有上限，需要更多结果应收窄过滤条件而非加大数量</n-text>
+                  <n-text depth="3">6. 失败信封统一带 errorCode，可按码决定重试还是放弃</n-text>
+                </n-space>
+              </n-alert>
+
+              <n-divider />
+
               <n-text strong>MCP 配置示例</n-text>
               <n-code :code="mcpConfigExample" language="json" word-wrap />
 
