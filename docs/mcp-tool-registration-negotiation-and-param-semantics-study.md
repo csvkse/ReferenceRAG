@@ -309,6 +309,51 @@ whereClauses.Add("(d.source_key LIKE @search ESCAPE '\\' OR d.locator LIKE @sear
 | 3 | Accept 归一化中间件 + G-N7..G-N9 | 新增 1 个中间件 + 端点注册顺序 | 中（影响传输层，务必带开关） |
 | 4 | `outputSchema` + `ttlMs/cacheScope` | SDK 描述符 + Tool 构造 | 低 |
 
+### 5.1 实施状态（2026-11-16）
+
+| 序 | 状态 | 落点 |
+| :--- | :--- | :--- |
+| 1 | ✅ 完成 | `IndexStatusTools.ListFiles`（connectorId/pathKeyword/appliedFilters/totalMatched/truncated）；`SqliteKnowledgeBaseStore.GetDocumentsAsync` 加 `ESCAPE '\'` + `EscapeLikePattern`；删除旧索引分支；`McpResultContracts.ListFilesResult` |
+| 2 | ✅ 完成 | SDK `McpTools/ToolVisibilityPolicy.cs`（`IToolVisibilityPolicy` + `MopToolVisibilityPolicy`）；`McpToolRegistry` 两条路径改为单一判定，删掉本地 `IsBackendOrigin/IsToolEnabled/IsToolExposeUpstream` |
+| 3 | ✅ 完成 | SDK `Middleware/McpAcceptNegotiationMiddleware.cs`；`MopOptions.AcceptNegotiation`（默认 true）；在 `MapMcp` 之前插入 |
+| 4 | ✅ 完成 | SDK `McpToolDescriptor.OutputSchema` + `McpToolSchemaBuilder.BuildOutputSchema`（camelCase、递归展开、深度上限 3）；list handler 按协商协议版本下发 `ttlMs/cacheScope` |
+
+门禁落地：`McpListFilesFilterGateTests`(8)、`McpInputSchemaGateTests` 扩 2 例、SDK
+`ToolVisibilityPolicyTests`(7)、SDK `McpAcceptNegotiationTests`(9)。
+
+### 5.2 实施中新发现的一个缺陷（已修）
+
+首版 `ttlMs/cacheScope` 采用**无条件赋值**，Dev 实测发现 2025-06-18 的 `tools/list`
+线上立刻多出这两个字段。官方源码注释明确记载旧协议客户端会因此报错（csharp-sdk
+issue #1721），且官方自己也是"只在 2026-07-28+ 盖章"。改为按协商版本门控后：
+
+| 协商版本 | `result` 的键 |
+| :--- | :--- |
+| 2025-06-18 | `[tools]` |
+| 2026-07-28 | `[tools, ttlMs=30000, cacheScope=private]` |
+
+这是"字段级兼容"而非"历史数据兼容"——协议字段对不可协商版本必须缺席，否则客户端解析失败。
+
+### 5.3 Dev 真机实测记录
+
+| 用例 | 结果 |
+| :--- | :--- |
+| `Accept: application/json` | 200 + `Content-Type: application/json; charset=utf-8`，body 为纯 JSON |
+| `Accept: */*` | 200 + JSON（此前 200 + SSE） |
+| 无 `Accept` 头 | 200 + JSON |
+| `Accept: text/event-stream`（回归） | 200 + SSE，`data:` 帧保留 |
+| `Accept: application/json, text/event-stream`（回归） | 200 + SSE |
+| 2026-07-28 + 单值 Accept | 200 + JSON（此前 406） |
+| `list_files` schema | `knowledgeBaseIds / connectorId / pathKeyword / limit`，无 `sourceId` |
+| `list_files` outputSchema | 含 `success/appliedFilters/count/totalMatched/truncated/files` |
+| `connectorId=145aa3faa2d0436d` | `count=3, totalMatched=28, truncated=true`，files 全部同一 connectorId |
+| `connectorId=deadbeefdeadbeef` | `isError` + `connector_not_found` |
+| `pathKeyword="%"` / `"_"` | `count=0, totalMatched=0`（此前匹配全库） |
+| `pathKeyword="ZZZNOTEXIST"` | `success:true, count:0, totalMatched:0`，`appliedFilters` 回显关键词 |
+
+测试与验收：SDK 275/275、Host 502/502、前端 133/133、dev 浏览器验收全达标、
+真机 MCP + 浏览器验收全达标。
+
 ---
 
 ## 6. 参考文献与实测记录
