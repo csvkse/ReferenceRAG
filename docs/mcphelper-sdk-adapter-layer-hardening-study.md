@@ -319,3 +319,72 @@ ReferenceRAG 未正式发布，因此：
 | P2 其余 | 死代码/简化 | P2 | 维护成本 | 顺手 |
 
 **不做的事**：不改传输层（除版本对齐）；不为后端代理另建并行注册体系；不引入新包。
+
+---
+
+## 8. 实施状态（S1–S7 + P2 全部落地）
+
+SDK 两个提交（`985f6a6`、`f7a09a7`，已推送 `origin/main`），消费方一个提交（`f940657`）。
+
+### 8.1 SDK 交付
+
+| 项 | 交付 | 文件 |
+| :--- | :--- | :--- |
+| S1 schema | 新增 `McpToolSchemaBuilder`：按方法签名生成 `type/properties/required/default/description/items`；无参工具输出 `additionalProperties:false`；框架注入参数不进 schema。`LocalToolProvider` 在 `DiscoverTools` 时填充 `InputSchema` | `McpTools/McpToolSchemaBuilder.cs`、`McpToolRegistry.cs` |
+| S5 注解 | `McpToolDescriptor` 增 `Title/ReadOnly/Idempotent/Destructive/OpenWorld`（保存**生效值**，协议默认 readOnly=false/idempotent=false/destructive=true/openWorld=true）；`BuildAnnotations` 只输出偏离默认的提示；`Metadata["RiskLevel"]` 作为回落数据源 | `McpToolDescriptor.cs`、`ServiceCollectionExtensions.cs` |
+| S4 框架参数 | `IServiceProvider` / `HttpContext` / `McpServer` / `CancellationToken` 由 DI 与上下文注入，不再计入「缺少必需参数」 | `McpToolRegistry.cs` |
+| S3 结果桥 | 新增 `McpToolResult`（BusinessPayload / PlainText / Structured / Envelope / Failure）+ `IMcpToolResultWriter`（5 个 Strategy 实现）；`Classify` 只在「content 是数组」或「带 isError」时视为信封；失败信封保留 `structuredContent` 并把 `errorCode` 写进 `_meta`。删除 `ConvertToCallToolResult` 的 if-else 猜语义 | `McpTools/McpToolResult.cs`、`McpToolResultWriter.cs`、`ServiceCollectionExtensions.cs` |
+| S2 上游开关 | `AllowUpstreamProxy` 只约束后端工具（按 `ProviderName` 前缀 `backend_`/`stdio_`/`lazy_backend_manager` 判定） | `McpToolRegistry.cs` |
+| S6 命名 | 删除手写 `ToSnakeCase` 状态机，改用 `JsonNamingPolicy.SnakeCaseLower`（`GetIPAddress` 由 `get_ipaddress` 修正为 `get_ip_address`） | `McpToolRegistry.cs` |
+| S7 参数转换 | 统一走 `JsonSerializer`，失败抛 `McpToolArgumentException`，只回显字段名与期望 JSON 类型 | `McpToolRegistry.cs`、`McpToolResult.cs` |
+| P2 清理 | 删 `DynamicMcpToolHandler`（293 行，仅日志引用）、`McpToolDescriptor.ToMcpToolFormat`（第二套序列化路径）、运行期 `GetRequiredService<IServiceCollection>`；`ToolTypeCollectingRegistry` → `ToolTypeCollector`（消除 LSP 违规）；`LocalToolProvider` 去泛型化以支持运行时类型注册 | 多处 |
+| 版本 | Core **2.0.1 → 2.1.0**；依赖 `ModelContextProtocol.AspNetCore` **1.2.0 → 2.2.0** | `McpHelper.Core.csproj` |
+
+**SDK 套件 259/259 通过**（原 236 例 + 新增 23 例门禁）。
+
+### 8.2 消费方收敛
+
+| 项 | 变化 |
+| :--- | :--- |
+| 包版本 | `McpHelper.Core 2.1.0`（本地 feed `packages/`）+ 新增 `ModelContextProtocol.AspNetCore 2.2.0`；运行期三包同代（Core 2.2.0 / AspNetCore 2.2.0 / McpHelper 2.1.0） |
+| 删除补偿件 | `McpInputSchemaEnricher.cs`（反射 schema + 命名对拍）整文件删除 —— 净减 250+ 行 |
+| `McpResult` | 去掉 `Sanitize` / `ReservedTopLevelKeys`；`Ok/OkRaw` 直接透出业务 JSON；`Fail` 补 `structuredContent(success/errorCode)` |
+| 注解数据源 | 启动期把 `McpCatalogRegistry.RiskLevel` 写入描述符 `Metadata`；新增 `GetRiskLevel` 按「去符号+小写」归一化查找，兼容目录 PascalCase 与协议 snake_case |
+| 门禁调整 | schema 门禁改为断言 BCL `SnakeCaseLower` 派生 + 全部工具有 description；hardening 门禁 Ok 用例改为「业务 JSON 原样保留」+ 失败信封携带 `structuredContent.errorCode` |
+
+### 8.3 实测结果
+
+**SDK 隔离探针（真实 SSE 端点）**
+
+| 项 | 修复前 | 修复后 |
+| :--- | :--- | :--- |
+| 带参数工具的 `inputSchema` | `{"type":"object","properties":{}}` | `{... properties:{query,topK}, required:["query"]}` |
+| 无参工具 | 同上（伪「无参」） | `{"type":"object","additionalProperties":false}` |
+| `[McpServerTool(ReadOnly=true)]` | 不透出 | `annotations.readOnlyHint/idempotentHint=true` |
+| `{"success":true,"content":"BODY"}` | `content: []`（被吞） | 文本块保留完整 JSON + `structuredContent` |
+| `{... "structuredContent":{"a":1}}` | `structuredContent` 丢失 | 原样透出 |
+| `IServiceProvider` 参数 | `缺少必需参数: sp` | 由 DI 注入 |
+| `topK:"abc"` | `An element of type 'String' cannot be converted to 'System.Nullable`1[System.Int32]'` | `参数 'topK' 类型无效，期望 integer` + `errorCode: invalid_argument` |
+| `AllowUpstreamProxy=false` | `tools/list` 返回 `[]` | 本地工具可见，仅后端工具隐藏 |
+
+**消费方 dev（`<dev-host>:5124`）**：25 个工具全部带 `annotations`；`read_note_content` 返回真实正文；`/etc/passwd` 仍被 `path_denied`；`get_index_status 3–32ms`、`list_sources 18–41ms`；真机验收 33/33。
+
+**消费方生产（`referencerag:deploy-f940657`）**
+
+| 项 | 实测 |
+| :--- | :--- |
+| `tools/list` | 25 工具，**25/25 带 annotations**，5 个无参工具 `additionalProperties:false`，延迟 30ms（首调 260ms） |
+| 检索/源/文件工具 | 6 类工具均暴露 `knowledgeBaseIds`；`get_document_info` 暴露 `knowledgeBaseId` |
+| 统计口径 | `get_index_status` 逐库：Notes 237,721 / 默认库 24,776 向量；`list_sources` 四行计数各异 |
+| 检索链 | `semantic_search → drill_down → get_document_info` 全通 |
+| `read_note_content` | 返回真实正文（`structuredContent` 同时给出）；`/etc/passwd` → `isError` + `path_denied` |
+| 性能 | `get_index_status 14–25ms`、`list_sources 47–63ms`、`get_system_stats 15–20ms` |
+| 浏览器契约 | Guide 9 项工具名与运行时一致；仪表盘/源管理无裸 spec id、无 0/0；四页移动端零溢出；控制台零错误 |
+
+生产契约验收脚本 **33/33 全部达标**。
+
+### 8.4 明确未做
+
+- **切到官方 `WithTools` 注册**（原方案 S1 的第一步）：本轮改为「用官方 schema 语义重建描述符」而非「改用 `McpServerTool.Create`」。原因：后端代理工具（`DynamicBackendToolProvider` / `StdioToolProvider` / `LazyBackendManager`）的动态发现、前缀改写、延迟初始化语义无法直接映射到官方静态注册；强行切换需要重做整套代理注册，风险大于收益。当前实现已让本地工具获得与官方等价的 schema/注解/结构化结果。
+- **`Accept` 单值协商仍返回 406**：属官方 SDK `HttpTransport` 的既有行为（要求同时接受 JSON 与 SSE），未修改。
+- **`list_files.sourceId` 的双重语义**（源名 vs 路径关键词）未拆分，留待与产品确认命名。
