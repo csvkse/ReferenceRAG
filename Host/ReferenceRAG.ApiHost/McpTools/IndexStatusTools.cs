@@ -32,13 +32,14 @@ public class IndexStatusTools
     /// 获取当前索引状态，包括向量索引和BM25索引的统计信息。
     /// 在需要了解知识库索引情况时使用，如确认索引是否已完成。
     /// </summary>
-    [McpServerTool, Description("获取当前索引状态（按物理知识库逐库统计：分块数/文档数/向量数）。用于确认知识库索引是否完成或诊断检索问题。")]
+    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(IndexStatusResult))]
+    [Description("按物理知识库逐库统计分块数/文档数/向量数。确认索引是否建完、或检索为空时排查索引问题使用。")]
     public async Task<string> GetIndexStatus()
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetIndexStatus), out var permErr))
         {
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
         }
 
         // v2 起索引统计的事实源是各库 kb.db；旧 vectors.db 已停止写入，
@@ -86,7 +87,7 @@ public class IndexStatusTools
             }
             catch (Exception ex)
             {
-                return McpResult.Fail(ex.Message);
+                return McpResult.FailException(ex);
             }
         }
 
@@ -127,7 +128,7 @@ public class IndexStatusTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -136,15 +137,16 @@ public class IndexStatusTools
     /// 在需要查看某个具体文档内容或调试检索结果时使用。
     /// </summary>
     /// <param name="chunkId">文档片段ID（Chunk ID）</param>
-    [McpServerTool, Description("获取指定文档分片的详细信息（内容、行号、所属文件）。传 knowledgeBaseId 时读物理知识库切片；否则读旧索引。")]
+    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(DocumentInfoResult))]
+    [Description("获取指定分片的详细信息（内容、行号、所属文件）。查某个 chunkId 属于哪个文件时使用；要看完整正文改用 knowledge_base_drill_down。必须同时传 knowledgeBaseId。")]
     public async Task<string> GetDocumentInfo(
-        [Description("文档分片 ID（必填）。知识库结果来自 chunkId，旧库结果来自 refId")] string chunkId,
-        [Description("目标知识库 ID（可选）。来自 knowledge_base_search 的 chunkId 必须传它才能定位")] string? knowledgeBaseId = null)
+        [Description("文档分片 ID（必填）。来自 knowledge_base_search / list_files 的 chunkId")] string chunkId,
+        [Description("目标知识库 ID（必填）。缺失时会报 chunk_not_found，不会跨库猜测")] string? knowledgeBaseId = null)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetDocumentInfo), out var permErr))
         {
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
         }
 
         var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
@@ -154,7 +156,7 @@ public class IndexStatusTools
             {
                 var kbChunk = await kbService.GetChunkByIdAsync(knowledgeBaseId, chunkId);
                 if (kbChunk == null)
-                    return McpResult.Fail($"知识库 {knowledgeBaseId} 中不存在切片 {chunkId}");
+                    return McpResult.Fail($"知识库 {knowledgeBaseId} 中不存在切片 {chunkId}", McpErrorCodes.ChunkNotFound);
                 return McpResult.Ok(new
                 {
                     success = true,
@@ -174,7 +176,7 @@ public class IndexStatusTools
             }
             catch (Exception ex)
             {
-                return McpResult.Fail(ex.Message);
+                return McpResult.FailException(ex);
             }
         }
 
@@ -185,7 +187,7 @@ public class IndexStatusTools
             var chunk = await vectorStore.GetChunkAsync(chunkId);
             if (chunk == null)
             {
-                return McpResult.Fail($"Document '{chunkId}' not found");
+                return McpResult.Fail($"Document '{chunkId}' not found", McpErrorCodes.DocumentNotFound);
             }
 
             var file = await vectorStore.GetFileAsync(chunk.FileId);
@@ -213,7 +215,7 @@ public class IndexStatusTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -227,15 +229,15 @@ public class IndexStatusTools
     [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(ListFilesResult))]
     [Description("列出知识库中已索引的文件（文档 ID、路径、切片数）。支持按 connectorId 精确过滤，或按 pathKeyword 做路径子串过滤（可叠加）。")]
     public async Task<string> ListFiles(
-        [Description("目标知识库 ID 的 JSON 数组，如 [\"kb_a\"]（可选）。留空表示全部已启用知识库")] string? knowledgeBaseIds = null,
+        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\"]（可选）。留空表示全部已启用知识库")] string? knowledgeBaseIds = null,
         [Description("连接器 ID（可选，精确匹配）。可由 list_sources 的 connectorId 字段获得")] string? connectorId = null,
         [Description("路径关键词（可选，sourceKey / locator 的子串匹配，% 与 _ 按字面处理）")] string? pathKeyword = null,
-        [Description("返回文件数量限制，默认20")] int limit = 20)
+        [Description("返回文件数量限制，默认 20，上限 200")] int limit = 20)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(ListFiles), out var permErr))
         {
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
         }
 
         var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
@@ -243,7 +245,7 @@ public class IndexStatusTools
         {
             // 知识库服务不可用时不再回落到旧索引：旧路径的 sourceId 语义与此处不同，
             // 静默换语义比直接失败更难排查。
-            return McpResult.Fail("知识库服务不可用，无法列出文件", "knowledge_base_unavailable");
+            return McpResult.Fail("知识库服务不可用，无法列出文件", McpErrorCodes.KnowledgeBaseUnavailable);
         }
 
         try
@@ -257,7 +259,7 @@ public class IndexStatusTools
                 : kbs.Where(k => k.Enabled).ToList();
 
             if (requested.Count > 0 && targetKbs.Count == 0)
-                return McpResult.Fail($"未找到指定知识库: {knowledgeBaseIds}", "knowledge_base_not_found");
+                return McpResult.Fail($"未找到指定知识库: {knowledgeBaseIds}", McpErrorCodes.KnowledgeBaseNotFound);
 
             // connectorId 必须能解析到具体连接器，否则过滤条件等同失效；
             // 直接报错而不是返回 0 条，调用方才能区分"没命中"与"参数错"。
@@ -276,7 +278,7 @@ public class IndexStatusTools
                 if (!matched)
                     return McpResult.Fail(
                         $"未找到连接器: {connectorId}（可由 list_sources 查看合法 connectorId）",
-                        "connector_not_found");
+                        McpErrorCodes.ConnectorNotFound);
             }
 
             var rows = new List<object>();
@@ -306,7 +308,7 @@ public class IndexStatusTools
             }
 
             var files = rows.Take(limit).ToList();
-            return McpResult.Ok(new
+            return McpResult.OkBounded(new
             {
                 success = true,
                 appliedFilters = new
@@ -322,7 +324,7 @@ public class IndexStatusTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 }

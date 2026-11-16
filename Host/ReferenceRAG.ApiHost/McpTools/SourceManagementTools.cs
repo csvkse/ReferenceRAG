@@ -28,13 +28,14 @@ public class SourceManagementTools
         _serviceProvider = serviceProvider;
     }
 
-    [McpServerTool, Description("列出所有已配置的知识库数据源及其索引统计（计数取自各知识库 kb.db 物理事实源）。包括源名称、路径、启用状态、文档数、分块数。用于了解当前知识库的覆盖范围。")]
+    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(ListSourcesResult))]
+    [Description("列出所有已配置的知识库数据源及其索引统计。第一次接触服务时先调它拿到合法 sourceName 与 connectorId。")]
     public async Task<string> ListSources(
-        [Description("目标知识库 ID 的 JSON 数组，如 [\"kb_a\",\"kb_b\"]。留空表示全部已启用知识库")] string? knowledgeBaseIds = null)
+        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示全部已启用知识库")] string? knowledgeBaseIds = null)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(ListSources), out var permErr))
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
 
         var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
 
@@ -125,7 +126,7 @@ public class SourceManagementTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -135,7 +136,7 @@ public class SourceManagementTools
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetSourceInfo), out var permErr))
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
 
         var catalog = scope.ServiceProvider.GetService<ISourceCatalog>() ?? new SourceCatalog(scope.ServiceProvider);
         var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
@@ -144,7 +145,7 @@ public class SourceManagementTools
         {
             var descriptor = await catalog.ResolveAsync(sourceName);
             if (descriptor == null)
-                return McpResult.Fail($"未找到数据源: {sourceName}（可用 list_sources 查看合法名称）", "source_not_found");
+                return McpResult.Fail($"未找到数据源: {sourceName}（可用 list_sources 查看合法名称）", McpErrorCodes.SourceNotFound);
 
             var stats = (await GetStatsCache(scope.ServiceProvider).GetConnectorStatsAsync(kbService))
                 .Where(s => NormalizePath(s.TargetPath) == NormalizePath(descriptor.Path))
@@ -190,16 +191,17 @@ public class SourceManagementTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
-    [McpServerTool, Description("获取整体系统统计信息：配置概览、Embedding 模型参数、搜索配置、重排配置，以及按知识库汇总的索引统计。用于系统诊断和配置审查。")]
+    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(SystemStatsResult))]
+    [Description("获取整体系统统计：配置概览、Embedding 模型参数、搜索与重排配置、按库汇总的索引统计。排查配置问题或确认当前模型参数时使用。")]
     public async Task<string> GetSystemStats()
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetSystemStats), out var permErr))
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
 
         var config = scope.ServiceProvider.GetRequiredService<ConfigManager>().Load();
         var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
@@ -260,7 +262,7 @@ public class SourceManagementTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 

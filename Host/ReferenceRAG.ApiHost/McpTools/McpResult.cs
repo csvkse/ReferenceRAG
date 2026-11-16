@@ -27,15 +27,19 @@ public static class McpResult
     /// <summary>成功：已经是完整 JSON 文本时使用。</summary>
     public static string OkRaw(string json) => json;
 
-    /// <summary>失败：输出协议信封，SDK 据此设置 <c>isError=true</c>。</summary>
-    public static string Fail(string? error, string? errorCode = null)
+    /// <summary>
+    /// 失败：输出协议信封，SDK 据此设置 <c>isError=true</c>。
+    /// <paramref name="errorCode"/> 必填（取值见 <see cref="McpErrorCodes"/>）：
+    /// 客户端要按码分支处理，缺码就得解析中文文本。
+    /// </summary>
+    public static string Fail(string? error, string errorCode)
     {
         var body = new JsonObject
         {
             ["success"] = false,
-            ["error"] = error ?? "未知错误"
+            ["error"] = error ?? "未知错误",
+            ["errorCode"] = errorCode
         };
-        if (!string.IsNullOrWhiteSpace(errorCode)) body["errorCode"] = errorCode;
 
         return new JsonObject
         {
@@ -51,8 +55,29 @@ public static class McpResult
             ["structuredContent"] = new JsonObject
             {
                 ["success"] = false,
-                ["errorCode"] = errorCode ?? "error"
+                ["errorCode"] = errorCode
             }
         }.ToJsonString(PrettyOptions);
+    }
+
+    /// <summary>包装未知异常：内部错误码 + 原始消息（便于模型判断是否可自纠）。</summary>
+    public static string FailException(Exception ex, string errorCode = McpErrorCodes.InternalError) =>
+        Fail(ex.Message, errorCode);
+
+    /// <summary>业务 JSON 的体积预算：超出则拒绝而不是截断，避免单次调用吃掉模型上下文。</summary>
+    public const int MaxPayloadChars = 400_000;
+
+    /// <summary>
+    /// 超出预算时返回 <c>too_large</c> 失败信封（附收窄建议），而不是静默截断。
+    /// 静默截断会让模型误以为已经拿到全部结果；拒绝则促使它收窄过滤条件。
+    /// </summary>
+    public static string OkBounded(object payload, int maxChars = MaxPayloadChars)
+    {
+        var json = Ok(payload);
+        if (json.Length <= maxChars) return json;
+
+        return Fail(
+            $"结果体积 {json.Length} 字符，超过上限 {maxChars}。请收窄过滤条件（更小的 topK/limit、更精确的关键词或 pathKeyword）后重试。",
+            McpErrorCodes.TooLarge);
     }
 }

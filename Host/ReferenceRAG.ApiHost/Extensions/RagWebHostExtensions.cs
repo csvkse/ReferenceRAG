@@ -80,6 +80,8 @@ public static class RagWebHostExtensions
                 EnableInfo = false,
                 ServerName = "ReferenceRAG-MCP",
                 ServerVersion = "1.0.0",
+                // 跨工具硬约束（先列源、检索四选一、chunkId 链、沙箱、上限、错误码）
+                ServerInstructions = McpCatalogRegistry.ServerInstructions,
                 TransportType = MopTransportType.Sse,
                 SseEndpoint = "/api/mcp",  // SSE 协议暴露端点
                 Backends = new List<BackendEndpoint>()
@@ -127,12 +129,15 @@ public static class RagWebHostExtensions
         var mcpRegistry = app.Services.GetService<McpHelper.McpTools.IMcpToolRegistry>();
         if (mcpRegistry is not null)
         {
-            // 注解数据源：既有 McpCatalogRegistry 的 RiskLevel（Read/Execute/Dangerous）
-            // → 协议 annotations。未在 [McpServerTool] 上显式声明时以此为准。
+            // 注解/提示词数据源：既有 McpCatalogRegistry 是工具风险等级与提示词的单一事实源，
+            // 启动期一次性写进描述符，避免 SDK 与业务侧维护两份互相漂移的文本。
             foreach (var (name, descriptor) in mcpRegistry.GetAllTools())
             {
-                var risk = ReferenceRAG.Core.Services.McpCatalogRegistry.GetRiskLevel(name);
+                var risk = McpCatalogRegistry.GetRiskLevel(name);
                 if (risk is not null) descriptor.Metadata["RiskLevel"] = risk;
+
+                var prompt = McpCatalogRegistry.GetPrompt(name);
+                if (!string.IsNullOrWhiteSpace(prompt)) descriptor.Metadata["DescriptionOverride"] = prompt;
             }
 
             var toolCount = mcpRegistry.GetAllTools().Count;

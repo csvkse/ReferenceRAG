@@ -34,23 +34,23 @@ public class RagSearchTools
     [McpServerTool, Description("知识库语义检索（免向量词法）。适合精确词汇、错误码、API 名。可指定 knowledgeBaseIds 限定范围。")]
     public Task<string> LexicalSearch(
         [Description("关键词或查询文本（必填）")] string query,
-        [Description("返回结果数量，默认 5")] int topK = 5,
-        [Description("目标知识库 ID 的 JSON 数组，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
+        [Description("返回结果数量，默认 5，上限 50")] int topK = 5,
+        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
         => SearchAsync(nameof(LexicalSearch), query, topK, knowledgeBaseIds, useLexical: true);
 
     [McpServerTool, Description("知识库语义检索（向量召回）。适合问答与信息检索。可指定 knowledgeBaseIds 限定范围。")]
     public Task<string> SemanticSearch(
         [Description("搜索查询文本（必填），建议补充同义词与中英文术语")] string query,
-        [Description("返回结果数量，默认 5，建议 1-20")] int topK = 5,
-        [Description("目标知识库 ID 的 JSON 数组，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
+        [Description("返回结果数量，默认 5，建议 1-20，上限 50")] int topK = 5,
+        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
         => SearchAsync(nameof(SemanticSearch), query, topK, knowledgeBaseIds, useLexical: false);
 
     [McpServerTool, Description("知识库混合检索（向量 + 词法 RRF 融合），兼顾精确匹配与语义理解。可指定 knowledgeBaseIds 限定范围。")]
     public Task<string> HybridSearch(
         [Description("搜索查询文本（必填）")] string query,
-        [Description("返回结果数量，默认 5")] int topK = 5,
+        [Description("返回结果数量，默认 5，上限 50")] int topK = 5,
         [Description("是否只走词法通道（跳过向量），默认 false")] bool lexicalOnly = false,
-        [Description("目标知识库 ID 的 JSON 数组，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
+        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
         => SearchAsync(nameof(HybridSearch), query, topK, knowledgeBaseIds, useLexical: lexicalOnly);
 
     [McpServerTool, Description("展开某个知识库切片的完整正文（按 chunkId 或 documentId + 序号）。用于检索结果被截断时补全上下文。")]
@@ -61,14 +61,14 @@ public class RagSearchTools
         string? chunkId = null,
         [Description("文档 ID（来自检索结果的 documentId）。配合 ordinal 取该文档下的第 N 个切片")]
         string? documentId = null,
-        [Description("当使用 documentId 时，返回该文档的切片数量（默认 20）")] int limit = 20)
+        [Description("当使用 documentId 时返回的切片数量，默认 20，上限 50（超出按 50 处理）")] int limit = 20)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(KnowledgeBaseDrillDown), out var permErr))
-            return Fail(permErr);
+            return Fail(permErr, McpErrorCodes.Forbidden);
 
         if (string.IsNullOrWhiteSpace(chunkId) && string.IsNullOrWhiteSpace(documentId))
-            return Fail("必须提供 chunkId 或 documentId");
+            return Fail("必须提供 chunkId 或 documentId", McpErrorCodes.InvalidArgument);
 
         try
         {
@@ -77,7 +77,7 @@ public class RagSearchTools
             if (!string.IsNullOrWhiteSpace(chunkId))
             {
                 var chunk = await kbService.GetChunkByIdAsync(knowledgeBaseId, chunkId);
-                if (chunk == null) return Fail($"知识库 {knowledgeBaseId} 中不存在切片 {chunkId}");
+                if (chunk == null) return Fail($"知识库 {knowledgeBaseId} 中不存在切片 {chunkId}", McpErrorCodes.ChunkNotFound);
                 return McpResult.Ok(new
                 {
                     success = true,
@@ -86,8 +86,8 @@ public class RagSearchTools
                 });
             }
 
-            var (chunks, total) = await kbService.GetChunksAsync(knowledgeBaseId, documentId, 1, limit);
-            if (total == 0) return Fail($"知识库 {knowledgeBaseId} 中不存在文档 {documentId} 的切片");
+            var (chunks, total) = await kbService.GetChunksAsync(knowledgeBaseId, documentId, 1, Math.Clamp(limit, 1, 50));
+            if (total == 0) return Fail($"知识库 {knowledgeBaseId} 中不存在文档 {documentId} 的切片", McpErrorCodes.DocumentNotFound);
             return McpResult.Ok(new
             {
                 success = true,
@@ -99,19 +99,19 @@ public class RagSearchTools
         }
         catch (Exception ex)
         {
-            return Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
     [McpServerTool, Description("对候选文档进行重排，用深度语义理解重新评估每个文档与查询的相关性。")]
     public async Task<string> RerankResults(
         [Description("原始查询（必填）")] string query,
-        [Description("待重排序的文本列表（必填，JSON 数组），如[\"文档1\",\"文档2\"]")] string documents,
-        [Description("最终返回数量，默认 5")] int topK = 5)
+        [Description("待重排序的文本列表（必填），须为 JSON 数组字符串，如[\"文档1\",\"文档2\"]")] string documents,
+        [Description("最终返回数量，默认 5，上限 50")] int topK = 5)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(RerankResults), out var permErr))
-            return Fail(permErr);
+            return Fail(permErr, McpErrorCodes.Forbidden);
 
         try
         {
@@ -141,7 +141,7 @@ public class RagSearchTools
         }
         catch (Exception ex)
         {
-            return Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -150,17 +150,17 @@ public class RagSearchTools
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, toolName, out var permErr))
-            return Fail(permErr);
+            return Fail(permErr, McpErrorCodes.Forbidden);
 
         if (string.IsNullOrWhiteSpace(query))
-            return Fail("query 不能为空");
+            return Fail("query 不能为空", McpErrorCodes.InvalidArgument);
 
         try
         {
             var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
             var kbSearch = scope.ServiceProvider.GetService<IKnowledgeBaseSearchService>();
             if (kbService == null || kbSearch == null)
-                return Fail("知识库服务未装配，无法执行检索（请检查宿主是否注册 AddKnowledgeBaseServices）");
+                return Fail("知识库服务未装配，无法执行检索（请检查宿主是否注册 AddKnowledgeBaseServices）", McpErrorCodes.ServiceUnavailable);
 
             var targetIds = ParseIds(knowledgeBaseIds);
             if (targetIds.Count == 0)
@@ -170,7 +170,7 @@ public class RagSearchTools
             }
 
             if (targetIds.Count == 0)
-                return Fail("当前没有可检索的知识库，请先创建知识库并挂载数据源");
+                return Fail("当前没有可检索的知识库，请先创建知识库并挂载数据源", McpErrorCodes.NoKnowledgeBase);
 
             var request = new CrossKnowledgeBaseSearchRequest(
                 Query: query,
@@ -223,7 +223,7 @@ public class RagSearchTools
         }
         catch (Exception ex)
         {
-            return Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -273,5 +273,5 @@ public class RagSearchTools
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
-    private static string Fail(string? error) => McpResult.Fail(error);
+    private static string Fail(string? error, string errorCode) => McpResult.Fail(error, errorCode);
 }

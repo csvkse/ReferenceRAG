@@ -40,7 +40,7 @@ public class KnowledgeFileTools
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(GetFileTree), out var permErr))
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
 
         var allowed = GetAllowedSources(scope.ServiceProvider);
 
@@ -58,15 +58,15 @@ public class KnowledgeFileTools
                     string.IsNullOrWhiteSpace(sourceName)
                         ? "当前没有可用的数据源，请通过 list_sources 确认"
                         : $"未找到指定的数据源或无权访问: {sourceName}（可用 list_sources 查看合法名称）",
-                    "source_not_found");
+                    McpErrorCodes.SourceNotFound);
 
             var root = FileBrowserPath.Normalize(target.Path);
             var targetDir = string.IsNullOrWhiteSpace(subPath) ? root : FileBrowserPath.Join(root, subPath);
             if (!FileBrowserPath.IsWithin(targetDir, root))
-                return McpResult.Fail("路径超出该数据源允许的沙箱范围", "path_denied");
+                return McpResult.Fail("路径超出该数据源允许的沙箱范围", McpErrorCodes.PathDenied);
 
             if (!Directory.Exists(targetDir))
-                return McpResult.Fail($"目录不存在: {targetDir}", "not_found");
+                return McpResult.Fail($"目录不存在: {targetDir}", McpErrorCodes.NotFound);
 
             var dirInfo = new DirectoryInfo(targetDir);
             var entries = new List<object>();
@@ -80,7 +80,7 @@ public class KnowledgeFileTools
                 entries.Add(new { name = f.Name, isDirectory = false, size = f.Length, modified = f.LastWriteTimeUtc });
             }
 
-            return McpResult.Ok(new
+            return McpResult.OkBounded(new
             {
                 success = true,
                 sourceName = target.Name,
@@ -91,7 +91,7 @@ public class KnowledgeFileTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -104,7 +104,7 @@ public class KnowledgeFileTools
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(ReadNoteContent), out var permErr))
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
 
         var fileReader = scope.ServiceProvider.GetService<IFileReaderService>();
         var allowed = GetAllowedSources(scope.ServiceProvider);
@@ -114,7 +114,7 @@ public class KnowledgeFileTools
             var resolvedPath = await ResolvePath(scope.ServiceProvider, filePath, sourceName, allowed);
 
             if (!File.Exists(resolvedPath))
-                return McpResult.Fail($"文件不存在: {resolvedPath}", "not_found");
+                return McpResult.Fail($"文件不存在: {resolvedPath}", McpErrorCodes.NotFound);
 
             // 字段名禁止用 content：与 CallToolResult.content 冲突会整段丢失（见 McpResult 注释）。
             if (fileReader != null && endLine > 0 && !(startLine == 1 && endLine >= 100000))
@@ -136,7 +136,7 @@ public class KnowledgeFileTools
 
             var info = new FileInfo(resolvedPath);
             if (info.Length > 5 * 1024 * 1024)
-                return McpResult.Fail("文件超过 5MB 大小限制，请使用 startLine 和 endLine 范围流式读取", "too_large");
+                return McpResult.Fail("文件超过 5MB 大小限制，请使用 startLine 和 endLine 范围流式读取", McpErrorCodes.TooLarge);
 
             var text = await File.ReadAllTextAsync(resolvedPath);
             return McpResult.Ok(new
@@ -150,11 +150,11 @@ public class KnowledgeFileTools
         }
         catch (FileAccessDeniedException ex)
         {
-            return McpResult.Fail(ex.Message, "path_denied");
+            return McpResult.Fail(ex.Message, McpErrorCodes.PathDenied);
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -165,10 +165,10 @@ public class KnowledgeFileTools
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(GetNoteOutline), out var permErr))
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
 
         var fileReader = scope.ServiceProvider.GetService<IFileReaderService>();
-        if (fileReader == null) return McpResult.Fail("文件大纲读取服务未注册", "service_unavailable");
+        if (fileReader == null) return McpResult.Fail("文件大纲读取服务未注册", McpErrorCodes.ServiceUnavailable);
 
         var allowed = GetAllowedSources(scope.ServiceProvider);
 
@@ -177,7 +177,7 @@ public class KnowledgeFileTools
             var resolvedPath = await ResolvePath(scope.ServiceProvider, filePath, sourceName, allowed);
 
             if (!File.Exists(resolvedPath))
-                return McpResult.Fail($"文件不存在: {resolvedPath}", "not_found");
+                return McpResult.Fail($"文件不存在: {resolvedPath}", McpErrorCodes.NotFound);
 
             var meta = await fileReader.GetMetadataAsync(resolvedPath);
             return McpResult.Ok(new
@@ -196,11 +196,11 @@ public class KnowledgeFileTools
         }
         catch (FileAccessDeniedException ex)
         {
-            return McpResult.Fail(ex.Message, "path_denied");
+            return McpResult.Fail(ex.Message, McpErrorCodes.PathDenied);
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -217,10 +217,10 @@ public class KnowledgeFileTools
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(SearchFileContent), out var permErr))
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
 
         var searchEngine = scope.ServiceProvider.GetService<IFileSearchEngine>();
-        if (searchEngine == null) return McpResult.Fail("文件搜索引擎未注册", "service_unavailable");
+        if (searchEngine == null) return McpResult.Fail("文件搜索引擎未注册", McpErrorCodes.ServiceUnavailable);
 
         try
         {
@@ -231,7 +231,7 @@ public class KnowledgeFileTools
             {
                 var resolved = await GetCatalog(scope.ServiceProvider).ResolveAsync(sourceName);
                 if (resolved == null || IsScopedOut(resolved, allowed))
-                    return McpResult.Fail($"无权限访问数据源或不存在: {sourceName}（可用 list_sources 查看合法名称）", "source_not_found");
+                    return McpResult.Fail($"无权限访问数据源或不存在: {sourceName}（可用 list_sources 查看合法名称）", McpErrorCodes.SourceNotFound);
 
                 // 连接器名与配置源名可能不同，统一用路径限定搜索引擎。
                 targetSources = new List<string> { resolved.Path };
@@ -255,13 +255,14 @@ public class KnowledgeFileTools
 
             var result = await searchEngine.SearchAsync(query);
             if (!result.Success)
-                return McpResult.Fail(result.Error ?? "搜索失败", "search_failed");
+                return McpResult.Fail(result.Error ?? "搜索失败", McpErrorCodes.SearchFailed);
 
-            return McpResult.Ok(result);
+            // 引擎内部已夹取 MaxMatches 到 [1,500]；超预算直接拒绝，避免 439KB 级响应。
+            return McpResult.OkBounded(result);
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -269,14 +270,14 @@ public class KnowledgeFileTools
     public async Task<string> FindFilesByPattern(
         [Description("文件名或路径通配符（必填，如 \"*.json\"、\"*architecture*.md\"、\"*.cs\"）")] string globPattern,
         [Description("所属数据源名称（可选，可来自 list_sources）")] string? sourceName = null,
-        [Description("最大返回文件数（默认 100）")] int maxResults = 100)
+        [Description("最大返回文件数，默认 100，上限 500")] int maxResults = 100)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(FindFilesByPattern), out var permErr))
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
 
         var searchEngine = scope.ServiceProvider.GetService<IFileSearchEngine>();
-        if (searchEngine == null) return McpResult.Fail("文件搜索引擎未注册", "service_unavailable");
+        if (searchEngine == null) return McpResult.Fail("文件搜索引擎未注册", McpErrorCodes.ServiceUnavailable);
 
         try
         {
@@ -286,23 +287,27 @@ public class KnowledgeFileTools
             {
                 var resolved = await GetCatalog(scope.ServiceProvider).ResolveAsync(sourceName);
                 if (resolved == null || IsScopedOut(resolved, allowed))
-                    return McpResult.Fail($"无权限访问数据源或不存在: {sourceName}（可用 list_sources 查看合法名称）", "source_not_found");
+                    return McpResult.Fail($"无权限访问数据源或不存在: {sourceName}（可用 list_sources 查看合法名称）", McpErrorCodes.SourceNotFound);
 
                 sourceName = resolved.Name;
             }
 
-            var files = await searchEngine.FindFilesAsync(sourceName, globPattern, maxResults);
-            return McpResult.Ok(new
+            // 硬上限 500：此前 maxResults=5000 会返回 500 条 / 77KB，且描述未声明上限。
+            var effectiveMaxResults = Math.Clamp(maxResults, 1, 500);
+            var files = await searchEngine.FindFilesAsync(sourceName, globPattern, effectiveMaxResults);
+            return McpResult.OkBounded(new
             {
                 success = true,
                 pattern = globPattern,
+                requestedMaxResults = maxResults,
+                effectiveMaxResults,
                 count = files.Count,
                 files
             });
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 

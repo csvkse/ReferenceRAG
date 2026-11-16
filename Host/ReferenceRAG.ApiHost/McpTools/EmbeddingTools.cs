@@ -38,13 +38,13 @@ public class EmbeddingTools
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(EmbedText), out var permErr))
         {
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
         }
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
 
         // 边界钳制：实测 40,000 字符输入耗时 27.6 秒且无任何提示，Agent 侧必超时。
         if (text.Length > MaxEmbedChars)
-            return McpResult.Fail($"文本过长：{text.Length} 字符，上限 {MaxEmbedChars}。请分段后多次调用。", "too_large");
+            return McpResult.Fail($"文本过长：{text.Length} 字符，上限 {MaxEmbedChars}。请分段后多次调用。", McpErrorCodes.TooLarge);
 
         try
         {
@@ -63,7 +63,7 @@ public class EmbeddingTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -81,7 +81,7 @@ public class EmbeddingTools
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(CalculateSimilarity), out var permErr))
         {
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
         }
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
 
@@ -110,7 +110,7 @@ public class EmbeddingTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
@@ -119,14 +119,14 @@ public class EmbeddingTools
     /// 在需要一次处理多个文本时使用，提高效率。
     /// </summary>
     /// <param name="texts">待向量化的文本列表（必填，JSON数组格式）</param>
-    [McpServerTool, Description("批量向量化多段文本。用于一次性处理多个文本，提高效率。输入为JSON数组格式，如[\"文本1\",\"文本2\",\"文本3\"]。")]
+    [McpServerTool, Description("批量向量化多段文本。用于一次性处理多个文本，提高效率。输入为 JSON 数组字符串，如[\"文本1\",\"文本2\",\"文本3\"]。")]
     public async Task<string> EmbedBatch(
-        [Description("待向量化的文本列表（必填，JSON数组），如[\"文本1\",\"文本2\",\"文本3\"]")] string texts)
+        [Description("待向量化的文本列表（必填），须为 JSON 数组字符串，如[\"文本1\",\"文本2\",\"文本3\"]")] string texts)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(EmbedBatch), out var permErr))
         {
-            return McpResult.Fail(permErr, "forbidden");
+            return McpResult.Fail(permErr, McpErrorCodes.Forbidden);
         }
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
 
@@ -136,7 +136,7 @@ public class EmbeddingTools
             var oversize = textList.FirstOrDefault(t => t.Length > MaxEmbedChars);
             if (oversize != null)
                 return McpResult.Fail(
-                    $"存在超长文本（{oversize.Length} 字符），单条上限 {MaxEmbedChars}。请分段后重试。", "too_large");
+                    $"存在超长文本（{oversize.Length} 字符），单条上限 {MaxEmbedChars}。请分段后重试。", McpErrorCodes.TooLarge);
 
             var results = new List<object>();
 
@@ -161,7 +161,7 @@ public class EmbeddingTools
         }
         catch (Exception ex)
         {
-            return McpResult.Fail(ex.Message);
+            return McpResult.FailException(ex);
         }
     }
 
