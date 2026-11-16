@@ -27,7 +27,7 @@ public sealed class RrfSearchFusionStrategy : ISearchFusionStrategy
         }
 
         var (wBm25, wVector) = AdaptiveSearchFusionHelper.CalculateWeights(_query);
-        var merged = new Dictionary<string, (double TotalScore, RecallItem Item)>();
+        var merged = new Dictionary<string, (double TotalScore, RecallItem Item, string KbId)>();
 
         foreach (var snapshot in snapshots)
         {
@@ -42,11 +42,11 @@ public sealed class RrfSearchFusionStrategy : ISearchFusionStrategy
                 var key = $"{snapshot.KnowledgeBaseId}::{item.ChunkId}";
                 if (merged.TryGetValue(key, out var existing))
                 {
-                    merged[key] = (existing.TotalScore + rrfScore, existing.Item);
+                    merged[key] = (existing.TotalScore + rrfScore, existing.Item, existing.KbId);
                 }
                 else
                 {
-                    merged[key] = (rrfScore, item);
+                    merged[key] = (rrfScore, item, snapshot.KnowledgeBaseId);
                 }
             }
         }
@@ -58,7 +58,8 @@ public sealed class RrfSearchFusionStrategy : ISearchFusionStrategy
             .Select(v => v.Item with
             {
                 Score = v.TotalScore,
-                ScoreKind = ScoreKind.RRF
+                ScoreKind = ScoreKind.RRF,
+                KnowledgeBaseId = v.Item.KnowledgeBaseId ?? v.KbId
             })
             .ToList();
     }

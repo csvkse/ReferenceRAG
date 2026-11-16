@@ -56,6 +56,7 @@ public static class McpCatalogRegistry
             new List<McpToolCatalogItem>
             {
                 new("SemanticSearch", "在知识库中执行向量语义搜索，基于自然语言查找相关文档片段", "Read", "search"),
+                new("KnowledgeBaseDrillDown", "展开知识库切片的完整正文（按 chunkId 或 documentId）", "Read", "search"),
                 new("LexicalSearch", "在知识库中执行免向量词法搜索", "Read", "search"),
                 new("KnowledgeBaseSearch", "在授权的隔离知识库中搜索", "Read", "search"),
                 new("HybridSearch", "混合搜索（BM25 关键词精确匹配 + 向量双路语义融合检索）", "Read", "search"),

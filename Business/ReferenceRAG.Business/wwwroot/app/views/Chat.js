@@ -8,6 +8,7 @@ import { API_URL } from '/app/config/env.js';
 import { useAuthStore } from '/app/stores/auth.js';
 import { ragFetch as fetch } from '/core/transport/index.js';
 import { modelsApi, settingsApi, knowledgeBasesApi } from '/app/api/index.js';
+import { loadKbSpecMap, kbOptionLabel } from '/shared/kb-label.js';
 import { isNearConversationBottom, isConversationFollowPauseIntent, shouldResumeConversationFollow, shouldFollowConversationStream, shouldApplyConversationStreamScroll, resolveScrollContainer } from '/shared/conversation-scroll.js';
 import { useBreakpoints } from '/core/responsive.js';
 const component = /*@__PURE__*/ _defineComponent({
@@ -61,14 +62,19 @@ const component = /*@__PURE__*/ _defineComponent({
         const toolDescriptions = ref([]);
         const boundKnowledgeBases = ref([]);
         const boundKbIds = ref([]);
+        const boundKbSpecMap = ref({});
         const boundKbOptions = computed(() => boundKnowledgeBases.value.map(k => ({
-            label: `${k.name} (${k.embeddingSpecId})`,
+            label: kbOptionLabel(k, boundKbSpecMap.value),
             value: k.id
         })));
         const loadBoundKnowledgeBases = async () => {
             try {
-                const res = await knowledgeBasesApi.getAll();
+                const [res, specs] = await Promise.all([
+                    knowledgeBasesApi.getAll(),
+                    loadKbSpecMap()
+                ]);
                 boundKnowledgeBases.value = res.data || [];
+                boundKbSpecMap.value = specs;
             } catch (e) {
                 console.warn('Failed to load knowledge bases in Chat:', e);
             }
@@ -739,7 +745,7 @@ const component = /*@__PURE__*/ _defineComponent({
         });
         const __returned__ = {
             isMobile,
-            chatBackend, currentChatModel, currentChatDisplayName, chatVariant, isGpuMode, chatModelOptions, switchingModel, loadChatModelStatus, handleModelChange, cancel, message, authStore, sessionId, messages, input, streaming, scrollbarRef, toolDescriptions, boundKnowledgeBases, boundKbIds, boundKbOptions, loadBoundKnowledgeBases, initialized, rawSet, editVisible, editText, editIndex,
+            chatBackend, currentChatModel, currentChatDisplayName, chatVariant, isGpuMode, chatModelOptions, switchingModel, loadChatModelStatus, handleModelChange, cancel, message, authStore, sessionId, messages, input, streaming, scrollbarRef, toolDescriptions, boundKnowledgeBases, boundKbIds, boundKbSpecMap, boundKbOptions, loadBoundKnowledgeBases, initialized, rawSet, editVisible, editText, editIndex,
             conversationFollowPaused, isNearBottom, onCanvasScroll, onCanvasWheel, onCanvasTouchStart, onCanvasPointerDown, resumeAndScrollToBottom,
             usedTokens, maxTokens, usagePercent, contextUsageDisplay, contextTagType, fetchContextUsage,
             supportsVision, visionUnsupportedReason, visionStatus, fetchCapabilities,

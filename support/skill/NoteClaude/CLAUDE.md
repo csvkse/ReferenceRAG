@@ -15,6 +15,11 @@ updated: 2026-04-18
 
 ## ReferenceRAG 配置
 
+> **v2 提示**：检索单元已改为「知识库」（每库独立 `kb.db`）。完整说明见
+> `support/skill/ReferenceRAG/references/knowledge-base.md`。
+> 多库场景请先 `GET /api/knowledge-bases` 取库 ID，再调 `/api/knowledge-base-search`
+> 并显式传 `KnowledgeBaseIds`。下面的 `/api/ai/query` 方式仍可用，但会合并旧单库召回。
+
 ### 触发方式
 
 | 格式 | 示例 |

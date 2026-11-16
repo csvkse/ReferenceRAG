@@ -7,6 +7,7 @@ import {
 } from 'naive-ui';
 import { RefreshOutline, TrashOutline, SearchOutline, LayersOutline } from '@vicons/ionicons5';
 import { bm25IndexApi, knowledgeBasesApi, knowledgeBaseSearchApi } from '/app/api/index.js';
+import { loadKbSpecMap, kbOptionLabel } from '/shared/kb-label.js';
 import { knowledgeBaseRequest, knowledgeBaseResponse } from '/app/views/lexical-search-template.js';
 
 const component = /*@__PURE__*/ _defineComponent({
@@ -26,10 +27,11 @@ const component = /*@__PURE__*/ _defineComponent({
         // 知识库选择状态
         const knowledgeBases = ref([]);
         const selectedKbId = ref(null);
+        const kbSpecMap = ref({});
         const kbOptions = computed(() => [
             { label: '全部知识库 (全局词法检索)', value: '__all__' },
             ...knowledgeBases.value.map(k => ({
-                label: `📚 ${k.name} (${k.embeddingSpecId || '默认规范'})`,
+                label: kbOptionLabel(k, kbSpecMap.value, { prefix: '📚 ' }),
                 value: k.id
             }))
         ]);
@@ -52,8 +54,12 @@ const component = /*@__PURE__*/ _defineComponent({
 
         const loadKnowledgeBases = async () => {
             try {
-                const res = await knowledgeBasesApi.getAll();
+                const [res, specs] = await Promise.all([
+                    knowledgeBasesApi.getAll(),
+                    loadKbSpecMap()
+                ]);
                 knowledgeBases.value = res.data || [];
+                kbSpecMap.value = specs;
                 if (!selectedKbId.value && knowledgeBases.value.length > 0) {
                     selectedKbId.value = '__all__';
                 }
@@ -193,7 +199,7 @@ const component = /*@__PURE__*/ _defineComponent({
         const __returned__ = {
             message, loading, indexing, clearing, searching, showClearDialog, summary,
             indexProgress, searchResults, searchDuration, searchForm, knowledgeBases,
-            selectedKbId, kbOptions, loadKnowledgeBases, loadSummary, handleIndexAll,
+            selectedKbId, kbSpecMap, kbOptions, loadKnowledgeBases, loadSummary, handleIndexAll,
             handleClear, handleSearch,
             get NButton() { return NButton; },
             get NSpace() { return NSpace; },

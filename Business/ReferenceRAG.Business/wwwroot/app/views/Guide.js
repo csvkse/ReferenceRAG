@@ -13,6 +13,11 @@ const logLevelJson = `{
 
 const desktopApiJson = `{ "Desktop": { "EnableLocalApi": true } }`;
 
+// 模块级：Guide 的说明文档（含模块级模板字符串）与页面内示例都复用同一地址，
+// 部署在 5123/5124/自定义端口时无需改文档。放在 setup 里会导致模块级模板插值报 ReferenceError。
+const serviceOrigin = (typeof window !== 'undefined' && window.location?.origin) || 'http://localhost:7897';
+const serviceBase = `${serviceOrigin}/api`;
+
 const dockerComposeExample = `services:
   referencerag:
     # 官方容器镜像标签可选:
@@ -24,7 +29,7 @@ const dockerComposeExample = `services:
     container_name: referencerag
     restart: unless-stopped
     ports:
-      - "7897:7897"
+            - "7897:5000"   # 宿主机 7897 → 容器 5000（容器内固定监听 5000）
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ReferenceRAG__dataPath=/app/data
@@ -42,14 +47,14 @@ const dockerComposeExample = `services:
               capabilities: [gpu]`;
 
 const dockerRunCpu = `docker run -d --name referencerag \
-  -p 7897:7897 \
+  -p 7897:5000 \
   -v ./data:/app/data \
   -v ./models:/app/models \
   ghcr.io/csvkse/referencerag:latest`;
 
 const dockerRunCuda = `# 需要宿主机具备 NVIDIA 显卡驱动与 nvidia-container-toolkit
 docker run -d --name referencerag --gpus all \
-  -p 7897:7897 \
+  -p 7897:5000 \
   -v ./data:/app/data \
   -v ./models:/app/models \
   ghcr.io/csvkse/referencerag:latest-cuda`;
@@ -58,7 +63,7 @@ const dockerRunAmd = `# 挂载 Linux KFD 算力设备与 DRI 渲染节点
 docker run -d --name referencerag \
   --device=/dev/kfd --device=/dev/dri \
   --group-add video --group-add render \
-  -p 7897:7897 \
+  -p 7897:5000 \
   -v ./data:/app/data \
   -v ./models:/app/models \
   ghcr.io/csvkse/referencerag:latest-rocm`;
@@ -67,7 +72,7 @@ const dockerRunIntel = `# 挂载 Linux DRI 渲染节点 (已内置 Level Zero / 
 docker run -d --name referencerag \
   --device=/dev/dri \
   --group-add video --group-add render \
-  -p 7897:7897 \
+  -p 7897:5000 \
   -v ./data:/app/data \
   -v ./models:/app/models \
   ghcr.io/csvkse/referencerag:latest-intel`;
@@ -127,14 +132,14 @@ allowed-tools: Read, Bash
 
 示例：\`Git 分支管理\` → \`Git 分支管理 branch 版本控制 分支策略 git flow\`
 
-直接调用 \`POST http://localhost:7897/api/ai/query\` 执行 HybridRerank 搜索，格式化返回结果。
+先列出知识库（GET \`/api/knowledge-bases\`），再调 \`POST /api/knowledge-base-search\` 并显式传 knowledgeBaseIds，格式化返回结果。
 
 ## 配置（可选）
 
 如需自定义地址，修改 \`~/.agents/.env\`：
 
 \`\`\`env
-OBSIDIAN_RAG_API_URL=http://localhost:7897
+OBSIDIAN_RAG_API_URL=${serviceOrigin}
 OBSIDIAN_RAG_API_KEY=
 \`\`\`
 
@@ -146,10 +151,10 @@ OBSIDIAN_RAG_API_KEY=
 
 **正确方式：使用 heredoc + --data-binary**
 \`\`\`bash
-curl -s -X POST "http://localhost:7897/api/ai/query" \\
+curl -s -X POST "${serviceBase}/knowledge-base-search" \\
   -H "Content-Type: application/json; charset=utf-8" \\
   --data-binary @- << 'EOF'
-{"query": "搜索关键词", "mode": "HybridRerank", "topK": 10}
+{"Query": "搜索关键词", "KnowledgeBaseIds": [], "TopK": 10}
 EOF
 \`\`\`
 
@@ -161,19 +166,19 @@ EOF
 ### 其他方式
 \`\`\`bash
 # PowerShell（推荐） - 不需要特殊处理
-curl -X POST "http://localhost:7897/api/ai/query" -H "Content-Type: application/json" -d '{"query": "搜索关键词", "mode": "HybridRerank"}'
+curl -X POST "${serviceBase}/knowledge-base-search" -H "Content-Type: application/json; charset=utf-8" -d '{"Query": "搜索关键词", "KnowledgeBaseIds": [], "TopK": 10}'
 
 # CMD - 需先设置编码
 chcp 65001
-curl -X POST "http://localhost:7897/api/ai/query" -H "Content-Type: application/json; charset=utf-8" -d "{\\"query\\": \\"搜索关键词\\"}"
+curl -X POST "${serviceBase}/knowledge-base-search" -H "Content-Type: application/json; charset=utf-8" -d "{\\"Query\\": \\"搜索关键词\\", \\"KnowledgeBaseIds\\": []}"
 \`\`\`
 
-**查询模式**：Quick(3) | Standard(10) | Hybrid(15) | HybridRerank(10,推荐) | Deep(20)
+**检索范围**：\`KnowledgeBaseIds\` 留空 = 全部启用库（最多 8 库扇出）;传具体 ID 则只查这些库。精确词法加 \`"UseLexicalTokenizer": true\`。
 
 ## 服务地址
 
-- Web UI: \`http://localhost:7897\`
-- Swagger: \`http://localhost:7897/swagger\`
+- Web UI: \`${serviceOrigin}\`
+- Swagger: \`${serviceOrigin}/swagger\`
 
 ## 支持的模型
 
@@ -206,7 +211,7 @@ const component = /*@__PURE__*/ _defineComponent({
     setup(__props, { expose: __expose }) {
         __expose();
         const message = useMessage();
-        
+
         const mcpConfigExample = JSON.stringify({
             "mcpServers": {
                 "ReferenceRAG": {
@@ -214,7 +219,7 @@ const component = /*@__PURE__*/ _defineComponent({
                     "name": "ReferenceRAG",
                     "type": "streamableHttp",
                     "description": "",
-                    "baseUrl": "http://127.0.0.1:7897/api/mcp",
+                    "baseUrl": `${serviceOrigin}/api/mcp`,
                     "command": "",
                     "args": [],
                     "env": {},
@@ -224,22 +229,20 @@ const component = /*@__PURE__*/ _defineComponent({
         }, null, 2);
 
         const mcpSearchExample = JSON.stringify({
-            tool: "rag-semantic-search",
+            tool: "knowledge_base_search",
             arguments: {
                 query: "向量数据库",
-                topK: 10,
-                sources: []
+                knowledgeBaseIds: [],
+                topK: 10
             }
         }, null, 2);
 
         const mcpDrilldownExample = JSON.stringify({
-            tool: "rag-hybrid-search",
+            tool: "knowledge_base_drill_down",
             arguments: {
-                query: "向量数据库",
-                topK: 10,
-                k1: 1.5,
-                b: 0.75,
-                enableRerank: false
+                knowledgeBaseId: "<kbId>",
+                documentId: "<documentId>",
+                limit: 20
             }
         }, null, 2);
 
@@ -282,6 +285,7 @@ const component = /*@__PURE__*/ _defineComponent({
             skillTemplate,
             copySkillTemplate,
             downloadSkillTemplate,
+            serviceOrigin, serviceBase,
             get CopyOutline() { return CopyOutline; }
         };
         return __returned__;
@@ -310,7 +314,7 @@ component.template = `
                 <n-card size="small" embedded title="Web 服务端 (WebHost / ApiHost)">
                   <n-space vertical :size="8">
                     <n-tag type="info" size="small">控制台 / Windows 服务 / Systemd</n-tag>
-                    <n-text depth="2">标准 ASP.NET Core 10 高并发后端，默认监听 <code>http://localhost:7897</code> 端口。</n-text>
+                    <n-text depth="2">标准 ASP.NET Core 10 高并发后端，默认监听 <code>${serviceOrigin}</code> 端口。</n-text>
                     <n-text depth="3">提供完整的现代化 Web UI 仪表盘、RESTful API 与交互式 Swagger 接口文档。</n-text>
                   </n-space>
                 </n-card>
@@ -608,48 +612,83 @@ component.template = `
                 </thead>
                 <tbody>
                   <tr>
-                    <td><n-text code>sources-list</n-text></td>
-                    <td>列出所有数据源及索引统计</td>
+                    <td><n-text code>knowledge_base_list</n-text></td>
+                    <td>列出全部物理隔离知识库（id / 名称 / 启用 / 绑定模型）</td>
                     <td>-</td>
                   </tr>
                   <tr>
-                    <td><n-text code>sources-get-info</n-text></td>
-                    <td>获取指定数据源详细信息</td>
-                    <td>sourceName</td>
+                    <td><n-text code>knowledge_base_search</n-text></td>
+                    <td>跨库多路召回 + RRF 融合（显式限定知识库范围）</td>
+                    <td>query, knowledgeBaseIds, topK, useLexicalTokenizer</td>
                   </tr>
                   <tr>
-                    <td><n-text code>rag-semantic-search</n-text></td>
-                    <td>向量语义搜索</td>
-                    <td>query, topK, sources</td>
+                    <td><n-text code>semantic_search</n-text></td>
+                    <td>知识库向量语义检索</td>
+                    <td>query, topK, knowledgeBaseIds</td>
                   </tr>
                   <tr>
-                    <td><n-text code>rag-hybrid-search</n-text></td>
-                    <td>混合搜索（向量+BM25）</td>
-                    <td>query, topK, k1, b, enableRerank</td>
+                    <td><n-text code>hybrid_search</n-text></td>
+                    <td>知识库混合检索（向量 + 词法融合）</td>
+                    <td>query, topK, lexicalOnly, knowledgeBaseIds</td>
                   </tr>
                   <tr>
-                    <td><n-text code>rag-rerank-results</n-text></td>
-                    <td>对候选文档重排</td>
+                    <td><n-text code>lexical_search</n-text></td>
+                    <td>免向量词法检索（精确词、API 名、错误码）</td>
+                    <td>query, topK, knowledgeBaseIds</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>knowledge_base_drill_down</n-text></td>
+                    <td>展开知识库切片的完整正文</td>
+                    <td>knowledgeBaseId, chunkId 或 documentId, limit</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>rerank_results</n-text></td>
+                    <td>对候选文档进行语义重排</td>
                     <td>query, documents, topK</td>
                   </tr>
                   <tr>
-                    <td><n-text code>embedding-encode-text</n-text></td>
-                    <td>文本向量化</td>
-                    <td>text</td>
+                    <td><n-text code>embed_text</n-text> / <n-text code>embed_batch</n-text></td>
+                    <td>单条 / 批量文本向量化</td>
+                    <td>text / texts</td>
                   </tr>
                   <tr>
-                    <td><n-text code>embedding-calculate-similarity</n-text></td>
-                    <td>计算文本相似度</td>
+                    <td><n-text code>calculate_similarity</n-text></td>
+                    <td>计算两段文本的余弦相似度</td>
                     <td>text1, text2</td>
                   </tr>
                   <tr>
-                    <td><n-text code>index-status</n-text></td>
-                    <td>获取索引状态</td>
+                    <td><n-text code>list_sources</n-text> / <n-text code>get_source_info</n-text></td>
+                    <td>数据源列表 / 单个源详情（计数取自各知识库 kb.db）</td>
+                    <td>knowledgeBaseIds / sourceName</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>get_index_status</n-text></td>
+                    <td>逐库索引统计（分块 / 文档 / 向量）</td>
                     <td>-</td>
                   </tr>
                   <tr>
-                    <td><n-text code>ping</n-text></td>
-                    <td>测试 MCP 连通性</td>
+                    <td><n-text code>list_files</n-text> / <n-text code>get_document_info</n-text></td>
+                    <td>知识库文档清单 / 单切片详情</td>
+                    <td>knowledgeBaseIds, limit / chunkId, knowledgeBaseId</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>get_file_tree</n-text> / <n-text code>read_note_content</n-text> / <n-text code>get_note_outline</n-text></td>
+                    <td>文件树 / 按行读正文 / Markdown 大纲</td>
+                    <td>path、filePath、startLine/endLine</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>search_file_content</n-text> / <n-text code>find_files_by_pattern</n-text></td>
+                    <td>正则内容检索 / 通配符找文件</td>
+                    <td>pattern, globPattern</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>graph_search</n-text> / <n-text code>graph_search_by_title</n-text></td>
+                    <td>图谱邻居遍历 / 按标题找节点</td>
+                    <td>nodeId, depth / query, limit</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>ping</n-text> / <n-text code>get_service_info</n-text></td>
+                    <td>连通性测试 / 服务信息</td>
                     <td>-</td>
                   </tr>
                 </tbody>

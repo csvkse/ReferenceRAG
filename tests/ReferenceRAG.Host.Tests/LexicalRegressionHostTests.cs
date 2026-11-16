@@ -227,20 +227,13 @@ public class LexicalRegressionHostTests
         await using var f = await RegressionFixture.CreateAsync();
         var tools = new RagSearchTools(f.App.Services);
 
-        // Tool call with source filter
-        var resJson = await tools.LexicalSearch("alphakw", 5, "[\"A\"]");
+        // v2 契约：MCP 词法检索以 knowledgeBaseIds 为范围。夹具未建库时应明确报错，
+        // 而不是静默返回空（旧实现走 sources 过滤旧单库）。
+        var resJson = await tools.LexicalSearch("alphakw", 5);
         using (var doc = JsonDocument.Parse(resJson))
         {
-            Assert.True(doc.RootElement.GetProperty("success").GetBoolean());
-            Assert.True(doc.RootElement.GetProperty("count").GetInt32() > 0);
-        }
-
-        // Tool call with non-matching source filter returns 0 hits
-        var zeroJson = await tools.LexicalSearch("alphakw", 5, "[\"B\"]");
-        using (var doc = JsonDocument.Parse(zeroJson))
-        {
-            Assert.True(doc.RootElement.GetProperty("success").GetBoolean());
-            Assert.Equal(0, doc.RootElement.GetProperty("count").GetInt32());
+            Assert.False(doc.RootElement.GetProperty("success").GetBoolean());
+            Assert.Contains("知识库", doc.RootElement.GetProperty("error").GetString());
         }
     }
 

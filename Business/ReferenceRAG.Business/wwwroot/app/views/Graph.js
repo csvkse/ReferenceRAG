@@ -3,6 +3,7 @@ import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue';
 import { NIcon, NPopconfirm, NTag, NSelect, useMessage } from 'naive-ui';
 import { RefreshOutline, LayersOutline, AddOutline, TrashOutline } from '@vicons/ionicons5';
 import { graphApi, knowledgeBasesApi } from '/app/api/index.js';
+import { loadKbSpecMap, kbOptionLabel } from '/shared/kb-label.js';
 import { useIndexStore } from '/app/stores/index.js';
 
 const component = /*@__PURE__*/ _defineComponent({
@@ -27,10 +28,11 @@ const component = /*@__PURE__*/ _defineComponent({
         // 知识库作用域状态
         const knowledgeBases = ref([]);
         const selectedKbId = ref(null);
+        const kbSpecMap = ref({});
         const kbOptions = computed(() => [
             { label: '全部知识库 (聚合统计)', value: '__all__' },
             ...knowledgeBases.value.map((k) => ({
-                label: `📚 ${k.name} (${k.embeddingSpecId || '默认规范'})`,
+                label: kbOptionLabel(k, kbSpecMap.value, { prefix: '📚 ' }),
                 value: k.id
             }))
         ]);
@@ -41,8 +43,12 @@ const component = /*@__PURE__*/ _defineComponent({
 
         const loadKnowledgeBases = async () => {
             try {
-                const res = await knowledgeBasesApi.getAll();
+                const [res, specs] = await Promise.all([
+                    knowledgeBasesApi.getAll(),
+                    loadKbSpecMap()
+                ]);
                 knowledgeBases.value = res.data || [];
+                kbSpecMap.value = specs;
                 if (!selectedKbId.value && knowledgeBases.value.length > 0) {
                     selectedKbId.value = '__all__';
                 }
@@ -305,7 +311,7 @@ const component = /*@__PURE__*/ _defineComponent({
         const __returned__ = {
             nodeTypeMeta, nodeTypeOptions, message, indexStore, searchQuery, nodeId, depth,
             searching, traversing, statsLoading, rebuilding, selectedNodeTypes,
-            knowledgeBases, selectedKbId, kbOptions, loadKnowledgeBases, getActiveKbId,
+            knowledgeBases, selectedKbId, kbSpecMap, kbOptions, loadKnowledgeBases, getActiveKbId,
             get rebuildPollTimer() { return rebuildPollTimer; }, set rebuildPollTimer(v) { rebuildPollTimer = v; },
             searchResults, traversalResult, stats, filteredSearchResults, filteredTraversalNodes,
             normalizeNodeId, getShortNodeId, renderNodeIdCell, nodeColumns, edgeColumns,

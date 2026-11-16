@@ -2,6 +2,8 @@ using ModelContextProtocol.Server;
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using ReferenceRAG.Business.Features.KnowledgeBase.Services;
+using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -25,8 +27,8 @@ public class SourceManagementTools
     /// 列出所有已配置的数据源及其状态。
     /// 在管理知识库、查看数据源概览时使用。
     /// </summary>
-    [McpServerTool, Description("列出所有已配置的知识库数据源及其索引统计。包括源名称、路径、类型、启用状态、向量数量、文档数量等信息。用于了解当前知识库的覆盖范围。")]
-    public async Task<string> ListSources()
+    [McpServerTool, Description("列出所有已配置的知识库数据源及其索引统计（计数取自各知识库 kb.db 物理事实源）。包括源名称、路径、启用状态、文档数、分块数。用于了解当前知识库的覆盖范围。")]
+    public async Task<string> ListSources([Description("所有物理知识库 ID 的 JSON 数组，如 [\"kb_a\",\"kb_b\"]。留空表示全部已启用知识库")] string? knowledgeBaseIds = null)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(ListSources), out var permErr))
@@ -34,11 +36,19 @@ public class SourceManagementTools
             return permErr!;
         }
         var config = scope.ServiceProvider.GetRequiredService<ConfigManager>().Load();
-        var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
-        var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
+        var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
 
         try
         {
+            if (kbService != null)
+            {
+                return JsonSerializer.Serialize(await BuildKnowledgeBaseSourceViewAsync(
+                    kbService, config, knowledgeBaseIds), JsonOptions);
+            }
+
+            var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+            var bm25Store = scope.ServiceProvider.GetRequiredService<IBM25Store>();
+
             var sources = config.Sources;
             var sourceStats = new List<object>();
 
@@ -71,11 +81,7 @@ public class SourceManagementTools
                 success = true,
                 count = sources.Count,
                 sources = sourceStats
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            }, JsonOptions);
         }
         catch (Exception ex)
         {
@@ -86,6 +92,92 @@ public class SourceManagementTools
             });
         }
     }
+
+    /// <summary>
+    /// 以 per-KB 连接器快照为事实源，产出「源」视图：
+    /// config.Sources 中的路径保留其名称，仅存在于知识库连接器中的路径补一行投影。
+    /// 与 REST /api/Sources 的计数口径一致（旧 vectors.db 快照不再参与）。
+    /// </summary>
+    private static async Task<object> BuildKnowledgeBaseSourceViewAsync(
+        IKnowledgeBaseService kbService, ObsidianRagConfig config, string? knowledgeBaseIdsJson)
+    {
+        var requested = string.IsNullOrWhiteSpace(knowledgeBaseIdsJson)
+            ? new List<string>()
+            : JsonSerializer.Deserialize<List<string>>(knowledgeBaseIdsJson) ?? new List<string>();
+
+        var kbs = await kbService.ListKnowledgeBasesAsync();
+        var targetKbs = requested.Count > 0
+            ? kbs.Where(k => requested.Contains(k.Id, StringComparer.OrdinalIgnoreCase)).ToList()
+            : kbs.Where(k => k.Enabled).ToList();
+
+        var snapshots = await kbService.GetConnectorStatsSnapshotAsync();
+        var byPath = new Dictionary<string, (int Docs, int Chunks)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var snap in snapshots)
+        {
+            if (!targetKbs.Any(k => k.Id == snap.KnowledgeBaseId)) continue;
+            var key = NormalizePathKey(snap.TargetPath);
+            byPath.TryGetValue(key, out var acc);
+            byPath[key] = (acc.Docs + snap.DocumentCount, acc.Chunks + snap.ChunkCount);
+        }
+
+        var rows = new List<object>();
+        foreach (var source in config.Sources)
+        {
+            byPath.TryGetValue(NormalizePathKey(source.Path), out var stat);
+            rows.Add(new
+            {
+                name = string.IsNullOrEmpty(source.Name) ? Path.GetFileName(source.Path) : source.Name,
+                path = source.Path,
+                type = source.Type.ToString(),
+                enabled = source.Enabled,
+                origin = "SourceConfig",
+                fileCount = stat.Docs,
+                chunkCount = stat.Chunks
+            });
+        }
+
+        // 仅由知识库连接器投影出来的路径（config.Sources 中没有）也要可见，否则 MCP 客户端看不到真实语料
+        var knownPaths = config.Sources.Select(s => NormalizePathKey(s.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var connectorRows = new List<object>();
+        foreach (var kb in targetKbs)
+        {
+            foreach (var conn in await kbService.GetConnectorsAsync(kb.Id))
+            {
+                var key = NormalizePathKey(conn.TargetPath);
+                if (!knownPaths.Add(key)) continue;
+                byPath.TryGetValue(key, out var stat);
+                connectorRows.Add(new
+                {
+                    name = $"{kb.Name} - {Path.GetFileName(conn.TargetPath)}",
+                    path = conn.TargetPath,
+                    type = "KnowledgeBaseConnector",
+                    enabled = conn.Enabled,
+                    origin = "KnowledgeBaseOnly",
+                    knowledgeBaseId = kb.Id,
+                    connectorId = conn.Id,
+                    fileCount = stat.Docs,
+                    chunkCount = stat.Chunks
+                });
+            }
+        }
+
+        return new
+        {
+            success = true,
+            knowledgeBaseCount = targetKbs.Count,
+            count = rows.Count + connectorRows.Count,
+            sources = rows.Concat(connectorRows).ToList()
+        };
+    }
+
+    private static string NormalizePathKey(string? path) =>
+        (path ?? string.Empty).TrimEnd('/', '\\').Replace('\\', '/');
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     /// <summary>
     /// 获取指定数据源的详细信息，包括存储统计和物理文件信息。

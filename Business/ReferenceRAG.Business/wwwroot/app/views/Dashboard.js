@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { NTag, NButton, NSpace, NCard, NGrid, NGi, NStatistic, NIcon, NProgress, NList, NListItem, NThing, NText, NDataTable, NDescriptions, NDescriptionsItem, useMessage } from 'naive-ui';
 import { LayersOutline, FolderOutline, DocumentTextOutline, GridOutline, SearchOutline, AddOutline, ChatbubblesOutline } from '@vicons/ionicons5';
 import { knowledgeBasesApi, indexApi } from '/app/api/index.js';
+import { loadKbSpecMap, kbModelLabel } from '/shared/kb-label.js';
 import { useIndexStore } from '/app/stores/index.js';
 import { JobCenter } from '/core/jobs/JobCenter.js';
 
@@ -20,9 +21,18 @@ const component = /*@__PURE__*/ _defineComponent({
         const knowledgeBases = ref([]);
         const connectorsMap = ref({});
         const loadingKbs = ref(false);
+        const kbSpecMap = ref({});
 
         const totalConnectors = computed(() => {
             return Object.values(connectorsMap.value).reduce((sum, list) => sum + (list?.length || 0), 0);
+        });
+
+        // 知识库列表总文件数：按连接器的物理统计求和（与源管理计数同源），
+        // 不再用 /index/summary 的旧单库快照（纯 KB 架构下它会偏小/过期）。
+        const totalKbFiles = computed(() => {
+            return Object.values(connectorsMap.value)
+                .flat()
+                .reduce((sum, c) => sum + (c?.documentCount || 0), 0);
         });
 
         const kbColumns = [
@@ -35,7 +45,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 title: '嵌入模型规范',
                 key: 'embeddingSpecId',
                 render: (row) => h(NTag, { type: 'info', size: 'small', secondary: true }, {
-                    default: () => row.embeddingSpecId || '默认规范'
+                    default: () => kbModelLabel(row, kbSpecMap.value)
                 })
             },
             {
@@ -95,7 +105,11 @@ const component = /*@__PURE__*/ _defineComponent({
         const loadKnowledgeBases = async (silent = false) => {
             if (!silent) loadingKbs.value = true;
             try {
-                const response = await knowledgeBasesApi.getAll();
+                const [response, specs] = await Promise.all([
+                    knowledgeBasesApi.getAll(),
+                    loadKbSpecMap()
+                ]);
+                kbSpecMap.value = specs;
                 knowledgeBases.value = response.data || [];
 
                 const map = {};
@@ -140,8 +154,8 @@ const component = /*@__PURE__*/ _defineComponent({
         });
 
         const __returned__ = {
-            router, message, indexStore, stats, knowledgeBases, connectorsMap, loadingKbs,
-            totalConnectors, kbColumns, loadStats, loadKnowledgeBases,
+            router, message, indexStore, stats, knowledgeBases, connectorsMap, loadingKbs, kbSpecMap,
+            totalConnectors, totalKbFiles, kbColumns, loadStats, loadKnowledgeBases,
             get NButton() { return NButton; },
             get NSpace() { return NSpace; },
             get NCard() { return NCard; },
@@ -193,7 +207,7 @@ component.template = `
       </n-gi>
       <n-gi>
         <n-card>
-          <n-statistic label="总文件索引数" :value="stats?.totalFiles || 0">
+          <n-statistic label="总文件索引数" :value="totalKbFiles || 0">
             <template #prefix>
               <n-icon :component="DocumentTextOutline" />
             </template>

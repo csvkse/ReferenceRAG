@@ -87,6 +87,15 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         }
     }
 
+    /// <summary>
+    /// 结构化事实类工具：返回的是权威文本（目录树、索引统计），必须原样回显。
+    /// 交给模型复述会把真实数据改写成看似合理但完全虚构的内容（真机已复现）。
+    /// </summary>
+    private static bool IsVerbatimToolResult(string? toolName) =>
+        toolName is not null
+        && (toolName.Equals("GetFileStructure", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("GetIndexStatus", StringComparison.OrdinalIgnoreCase));
+
     public IChatClient? Client => _client;
     public bool IsConfigured => _client != null;
     public bool IsLocalGguf => _isLocalGguf && _activeBackend == "LocalGguf";
@@ -822,34 +831,77 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
 
     [Description("按 refId 展开某个检索结果的完整上下文，适用于 SearchKnowledge 返回内容被截断时。")]
     private async Task<string> DrillDownChunkAsync(
-        [Description("来自 SearchKnowledge 结果的 refId")] string refId,
-        [Description("原始查询词")] string query,
-        [Description("上下文扩展窗口大小，默认 2")] int expandContext = 2)
+        [Description("来自 SearchKnowledge 旧库结果的 refId（可选）。KB 结果请改用 chunkId + knowledgeBaseId")] string? refId = null,
+        [Description("原始查询词（可选，旧库展开时使用）")] string? query = null,
+        [Description("上下文扩展窗口大小，默认 2")] int expandContext = 2,
+        [Description("知识库切片 ID（可选）。若 SearchKnowledge 结果来自知识库，请传 chunkId 与其所属 knowledgeBaseId")] string? chunkId = null,
+        [Description("知识库 ID（可选）。与 chunkId 同时提供时优先走物理知识库展开")] string? knowledgeBaseId = null)
     {
         RecordExecutedTool("DrillDownChunk");
         try
         {
             using var scope = _scopeFactory.CreateScope();
+
+            // 状态机：显式尝试物理知识库 → 旧库 → 明确失败，杜绝「静默返回空」。
+            var resolution = ResolveKbTarget(scope.ServiceProvider, knowledgeBaseId, chunkId, refId);
+            if (resolution.KbId != null && resolution.ChunkId != null)
+            {
+                var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
+                if (kbService != null)
+                {
+                    var chunk = await kbService.GetChunkByIdAsync(resolution.KbId, resolution.ChunkId);
+                    if (chunk != null)
+                    {
+                        return $"## 展开内容（知识库 {resolution.KbId}，切片 {chunk.Id}，文档 {chunk.DocumentSourceKey}）\n\n{chunk.Text}";
+                    }
+                    return $"知识库 {resolution.KbId} 中不存在切片 {resolution.ChunkId}。若该 refId 来自旧库检索结果，请改用 refId 参数重试。";
+                }
+            }
+
             var allowedSources = scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
             if (allowedSources is { Count: 0 }) return "当前授权范围内没有可检索的数据源。";
+
+            if (string.IsNullOrWhiteSpace(refId))
+                return resolution.Hint ?? "未提供 refId/chunkId，无法展开。请用 SearchKnowledge 检索后按其返回的 chunkId 与 knowledgeBaseId 调用。";
+
             var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
             var response = await searchService.DrillDownAsync(new DrillDownRequest
             {
-                Query = query,
+                Query = query ?? string.Empty,
                 RefIds = [refId],
                 ExpandContext = expandContext,
                 Mode = scope.ServiceProvider.GetService<ConfigManager>()?.Load().Search.ChatQueryMode,
                 Sources = allowedSources?.ToList()
             });
-            return string.IsNullOrWhiteSpace(response.FullContext)
-                ? "未能展开该片段内容。"
-                : $"## 展开内容（refId: {refId}）\n\n{response.FullContext}";
+
+            if (!string.IsNullOrWhiteSpace(response.FullContext))
+                return $"## 展开内容（refId: {refId}）\n\n{response.FullContext}";
+
+            return resolution.Hint ?? "未能展开该片段内容（该 refId 可能来自已停止写入的旧索引，建议先用 SearchKnowledge 重新检索）。";
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "DrillDown 失败: {RefId}", refId);
             return $"展开失败：{ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// 解析切片所属知识库（状态机：KbExplicit → KbPrefixProbe → LegacyExpected → Unknown）。
+    /// KB 分块 ID 采用 GUID 格式，此处仅做格式判别与显式参数优先，不做跨库全量扫描以免拖慢对话。
+    /// </summary>
+    private static (string? KbId, string? ChunkId, string? Hint) ResolveKbTarget(
+        IServiceProvider services, string? knowledgeBaseId, string? chunkId, string? refId)
+    {
+        if (!string.IsNullOrWhiteSpace(knowledgeBaseId) && !string.IsNullOrWhiteSpace(chunkId))
+            return (knowledgeBaseId, chunkId, null);
+
+        if (!string.IsNullOrWhiteSpace(knowledgeBaseId))
+            return (knowledgeBaseId, string.IsNullOrWhiteSpace(chunkId) ? refId : chunkId, null);
+
+        if (!string.IsNullOrWhiteSpace(chunkId) && !string.IsNullOrWhiteSpace(refId) && chunkId != refId)
+            return (null, null, "chunkId 与 refId 不一致且未提供 knowledgeBaseId，无法判定所属知识库。");
+        return (null, null, null);
     }
 
     [Description("BM25 关键词精确搜索，适用于错误码、API 名称、变量名、精确术语等场景。")]
@@ -1091,18 +1143,19 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         }
     }
 
-    [Description("获取一批文件的章节目录结构（标题 + 行号范围），不含正文，用于规划后续精准读取。文件路径用逗号分隔，单次最多 20 个。")]
+    [Description("获取文件的章节目录结构（标题 + 行号范围），不含正文，用于规划后续精准读取。不传 filePaths 时返回当前知识库的目录树。文件路径用逗号分隔，单次最多 20 个。")]
     private async Task<string> GetFileStructureAsync(
-        [Description("文件绝对路径列表，多个路径用英文逗号分隔")] string filePaths)
+        [Description("文件绝对路径列表，多个路径用英文逗号分隔。留空则返回当前挂载知识库的目录树与连接器路径")] string? filePaths = null)
     {
         RecordExecutedTool("GetFileStructure");
         try
         {
-            var paths = filePaths.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (paths.Length == 0) return "文件路径列表不能为空。";
+            using var scope = _scopeFactory.CreateScope();
+            var paths = (filePaths ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (paths.Length == 0)
+                return await BuildKnowledgeBaseTreeAsync(scope.ServiceProvider);
             if (paths.Length > 20) return "单次最多查询 20 个文件。";
 
-            using var scope = _scopeFactory.CreateScope();
             var allowedSources = scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources();
             var configManager = scope.ServiceProvider.GetRequiredService<ConfigManager>();
 
@@ -1130,7 +1183,8 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
 
                 if (file == null)
                 {
-                    sb.AppendLine($"- {rawPath}: 文件未被索引");
+                    var kbHint = await TryResolveKnowledgeBaseDocumentAsync(scope.ServiceProvider, normalizedPath);
+                    sb.AppendLine($"- {rawPath}: {kbHint ?? "文件未被索引"}");
                     continue;
                 }
 
@@ -1156,6 +1210,62 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             _logger.LogError(ex, "GetFileStructure 失败");
             return $"获取文件结构失败：{ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// 无文件路径时的目录树分支：读物理知识库的连接器与目录层级。
+    /// 旧实现直接返回「不能为空」，模型拿不到任何真实结构就自行编造目录树（真机实测出现虚构的 React/Python 工程树）。
+    /// </summary>
+    private async Task<string> BuildKnowledgeBaseTreeAsync(IServiceProvider services)
+    {
+        var kbService = services.GetService<IKnowledgeBaseService>();
+        if (kbService == null) return "文件路径列表不能为空。";
+
+        var boundKbs = _currentRequestKnowledgeBaseIds.Value;
+        var targetIds = boundKbs is { Count: > 0 }
+            ? boundKbs.ToList()
+            : (await kbService.ListKnowledgeBasesAsync()).Where(k => k.Enabled).Select(k => k.Id).ToList();
+        if (targetIds.Count == 0) return "当前没有已启用的知识库，无法列出目录结构。";
+
+        var kbs = (await kbService.ListKnowledgeBasesAsync()).ToDictionary(k => k.Id);
+        var sb = new StringBuilder();
+        sb.AppendLine("## 知识库目录树");
+        sb.AppendLine();
+
+        foreach (var kbId in targetIds)
+        {
+            if (!kbs.TryGetValue(kbId, out var kb)) continue;
+
+            var connectors = await kbService.GetConnectorsAsync(kbId);
+            sb.AppendLine($"### {kb.Name}（knowledgeBaseId: {kb.Id}）");
+
+            if (connectors.Count == 0)
+            {
+                sb.AppendLine("  （无连接器）");
+                sb.AppendLine();
+                continue;
+            }
+
+            foreach (var conn in connectors)
+            {
+                sb.AppendLine($"- 连接器 {conn.Id}：{conn.TargetPath}"
+                    + $"（{conn.DocumentCount} 篇文档 / {conn.ChunkCount} 切片，{(conn.Enabled ? "启用" : "停用")}）");
+            }
+
+            var paths = await kbService.GetPathsAsync([kbId]);
+            foreach (var src in paths.Sources)
+            {
+                sb.AppendLine($"  - {src.Name}：{src.RootPath}");
+                foreach (var folder in src.Folders)
+                {
+                    sb.AppendLine($"    - {folder}");
+                }
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("如需查看某个文件的具体章节与行号，请把该文件的绝对路径传给 filePaths。");
+        return sb.ToString();
     }
 
     [Description("按行范围精准读取文件内容。startLine=0 且 endLine=0 时读取全文。建议先用 GetFileStructure 确认目标章节行号再调用。")]
@@ -1191,7 +1301,12 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
             var (file, allChunks) = await GetChatDocumentAsync(scope.ServiceProvider, config, normalizedPath, allowedSources);
 
             if (file == null)
-                return "文件未被索引。";
+            {
+                // KB 文档的 Locator 不在 config.Sources 下，故 GetChatDocumentAsync 必然落空。
+                // 这里显式给出可执行的下一步，而不是让模型以为「文件不存在」。
+                var kbHint = await TryResolveKnowledgeBaseDocumentAsync(scope.ServiceProvider, normalizedPath);
+                return kbHint ?? "文件未被索引。";
+            }
 
             if ((config.Sources.Count > 0 || allowedSources != null) && (!enabledSources.Contains(file.Source ?? "")))
                 return "该文件所属数据源已停用，无法读取内容。";
@@ -1269,6 +1384,45 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
         return (file, chunks.OrderBy(c => c.ChunkOrder).ToList());
     }
 
+    /// <summary>
+    /// KB 文档兜底：文件路径不在 config.Sources 时，检查它是否属于某个物理知识库的文档 Locator。
+    /// 命中则返回可执行指引（含 knowledgeBaseId 与 documentId），供模型改用 KB 展开。
+    /// 检索复用 GetDocumentsAsync 的 source_key/locator LIKE 过滤，避免全库扫描。
+    /// </summary>
+    private static async Task<string?> TryResolveKnowledgeBaseDocumentAsync(IServiceProvider services, string normalizedPath)
+    {
+        var kbService = services.GetService<IKnowledgeBaseService>();
+        if (kbService == null) return null;
+
+        try
+        {
+            var kbs = await kbService.ListKnowledgeBasesAsync();
+            if (kbs.Count == 0) return null;
+
+            var fileName = Path.GetFileName(normalizedPath);
+            foreach (var kb in kbs.Where(k => k.Enabled))
+            {
+                var (documents, _) = await kbService.GetDocumentsAsync(kb.Id, page: 1, pageSize: 20, search: fileName);
+                var hit = documents.FirstOrDefault(d =>
+                    string.Equals(d.Locator, normalizedPath, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(NormalizeSlashes(d.Locator), NormalizeSlashes(normalizedPath), StringComparison.OrdinalIgnoreCase));
+                if (hit == null) continue;
+
+                return $"该文件属于知识库「{kb.Name}」（knowledgeBaseId: {kb.Id}，documentId: {hit.Id}），不在旧索引中。\n"
+                     + "请改用 knowledgeBaseId + documentId 读取内容（或先 SearchKnowledge 检索该库）。";
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? NormalizeSlashes(string? path) =>
+        path?.Replace('\\', '/');
+
     private static bool ChatFileIsAllowed(ObsidianRagConfig config, FileRecord file, IReadOnlyList<string>? allowedSources)
     {
         var source = IndexService.FindLexicalSource(Path.GetFullPath(file.Path), config.Sources);
@@ -1298,15 +1452,27 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
 
             if (kbStorage != null && targetKbIds != null && targetKbIds.Count > 0)
             {
+                var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
+                var names = kbService != null
+                    ? (await kbService.ListKnowledgeBasesAsync()).ToDictionary(k => k.Id, k => k.Name)
+                    : new Dictionary<string, string>();
+
+                var sbKb = new StringBuilder("挂载知识库（共 " + targetKbIds.Count + " 个库）：");
+                long totalChunks = 0;
                 long totalVectors = 0;
                 foreach (var kbId in targetKbIds)
                 {
                     if (!await kbStorage.ExistsAsync(kbId)) continue;
                     await using var lease = await kbStorage.AcquireLeaseAsync(kbId, StorageAccess.ReadOnly);
+                    // 纯词法库没有向量（ActiveVectorCount=0），只看向量会把「已就绪」误报成「空」。
+                    var lexical = await lease.Store.GetLexicalStatsAsync();
                     var manifest = await lease.Store.GetManifestAsync();
+                    totalChunks += lexical.TotalChunks;
                     totalVectors += manifest.ActiveVectorCount;
+                    var label = names.TryGetValue(kbId, out var name) ? name : kbId;
+                    sbKb.Append($"\n- {label}（{kbId}）：{lexical.TotalChunks} 个分块（{lexical.TotalDocuments} 篇文档），{manifest.ActiveVectorCount} 个向量");
                 }
-                return $"挂载知识库（共 {targetKbIds.Count} 个库）：活跃分块/向量总数 {totalVectors}。";
+                return sbKb.Append($"\n合计：{totalChunks} 个分块，{totalVectors} 个向量。").ToString();
             }
 
             if (scope.ServiceProvider.GetService<IRequestSourceScopeAccessor>()?.GetAllowedSources() != null)
@@ -1526,48 +1692,59 @@ public class MafChatService : IDisposable, IChatModelCapabilityProvider
                 toolResult = $"工具执行异常: {ex.Message}";
             }
 
-            // 构造工具结果上下文，转入 Phase 2 总结生成（强负向防说教，杜绝递归调用）
-            fsm.TransitionTo(ChatTurnState.Phase2Synthesizing, "工具执行完毕转入 Phase 2 总结生成");
-            var phase2History = new List<ChatMessage>(history)
+            // 结构化事实类工具（目录树 / 索引统计）返回的是**权威文本**，模型再复述只会失真。
+            // 真机实测：DeepSeek-V3 在 Phase 2 会把真实目录树改写成虚构的工程结构，
+            // 因此这里直接原样回显，不让模型二次加工。
+            if (IsVerbatimToolResult(decision.FunctionName))
             {
-                new(ChatRole.Assistant, directBadge.TrimEnd()),
-                new(ChatRole.Tool, toolResult)
-            };
-
-            var phase2Options = new ChatOptions
+                var verbatim = $"```text\n{toolResult.Trim()}\n```\n";
+                responseText.Append(verbatim);
+                yield return new SseEvent("text", Delta: verbatim);
+                fsm.TransitionTo(ChatTurnState.OutputSanitizing, "结构化事实类工具结果原样回显");
+            }
+            else
             {
-                Tools = [], // 总结阶段不再挂载工具，专注生成纯粹总结
-                MaxOutputTokens = 4096,
-                Temperature = _temperature,
-                TopP = _topP,
-                FrequencyPenalty = _frequencyPenalty,
-                PresencePenalty = _presencePenalty,
-                AdditionalProperties = new AdditionalPropertiesDictionary
+                var phase2History = new List<ChatMessage>(history)
                 {
-                    ["RepeatPenalty"] = _repeatPenalty,
-                    ["PenaltyCount"] = _penaltyCount,
-                    ["EnableRepetitionCircuitBreaker"] = _enableRepetitionCircuitBreaker
-                }
-            };
+                    new(ChatRole.Assistant, directBadge.TrimEnd()),
+                    new(ChatRole.Tool, toolResult)
+                };
 
-            var phase2Breaker = _enableRepetitionCircuitBreaker ? new RepetitionCircuitBreaker() : null;
-            await foreach (var update in client.GetStreamingResponseAsync(phase2History, phase2Options, ct))
-            {
-                if (!string.IsNullOrEmpty(update.Text))
+                var phase2Options = new ChatOptions
                 {
-                    if (phase2Breaker != null && !phase2Breaker.ProcessToken(update.Text, out var safeChunk))
+                    Tools = [], // 总结阶段不再挂载工具，专注生成纯粹总结
+                    MaxOutputTokens = 4096,
+                    Temperature = _temperature,
+                    TopP = _topP,
+                    FrequencyPenalty = _frequencyPenalty,
+                    PresencePenalty = _presencePenalty,
+                    AdditionalProperties = new AdditionalPropertiesDictionary
                     {
-                        _logger.LogWarning("[MafChatService] Phase 2 总结流式生成触发自回归重复熔断: {Reason}", phase2Breaker.BreakReason);
-                        if (!string.IsNullOrEmpty(safeChunk))
-                        {
-                            responseText.Append(safeChunk);
-                            yield return new SseEvent("text", Delta: safeChunk);
-                        }
-                        break;
+                        ["RepeatPenalty"] = _repeatPenalty,
+                        ["PenaltyCount"] = _penaltyCount,
+                        ["EnableRepetitionCircuitBreaker"] = _enableRepetitionCircuitBreaker
                     }
+                };
 
-                    responseText.Append(update.Text);
-                    yield return new SseEvent("text", Delta: update.Text);
+                var phase2Breaker = _enableRepetitionCircuitBreaker ? new RepetitionCircuitBreaker() : null;
+                await foreach (var update in client.GetStreamingResponseAsync(phase2History, phase2Options, ct))
+                {
+                    if (!string.IsNullOrEmpty(update.Text))
+                    {
+                        if (phase2Breaker != null && !phase2Breaker.ProcessToken(update.Text, out var safeChunk))
+                        {
+                            _logger.LogWarning("[MafChatService] Phase 2 总结流式生成触发自回归重复熔断: {Reason}", phase2Breaker.BreakReason);
+                            if (!string.IsNullOrEmpty(safeChunk))
+                            {
+                                responseText.Append(safeChunk);
+                                yield return new SseEvent("text", Delta: safeChunk);
+                            }
+                            break;
+                        }
+
+                        responseText.Append(update.Text);
+                        yield return new SseEvent("text", Delta: update.Text);
+                    }
                 }
             }
         }

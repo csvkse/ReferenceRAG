@@ -99,6 +99,7 @@ public static class RagWebHostExtensions
             registry.RegisterLocalTool<IndexStatusTools>();
             registry.RegisterLocalTool<SourceManagementTools>();
             registry.RegisterLocalTool<KnowledgeBaseMcpTools>();
+            registry.RegisterLocalTool<TestTools>();
         });
         #endregion
 
@@ -114,6 +115,17 @@ public static class RagWebHostExtensions
         var dataConfig = app.Services.GetRequiredService<ConfigManager>().Load();
         app.Services.GetRequiredService<ReferenceRAG.Infrastructure.Features.Database.DataDirectoryLease>().Acquire(dataConfig.DataPath ?? "data");
         StaticLogger.LoggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
+
+        // MCP 工具描述符的参数 schema 由第三方 SSE 适配层留空（它只读描述文本）。
+        // 这里按方法签名就地补齐，使 tools/list 返回合规 JSON Schema。
+        var mcpRegistry = app.Services.GetService<McpHelper.McpTools.IMcpToolRegistry>();
+        if (mcpRegistry is not null)
+        {
+            var result = ReferenceRAG.Service.McpTools.McpInputSchemaEnricher.Enrich(mcpRegistry);
+            app.Logger.LogInformation(
+                "[MCP] inputSchema 已补齐 {Enriched} 个工具，未匹配方法 {Missing} 个",
+                result.EnrichedCount, result.MissingCount);
+        }
 
         app.UseAuthorization();
         app.MapControllers();

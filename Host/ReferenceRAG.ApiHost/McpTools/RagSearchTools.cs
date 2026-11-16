@@ -1,20 +1,29 @@
-using ModelContextProtocol.Server;
-using System.ComponentModel;
-using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol.Server;
+using ReferenceRAG.Business.Features.KnowledgeBase.Services;
+using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Interfaces;
-using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Services;
+using System.ComponentModel;
+using System.Text.Json;
 
 namespace ReferenceRAG.Service.McpTools;
 
 /// <summary>
-/// RAG 搜索相关工具（语义搜索、混合搜索与模型重排）
+/// RAG 检索 MCP 工具。
+///
+/// v2 之后「知识库（每库独立 kb.db）」是检索的一等公民，因此本组工具：
+/// 1. 必读参数为 query，可选 knowledgeBaseIds 显式限定检索范围（留空=全部启用库）；
+/// 2. 全部走 IKnowledgeBaseSearchService，**不再默认回落到已停止写入的旧单库 vectors.db**；
+/// 3. 返回结构同时给出 chunkId/documentId/knowledgeBaseId，便于 kb_drilldown 精准展开。
 /// </summary>
 [McpServerToolType]
 public class RagSearchTools
 {
+    private const int MaxPreviewChars = 500;
+
     private readonly IServiceProvider _serviceProvider;
 
     public RagSearchTools(IServiceProvider serviceProvider)
@@ -22,213 +31,92 @@ public class RagSearchTools
         _serviceProvider = serviceProvider;
     }
 
-    [McpServerTool, Description("在已授权的知识源中执行免向量词法检索，返回原文及来源。")]
-    public async Task<string> LexicalSearch(
-        [Description("关键词或查询文本")] string query,
+    [McpServerTool, Description("知识库语义检索（免向量词法）。适合精确词汇、错误码、API 名。可指定 knowledgeBaseIds 限定范围。")]
+    public Task<string> LexicalSearch(
+        [Description("关键词或查询文本（必填）")] string query,
         [Description("返回结果数量，默认 5")] int topK = 5,
-        [Description("可选的知识源名称 JSON 数组")] string? sources = null)
+        [Description("目标知识库 ID 的 JSON 数组，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
+        => SearchAsync(nameof(LexicalSearch), query, topK, knowledgeBaseIds, useLexical: true);
+
+    [McpServerTool, Description("知识库语义检索（向量召回）。适合问答与信息检索。可指定 knowledgeBaseIds 限定范围。")]
+    public Task<string> SemanticSearch(
+        [Description("搜索查询文本（必填），建议补充同义词与中英文术语")] string query,
+        [Description("返回结果数量，默认 5，建议 1-20")] int topK = 5,
+        [Description("目标知识库 ID 的 JSON 数组，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
+        => SearchAsync(nameof(SemanticSearch), query, topK, knowledgeBaseIds, useLexical: false);
+
+    [McpServerTool, Description("知识库混合检索（向量 + 词法 RRF 融合），兼顾精确匹配与语义理解。可指定 knowledgeBaseIds 限定范围。")]
+    public Task<string> HybridSearch(
+        [Description("搜索查询文本（必填）")] string query,
+        [Description("返回结果数量，默认 5")] int topK = 5,
+        [Description("是否只走词法通道（跳过向量），默认 false")] bool lexicalOnly = false,
+        [Description("目标知识库 ID 的 JSON 数组，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
+        => SearchAsync(nameof(HybridSearch), query, topK, knowledgeBaseIds, useLexical: lexicalOnly);
+
+    [McpServerTool, Description("展开某个知识库切片的完整正文（按 chunkId 或 documentId + 序号）。用于检索结果被截断时补全上下文。")]
+    public async Task<string> KnowledgeBaseDrillDown(
+        [Description("目标知识库 ID（必填）。可用 kb_list 获取")]
+        string knowledgeBaseId,
+        [Description("切片 ID（来自检索结果的 chunkId）。与 documentId 二选一")]
+        string? chunkId = null,
+        [Description("文档 ID（来自检索结果的 documentId）。配合 ordinal 取该文档下的第 N 个切片")]
+        string? documentId = null,
+        [Description("当使用 documentId 时，返回该文档的切片数量（默认 20）")] int limit = 20)
     {
         using var scope = _serviceProvider.CreateScope();
-        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(LexicalSearch), out var error))
-            return error ?? JsonSerializer.Serialize(new { success = false, error = "权限检查失败" });
-        try
-        {
-            var request = new AIQueryRequest { Query = query, TopK = topK, Mode = QueryMode.Lexical, EnableRerank = false };
-            if (!string.IsNullOrWhiteSpace(sources)) request.Sources = JsonSerializer.Deserialize<List<string>>(sources);
-            if (!ApplyApiKeySourceIsolation(scope.ServiceProvider, request))
-                return JsonSerializer.Serialize(new { success = true, query, count = 0, chunks = Array.Empty<object>() });
-            var search = scope.ServiceProvider.GetRequiredService<ISearchService>();
-            var response = await search.SearchAsync(request);
-            return JsonSerializer.Serialize(new { success = true, query, mode = "Lexical", count = response.Chunks.Count,
-                chunks = response.Chunks.Select(c => new { refId = c.RefId, c.FilePath, c.Title, c.Content,
-                    c.StartLine, c.EndLine, c.Source, c.BM25Score }) },
-                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
-        }
-        catch (Exception ex)
-        {
-            return JsonSerializer.Serialize(new { success = false, error = ex.Message, query });
-        }
-    }
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(KnowledgeBaseDrillDown), out var permErr))
+            return Fail(permErr);
 
-    /// <summary>
-    /// 执行语义搜索，使用向量相似度在知识库中查找相关内容。
-    /// 当用户提出问题或需要从知识库获取信息时使用此工具。
-    /// </summary>
-    /// <param name="query">搜索查询文本（必填）。使用自然语言描述要查找的信息，如"如何使用API认证"</param>
-    /// <param name="topK">返回结果数量，默认5。数值越大返回越多结果，建议范围1-20</param>
-    /// <param name="sources">数据源名称列表（可选），用于限定只在特定知识库中搜索，如["VNote","Note"]</param>
-    [McpServerTool, Description("在知识库中执行语义搜索，通过自然语言查询找到相关文档片段。适用于问答、信息检索、事实查询等场景。")]
-    public async Task<string> SemanticSearch(
-        [Description("搜索查询文本（必填）。使用完整的问题或关键词，如\"Obsidian如何配置插件\"、\"Python异步编程\"")] string query,
-        [Description("返回结果数量，默认5。建议1-10，数值越大结果越多但处理越慢")] int topK = 5,
-        [Description("数据源名称列表（可选），如[\"VNote\",\"Note\"]。留空则自动使用当前授权的所有知识源")] string? sources = null)
-    {
-        using var scope = _serviceProvider.CreateScope();
-        if (!CheckToolPermission(scope.ServiceProvider, nameof(SemanticSearch), out var permErr))
-        {
-            return JsonSerializer.Serialize(new { success = false, error = permErr });
-        }
-
-        var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
+        if (string.IsNullOrWhiteSpace(chunkId) && string.IsNullOrWhiteSpace(documentId))
+            return Fail("必须提供 chunkId 或 documentId");
 
         try
         {
-            var request = new AIQueryRequest
-            {
-                Query = query,
-                Mode = QueryMode.Standard,
-                TopK = topK,
-                EnableRerank = false
-            };
+            var kbService = scope.ServiceProvider.GetRequiredService<IKnowledgeBaseService>();
 
-            if (!string.IsNullOrEmpty(sources))
+            if (!string.IsNullOrWhiteSpace(chunkId))
             {
-                request.Sources = JsonSerializer.Deserialize<List<string>>(sources);
+                var chunk = await kbService.GetChunkByIdAsync(knowledgeBaseId, chunkId);
+                if (chunk == null) return Fail($"知识库 {knowledgeBaseId} 中不存在切片 {chunkId}");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    knowledgeBaseId,
+                    chunk = MapChunk(chunk)
+                }, PrettyOptions());
             }
 
-            if (!ApplyApiKeySourceIsolation(scope.ServiceProvider, request))
-                return JsonSerializer.Serialize(new { success = true, query, count = 0, chunks = Array.Empty<object>() });
-
-            var response = await searchService.SearchAsync(request);
-
+            var (chunks, total) = await kbService.GetChunksAsync(knowledgeBaseId, documentId, 1, limit);
+            if (total == 0) return Fail($"知识库 {knowledgeBaseId} 中不存在文档 {documentId} 的切片");
             return JsonSerializer.Serialize(new
             {
                 success = true,
-                query = query,
-                searchedSources = request.Sources ?? new List<string>(),
-                count = response.Chunks.Count,
-                stats = response.Stats,
-                chunks = response.Chunks.Select(c => new
-                {
-                    refId = c.RefId,
-                    filePath = c.FilePath,
-                    title = c.Title,
-                    content = c.Content.Length > 500 ? c.Content.Substring(0, 500) + "..." : c.Content,
-                    score = c.Score,
-                    source = c.Source,
-                    obsidianLink = c.ObsidianLink
-                })
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+                knowledgeBaseId,
+                documentId,
+                total,
+                chunks = chunks.Select(MapChunk)
+            }, PrettyOptions());
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new
-            {
-                success = false,
-                error = ex.Message,
-                query = query
-            });
+            return Fail(ex.Message);
         }
     }
 
-    /// <summary>
-    /// 执行混合搜索，结合向量相似度和关键词匹配，获得更准确的搜索结果。
-    /// 当需要精确关键词匹配同时又想利用语义理解时使用。
-    /// </summary>
-    /// <param name="query">搜索查询文本（必填）</param>
-    /// <param name="topK">返回结果数量，默认5</param>
-    /// <param name="k1">BM25 k1参数，控制词频影响程度，默认1.5</param>
-    /// <param name="b">BM25 b参数，控制文档长度归一化，默认0.75</param>
-    /// <param name="enableRerank">是否启用重排，默认false。重排可提高相关性但会增加延迟</param>
-    [McpServerTool, Description("混合搜索结合向量语义理解和关键词匹配。当需要同时精确匹配某些词汇又需要语义理解时使用，如查找特定API名称的同时理解其用途。")]
-    public async Task<string> HybridSearch(
-        [Description("搜索查询文本（必填）")] string query,
-        [Description("返回结果数量，默认5")] int topK = 5,
-        [Description("BM25词频参数k1，默认1.5。值越大词频影响越大")] float k1 = 1.5f,
-        [Description("BM25长度归一化参数b，默认0.75")] float b = 0.75f,
-        [Description("是否启用重排提升相关性，默认false。重排会消耗更多资源但结果更准确")] bool enableRerank = false)
-    {
-        using var scope = _serviceProvider.CreateScope();
-        if (!CheckToolPermission(scope.ServiceProvider, nameof(HybridSearch), out var permErr))
-        {
-            return JsonSerializer.Serialize(new { success = false, error = permErr });
-        }
-
-        var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
-
-        try
-        {
-            var request = new AIQueryRequest
-            {
-                Query = query,
-                Mode = QueryMode.Hybrid,
-                TopK = topK,
-                K1 = k1,
-                B = b,
-                EnableRerank = enableRerank
-            };
-
-            if (!ApplyApiKeySourceIsolation(scope.ServiceProvider, request))
-                return JsonSerializer.Serialize(new { success = true, query, count = 0, chunks = Array.Empty<object>() });
-
-            var response = await searchService.SearchAsync(request);
-
-            return JsonSerializer.Serialize(new
-            {
-                success = true,
-                query = query,
-                searchedSources = request.Sources ?? new List<string>(),
-                count = response.Chunks.Count,
-                mode = response.Mode.ToString(),
-                rerankApplied = response.RerankApplied,
-                stats = response.Stats,
-                chunks = response.Chunks.Select(c => new
-                {
-                    refId = c.RefId,
-                    filePath = c.FilePath,
-                    title = c.Title,
-                    content = c.Content.Length > 500 ? c.Content.Substring(0, 500) + "..." : c.Content,
-                    score = c.Score,
-                    bm25Score = c.BM25Score,
-                    embeddingScore = c.EmbeddingScore,
-                    rerankScore = c.RerankScore,
-                    source = c.Source
-                })
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
-        }
-        catch (Exception ex)
-        {
-            return JsonSerializer.Serialize(new
-            {
-                success = false,
-                error = ex.Message,
-                query = query
-            });
-        }
-    }
-
-    /// <summary>
-    /// 对已有的搜索结果或候选文档进行重排序，提高相关性。
-    /// 当有大量候选文档需要筛选时使用，可显著提升结果质量。
-    /// </summary>
-    /// <param name="query">原始查询问题（必填）</param>
-    /// <param name="documents">待重排序的文档列表（必填，JSON数组格式），每个元素是一段文本</param>
-    /// <param name="topK">返回数量，默认5</param>
-    [McpServerTool, Description("对候选文档进行重排，用深度语义理解重新评估每个文档与查询的相关性。当搜索结果过多或初步结果不理想时用于优化。")]
+    [McpServerTool, Description("对候选文档进行重排，用深度语义理解重新评估每个文档与查询的相关性。")]
     public async Task<string> RerankResults(
-        [Description("原始查询（必填）。用户的问题或需求描述")] string query,
-        [Description("待重排序的文档列表（必填，JSON数组），如[\"文档1内容...\",\"文档2内容...\"]")] string documents,
-        [Description("最终返回数量，默认5")] int topK = 5)
+        [Description("原始查询（必填）")] string query,
+        [Description("待重排序的文本列表（必填，JSON 数组），如[\"文档1\",\"文档2\"]")] string documents,
+        [Description("最终返回数量，默认 5")] int topK = 5)
     {
         using var scope = _serviceProvider.CreateScope();
-        if (!CheckToolPermission(scope.ServiceProvider, nameof(RerankResults), out var permErr))
-        {
-            return JsonSerializer.Serialize(new { success = false, error = permErr });
-        }
-
-        var rerankService = scope.ServiceProvider.GetRequiredService<IRerankService>();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(RerankResults), out var permErr))
+            return Fail(permErr);
 
         try
         {
             var docs = JsonSerializer.Deserialize<List<string>>(documents) ?? new List<string>();
+            var rerankService = scope.ServiceProvider.GetRequiredService<IRerankService>();
             var result = await rerankService.RerankBatchAsync(query, docs);
 
             var topResults = result.Documents
@@ -239,69 +127,152 @@ public class RagSearchTools
             return JsonSerializer.Serialize(new
             {
                 success = true,
-                query = query,
+                query,
                 inputCount = docs.Count,
                 outputCount = topResults.Count,
                 durationMs = result.DurationMs,
                 results = topResults.Select(d => new
                 {
                     index = d.Index,
-                    document = d.Document.Length > 300 ? d.Document.Substring(0, 300) + "..." : d.Document,
+                    document = d.Document.Length > 300 ? d.Document[..300] + "..." : d.Document,
                     relevanceScore = d.RelevanceScore
                 })
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            }, PrettyOptions());
         }
         catch (Exception ex)
         {
+            return Fail(ex.Message);
+        }
+    }
+
+    private async Task<string> SearchAsync(
+        string toolName, string query, int topK, string? knowledgeBaseIds, bool useLexical)
+    {
+        using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, toolName, out var permErr))
+            return Fail(permErr);
+
+        if (string.IsNullOrWhiteSpace(query))
+            return Fail("query 不能为空");
+
+        try
+        {
+            var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
+            var kbSearch = scope.ServiceProvider.GetService<IKnowledgeBaseSearchService>();
+            if (kbService == null || kbSearch == null)
+                return Fail("知识库服务未装配，无法执行检索（请检查宿主是否注册 AddKnowledgeBaseServices）");
+
+            var targetIds = ParseIds(knowledgeBaseIds);
+            if (targetIds.Count == 0)
+            {
+                var accessible = await kbService.ListKnowledgeBasesAsync();
+                targetIds = accessible.Where(k => k.Enabled).Select(k => k.Id).ToList();
+            }
+
+            if (targetIds.Count == 0)
+                return Fail("当前没有可检索的知识库，请先创建知识库并挂载数据源");
+
+            var request = new CrossKnowledgeBaseSearchRequest(
+                Query: query,
+                TopK: Math.Clamp(topK, 1, 50),
+                KnowledgeBaseIds: targetIds,
+                UseLexicalTokenizer: useLexical,
+                FailurePolicy: FailurePolicy.AllowPartial,
+                AllowDegrade: true)
+            {
+                AuthorizedSourceNames = GetAllowedSources(scope.ServiceProvider)
+            };
+
+            var response = await kbSearch.SearchAsync(request);
+
             return JsonSerializer.Serialize(new
             {
-                success = false,
-                error = ex.Message,
-                query = query
-            });
-        }
-    }
-
-    private static bool CheckToolPermission(IServiceProvider sp, string toolName, out string? error)
-    {
-        var httpContextAccessor = sp.GetService<IHttpContextAccessor>();
-        var currentKey = httpContextAccessor?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
-        if (currentKey != null && !ApiKeyPermissionMatrix.IsMcpToolPermitted(currentKey, toolName))
-        {
-            error = $"此 API Key 未被授权调用 MCP 工具: {toolName}";
-            return false;
-        }
-        error = null;
-        return true;
-    }
-
-    private static bool ApplyApiKeySourceIsolation(IServiceProvider sp, AIQueryRequest request)
-    {
-        var httpContextAccessor = sp.GetService<IHttpContextAccessor>();
-        var currentKey = httpContextAccessor?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
-        var effectiveSources = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(currentKey);
-        if (effectiveSources != null)
-        {
-            if (effectiveSources.Count == 0) return false;
-            if (request.Sources == null || request.Sources.Count == 0)
-            {
-                request.Sources = effectiveSources.ToList();
-            }
-            else
-            {
-                request.Sources = request.Sources
-                    .Where(s => effectiveSources.Contains(s, StringComparer.OrdinalIgnoreCase))
-                    .ToList();
-                if (request.Sources.Count == 0)
+                success = true,
+                tool = toolName,
+                query,
+                knowledgeBaseIds = targetIds,
+                count = response.Items.Count,
+                scoreKind = response.ScoreKind.ToString(),
+                elapsedMs = Math.Round(response.Elapsed.TotalMilliseconds, 1),
+                degraded = response.Degraded,
+                degradationReason = response.DegradationReason,
+                indexDegraded = response.IndexDegraded,
+                successfulKbs = response.SuccessfulKnowledgeBaseIds,
+                failedKbs = response.FailedKnowledgeBaseIds,
+                usedRecallFloor = response.UsedRecallFloor,
+                items = response.Items.Select(i => new
                 {
-                    request.Sources = new List<string> { "__NO_ACCESS_EMPTY_SOURCE__" };
-                }
-            }
+                    knowledgeBaseId = i.KnowledgeBaseId,
+                    chunkId = i.ChunkId,
+                    documentId = i.DocumentId,
+                    sourceKey = i.SourceKey,
+                    locator = i.Locator,
+                    text = Truncate(i.Text),
+                    score = Math.Round(i.Score, 4),
+                    scoreKind = i.ScoreKind.ToString(),
+                    startLine = i.StartLine,
+                    endLine = i.EndLine,
+                    headingPath = i.HeadingPath,
+                    coverage = i.Coverage,
+                    isFloor = i.IsFloor
+                })
+            }, PrettyOptions());
         }
-        return true;
+        catch (Exception ex)
+        {
+            return Fail(ex.Message);
+        }
     }
+
+    private static object MapChunk(KnowledgeBaseChunkRecord chunk) => new
+    {
+        chunkId = chunk.Id,
+        documentId = chunk.DocumentId,
+        documentSourceKey = chunk.DocumentSourceKey,
+        ordinal = chunk.Ordinal,
+        text = chunk.Text,
+        tokenCount = chunk.TokenCount,
+        hasVector = chunk.HasVector,
+        enabled = chunk.Enabled,
+        startLine = chunk.StartLine,
+        endLine = chunk.EndLine,
+        headingPath = chunk.HeadingPath
+    };
+
+    private static List<string> ParseIds(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new List<string>();
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<List<string>>(json);
+            return parsed?.Where(x => !string.IsNullOrWhiteSpace(x)).ToList() ?? new List<string>();
+        }
+        catch
+        {
+            // 容错：也接受逗号分隔
+            return json.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        }
+    }
+
+    private static string Truncate(string text) =>
+        text.Length <= MaxPreviewChars ? text : text[..MaxPreviewChars] + "...";
+
+    private static IReadOnlyList<string>? GetAllowedSources(IServiceProvider sp)
+    {
+        var context = sp.GetService<IHttpContextAccessor>()?.HttpContext;
+        return ApiKeyPermissionMatrix.GetEffectiveAllowedSources(context?.Items["CurrentApiKey"] as ApiKeyEntity);
+    }
+
+    private static JsonSerializerOptions PrettyOptions() => new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    private static string Fail(string? error) => JsonSerializer.Serialize(new
+    {
+        success = false,
+        error = error ?? "未知错误"
+    }, PrettyOptions());
 }

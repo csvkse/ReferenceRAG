@@ -5,6 +5,7 @@ import {
     NPopconfirm, NDescriptions, NDescriptionsItem, useMessage
 } from 'naive-ui';
 import { apiKeysApi, knowledgeBasesApi } from '/app/api/index.js';
+import { loadKbSpecMap, kbModelLabel } from '/shared/kb-label.js';
 
 const component = /*@__PURE__*/ _defineComponent({
     name: 'ApiKeys',
@@ -53,17 +54,20 @@ const component = /*@__PURE__*/ _defineComponent({
 
         const loadCatalog = async () => {
             try {
-                const [metaRes, kbRes] = await Promise.all([
+                const [metaRes, kbRes, specs] = await Promise.all([
                     apiKeysApi.getMetaCatalog(),
-                    knowledgeBasesApi.getAll().catch(() => ({ data: [] }))
+                    knowledgeBasesApi.getAll().catch(() => ({ data: [] })),
+                    loadKbSpecMap()
                 ]);
                 const baseCatalog = metaRes.data || { categories: [], modules: [], mcpTools: [], sources: [] };
                 baseCatalog.knowledgeBases = kbRes.data || [];
+                baseCatalog.kbSpecMap = specs;
                 metaCatalog.value = baseCatalog;
             } catch (err) {
                 console.warn('获取权限元数据失败:', err);
             }
         };
+        const kbLabel = (kb) => kbModelLabel(kb, metaCatalog.value.kbSpecMap || {});
 
         const loadKeys = async () => {
             loading.value = true;
@@ -509,7 +513,7 @@ const component = /*@__PURE__*/ _defineComponent({
         });
 
         const __returned__ = {
-            keys, loading, metaCatalog, showModal, isEdit, submitting, form,
+            keys, loading, metaCatalog, showModal, isEdit, submitting, form, kbLabel,
             showSecretModal, createdSecret, showGuideModal, guideKey, mcpConfigJson,
             columns, loadKeys, openCreateModal, openEditModal, handleSave, handleToggle,
             handleDelete, copyToClipboard, openGuide,
@@ -719,7 +723,7 @@ component.template = `
                     <n-space vertical :size="6">
                       <n-checkbox v-for="kb in metaCatalog.knowledgeBases" :key="'kb:' + kb.id" :value="kb.name">
                         <span style="font-weight: 500;">📚 {{ kb.name }}</span>
-                        <n-text depth="3" style="margin-left: 8px; font-size: 12px;">({{ kb.embeddingSpecId || '默认规范' }})</n-text>
+                        <n-text depth="3" style="margin-left: 8px; font-size: 12px;">({{ kbLabel(kb) }})</n-text>
                       </n-checkbox>
                     </n-space>
                   </n-checkbox-group>

@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { useMessage } from 'naive-ui';
 import { SearchOutline, ArrowDownOutline, OpenOutline, CloseOutline, RefreshOutline, CubeOutline, GitMergeOutline, LayersOutline, OptionsOutline, BookOutline } from '@vicons/ionicons5';
 import { aiQueryApi, sourcesApi, pathsApi, knowledgeBasesApi, knowledgeBaseSearchApi } from '/app/api/index.js';
+import { loadKbSpecMap, kbOptionLabel } from '/shared/kb-label.js';
 import { enableLexicalSearchTemplate, knowledgeBaseRequest, knowledgeBaseResponse } from '/app/views/lexical-search-template.js';
 import { SearchHitAdapter } from '/app/services/reader/SearchHitAdapter.js';
 import TimingWaterfall from '/app/components/TimingWaterfall.js';
@@ -28,14 +29,19 @@ const component = /*@__PURE__*/ _defineComponent({
         const searchStatus = ref(null);
         const knowledgeBases = ref([]);
         const selectedKbIds = ref([]);
+        const kbSpecMap = ref({});
         const kbOptions = computed(() => knowledgeBases.value.map(kb => ({
-            label: `${kb.name} (${kb.embeddingSpecId})`,
+            label: kbOptionLabel(kb, kbSpecMap.value),
             value: kb.id
         })));
         const loadKnowledgeBases = async () => {
             try {
-                const res = await knowledgeBasesApi.getAll();
+                const [res, specs] = await Promise.all([
+                    knowledgeBasesApi.getAll(),
+                    loadKbSpecMap()
+                ]);
                 knowledgeBases.value = res.data || [];
+                kbSpecMap.value = specs;
             } catch (e) {
                 console.warn('Failed to load knowledge bases in search:', e);
             }
@@ -362,7 +368,7 @@ const component = /*@__PURE__*/ _defineComponent({
             loadSearchStatus();
             loadKnowledgeBases();
         });
-        const __returned__ = { searchQuery, loading, searched, searchError, showAdvanced, searchResponse, sources, paths, selectedPaths, pathsLoading, searchStatus, modeDefaults, defaultOptions, searchOptions, isDefaultOptions, sourceOptions, pathTreeData, selectedPathFolders, handlePathSelect, showDrilldown, drilldownLoading, drilldownResponse, phaseItems, hasAnyPhase, getScoreType, truncateContent, handleKeyDown, handleClearQuery, handleReset, handleSearch, handleJumpToReader, handleDrilldown, loadSources, loadPaths, loadSearchStatus, getStrategyDisplayName, getStepTagType, displayChunks, knowledgeBases, selectedKbIds, kbOptions, loadKnowledgeBases, formatScore, getScoreKindBadge, get SearchOutline() { return SearchOutline; }, get ArrowDownOutline() { return ArrowDownOutline; }, get OpenOutline() { return OpenOutline; }, get CloseOutline() { return CloseOutline; }, get RefreshOutline() { return RefreshOutline; }, get CubeOutline() { return CubeOutline; }, get GitMergeOutline() { return GitMergeOutline; }, get LayersOutline() { return LayersOutline; }, get OptionsOutline() { return OptionsOutline; }, get BookOutline() { return BookOutline; }, get TimingWaterfall() { return TimingWaterfall; } };
+        const __returned__ = { searchQuery, loading, searched, searchError, showAdvanced, searchResponse, sources, paths, selectedPaths, pathsLoading, searchStatus, modeDefaults, defaultOptions, searchOptions, isDefaultOptions, sourceOptions, pathTreeData, selectedPathFolders, handlePathSelect, showDrilldown, drilldownLoading, drilldownResponse, phaseItems, hasAnyPhase, getScoreType, truncateContent, handleKeyDown, handleClearQuery, handleReset, handleSearch, handleJumpToReader, handleDrilldown, loadSources, loadPaths, loadSearchStatus, getStrategyDisplayName, getStepTagType, displayChunks, knowledgeBases, selectedKbIds, kbSpecMap, kbOptions, loadKnowledgeBases, formatScore, getScoreKindBadge, get SearchOutline() { return SearchOutline; }, get ArrowDownOutline() { return ArrowDownOutline; }, get OpenOutline() { return OpenOutline; }, get CloseOutline() { return CloseOutline; }, get RefreshOutline() { return RefreshOutline; }, get CubeOutline() { return CubeOutline; }, get GitMergeOutline() { return GitMergeOutline; }, get LayersOutline() { return LayersOutline; }, get OptionsOutline() { return OptionsOutline; }, get BookOutline() { return BookOutline; }, get TimingWaterfall() { return TimingWaterfall; } };
         return __returned__;
     }
 });

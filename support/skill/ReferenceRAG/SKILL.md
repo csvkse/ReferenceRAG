@@ -69,54 +69,81 @@ Invoke-WebRequest -Uri "http://localhost:7897/api/ai/query" `
 
 ---
 
-## 当前实例状态（2026-10-22 实测）
+## 服务自检（不要写死具体数字）
 
-| 项 | 值 |
-|---|---|
-| 数据源 | `新建文件夹` → `E:\Content\Down\新建文件夹` |
-| 文件数 / 分块数 | 8 文件 / 8985 分块 |
-| 嵌入模型 | `bge-m3`（Q4_0 GGUF，1024 维，CUDA / RTX 4060 Laptop） |
-| 重排模型 | `bge-reranker-base`（Q4_K_M GGUF，同 GPU） |
-| 图谱 | 21 节点、**0 边** |
-| 最后索引 | 2026-10-20 21:24 |
+实例的数据量、模型、图谱规模都会变化，**不要依赖文档里的历史快照**。需要时现查：
 
-两个影响使用的注意点：
+```bash
+# 知识库清单（含 id / 名称 / 启用状态 / 绑定模型规格）
+curl -s "http://localhost:7897/api/knowledge-bases"
 
-1. **图谱不可用**：数据源无 `[[双链]]`，`.txt` 不解析链接，`EdgeCount` 恒为 0。
-   `/api/graph/neighbors`、`/api/graph/subgraph` 会返回空结果，**不要依赖图谱做关联探索**，
-   直接用 `/api/ai/query` 检索。可用 `GET /api/graph/stats` 确认。
-2. **索引混杂小说**：源目录同时含技术文档和中文小说（`操虫师.txt`、`剑来.txt`）。
-   检索无技术内容的词会召回小说正文，属预期噪声，非故障。
+# 某库的连接器与真实文件数/分块数
+curl -s "http://localhost:7897/api/knowledge-bases/{id}/connectors"
+
+# 索引与模型状态
+curl -s "http://localhost:7897/api/index/models/current"
+curl -s "http://localhost:7897/api/graph/stats"
+```
+
+两个通用注意点：
+
+1. **图谱可能为空**：只有解析出 `[[双链]]` 的 Markdown 才产生边。`GET /api/graph/stats` 的
+   `EdgeCount` 为 0 时不要依赖 `neighbors`/`subgraph` 做关联探索。
+2. **同库混装语料会有噪声**：一个库同时挂技术文档与小说时，模糊词会召回无关正文，属预期行为；
+   建议按主题拆分知识库，或用 `UseLexicalTokenizer` 走精确词法。
 
 ---
 
 ## Agent 决策树
 
+v2 起检索单元是**知识库**（每库独立 `kb.db`）。**先选库，再检索**：
+
 ```
 用户意图
+├── 不确定有哪些库 / 用户提到"某个知识库"
+│   └── GET /api/knowledge-bases              ← 先取 id + name 清单
+│
 ├── 通用语义查询（绝大多数情况）
-│   └── POST /api/ai/query  [Mode: HybridRerank]
-│       ├── 结果相关但内容被截断 → POST /api/ai/drill-down   （见 api-reference.md）
-│       ├── 需要某文件特定章节 → files/info 拿目录 → file/lines 取行范围
-│       └── 已知文件路径要全文 → POST /api/sources/file/lines  (0,0)
+│   └── POST /api/knowledge-base-search
+│         body: {"Query":"...", "KnowledgeBaseIds":["<kbId>"], "TopK":8}
+│       ├── 内容被截断 → 同上提高 TopK，或读 chunks 端点取全文
+│       └── 跨库对比 → 传多个 KnowledgeBaseIds（RRF 融合）
 │
 ├── 精确关键词 / 错误码 / API 名 / 变量名
-│   └── GET /api/bm25index/search
+│   └── 同上，但 body 加 "UseLexicalTokenizer": true（免向量词法）
 │
 ├── 按笔记标题找某篇具体文档
-│   └── GET /api/graph/search?q=标题关键词   （见 api-reference.md）
+│   └── GET /api/graph/search?q=标题关键词
 │
-└── 列出知识库有哪些文件
-    └── GET /api/sources  →  GET /api/sources/{name}/files
+└── 列出某库有哪些文件
+    └── GET /api/knowledge-bases/{id}/documents?page=1&pageSize=50
 ```
 
-图谱关联接口（`neighbors`/`subgraph`）当前实例边数为 0，未列入主路径。
+**禁止**把 `/api/ai/query` 当唯一入口：它仍合并旧单库召回，在 v2 架构下可能返回过期内容
+（旧库已停止写入）。多库场景一律走 `/api/knowledge-base-search`。
+
+### 文档与切片
+
+| 需求 | 端点 |
+| :--- | :--- |
+| 某库的文档列表（分页 / 关键词） | `GET /api/knowledge-bases/{id}/documents?page=&pageSize=&search=` |
+| 某文档的全部切片 | `GET /api/knowledge-bases/{id}/chunks?documentId=&page=&pageSize=` |
+| 单个切片全文 | `GET /api/knowledge-bases/{id}/chunks/{chunkId}` |
+| 目录树与连接器路由 | `GET /api/knowledge-bases/{id}/paths` |
+
+### 配置漂移与重嵌入
+
+- `GET /api/knowledge-bases/{id}/drift` — `Aligned` / `Customized` / `Drifted`。
+  `Drifted` 表示该库固化的模型与全局默认不同；模型身份经规范化比较，展示名差异不会误报。
+- `POST /api/knowledge-bases/{id}/reindex` — 作业化蓝绿重构，`{"targetEmbeddingSpecId":"..."}`，
+  返回 202 后用 `GET /api/jobs/{jobId}` 轮询。
+- 重新分段用 `POST /api/knowledge-bases/{id}/rechunk`。
 
 ---
 
 ## 查询前处理（调用任何搜索 API 前必须执行）
 
-调用 `/api/ai/query` 或 `/api/bm25index/search` 前，**必须先把用户输入扩展为丰富查询串**：
+调用 `/api/knowledge-base-search` 前，**必须先把用户输入扩展为丰富查询串**：
 
 1. 提取核心名词和技术术语
 2. 补充中英文同义词、缩写、别名
@@ -136,99 +163,81 @@ Invoke-WebRequest -Uri "http://localhost:7897/api/ai/query" `
 
 ## 核心接口
 
-### 1. 语义查询（主力，90% 场景）
+### 1. 跨库语义检索（主力，90% 场景）
 
 ```
-POST /api/ai/query
+POST /api/knowledge-base-search
 ```
 
 ```bash
-curl -s -X POST "http://localhost:7897/api/ai/query" \
+curl -s -X POST "http://localhost:7897/api/knowledge-base-search" \
   -H "Content-Type: application/json; charset=utf-8" \
   --data-binary @- << 'EOF'
-{"Query": "Git 分支管理 branch 版本控制", "Mode": "HybridRerank", "TopK": 5, "Slim": true}
+{"Query": "Git 分支管理 branch 版本控制", "KnowledgeBaseIds": ["<kbId>"], "TopK": 8}
 EOF
 ```
 
-**响应直接用 `Context` 字段回答**，系统已拼装去重并附 `[[文件#L行号]]` 来源标注。
+响应字段（PascalCase）：
+- `Items[*]`：`ChunkId`、`DocumentId`、`KnowledgeBaseId`、`SourceKey`、`Text`、`Score`、
+  `ScoreKind`（RRF / Cosine / BM25）、`StartLine`、`EndLine`、`HeadingPath`
+- `SuccessfulKnowledgeBaseIds` / `FailedKnowledgeBaseIds`：扇出结果；`FailurePolicy: AllowPartial`
+  时部分库失败也会返回其余结果
+- `UsedRecallFloor`：为 `true` 表示查询词在本语料中不存在，只给了宽松兜底，**必须如实告知用户**
 
-`Slim: true` 时 `Chunks[*].Content` 是空串，但 `Context` 仍有全文 —— 想要内容就别开 Slim。
+`KnowledgeBaseIds` 留空 = 检索所有已启用库（最多 8 库扇出）。
+要原文直接用 `Text`（已是原始正文，不是分词结果）。
 
-`Mode` 取值 `HybridRerank`（推荐）/ `Hybrid` / `Standard` / `Quick` / `Deep`，
-未显式传 `TopK` 时用模式默认值（`HybridRerank`=10、`Deep`=20）。
-完整参数表与五种模式的默认值见 [references/api-reference.md](references/api-reference.md)。
+**耗时预期**：首查可能因模型冷加载慢 3-5 秒；`IndexDegraded: true` 表示词法索引仍在后台补齐。
 
-**耗时预期**：`Stats.Phases.ModelLoadMs` 常占 3-5 秒（模型冷加载），首次查询必慢，属正常。
+### 2. 精确关键词（免向量词法）
 
-### 2. 取文件原始正文
+同上端点，body 加 `"UseLexicalTokenizer": true`。适合错误码、API 名、变量名、专有名词；
+不依赖嵌入模型，延迟显著更低。
 
-```
-POST /api/sources/file/lines
-```
-
-```bash
-curl -s -X POST "http://localhost:7897/api/sources/file/lines" \
-  -H "Content-Type: application/json; charset=utf-8" \
-  --data-binary @- << 'EOF'
-{"Items": [{"Path": "E:/Content/Down/新建文件夹/note.md", "StartLine": 1, "EndLine": 10}]}
-EOF
-```
-
-- `StartLine`/`EndLine` 均传 `0` = 整个文件所有 chunk
-- 单次最多 20 条；路径含 `..` 或为空 → 该条目 `Error: "路径无效"`，其余正常
-- 响应 `Chunks[*].Content` 是**原始 Markdown 正文**
-
-> ✅ **这是拿原文的正确接口。** BM25 接口返回的 `Content` 是分词后的空格分隔文本，不能直接引用。
-
-### 3. 精确关键词搜索
-
-```
-GET /api/bm25index/search?query=关键词&topK=10
-```
-
-适合错误码、API 名、变量名、专有名词。
+### 3. 取知识库文档与切片
 
 ```bash
-curl -s "http://localhost:7897/api/bm25index/search?query=IndexOutOfRangeException&topK=5"
+# 文档列表（search 可按文件名/路径过滤）
+curl -s "http://localhost:7897/api/knowledge-bases/{id}/documents?page=1&pageSize=50&search=关键词"
+
+# 某文档的全部切片
+curl -s "http://localhost:7897/api/knowledge-bases/{id}/chunks?documentId={docId}&page=1&pageSize=50"
+
+# 单切片全文
+curl -s "http://localhost:7897/api/knowledge-bases/{id}/chunks/{chunkId}"
 ```
 
-响应 `Results[*]` 含 `ChunkId`、`Content`（**分词结果**）、`Score`（BM25 原始分，查询间不可比）、`Rank`。
-要原文需拿 `ChunkId` 对应 `FilePath` 走 `file/lines`。
-
-### 4. 列出数据源与文件
+### 4. 知识库清单与状态
 
 ```bash
-# 源列表（含文件数、分块数、最后索引时间）
-curl -s "http://localhost:7897/api/sources"
-
-# 指定源的文件，分页。源名含中文需 URL 编码（新建文件夹 → %E6%96%B0%E5%BB%BA%E6%96%87%E4%BB%B6%E5%A4%B9）
-curl -s "http://localhost:7897/api/sources/%E6%96%B0%E5%BB%BA%E6%96%87%E4%BB%B6%E5%A4%B9/files?page=1&pageSize=50"
+curl -s "http://localhost:7897/api/knowledge-bases"                 # id / 名称 / 启用 / 绑定模型
+curl -s "http://localhost:7897/api/knowledge-bases/{id}/connectors"  # 真实文件数 / 分块数
+curl -s "http://localhost:7897/api/knowledge-bases/{id}/drift"       # Aligned / Customized / Drifted
 ```
 
-`/files` 只有 `page`/`pageSize` 参数，**不支持关键词过滤**，只能全量翻页。
+> 旧接口 `GET /api/bm25index/search`、`POST /api/sources/file/lines` 仍可用，但只覆盖
+> **未迁移的历史单库数据**；v2 入库内容一律通过知识库端点读取。
 
 ---
 
 ## 多步查询策略
 
 ### A. 通用查询（最常用）
-1. 扩展查询词 → 2. `POST /api/ai/query`（`HybridRerank`，显式 `TopK`，`Slim: true`）→ 3. 用 `Context` 回答
+1. 扩展查询词 → 2. `POST /api/knowledge-base-search`（显式 `KnowledgeBaseIds` + `TopK`）→ 3. 用 `Items[*].Text` 回答
 
-### B. 需要某篇原文的特定章节（最省 token）
-1. 搜索 → 拿 `FilePath` → 2. `POST /api/sources/files/info` 拿章节目录（无正文）→ 3. 按 `HeadingPath` + 行号挑章节 → 4. `POST /api/sources/file/lines` 只取目标行范围 → 5. 用原始正文回答
+### B. 需要某文档特定章节（最省 token）
+1. 检索 → 拿 `DocumentId` + `KnowledgeBaseId` → 2. `GET .../chunks?documentId=` 拿切片与 `HeadingPath`/行号 → 3. 用 `Text` 回答
 
-### C. 读取指定文件完整内容
-1. 拿 `FilePath` → 2. `POST /api/sources/file/lines` 传 `StartLine: 0, EndLine: 0` → 3. 拼接 `Chunks[*].Content`
+### C. 读取切片完整正文
+1. 检索结果 `Text` 被截断 → 2. `GET /api/knowledge-bases/{id}/chunks/{chunkId}` → 3. 用完整 `Text`
 
-> 先用 `files/info` 看结构再决定是否全文。小说类文件可达 37 万行、200+ chunk，全文会撑爆上下文。
+> 大文件（小说类可达 37 万行）不要一次拉全文，按文档切片分页取。
 
 ### D. 结果不够详细
-1. `POST /api/ai/query` → 2. 取 `Chunks[*].RefId` → 3. `POST /api/ai/drill-down` → 4. 用 `FullContext` 回答
-
-> `RefIds` 必须是 `/api/ai/query` 返回的 `RefId`（GUID）。传 `FileId` 或序号会得到空结果且不报错。
+1. 提高 `TopK` 再检索一次；2. 若仍不足，先 `GET .../chunks?documentId=` 定位切片，再点取单切片全文。
 
 ### E. 精确术语 + 语义组合
-1. `GET /api/bm25index/search` 锁定 chunk → 2. `POST /api/ai/query`（`Deep`）补语义内容 → 3. 合并回答
+1. `UseLexicalTokenizer: true` 锁定 chunk → 2. 同一批 `KnowledgeBaseIds` 做普通语义检索 → 3. 合并回答
 
 ---
 
@@ -236,6 +245,7 @@ curl -s "http://localhost:7897/api/sources/%E6%96%B0%E5%BB%BA%E6%96%87%E4%BB%B6%
 
 | 需求 | 文档 |
 |------|------|
+| **多知识库架构：选库、跨库检索、切片读取、漂移** | [references/knowledge-base.md](references/knowledge-base.md) |
 | 全部 `/api/*` 端点完整参数表、模式默认值、响应字段 | [references/api-reference.md](references/api-reference.md) |
 | `/v1/*` OpenAI 兼容端点（chat / embeddings / rerank / models） | [references/openai-compat.md](references/openai-compat.md) |
 | 故障排查表、字段名映射、易错点详解 | [references/troubleshooting.md](references/troubleshooting.md) |

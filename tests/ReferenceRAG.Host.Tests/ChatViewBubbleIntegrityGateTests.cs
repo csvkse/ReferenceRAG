@@ -80,7 +80,12 @@ public sealed class ChatViewBubbleIntegrityGateTests
         start += prefix.Length;
 
         const string suffix = "\";\ncomponent.__scopeId";
+        // 行尾可能是 LF 或 CRLF（取决于 checkout 的 autocrlf 与 filter），两者都要能定位。
         var end = content.LastIndexOf(suffix, StringComparison.Ordinal);
+        if (end < 0)
+        {
+            end = content.LastIndexOf("\";\r\ncomponent.__scopeId", StringComparison.Ordinal);
+        }
         Assert.True(end >= 0);
 
         var rawTmplJson = "\"" + content.Substring(start, end - start) + "\"";

@@ -327,7 +327,12 @@ public sealed record RecallItem(
     /// </summary>
     double? Coverage = null,
     /// <summary>该结果来自召回地板层（锚点内容词在本语料不存在时的宽松兜底）。</summary>
-    bool IsFloor = false);
+    bool IsFloor = false,
+    /// <summary>
+    /// 所属物理知识库 ID（跨库扇出后由 SearchService 回填）。
+    /// 调用方以此把结果关联回具体库，例如 kb_drilldown 定位切片时必需。
+    /// </summary>
+    string? KnowledgeBaseId = null);
 
 /// <summary>
 /// 某库检索返回的快照

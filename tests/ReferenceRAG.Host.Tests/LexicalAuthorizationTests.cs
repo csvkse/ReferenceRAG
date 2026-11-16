@@ -300,16 +300,26 @@ public class LexicalAuthorizationTests
             services.AddSingleton<IEmbeddingService>(_ => throw new InvalidOperationException("embedding resolved"));
             services.AddSingleton<IRerankService>(_ => throw new InvalidOperationException("reranker resolved"));
             services.AddSearch();
+            // v2：MCP 检索改走物理知识库，此处补一个只读 KB 搜索桩（返回含 allowed 源的切片），
+            // 用于验证「模块化数据源授权（AuthorizedSourceNames）在 KB 通道上同样生效」。
+            var kbSearch = new Mock<IKnowledgeBaseSearchService>();
+            kbSearch.Setup(s => s.SearchAsync(It.IsAny<CrossKnowledgeBaseSearchRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new CrossKnowledgeBaseSearchResponse(
+                    "integrationneedle",
+                    new List<RecallItem> { new("chunk-1", "doc-1", "note.md", "integrationneedle allowed", 1.0, ScoreKind.BM25, 1, KnowledgeBaseId: "kb-1") },
+                    new[] { "kb-1" }, Array.Empty<string>(), false, ScoreKind.BM25, TimeSpan.Zero));
+            services.AddSingleton<IKnowledgeBaseSearchService>(kbSearch.Object);
+            services.AddSingleton<IKnowledgeBaseService>(new Mock<IKnowledgeBaseService>().Object);
             await using var provider = services.BuildServiceProvider();
             var controller = ActivatorUtilities.CreateInstance<AIQueryController>(provider);
             controller.ControllerContext = new ControllerContext { HttpContext = context };
             var result = await controller.Query(new AIQueryRequest { Query = "integrationneedle", Mode = QueryMode.Lexical });
             var response = Assert.IsType<AIQueryResponse>(Assert.IsType<OkObjectResult>(result.Result).Value);
             Assert.Equal("allowed", Assert.Single(response.Chunks).Source);
-            var json = await new RagSearchTools(provider).LexicalSearch("integrationneedle");
+            var json = await new RagSearchTools(provider).LexicalSearch("integrationneedle", 5, "[\"kb-1\"]");
             using var parsed = System.Text.Json.JsonDocument.Parse(json);
             Assert.True(parsed.RootElement.GetProperty("success").GetBoolean());
-            Assert.Equal("allowed", Assert.Single(parsed.RootElement.GetProperty("chunks").EnumerateArray()).GetProperty("source").GetString());
+            Assert.Equal("kb-1", parsed.RootElement.GetProperty("items")[0].GetProperty("knowledgeBaseId").GetString());
         }
         finally
         {
@@ -465,22 +475,43 @@ public class LexicalAuthorizationTests
     }
 
     [Fact]
-    public async Task LexicalMcpToolUsesLexicalModeAndRestrictsSources()
+    public async Task LexicalMcpToolRestrictsToExplicitKnowledgeBaseScope()
     {
-        var search = new Mock<ISearchService>(MockBehavior.Strict);
-        search.Setup(s => s.SearchAsync(It.Is<AIQueryRequest>(r => r.Mode == QueryMode.Lexical &&
-                r.Sources != null && r.Sources.Count == 1 && r.Sources[0] == "public"), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new AIQueryResponse { Mode = QueryMode.Lexical });
+        // v2 契约：MCP 词法检索以 knowledgeBaseIds 为范围（不再用 sources 过滤旧库）。
+        // 未指定库且系统无库 → 明确报错，绝不静默返回空或回落旧单库。
+        var kbSearch = new Mock<IKnowledgeBaseSearchService>(MockBehavior.Strict);
+        kbSearch.Setup(s => s.SearchAsync(
+                It.Is<CrossKnowledgeBaseSearchRequest>(r =>
+                    r.UseLexicalTokenizer && r.KnowledgeBaseIds.Count == 1 && r.KnowledgeBaseIds[0] == "kb-public"),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new CrossKnowledgeBaseSearchResponse(
+                "needle",
+                new List<RecallItem> { new("chunk-1", "doc-1", "note.md", "needle", 0.9, ScoreKind.BM25, 1, KnowledgeBaseId: "kb-public") },
+                new[] { "kb-public" },
+                Array.Empty<string>(),
+                false, ScoreKind.BM25, TimeSpan.Zero));
+
+        var kbService = new Mock<IKnowledgeBaseService>();
+        kbService.Setup(s => s.ListKnowledgeBasesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<KnowledgeBaseDefinition>
+            {
+                new("kb-public", "public-kb", null, true, 1, 1, "spec_lexical_only", DateTime.UtcNow, DateTime.UtcNow)
+            });
+
         var context = new DefaultHttpContext();
         context.Items["CurrentApiKey"] = new ApiKeyEntity { SourceScopeMode = "custom", AllowedSources = "[\"public\"]" };
         var services = new ServiceCollection();
         services.AddSingleton<IHttpContextAccessor>(new HttpContextAccessor { HttpContext = context });
-        services.AddSingleton(search.Object);
+        services.AddSingleton(kbService.Object);
+        services.AddSingleton(kbSearch.Object);
         using var provider = services.BuildServiceProvider();
-        var result = await new RagSearchTools(provider).LexicalSearch("needle", 5, "[\"public\",\"private\"]");
+
+        var result = await new RagSearchTools(provider).LexicalSearch("needle", 5, "[\"kb-public\"]");
         using var json = System.Text.Json.JsonDocument.Parse(result);
         Assert.True(json.RootElement.GetProperty("success").GetBoolean());
-        search.VerifyAll();
+        Assert.True(json.RootElement.GetProperty("count").GetInt32() > 0);
+        Assert.Equal("kb-public", json.RootElement.GetProperty("items")[0].GetProperty("knowledgeBaseId").GetString());
+        kbSearch.VerifyAll();
     }
 
     [Fact]
@@ -506,21 +537,27 @@ public class LexicalAuthorizationTests
     }
 
     [Fact]
-    public async Task McpWithNoAuthorizedSourcesDoesNotCallSearch()
+    public async Task McpWithoutAnyKnowledgeBaseReturnsExplicitError()
     {
-        var search = new Mock<ISearchService>(MockBehavior.Strict);
+        // v2：KB 是唯一检索事实源。没有库时应明确报错，不得回落旧单库或静默返回空。
+        var kbSearch = new Mock<IKnowledgeBaseSearchService>(MockBehavior.Strict);
+        var kbService = new Mock<IKnowledgeBaseService>();
+        kbService.Setup(s => s.ListKnowledgeBasesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<KnowledgeBaseDefinition>());
+
         var context = new DefaultHttpContext();
         context.Items["CurrentApiKey"] = new ApiKeyEntity { SourceScopeMode = "custom", AllowedSources = "[]" };
         var services = new ServiceCollection();
         services.AddSingleton<IHttpContextAccessor>(new HttpContextAccessor { HttpContext = context });
-        services.AddSingleton(search.Object);
+        services.AddSingleton(kbService.Object);
+        services.AddSingleton(kbSearch.Object);
         using var provider = services.BuildServiceProvider();
         var tool = new RagSearchTools(provider);
         var result = await tool.SemanticSearch("secret");
         using var json = System.Text.Json.JsonDocument.Parse(result);
-        Assert.True(json.RootElement.GetProperty("success").GetBoolean());
-        Assert.Equal(0, json.RootElement.GetProperty("count").GetInt32());
-        search.VerifyNoOtherCalls();
+        Assert.False(json.RootElement.GetProperty("success").GetBoolean());
+        Assert.Contains("知识库", json.RootElement.GetProperty("error").GetString());
+        kbSearch.VerifyNoOtherCalls();
     }
 
     [Fact]
