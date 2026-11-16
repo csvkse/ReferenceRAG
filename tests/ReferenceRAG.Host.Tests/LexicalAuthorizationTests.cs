@@ -469,8 +469,8 @@ public class LexicalAuthorizationTests
         services.AddSingleton(search.Object);
         using var provider = services.BuildServiceProvider();
         var result = await new RagSearchTools(provider).LexicalSearch("needle");
-        using var json = System.Text.Json.JsonDocument.Parse(result);
-        Assert.False(json.RootElement.GetProperty("success").GetBoolean());
+        var parsed = McpToolResult.Parse(result);
+        Assert.True(parsed.IsError);
         search.VerifyNoOtherCalls();
     }
 
@@ -554,9 +554,9 @@ public class LexicalAuthorizationTests
         using var provider = services.BuildServiceProvider();
         var tool = new RagSearchTools(provider);
         var result = await tool.SemanticSearch("secret");
-        using var json = System.Text.Json.JsonDocument.Parse(result);
-        Assert.False(json.RootElement.GetProperty("success").GetBoolean());
-        Assert.Contains("知识库", json.RootElement.GetProperty("error").GetString());
+        var parsed = McpToolResult.Parse(result);
+        Assert.True(parsed.IsError);
+        Assert.Contains("知识库", parsed.Text);
         kbSearch.VerifyNoOtherCalls();
     }
 

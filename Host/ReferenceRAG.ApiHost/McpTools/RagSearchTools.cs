@@ -78,24 +78,24 @@ public class RagSearchTools
             {
                 var chunk = await kbService.GetChunkByIdAsync(knowledgeBaseId, chunkId);
                 if (chunk == null) return Fail($"知识库 {knowledgeBaseId} 中不存在切片 {chunkId}");
-                return JsonSerializer.Serialize(new
+                return McpResult.Ok(new
                 {
                     success = true,
                     knowledgeBaseId,
                     chunk = MapChunk(chunk)
-                }, PrettyOptions());
+                });
             }
 
             var (chunks, total) = await kbService.GetChunksAsync(knowledgeBaseId, documentId, 1, limit);
             if (total == 0) return Fail($"知识库 {knowledgeBaseId} 中不存在文档 {documentId} 的切片");
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 knowledgeBaseId,
                 documentId,
                 total,
                 chunks = chunks.Select(MapChunk)
-            }, PrettyOptions());
+            });
         }
         catch (Exception ex)
         {
@@ -185,12 +185,15 @@ public class RagSearchTools
 
             var response = await kbSearch.SearchAsync(request);
 
-            return JsonSerializer.Serialize(new
+            return McpResult.OkRaw(JsonSerializer.Serialize(new
             {
                 success = true,
                 tool = toolName,
                 query,
                 knowledgeBaseIds = targetIds,
+                requestedTopK = topK,
+                // 回显真正生效的上限（原先 topK=900 被静默钳到 50，调用方无从判断）
+                effectiveTopK = Math.Clamp(topK, 1, 50),
                 count = response.Items.Count,
                 scoreKind = response.ScoreKind.ToString(),
                 elapsedMs = Math.Round(response.Elapsed.TotalMilliseconds, 1),
@@ -216,7 +219,7 @@ public class RagSearchTools
                     coverage = i.Coverage,
                     isFloor = i.IsFloor
                 })
-            }, PrettyOptions());
+            }, PrettyOptions()));
         }
         catch (Exception ex)
         {
@@ -270,9 +273,5 @@ public class RagSearchTools
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
-    private static string Fail(string? error) => JsonSerializer.Serialize(new
-    {
-        success = false,
-        error = error ?? "未知错误"
-    }, PrettyOptions());
+    private static string Fail(string? error) => McpResult.Fail(error);
 }

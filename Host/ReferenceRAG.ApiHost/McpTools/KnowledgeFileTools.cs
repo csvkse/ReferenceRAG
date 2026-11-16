@@ -3,12 +3,12 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using ReferenceRAG.ApiHost.Services;
+using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
@@ -16,7 +16,12 @@ using ReferenceRAG.Core.Services;
 namespace ReferenceRAG.Service.McpTools;
 
 /// <summary>
-/// 知识库文件与笔记探索工具（模块化拆分，支持目录树、流式行阅读、大纲解析与 Agent 级文本/正则检索）
+/// 知识库文件与笔记探索工具（目录树、流式行阅读、大纲解析、Agent 级文本/正则检索）。
+///
+/// 三条硬约束（均由生产实测反推）：
+/// 1. 路径必须经 <see cref="IFileAccessPolicy"/>：绝对路径只能落在已注册源根内（原先 `/etc/passwd` 可读）；
+/// 2. 源名必须经 <see cref="ISourceCatalog"/>：此前 file_tree 只认 config.Sources，而 list_sources 会给出 KB 连接器名；
+/// 3. 结果必须经 <see cref="McpResult"/>：顶层 `content` 会被协议层吞掉。
 /// </summary>
 [McpServerToolType]
 public class KnowledgeFileTools
@@ -30,50 +35,41 @@ public class KnowledgeFileTools
 
     [McpServerTool, Description("获取指定知识库数据源或子目录下的文件与目录列表结构。用于探索知识库结构、定位笔记文件。")]
     public async Task<string> GetFileTree(
-        [Description("数据源名称（可选）。若为空则默认使用第一个可用知识源")] string? sourceName = null,
+        [Description("数据源名称（可选，可来自 list_sources）。若为空则默认使用第一个可用知识源")] string? sourceName = null,
         [Description("相对子路径（可选），如 \"docs/api\"")] string? subPath = null)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(GetFileTree), out var permErr))
-        {
-            return JsonSerializer.Serialize(new { success = false, error = permErr });
-        }
-        var config = scope.ServiceProvider.GetRequiredService<ConfigManager>().Load();
+            return McpResult.Fail(permErr, "forbidden");
+
+        var allowed = GetAllowedSources(scope.ServiceProvider);
 
         try
         {
-            var allowedSources = GetEffectiveSources(scope.ServiceProvider);
+            var sources = await GetCatalog(scope.ServiceProvider).ListAsync();
+            var visible = ApplyScope(sources, allowed);
 
-            var targetSource = string.IsNullOrWhiteSpace(sourceName)
-                ? config.Sources.FirstOrDefault(s => s.Enabled && (allowedSources == null || allowedSources.Contains(s.Name, StringComparer.OrdinalIgnoreCase)))
-                : config.Sources.FirstOrDefault(s => string.Equals(s.Name, sourceName, StringComparison.OrdinalIgnoreCase));
+            var target = string.IsNullOrWhiteSpace(sourceName)
+                ? visible.FirstOrDefault(s => s.Enabled)
+                : visible.FirstOrDefault(s => string.Equals(s.Name, sourceName, StringComparison.OrdinalIgnoreCase));
 
-            if (targetSource == null)
-            {
-                return JsonSerializer.Serialize(new { success = false, error = $"未找到指定的数据源或无权访问: {sourceName}" });
-            }
+            if (target == null)
+                return McpResult.Fail(
+                    string.IsNullOrWhiteSpace(sourceName)
+                        ? "当前没有可用的数据源，请通过 list_sources 确认"
+                        : $"未找到指定的数据源或无权访问: {sourceName}（可用 list_sources 查看合法名称）",
+                    "source_not_found");
 
-            if (allowedSources != null && !allowedSources.Contains(targetSource.Name, StringComparer.OrdinalIgnoreCase))
-            {
-                return JsonSerializer.Serialize(new { success = false, error = $"无权限访问数据源: {targetSource.Name}" });
-            }
-
-            var root = FileBrowserPath.Normalize(targetSource.Path);
+            var root = FileBrowserPath.Normalize(target.Path);
             var targetDir = string.IsNullOrWhiteSpace(subPath) ? root : FileBrowserPath.Join(root, subPath);
-
             if (!FileBrowserPath.IsWithin(targetDir, root))
-            {
-                return JsonSerializer.Serialize(new { success = false, error = "路径超出该知识库允许的沙箱范围" });
-            }
+                return McpResult.Fail("路径超出该数据源允许的沙箱范围", "path_denied");
 
             if (!Directory.Exists(targetDir))
-            {
-                return JsonSerializer.Serialize(new { success = false, error = $"目录不存在: {targetDir}" });
-            }
+                return McpResult.Fail($"目录不存在: {targetDir}", "not_found");
 
             var dirInfo = new DirectoryInfo(targetDir);
             var entries = new List<object>();
-
             foreach (var d in dirInfo.EnumerateDirectories())
             {
                 if (d.Name.StartsWith('.')) continue;
@@ -84,70 +80,47 @@ public class KnowledgeFileTools
                 entries.Add(new { name = f.Name, isDirectory = false, size = f.Length, modified = f.LastWriteTimeUtc });
             }
 
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
-                sourceName = targetSource.Name,
+                sourceName = target.Name,
                 currentPath = targetDir,
                 count = entries.Count,
                 entries
-            }, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+            return McpResult.Fail(ex.Message);
         }
     }
 
     [McpServerTool, Description("读取知识库中指定笔记的内容。支持指定起止行范围（startLine, endLine），避免一次性读取超长文件撑爆 Token。")]
     public async Task<string> ReadNoteContent(
         [Description("笔记文件相对路径或绝对路径（必填），如 \"docs/architecture.md\" 或完整路径")] string filePath,
-        [Description("所属数据源名称（可选）。若提供则在该源沙箱内解析相对路径")] string? sourceName = null,
+        [Description("所属数据源名称（可选，可来自 list_sources）。若提供则在该源沙箱内解析相对路径")] string? sourceName = null,
         [Description("起始行号（可选，从 1 开始，默认 1）")] int startLine = 1,
         [Description("结束行号（可选，默认 200；传 -1 或大数值读取至文件末尾，最大 2MB）")] int endLine = 200)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(ReadNoteContent), out var permErr))
-        {
-            return JsonSerializer.Serialize(new { success = false, error = permErr });
-        }
-        var config = scope.ServiceProvider.GetRequiredService<ConfigManager>().Load();
+            return McpResult.Fail(permErr, "forbidden");
+
         var fileReader = scope.ServiceProvider.GetService<IFileReaderService>();
+        var allowed = GetAllowedSources(scope.ServiceProvider);
 
         try
         {
-            string resolvedPath;
-            if (!string.IsNullOrWhiteSpace(sourceName))
-            {
-                var allowedSources = GetEffectiveSources(scope.ServiceProvider);
-                if (allowedSources != null && !allowedSources.Contains(sourceName, StringComparer.OrdinalIgnoreCase))
-                {
-                    return JsonSerializer.Serialize(new { success = false, error = $"无权限访问数据源: {sourceName}" });
-                }
-
-                var targetSource = config.Sources.FirstOrDefault(s => string.Equals(s.Name, sourceName, StringComparison.OrdinalIgnoreCase));
-                if (targetSource == null)
-                    return JsonSerializer.Serialize(new { success = false, error = $"未找到指定的数据源: {sourceName}" });
-
-                var root = FileBrowserPath.Normalize(targetSource.Path);
-                resolvedPath = FileBrowserPath.Join(root, filePath);
-                if (!FileBrowserPath.IsWithin(resolvedPath, root))
-                    return JsonSerializer.Serialize(new { success = false, error = "文件路径超出该知识库沙箱范围" });
-            }
-            else
-            {
-                resolvedPath = FileBrowserPath.Normalize(filePath);
-            }
+            var resolvedPath = await ResolvePath(scope.ServiceProvider, filePath, sourceName, allowed);
 
             if (!File.Exists(resolvedPath))
-            {
-                return JsonSerializer.Serialize(new { success = false, error = $"文件不存在: {resolvedPath}" });
-            }
+                return McpResult.Fail($"文件不存在: {resolvedPath}", "not_found");
 
+            // 字段名禁止用 content：与 CallToolResult.content 冲突会整段丢失（见 McpResult 注释）。
             if (fileReader != null && endLine > 0 && !(startLine == 1 && endLine >= 100000))
             {
                 var rangeResult = await fileReader.ReadLineRangeAsync(resolvedPath, startLine, endLine);
-                return JsonSerializer.Serialize(new
+                return McpResult.Ok(new
                 {
                     success = true,
                     filePath = resolvedPath,
@@ -157,82 +130,57 @@ public class KnowledgeFileTools
                     totalLines = rangeResult.TotalLines,
                     returnedLines = rangeResult.ReturnedLines,
                     hasMore = rangeResult.HasMore,
-                    content = rangeResult.Content
-                }, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                    text = rangeResult.Content
+                });
             }
 
             var info = new FileInfo(resolvedPath);
             if (info.Length > 5 * 1024 * 1024)
-            {
-                return JsonSerializer.Serialize(new { success = false, error = "文件超过 5MB 大小限制，请使用 startLine 和 endLine 范围流式读取" });
-            }
+                return McpResult.Fail("文件超过 5MB 大小限制，请使用 startLine 和 endLine 范围流式读取", "too_large");
 
             var text = await File.ReadAllTextAsync(resolvedPath);
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 filePath = resolvedPath,
                 fileName = info.Name,
                 size = info.Length,
-                content = text
-            }, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                text
+            });
+        }
+        catch (FileAccessDeniedException ex)
+        {
+            return McpResult.Fail(ex.Message, "path_denied");
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+            return McpResult.Fail(ex.Message);
         }
     }
 
     [McpServerTool, Description("获取指定文档的大纲目录（Markdown H1~H6 标题树与对应行号）、Frontmatter 元数据及向量知识库分块索引状态。")]
     public async Task<string> GetNoteOutline(
         [Description("笔记文件相对路径或绝对路径（必填）")] string filePath,
-        [Description("所属数据源名称（可选）")] string? sourceName = null)
+        [Description("所属数据源名称（可选，可来自 list_sources）")] string? sourceName = null)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(GetNoteOutline), out var permErr))
-        {
-            return JsonSerializer.Serialize(new { success = false, error = permErr });
-        }
-        var config = scope.ServiceProvider.GetRequiredService<ConfigManager>().Load();
-        var fileReader = scope.ServiceProvider.GetService<IFileReaderService>();
+            return McpResult.Fail(permErr, "forbidden");
 
-        if (fileReader == null)
-        {
-            return JsonSerializer.Serialize(new { success = false, error = "文件大纲读取服务未注册" });
-        }
+        var fileReader = scope.ServiceProvider.GetService<IFileReaderService>();
+        if (fileReader == null) return McpResult.Fail("文件大纲读取服务未注册", "service_unavailable");
+
+        var allowed = GetAllowedSources(scope.ServiceProvider);
 
         try
         {
-            string resolvedPath;
-            if (!string.IsNullOrWhiteSpace(sourceName))
-            {
-                var allowedSources = GetEffectiveSources(scope.ServiceProvider);
-                if (allowedSources != null && !allowedSources.Contains(sourceName, StringComparer.OrdinalIgnoreCase))
-                {
-                    return JsonSerializer.Serialize(new { success = false, error = $"无权限访问数据源: {sourceName}" });
-                }
-
-                var targetSource = config.Sources.FirstOrDefault(s => string.Equals(s.Name, sourceName, StringComparison.OrdinalIgnoreCase));
-                if (targetSource == null)
-                    return JsonSerializer.Serialize(new { success = false, error = $"未找到指定的数据源: {sourceName}" });
-
-                var root = FileBrowserPath.Normalize(targetSource.Path);
-                resolvedPath = FileBrowserPath.Join(root, filePath);
-                if (!FileBrowserPath.IsWithin(resolvedPath, root))
-                    return JsonSerializer.Serialize(new { success = false, error = "文件路径超出该知识库沙箱范围" });
-            }
-            else
-            {
-                resolvedPath = FileBrowserPath.Normalize(filePath);
-            }
+            var resolvedPath = await ResolvePath(scope.ServiceProvider, filePath, sourceName, allowed);
 
             if (!File.Exists(resolvedPath))
-            {
-                return JsonSerializer.Serialize(new { success = false, error = $"文件不存在: {resolvedPath}" });
-            }
+                return McpResult.Fail($"文件不存在: {resolvedPath}", "not_found");
 
             var meta = await fileReader.GetMetadataAsync(resolvedPath);
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 filePath = meta.Path,
@@ -244,11 +192,15 @@ public class KnowledgeFileTools
                 ragChunkCount = meta.RagChunkCount,
                 ragLastIndexed = meta.RagLastIndexed,
                 headings = meta.Headings
-            }, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            });
+        }
+        catch (FileAccessDeniedException ex)
+        {
+            return McpResult.Fail(ex.Message, "path_denied");
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+            return McpResult.Fail(ex.Message);
         }
     }
 
@@ -265,32 +217,28 @@ public class KnowledgeFileTools
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(SearchFileContent), out var permErr))
-        {
-            return JsonSerializer.Serialize(new { success = false, error = permErr });
-        }
-        var searchEngine = scope.ServiceProvider.GetService<IFileSearchEngine>();
+            return McpResult.Fail(permErr, "forbidden");
 
-        if (searchEngine == null)
-        {
-            return JsonSerializer.Serialize(new { success = false, error = "文件搜索引擎未注册" });
-        }
+        var searchEngine = scope.ServiceProvider.GetService<IFileSearchEngine>();
+        if (searchEngine == null) return McpResult.Fail("文件搜索引擎未注册", "service_unavailable");
 
         try
         {
-            var allowedSources = GetEffectiveSources(scope.ServiceProvider);
+            var allowed = GetAllowedSources(scope.ServiceProvider);
             List<string>? targetSources = null;
 
             if (!string.IsNullOrWhiteSpace(sourceName))
             {
-                if (allowedSources != null && !allowedSources.Contains(sourceName, StringComparer.OrdinalIgnoreCase))
-                {
-                    return JsonSerializer.Serialize(new { success = false, error = $"无权限访问数据源: {sourceName}" });
-                }
-                targetSources = new List<string> { sourceName };
+                var resolved = await GetCatalog(scope.ServiceProvider).ResolveAsync(sourceName);
+                if (resolved == null || IsScopedOut(resolved, allowed))
+                    return McpResult.Fail($"无权限访问数据源或不存在: {sourceName}（可用 list_sources 查看合法名称）", "source_not_found");
+
+                // 连接器名与配置源名可能不同，统一用路径限定搜索引擎。
+                targetSources = new List<string> { resolved.Path };
             }
-            else if (allowedSources != null)
+            else if (allowed != null)
             {
-                targetSources = allowedSources.ToList();
+                targetSources = allowed.ToList();
             }
 
             var query = new FileSearchQuery
@@ -306,57 +254,99 @@ public class KnowledgeFileTools
             };
 
             var result = await searchEngine.SearchAsync(query);
-            return JsonSerializer.Serialize(result, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            if (!result.Success)
+                return McpResult.Fail(result.Error ?? "搜索失败", "search_failed");
+
+            return McpResult.Ok(result);
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+            return McpResult.Fail(ex.Message);
         }
     }
 
     [McpServerTool, Description("根据通配符模式快速查找并定位知识库中的文件路径列表（类似 fd-find / glob，零内容读取开销）。")]
     public async Task<string> FindFilesByPattern(
         [Description("文件名或路径通配符（必填，如 \"*.json\"、\"*architecture*.md\"、\"*.cs\"）")] string globPattern,
-        [Description("所属数据源名称（可选）")] string? sourceName = null,
+        [Description("所属数据源名称（可选，可来自 list_sources）")] string? sourceName = null,
         [Description("最大返回文件数（默认 100）")] int maxResults = 100)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(FindFilesByPattern), out var permErr))
-        {
-            return JsonSerializer.Serialize(new { success = false, error = permErr });
-        }
-        var searchEngine = scope.ServiceProvider.GetService<IFileSearchEngine>();
+            return McpResult.Fail(permErr, "forbidden");
 
-        if (searchEngine == null)
-        {
-            return JsonSerializer.Serialize(new { success = false, error = "文件搜索引擎未注册" });
-        }
+        var searchEngine = scope.ServiceProvider.GetService<IFileSearchEngine>();
+        if (searchEngine == null) return McpResult.Fail("文件搜索引擎未注册", "service_unavailable");
 
         try
         {
-            var allowedSources = GetEffectiveSources(scope.ServiceProvider);
-            if (!string.IsNullOrWhiteSpace(sourceName) && allowedSources != null && !allowedSources.Contains(sourceName, StringComparer.OrdinalIgnoreCase))
+            var allowed = GetAllowedSources(scope.ServiceProvider);
+
+            if (!string.IsNullOrWhiteSpace(sourceName))
             {
-                return JsonSerializer.Serialize(new { success = false, error = $"无权限访问数据源: {sourceName}" });
+                var resolved = await GetCatalog(scope.ServiceProvider).ResolveAsync(sourceName);
+                if (resolved == null || IsScopedOut(resolved, allowed))
+                    return McpResult.Fail($"无权限访问数据源或不存在: {sourceName}（可用 list_sources 查看合法名称）", "source_not_found");
+
+                sourceName = resolved.Name;
             }
 
             var files = await searchEngine.FindFilesAsync(sourceName, globPattern, maxResults);
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 pattern = globPattern,
                 count = files.Count,
                 files
-            }, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+            return McpResult.Fail(ex.Message);
         }
+    }
+
+    private static async Task<string> ResolvePath(
+        IServiceProvider services, string filePath, string? sourceName, HashSet<string>? allowedSources)
+    {
+        if (!string.IsNullOrWhiteSpace(sourceName))
+        {
+            var resolved = await GetCatalog(services).ResolveAsync(sourceName);
+            if (resolved == null || IsScopedOut(resolved, allowedSources))
+                throw new FileAccessDeniedException($"无权限访问数据源或不存在: {sourceName}");
+
+            // 用连接器/配置源的真实根拼相对路径，避免只认 config.Sources 的名字。
+            var root = FileBrowserPath.Normalize(resolved.Path);
+            var candidate = filePath.StartsWith('/') || Path.IsPathFullyQualified(filePath)
+                ? FileBrowserPath.Normalize(filePath)
+                : FileBrowserPath.Join(root, filePath);
+            if (!FileBrowserPath.IsWithin(candidate, root))
+                throw new FileAccessDeniedException("文件路径超出该数据源允许的沙箱范围");
+            return candidate;
+        }
+
+        var policy = services.GetService<IFileAccessPolicy>()
+                     ?? new SourceScopedFileAccessPolicy(new SourceCatalog(services));
+        return await policy.ResolveAsync(filePath, null);
+    }
+
+    private static bool IsScopedOut(SourceDescriptor source, HashSet<string>? allowed) =>
+        allowed != null
+        && source.AuthorizationName != null
+        && !allowed.Contains(source.AuthorizationName);
+
+    private static ISourceCatalog GetCatalog(IServiceProvider sp) =>
+        sp.GetService<ISourceCatalog>() ?? new SourceCatalog(sp);
+
+    /// <summary>按 API Key 授权裁剪可见源（连接器用 AuthorizationName 判定，未继承配置源时交由 KB 层裁决）。</summary>
+    private static IReadOnlyList<SourceDescriptor> ApplyScope(
+        IReadOnlyList<SourceDescriptor> sources, HashSet<string>? allowed)
+    {
+        if (allowed == null) return sources;
+        return sources
+            .Where(s => s.AuthorizationName == null
+                        || allowed.Contains(s.AuthorizationName))
+            .ToList();
     }
 
     private static bool CheckToolPermission(IServiceProvider sp, string toolName, out string? error)
@@ -372,7 +362,7 @@ public class KnowledgeFileTools
         return true;
     }
 
-    private static HashSet<string>? GetEffectiveSources(IServiceProvider sp)
+    private static HashSet<string>? GetAllowedSources(IServiceProvider sp)
     {
         var httpContextAccessor = sp.GetService<IHttpContextAccessor>();
         var currentKey = httpContextAccessor?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;

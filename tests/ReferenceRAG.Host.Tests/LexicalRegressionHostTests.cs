@@ -230,11 +230,9 @@ public class LexicalRegressionHostTests
         // v2 契约：MCP 词法检索以 knowledgeBaseIds 为范围。夹具未建库时应明确报错，
         // 而不是静默返回空（旧实现走 sources 过滤旧单库）。
         var resJson = await tools.LexicalSearch("alphakw", 5);
-        using (var doc = JsonDocument.Parse(resJson))
-        {
-            Assert.False(doc.RootElement.GetProperty("success").GetBoolean());
-            Assert.Contains("知识库", doc.RootElement.GetProperty("error").GetString());
-        }
+        var parsed = McpToolResult.Parse(resJson);
+        Assert.True(parsed.IsError);
+        Assert.Contains("知识库", parsed.Text);
     }
 
     [Fact]

@@ -80,13 +80,13 @@ public sealed class McpKnowledgeBaseRoutingGateTests : IDisposable
         var kb = await SeedAsync("Alpha", path, "# 量子计算\n\n量子比特与退相干原理。", "# 容器编排\n\nDocker 与 Kubernetes 调度。");
 
         var tools = new RagSearchTools(_provider);
-        var json = await tools.SemanticSearch("量子", topK: 5);
+        var result = McpToolResult.Parse(await tools.SemanticSearch("量子", topK: 5));
 
-        Assert.Contains("\"success\": true", json);
-        Assert.Contains("\"chunkId\"", json);
-        Assert.Contains("knowledgeBaseIds", json);
-        Assert.Contains(kb.Id, json, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("量子", json);
+        Assert.False(result.IsError);
+        Assert.Contains("\"chunkId\"", result.Text);
+        Assert.Contains("knowledgeBaseIds", result.Text);
+        Assert.Contains(kb.Id, result.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("量子", result.Text);
     }
 
     [Fact]
@@ -114,10 +114,11 @@ public sealed class McpKnowledgeBaseRoutingGateTests : IDisposable
     public async Task Search_WithoutAnyKnowledgeBase_ReturnsExplicitError_NotLegacyFallback()
     {
         var tools = new RagSearchTools(_provider);
-        var json = await tools.SemanticSearch("任意查询", topK: 5);
+        var result = McpToolResult.Parse(await tools.SemanticSearch("任意查询", topK: 5));
 
-        Assert.Contains("\"success\": false", json);
-        Assert.Contains("知识库", json);
+        // 失败必须是协议层可判别的 isError 信封，且文案指向知识库
+        Assert.True(result.IsError);
+        Assert.Contains("知识库", result.Text);
     }
 
     [Fact]
@@ -136,10 +137,10 @@ public sealed class McpKnowledgeBaseRoutingGateTests : IDisposable
         var docId = ExtractFirstDocumentId(searchJson);
         Assert.False(string.IsNullOrWhiteSpace(docId));
 
-        var json = await tools.DrillDown(kb.Id, documentId: docId, limit: 10);
-        Assert.Contains("\"success\": true", json);
-        Assert.Contains("chunks", json);
-        Assert.Contains("内容", json);
+        var result = McpToolResult.Parse(await tools.DrillDown(kb.Id, documentId: docId, limit: 10));
+        Assert.False(result.IsError);
+        Assert.Contains("chunks", result.Text);
+        Assert.Contains("内容", result.Text);
     }
 
     [Fact]
@@ -150,8 +151,9 @@ public sealed class McpKnowledgeBaseRoutingGateTests : IDisposable
         var kb = await SeedAsync("Drill2", path, "# 内容\n\n正文。");
 
         var tools = new RagKnowledgeBaseToolsProbe(_provider);
-        var json = await tools.DrillDown(kb.Id, chunkId: "no-such-chunk");
-        Assert.Contains("\"success\": false", json);
+        var result = McpToolResult.Parse(await tools.DrillDown(kb.Id, chunkId: "no-such-chunk"));
+        Assert.True(result.IsError);
+        Assert.Contains("不存在切片", result.Text);
     }
 
     private static string? ExtractFirstDocumentId(string json)

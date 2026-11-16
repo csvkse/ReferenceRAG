@@ -101,6 +101,12 @@ public static class RagWebHostExtensions
             registry.RegisterLocalTool<KnowledgeBaseMcpTools>();
             registry.RegisterLocalTool<TestTools>();
         });
+
+        // 文件工具的源解析与沙箱：单一事实源（配置源 ∪ KB 连接器）+ 路径包含性校验。
+        services.AddSingleton<ISourceCatalog, SourceCatalog>();
+        services.AddSingleton<IFileAccessPolicy, SourceScopedFileAccessPolicy>();
+        // 统计读模型的 30s TTL 缓存（索引统计与连接器统计，生产实测 1.2–2.4 秒）。
+        services.AddSingleton<IMcpStatsCache, McpStatsCache>();
         #endregion
 
         return services;

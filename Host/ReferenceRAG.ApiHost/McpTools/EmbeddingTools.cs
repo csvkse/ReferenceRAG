@@ -16,6 +16,9 @@ namespace ReferenceRAG.Service.McpTools;
 [McpServerToolType]
 public class EmbeddingTools
 {
+    /// <summary>单条向量化字符上限（实测 40,000 字符耗时 27.6 秒，会拖垮 Agent 超时预算）。</summary>
+    private const int MaxEmbedChars = 8000;
+
     private readonly IServiceProvider _serviceProvider;
 
     public EmbeddingTools(IServiceProvider serviceProvider)
@@ -35,16 +38,20 @@ public class EmbeddingTools
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(EmbedText), out var permErr))
         {
-            return permErr!;
+            return McpResult.Fail(permErr, "forbidden");
         }
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
+
+        // 边界钳制：实测 40,000 字符输入耗时 27.6 秒且无任何提示，Agent 侧必超时。
+        if (text.Length > MaxEmbedChars)
+            return McpResult.Fail($"文本过长：{text.Length} 字符，上限 {MaxEmbedChars}。请分段后多次调用。", "too_large");
 
         try
         {
             var vector = await embeddingService.EncodeAsync(text);
             var dimension = vector.Length;
 
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 text = text.Length > 100 ? text[..100] + "..." : text,
@@ -52,19 +59,11 @@ public class EmbeddingTools
                 modelName = embeddingService.ModelName,
                 vectorPreview = vector.Take(10).ToArray(),
                 vectorNorm = Math.Sqrt(vector.Sum(v => v * v))
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
             });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new
-            {
-                success = false,
-                error = ex.Message
-            });
+            return McpResult.Fail(ex.Message);
         }
     }
 
@@ -82,7 +81,7 @@ public class EmbeddingTools
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(CalculateSimilarity), out var permErr))
         {
-            return permErr!;
+            return McpResult.Fail(permErr, "forbidden");
         }
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
 
@@ -93,7 +92,7 @@ public class EmbeddingTools
 
             var similarity = CosineSimilarity(vector1, vector2);
 
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 similarity = similarity,
@@ -107,19 +106,11 @@ public class EmbeddingTools
                     > 0.3f => "相似性较低",
                     _ => "几乎不相关"
                 }
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
             });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new
-            {
-                success = false,
-                error = ex.Message
-            });
+            return McpResult.Fail(ex.Message);
         }
     }
 
@@ -135,13 +126,18 @@ public class EmbeddingTools
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(EmbedBatch), out var permErr))
         {
-            return permErr!;
+            return McpResult.Fail(permErr, "forbidden");
         }
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
 
         try
         {
             var textList = JsonSerializer.Deserialize<List<string>>(texts) ?? [];
+            var oversize = textList.FirstOrDefault(t => t.Length > MaxEmbedChars);
+            if (oversize != null)
+                return McpResult.Fail(
+                    $"存在超长文本（{oversize.Length} 字符），单条上限 {MaxEmbedChars}。请分段后重试。", "too_large");
+
             var results = new List<object>();
 
             foreach (var text in textList)
@@ -155,25 +151,17 @@ public class EmbeddingTools
                 });
             }
 
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 count = results.Count,
                 modelName = embeddingService.ModelName,
                 results = results
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
             });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new
-            {
-                success = false,
-                error = ex.Message
-            });
+            return McpResult.Fail(ex.Message);
         }
     }
 

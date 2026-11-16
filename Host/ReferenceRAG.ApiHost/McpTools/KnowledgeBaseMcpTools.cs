@@ -31,14 +31,14 @@ public class KnowledgeBaseMcpTools
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(KnowledgeBaseList), out var error))
-            return error ?? JsonSerializer.Serialize(new { success = false, error = "权限检查失败" });
+            return error ?? McpResult.Fail("权限检查失败");
         try
         {
             var allowed = GetAllowedSources(scope.ServiceProvider);
             var kbs = allowed == null
                 ? await scope.ServiceProvider.GetRequiredService<IKnowledgeBaseService>().ListKnowledgeBasesAsync()
                 : await scope.ServiceProvider.GetRequiredService<IKnowledgeBaseSearchService>().ListAccessibleKnowledgeBasesAsync(allowed);
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 count = kbs.Count,
@@ -53,11 +53,11 @@ public class KnowledgeBaseMcpTools
                     embeddingSpecId = k.EmbeddingSpecId,
                     updatedAt = k.UpdatedAt
                 })
-            }, new JsonSerializerOptions { WriteIndented = true });
+            });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+            return McpResult.Fail(ex.Message);
         }
     }
 
@@ -73,7 +73,7 @@ public class KnowledgeBaseMcpTools
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(KnowledgeBaseSearch), out var error))
-            return error ?? JsonSerializer.Serialize(new { success = false, error = "权限检查失败" });
+            return error ?? McpResult.Fail("权限检查失败");
         var kbService = scope.ServiceProvider.GetRequiredService<IKnowledgeBaseService>();
         var searchService = scope.ServiceProvider.GetRequiredService<IKnowledgeBaseSearchService>();
 
@@ -92,11 +92,7 @@ public class KnowledgeBaseMcpTools
 
             if (targetIds.Count == 0)
             {
-                return JsonSerializer.Serialize(new
-                {
-                    success = false,
-                    error = "没有可供检索的有效知识库，请先创建或指定知识库 ID"
-                });
+                return McpResult.Fail("没有可供检索的有效知识库，请先创建或指定知识库 ID");
             }
 
             var request = new CrossKnowledgeBaseSearchRequest(
@@ -109,7 +105,7 @@ public class KnowledgeBaseMcpTools
 
             var response = await searchService.SearchAsync(request);
 
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 query = query,
@@ -129,16 +125,11 @@ public class KnowledgeBaseMcpTools
                     documentVersion = item.DocumentVersion,
                     connectorId = item.ConnectorId
                 })
-            }, new JsonSerializerOptions { WriteIndented = true });
+            });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new
-            {
-                success = false,
-                query = query,
-                error = ex.Message
-            });
+            return McpResult.Fail(ex.Message);
         }
     }
 

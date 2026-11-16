@@ -25,6 +25,9 @@ public class IndexStatusTools
         _serviceProvider = serviceProvider;
     }
 
+    private static IMcpStatsCache GetStatsCache(IServiceProvider sp) =>
+        sp.GetService<IMcpStatsCache>() ?? new McpStatsCache();
+
     /// <summary>
     /// 获取当前索引状态，包括向量索引和BM25索引的统计信息。
     /// 在需要了解知识库索引情况时使用，如确认索引是否已完成。
@@ -35,7 +38,7 @@ public class IndexStatusTools
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetIndexStatus), out var permErr))
         {
-            return permErr!;
+            return McpResult.Fail(permErr, "forbidden");
         }
 
         // v2 起索引统计的事实源是各库 kb.db；旧 vectors.db 已停止写入，
@@ -46,32 +49,31 @@ public class IndexStatusTools
         {
             try
             {
-                var kbs = await kbService.ListKnowledgeBasesAsync();
+                // 30s TTL 缓存：逐库 COUNT(*) + AVG(LENGTH(text)) 在 237k 行语料上稳定耗时 1.2–1.5 秒。
+                var stats = await GetStatsCache(scope.ServiceProvider)
+                    .GetIndexStatsAsync(kbService, kbStorage);
+
                 var perKb = new List<object>();
                 int totalChunks = 0, totalVectors = 0, totalDocuments = 0;
-                foreach (var kb in kbs.Where(k => k.Enabled))
+                foreach (var kb in stats)
                 {
-                    if (!await kbStorage.ExistsAsync(kb.Id)) continue;
-                    await using var lease = await kbStorage.AcquireLeaseAsync(kb.Id, StorageAccess.ReadOnly);
-                    var lexical = await lease.Store.GetLexicalStatsAsync();
-                    var manifest = await lease.Store.GetManifestAsync();
-                    totalChunks += lexical.TotalChunks;
-                    totalDocuments += lexical.TotalDocuments;
-                    totalVectors += manifest.ActiveVectorCount;
+                    totalChunks += kb.ChunkCount;
+                    totalDocuments += kb.DocumentCount;
+                    totalVectors += kb.VectorCount;
                     perKb.Add(new
                     {
-                        knowledgeBaseId = kb.Id,
+                        knowledgeBaseId = kb.KnowledgeBaseId,
                         name = kb.Name,
-                        chunkCount = lexical.TotalChunks,
-                        documentCount = lexical.TotalDocuments,
-                        vectorCount = manifest.ActiveVectorCount,
-                        vocabularySize = lexical.TotalVocabularySize,
+                        chunkCount = kb.ChunkCount,
+                        documentCount = kb.DocumentCount,
+                        vectorCount = kb.VectorCount,
+                        vocabularySize = kb.VocabularySize,
                         embeddingSpecId = kb.EmbeddingSpecId,
-                        status = lexical.TotalChunks > 0 ? "indexed" : "empty"
+                        status = kb.ChunkCount > 0 ? "indexed" : "empty"
                     });
                 }
 
-                return JsonSerializer.Serialize(new
+                return McpResult.Ok(new
                 {
                     success = true,
                     knowledgeBaseCount = perKb.Count,
@@ -80,15 +82,11 @@ public class IndexStatusTools
                     totalVectors,
                     knowledgeBases = perKb,
                     lastUpdated = DateTime.UtcNow.ToString("O")
-                }, new JsonSerializerOptions
-                {
-                    WriteIndented = true,
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
                 });
             }
             catch (Exception ex)
             {
-                return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+                return McpResult.Fail(ex.Message);
             }
         }
 
@@ -102,7 +100,7 @@ public class IndexStatusTools
 
             var bm25Stats = await bm25Store.GetStatsAsync();
 
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 vectorIndex = new
@@ -125,19 +123,11 @@ public class IndexStatusTools
                     status = bm25Stats.TotalDocuments > 0 ? "indexed" : "empty"
                 },
                 lastUpdated = DateTime.UtcNow.ToString("O")
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
             });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new
-            {
-                success = false,
-                error = ex.Message
-            });
+            return McpResult.Fail(ex.Message);
         }
     }
 
@@ -154,7 +144,7 @@ public class IndexStatusTools
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GetDocumentInfo), out var permErr))
         {
-            return permErr!;
+            return McpResult.Fail(permErr, "forbidden");
         }
 
         var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
@@ -164,8 +154,8 @@ public class IndexStatusTools
             {
                 var kbChunk = await kbService.GetChunkByIdAsync(knowledgeBaseId, chunkId);
                 if (kbChunk == null)
-                    return JsonSerializer.Serialize(new { success = false, error = $"知识库 {knowledgeBaseId} 中不存在切片 {chunkId}" });
-                return JsonSerializer.Serialize(new
+                    return McpResult.Fail($"知识库 {knowledgeBaseId} 中不存在切片 {chunkId}");
+                return McpResult.Ok(new
                 {
                     success = true,
                     knowledgeBaseId,
@@ -180,11 +170,11 @@ public class IndexStatusTools
                         headingPath = kbChunk.HeadingPath
                     },
                     file = new { path = kbChunk.DocumentSourceKey }
-                }, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                });
             }
             catch (Exception ex)
             {
-                return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+                return McpResult.Fail(ex.Message);
             }
         }
 
@@ -195,16 +185,12 @@ public class IndexStatusTools
             var chunk = await vectorStore.GetChunkAsync(chunkId);
             if (chunk == null)
             {
-                return JsonSerializer.Serialize(new
-                {
-                    success = false,
-                    error = $"Document '{chunkId}' not found"
-                });
+                return McpResult.Fail($"Document '{chunkId}' not found");
             }
 
             var file = await vectorStore.GetFileAsync(chunk.FileId);
 
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 chunk = new
@@ -223,19 +209,11 @@ public class IndexStatusTools
                     title = file.Title,
                     source = file.Source
                 } : null
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
             });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new
-            {
-                success = false,
-                error = ex.Message
-            });
+            return McpResult.Fail(ex.Message);
         }
     }
 
@@ -254,7 +232,7 @@ public class IndexStatusTools
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(ListFiles), out var permErr))
         {
-            return permErr!;
+            return McpResult.Fail(permErr, "forbidden");
         }
 
         var kbService = scope.ServiceProvider.GetService<IKnowledgeBaseService>();
@@ -290,16 +268,16 @@ public class IndexStatusTools
                     if (rows.Count >= limit) break;
                 }
 
-                return JsonSerializer.Serialize(new
+                return McpResult.Ok(new
                 {
                     success = true,
                     count = Math.Min(rows.Count, limit),
                     files = rows.Take(limit)
-                }, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                });
             }
             catch (Exception ex)
             {
-                return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+                return McpResult.Fail(ex.Message);
             }
         }
 
@@ -315,7 +293,7 @@ public class IndexStatusTools
 
             var fileList = files.Take(limit).ToList();
 
-            return JsonSerializer.Serialize(new
+            return McpResult.Ok(new
             {
                 success = true,
                 count = fileList.Count,
@@ -326,19 +304,11 @@ public class IndexStatusTools
                     title = f.Title,
                     source = f.Source
                 })
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
             });
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new
-            {
-                success = false,
-                error = ex.Message
-            });
+            return McpResult.Fail(ex.Message);
         }
     }
 }

@@ -65,10 +65,10 @@ public class GraphSearchTools
         else
         {
             if (LegacyGraphUnavailable(scope.ServiceProvider))
-                return JsonSerializer.Serialize(new { error = "词法索引模式下旧知识图谱可能过期，暂不可用" });
+                return McpResult.Fail("词法索引模式下旧知识图谱可能过期，暂不可用", "legacy_graph_stale");
             var graphStore = scope.ServiceProvider.GetService<IGraphStore>();
             if (graphStore == null)
-                return JsonSerializer.Serialize(new { error = "知识图谱功能未启用" });
+                return McpResult.Fail("知识图谱功能未启用", "graph_disabled");
             result = await graphStore.GetNeighborsAsync(nodeId, depth);
         }
 
@@ -129,14 +129,14 @@ public class GraphSearchTools
         else
         {
             if (LegacyGraphUnavailable(scope.ServiceProvider))
-                return JsonSerializer.Serialize(new { error = "词法索引模式下旧知识图谱可能过期，暂不可用" });
+                return McpResult.Fail("词法索引模式下旧知识图谱可能过期，暂不可用", "legacy_graph_stale");
             var graphStore = scope.ServiceProvider.GetService<IGraphStore>();
             if (graphStore == null)
-                return JsonSerializer.Serialize(new { error = "知识图谱功能未启用" });
+                return McpResult.Fail("知识图谱功能未启用", "graph_disabled");
             nodes = await graphStore.SearchNodesAsync(query, limit);
         }
 
-        return JsonSerializer.Serialize(new
+        return McpResult.Ok(new
         {
             query,
             knowledgeBaseId = targetKbId,
