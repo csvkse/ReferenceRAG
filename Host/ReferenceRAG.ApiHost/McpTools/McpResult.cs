@@ -60,9 +60,15 @@ public static class McpResult
         }.ToJsonString(PrettyOptions);
     }
 
-    /// <summary>包装未知异常：内部错误码 + 原始消息（便于模型判断是否可自纠）。</summary>
+    /// <summary>
+    /// 包装异常。入参校验异常（<see cref="McpInputArgumentException"/>）映射为
+    /// <c>invalid_argument</c>，其余按 <paramref name="errorCode"/> 处理。
+    /// 这样各工具的 try/catch 无需各自判断——此前 limit=0 被兜成 internal_error。
+    /// </summary>
     public static string FailException(Exception ex, string errorCode = McpErrorCodes.InternalError) =>
-        Fail(ex.Message, errorCode);
+        ex is McpInputArgumentException
+            ? Fail(ex.Message, McpErrorCodes.InvalidArgument)
+            : Fail(ex.Message, errorCode);
 
     /// <summary>业务 JSON 的体积预算：超出则拒绝而不是截断，避免单次调用吃掉模型上下文。</summary>
     public const int MaxPayloadChars = 400_000;

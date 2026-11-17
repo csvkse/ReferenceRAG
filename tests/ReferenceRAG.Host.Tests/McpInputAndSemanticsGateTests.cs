@@ -181,7 +181,9 @@ public sealed class McpInputAndSemanticsGateTests
 
     [Theory]
     [InlineData("zzzzqqqxxx 完全不存在的词", false, true)]
+    [InlineData("E1001 错误码", false, true)]
     [InlineData("MCP 协议", false, false)]
+    [InlineData("模型上下文协议", false, false)]
     public void QueryMatchSignals_DetectMisses(string query, bool usedRecallFloor, bool expectNoMatch)
     {
         var items = new List<RecallItem>

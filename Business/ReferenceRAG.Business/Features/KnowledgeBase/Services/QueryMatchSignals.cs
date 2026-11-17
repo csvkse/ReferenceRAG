@@ -38,12 +38,13 @@ public static class QueryMatchSignals
         if (string.IsNullOrWhiteSpace(query)) return (false, null);
         if (items is null || items.Count == 0) return (true, "没有召回任何切片");
 
-        var tokens = Tokenize(query);
+        var cjkTokens = TokenizeCjk(query);
+        var asciiTokens = TokenizeAscii(query);
         if (extraTokens is not null)
         {
-            foreach (var t in extraTokens.Where(t => !string.IsNullOrWhiteSpace(t))) tokens.Add(t.Trim());
+            asciiTokens.AddRange(extraTokens.Where(t => !string.IsNullOrWhiteSpace(t)).Select(t => t.Trim()));
         }
-        if (tokens.Count == 0) return (false, null);
+        if (cjkTokens.Count == 0 && asciiTokens.Count == 0) return (false, null);
 
         var haystack = new StringBuilder();
         foreach (var item in items)
@@ -54,23 +55,47 @@ public static class QueryMatchSignals
         }
         var hay = haystack.ToString();
 
-        var hit = tokens.Count(t => hay.Contains(t, StringComparison.OrdinalIgnoreCase));
-        if (hit > 0) return (false, null);
+        // 判定分两类：
+        //  1) 查询含 ASCII 标识（zzzzqqqxxx / E1001 / McpServerTool）：这是意图锚点，
+        //     任一个都没出现 → 没命中（中文二元组偶然重叠不算数）。
+        //  2) 纯中文查询：二元组覆盖率低于 40% 视为没命中（"存在/完全/可能"几乎处处出现）。
+        if (asciiTokens.Count > 0)
+        {
+            var asciiHits = asciiTokens.Count(t => hay.Contains(t, StringComparison.OrdinalIgnoreCase));
+            if (asciiHits == 0)
+            {
+                return (true, $"查询标识（{string.Join("、", asciiTokens.Take(4))}）未出现在任何返回切片中；结果与查询无关，请改写查询或确认语料覆盖范围");
+            }
+            return (false, null);
+        }
+
+        var hit = cjkTokens.Count(t => hay.Contains(t, StringComparison.OrdinalIgnoreCase));
+        var requiredHits = cjkTokens.Count <= 2 ? 1 : (int)Math.Ceiling(cjkTokens.Count * 0.4);
+        if (hit >= requiredHits) return (false, null);
 
         if (usedRecallFloor)
         {
             return (true, "查询内容词在语料中不存在，返回的是召回地板的宽松兜底结果");
         }
 
-        return (true, $"查询内容词（{string.Join("、", tokens.Take(4))}）均未出现在返回切片中；结果与查询无关，请改写查询或确认语料覆盖范围");
+        return (true, $"查询内容词（{string.Join("、", cjkTokens.Take(4))}）多数未出现在返回切片中；结果与查询相关性不足，请改写查询或确认语料覆盖范围");
     }
 
-    /// <summary>与召回侧一致的轻量分词：ASCII 词 + CJK 二元组，剔除高频虚词。</summary>
-    public static List<string> Tokenize(string text)
+    /// <summary>ASCII 标识：长度 ≥3 才算意图锚点（"MCP"、"E1001"）。</summary>
+    public static List<string> TokenizeAscii(string text)
     {
         var tokens = new List<string>();
-        foreach (Match m in AsciiWord.Matches(text)) tokens.Add(m.Value.ToLowerInvariant());
+        foreach (Match m in AsciiWord.Matches(text))
+        {
+            if (m.Value.Length >= 3) tokens.Add(m.Value.ToLowerInvariant());
+        }
+        return tokens.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
 
+    /// <summary>CJK 二元组，剔除高频虚词。</summary>
+    public static List<string> TokenizeCjk(string text)
+    {
+        var tokens = new List<string>();
         foreach (Match run in CjkRun.Matches(text))
         {
             var s = run.Value;
@@ -85,7 +110,6 @@ public static class QueryMatchSignals
                 if (!StopBigrams.Contains(bg)) tokens.Add(bg);
             }
         }
-
-        return tokens.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return tokens.Distinct(StringComparer.Ordinal).ToList();
     }
 }
