@@ -213,7 +213,7 @@ public interface IKnowledgeBaseSearchService
 
 public sealed record CrossKnowledgeBaseSearchRequest(
     string Query,
-    IReadOnlyList<string> KnowledgeBaseIds,
+    IReadOnlyList<string>? KnowledgeBaseIds = null,
     int TopK = 10,
     FailurePolicy FailurePolicy = FailurePolicy.AllowPartial,
     TimeSpan? Timeout = null,

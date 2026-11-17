@@ -102,6 +102,12 @@ public static class ApiKeyPermissionMatrix
 
         var sources = ParseJsonOrTokens(key.AllowedSources);
         if (sources.Contains("*")) return null;
+
+        // 若当前密钥已明确指定了具体的知识库范围，且未单独配置特定数据源名单，
+        // 则数据源范围由知识库级联判定，此处不返回空的 0 数据源限制
+        if (sources.Count == 0 && GetEffectiveAllowedKnowledgeBases(key) != null)
+            return null;
+
         return sources.ToList();
     }
 

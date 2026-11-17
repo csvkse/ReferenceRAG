@@ -48,6 +48,12 @@ python <skill-dir>/scripts/rag_cli.py list-kbs
 python <skill-dir>/scripts/rag_cli.py stats
 ```
 
+### 轨道 3：底层 REST API 映射（自动化流水线或无 CLI 环境）
+- 跨库通用检索：`POST /api/knowledge-base-search`
+- 知识库清单与状态：`GET /api/knowledge-bases`
+- 数据源与长文按行读取：`GET /api/sources`, `POST /api/sources/file/lines`, `GET /api/sources/files/info`
+- 异步作业队列：`GET /api/jobs`
+
 ---
 
 ## 🧭 Agent 决策与执行状态机
@@ -57,8 +63,8 @@ python <skill-dir>/scripts/rag_cli.py stats
    │
    ▼ 提取核心概念词 (同义词、中英混排，去口语化助词)
 [策略路由]
-   ├── 查代码/错误码/API/配置项 ──> 词法优先策略 (lexical_search 或 --lexical)
-   └── 查架构设计/教程/原理     ──> 混合融合策略 (hybrid_search，默认)
+   ├── 查代码/错误码/API/配置项 ──> 词法优先策略 (lexical_search 或 knowledge_search /api/knowledge-base-search)
+   └── 查架构设计/教程/原理     ──> 混合融合策略 (hybrid_search / knowledge_search)
    │
    ▼
 [执行检索]

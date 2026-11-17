@@ -139,25 +139,31 @@ npm test
 - **语义化版本**：`Version` 与 `InformationalVersion` 自动携带完整 Commit 哈希与预发布标记。
 - **API 联动**：后端 [SystemController.cs](file:///e:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/Host/ReferenceRAG.ApiHost/Controllers/SystemController.cs#L188) 通过程序集反射动态返回最新版本，诊断中心与前端自动显示真实版本号，彻底解决桌面端软件版本停留在 `v1.0.0` 的问题。
 
-### 2) 统一规范化发版命令 (Agent 发版唯一指定操作)
-后续 AI Agent 在协助用户发版、生成标签与触发发布流水线时，**必须统一调用状态机脚本，严禁直接手敲 `git tag` 或手动改文件**：
+### 2) 多元化发版支持 (手动 Git 与脚本双轨制)
+- **模式 A：原生手动 Git 发版（完全自由支持）**：
+  开发者可直接在终端使用原生 Git 命令或在 GitHub Releases 网页端打标签：
+  ```bash
+  git tag v1.0.52
+  git push origin v1.0.52
+  ```
+  打标后，本地构建或打包产物将自动被标记为 `1.0.52`。
 
+- **模式 B：AI 状态机辅助发版（推荐自动化操作）**：
+  若由 AI Agent 协助发版，建议调用 [scripts/release.ps1](file:///e:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/scripts/release.ps1) 自动完成纯净度校验与防呆检查：
+  ```powershell
+  pwsh scripts/release.ps1 -Version 1.0.52 -Message "Release v1.0.52: ..." -Push
+  ```
+
+### 3) 本地桌面端打包规范与自动标签同步
 ```powershell
-# 标准发版命令（自动完成工作区纯净度校验 -> 标签唯一性检查 -> 打 Git Tag -> 推送远程触发 CI/CD）
-pwsh scripts/release.ps1 -Version <版本号> -Message "<说明>" -Push
-
-# 示例：发布 v1.0.52
-pwsh scripts/release.ps1 -Version 1.0.52 -Message "Release v1.0.52: 修复桌面端版本号同步与发版门禁" -Push
-```
-
-- **状态机守卫规则**：发版前工作区必须干净（无未暂存/未提交的代码），杜绝因果倒置。
-- **自动化 CI 触发**：推送标签后，GitHub Actions (`desktop-release.yml`) 将自动启动构建全硬件架构（Universal / CUDA / AMD / Intel / CPU）分包并发布 GitHub Release。
-
-### 3) 本地桌面端打包规范
-```powershell
-# 本地打包桌面软件 (自动继承最新 Git 标签作为软件版本):
+# 本地打包桌面软件 (自动感应远程已推送标签并继承为软件版本):
 .\build-desktop.bat
 ```
+- **智能标签同步器**：打包前自动调用 [support/tools/scripts/sync-git-tags.ps1](file:///e:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/support/tools/scripts/sync-git-tags.ps1)，采用 **5 分钟 TTL 缓存代理** 与 **2 秒严格超时熔断**：
+  - 缓存期内 0 毫秒跳过，不影响打包速度；
+  - 自动增量抓取 GitHub 网页端或其他成员新推送的标签；
+  - 离线或弱网环境下自动静默降级为本地已有标签构建，绝不中断打包。
+  - 支持参数：`.\build-desktop.bat --sync-tags`（强制同步）或 `--no-sync-tags`（纯离线跳过）。
 
 ### 4) Git 客户端门禁与守门员钩子
 项目统一使用 `.githooks` 进行版本化管理。新工作区或 Agent 协助配置环境时，执行：

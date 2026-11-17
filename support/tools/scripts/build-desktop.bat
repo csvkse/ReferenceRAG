@@ -29,6 +29,8 @@ set "PRESERVE_CONFIG=true"
 set "GPU_BACKEND="
 set "GPU_BACKEND_DESC="
 set "BUNDLE_CUDA="
+set "SYNC_TAGS=true"
+set "SYNC_TAGS_FORCE=false"
 
 :parse_args
 if "%~1"=="" goto after_args
@@ -212,6 +214,17 @@ if /i "%~1"=="--batch" (
     shift
     goto parse_args
 )
+if /i "%~1"=="--no-sync-tags" (
+    set "SYNC_TAGS=false"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--sync-tags" (
+    set "SYNC_TAGS=true"
+    set "SYNC_TAGS_FORCE=true"
+    shift
+    goto parse_args
+)
 shift
 goto parse_args
 
@@ -245,6 +258,8 @@ echo   --framework-dependent      构建框架依赖版本 [非独立分发，�
 echo   --pdb                      保留 PDB 调试符号文件 [默认: 去除 PDB 以压缩体积]
 echo   --smoke                    构建前执行端到端自动化冒烟测试门禁 [smoke-test.bat]
 echo   --batch                    非交互模式运行 [CI/CD 自动化流水线使用]
+echo   --sync-tags                强制同步远程已推送标签 [默认: 5分钟 TTL 增量探测]
+echo   --no-sync-tags             跳过远程标签同步，纯离线秒级构建
 echo   --reset-config             构建后不保留历史 appsettings.json 配置
 echo   -v, --verbose              输出详细的 dotnet MSBuild 构建日志
 echo   -h, --help, /?             显示此帮助信息
@@ -369,6 +384,12 @@ if /i "%RUN_SMOKE%"=="true" (
     )
     echo [build-desktop] 冒烟测试全部通过，继续执行构建发布流程。
     echo.
+)
+
+if /i "%SYNC_TAGS%"=="true" (
+    set "_SYNC_FORCE_ARG="
+    if /i "%SYNC_TAGS_FORCE%"=="true" set "_SYNC_FORCE_ARG=-Force"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%sync-git-tags.ps1" !_SYNC_FORCE_ARG!
 )
 
 echo [build-desktop] 检查并清理旧有运行中进程...

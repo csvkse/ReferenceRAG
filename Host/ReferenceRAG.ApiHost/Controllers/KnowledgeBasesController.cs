@@ -153,7 +153,7 @@ public class KnowledgeBasesController : ControllerBase
         var key = ControllerContext.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
         if (key != null && !ApiKeyPermissionMatrix.CanAccessKnowledgeBase(key, id))
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "无权访问指定的知识库" });
         }
         var kb = await _kbService.GetKnowledgeBaseAsync(id, ct);
         if (kb == null) return NotFound(new { message = $"知识库不存在: {id}" });
@@ -616,7 +616,7 @@ public class KnowledgeBasesController : ControllerBase
         var key = ControllerContext.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
         if (key != null && !ApiKeyPermissionMatrix.CanAccessKnowledgeBase(key, id))
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "无权访问指定的知识库" });
         }
         var (docs, total) = await _kbService.GetDocumentsAsync(id, page, pageSize, search, connectorId, ct);
         return Ok(new { items = docs, total, page, pageSize });
@@ -680,7 +680,7 @@ public class KnowledgeBasesController : ControllerBase
         var key = ControllerContext.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
         if (key != null && !ApiKeyPermissionMatrix.CanAccessKnowledgeBase(key, id))
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "无权访问指定的知识库" });
         }
         var (chunks, total) = await _kbService.GetChunksAsync(id, documentId, page, pageSize, search, enabledOnly, ct);
         return Ok(new { items = chunks, total, page, pageSize });
@@ -918,6 +918,17 @@ public sealed class RestrictKnowledgeBaseToFullSourceScopeAttribute : Attribute,
             action.ControllerTypeInfo.AsType() == typeof(KnowledgeBasesController) &&
             action.MethodInfo.Name == nameof(KnowledgeBasesController.ListKnowledgeBases)) return;
         var key = context.HttpContext.Items["CurrentApiKey"] as ApiKeyEntity;
+        if (key == null) return;
+
+        // 若当前请求目标为特定知识库路由，且已被授予该知识库权限，则放行
+        var routeId = context.RouteData.Values["id"]?.ToString();
+        if (!string.IsNullOrEmpty(routeId) && ApiKeyPermissionMatrix.CanAccessKnowledgeBase(key, routeId))
+            return;
+
+        // 若当前 Key 已配置了具体的知识库 ID 范围，则优先交由知识库权限矩阵决断
+        if (ApiKeyPermissionMatrix.GetEffectiveAllowedKnowledgeBases(key) != null)
+            return;
+
         if (ApiKeyPermissionMatrix.GetEffectiveAllowedSources(key) != null)
             context.Result = new ObjectResult(new { message = "当前密钥的数据源权限尚未映射到独立知识库连接器。" }) { StatusCode = 403 };
     }
