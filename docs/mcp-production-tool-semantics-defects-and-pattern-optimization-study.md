@@ -375,3 +375,63 @@ L1/L2 的共性：**"降级"是内部实现的细节，出口契约没有它的�
 - 本轮实测脚本：`/tmp/mcpverify/prod_probe.py`（SSE JSON-RPC 客户端）、`rr-mcp-prod-sweep1..6.py`（调用矩阵 / 边界 / 契约校验）、`/tmp/mcpcheck/check_zh.py`（中文描述检查器）、`tasks.json`（25 条任务）。
 
 
+
+---
+
+## 11. 实施状态（2026-11-17）
+
+### 11.1 交付清单
+
+| 方案项 | 落地位置 | 状态 |
+|:--|:--|:--|
+| **R1 分数语义** | `IRerankService`（`RelevanceScore` 可空 + `RerankScoreKind` + `RerankResult.Degraded/DegradationReason`）、`LlamaRerankAdapter.NormalizeScore`（NaN 不再伪造 0.85） | ✅ |
+| **R2 顺序无关性** | 降级批次按 `Index` 排序；`GenerateFallbackDocuments` 分数留 null | ✅ |
+| **R3 配置面可见** | `get_system_stats.rerank.health/degradationReason/modelPath`；`IRerankRuntimeTelemetryProvider.IsDegraded` | ✅ |
+| **R4 二选一收口** | 未做（生产模型切换属运维决策，代码侧已具备降级可观测） | ⬜ 待运维 |
+| **S1 通道事实** | `RecallChannel` 位标志 + 三个召回源打标 + RRF/ZScore 融合取并集 + `items[].channels` | ✅ |
+| **S2 降级三值** | `knowledge_base_search` 补 `degraded/indexDegraded/degradationReason/usedRecallFloor/kbChannels` | ✅ |
+| **S3 无结果信号** | `QueryMatchSignals`（ASCII 锚点优先 / CJK 40% 覆盖）+ `noMatch/noMatchReason` | ✅ |
+| **S4 上榜依据** | 由 `channels` + `coverage` + `isFloor` 表达（未单列 `matchedTerms`） | ✅（等价信息） |
+| **P1 未知参数拒绝** | SDK `McpToolRegistry.GetDeclaredParameterNames` + `arguments` 键集校验 | ✅ |
+| **P2 单一 ID 解析** | `McpInputAdapters.ParseKnowledgeBaseIds`（6 处工具共用） | ✅ |
+| **P3 JSON 错误归一** | 同上（不泄漏 `Path/LineNumber`）+ `McpResult.FailException` 映射 `invalid_argument` | ✅ |
+| **P4 outputSchema 修正** | SDK `BuildOutputSchema`：Dictionary→additionalProperties、可空→`["type","null"]`、`SystemStatsResult` 强类型 | ✅ |
+| **P5 失败形态建模** | SDK `BuildOutputSchema` 生成 `anyOf[成功, 失败]` | ✅ |
+| **P6 缺参结构化** | SDK 缺参分支补 `structuredContent{errorCode,missing}` | ✅ |
+| **P7 未知工具** | `errorCode=unknown_tool`（保留 `isError`，未改 JSON-RPC 码以免破坏容错客户端） | ✅（折中） |
+| **P8 数值上下界** | `list_files`/`find_files`/`graph_*`/`drill_down`/`search_file_content` 拒绝 0/负数、超上限夹取并回显 `requested*/effective*` | ✅ |
+| **P9 入参上限** | `calculate_similarity` 8000 字符、`embed_batch` 100 条、`rerank_results` 100 条 | ✅ |
+| **T1–T3 文案** | `kb_list`→`knowledge_base_list`、`maxMatches` 统一 500、`depth` 改「范围 1–3」、`limit` 补多库截断 | ✅ |
+| **T4 title** | 25/25 工具补 `Title` | ✅ |
+| **E1 transcript 评估** | 未做真实模型多步 transcript（需模型与配额），离线选型基线已固化 | ⬜ |
+| **E2 选型门禁** | `scripts/mcp-tool-audit.py`（可接 CI，基线 17/25 明确、≤1 错误） | ✅ |
+| **E3 成本门禁** | 同上：总字节 ≤30 KB、outputSchema ≤35%、单条 ≤600 字符 | ✅ |
+| **E4 幽灵名门禁** | `McpToolContractSemanticsGateTests.Descriptions_OnlyReferenceExistingToolNames` | ✅ |
+
+### 11.2 门禁结果
+
+| 套件 | 结果 |
+|:--|:--|
+| `ReferenceRAG.Host.Tests` | **544 / 544**（新增 `McpToolContractSemanticsGateTests` 6 项 + `McpInputAndSemanticsGateTests` 24 项） |
+| `ReferenceRAG.Tests`（Core） | **799 / 799**（47 跳过为既有 Skip） |
+| `McpHelper.Core.Tests` / `Linker.Tests` | **276 / 276**、**46 / 46** |
+| 前端 AST 门禁 / 单测 | 60 模块 + 14 模板通过；**133 / 133** |
+| `scripts/mcp-tool-audit.py`（dev） | `tools=25 compact=29,427B outputSchema=25.9%`；选型 17 明确 / 7 歧义 / 1 错误；warns 0 |
+
+### 11.3 dev 真机验收（`referencerag-dev` @ `127.0.0.1:5124`（经 SSH 隧道））
+
+- **接口面 36/36 断言通过**：title 全覆盖、7 个 outputSchema 为 anyOf 且自建校验 0 违规、未知参数 → `invalid_argument`（列出可用参数名）、缺参 → `structuredContent{missing}`、`knowledgeBaseIds` 五种写法语义一致、非法 JSON 不泄漏序列化器内部路径、`unknown_tool` 有码。
+- **检索语义**：`items[].channels` 与 `kbChannels` 均输出；`knowledge_base_search` 补全三值降级字段；`zzzzqqqxxx 完全不存在的词` → `noMatch=true`；`袁崇焕` → `noMatch=false`。
+- **重排**（dev 用 ONNX Cross-Encoder，因此为真实分数）：`degraded=false scoreKind=measured`，同一批文档换顺序分数随内容变化（0.997 / 7e-05 / 1.6e-05），`effectiveTopK` 回显。
+- **边界**：`limit=0` → `invalid_argument`、`limit=5000` → `effectiveLimit=200`、`maxResults=5000` → 500、`contextLines=99` → 5、`calculate_similarity(9000)` → `too_large`、`embed_batch(101)` → `invalid_argument`。
+- **页面验收（内置浏览器）**：`/search` 顶部出现「未命中查询」「通道 向量+词法」标签，正常查询不误报；`/guide` MCP 页新增「响应语义与失败约定」表（含 `channels`/`kbChannels`/`noMatch`/`scoreKind`/`effectiveXxx`，无 `kb_list` 残留）；`/apikeys` 工具树仍显示 25 节点且描述与注册表一致（改 title 未影响权限树）；`/performance` 重排预设跑通并展示 NDCG/MRR/MAP。
+- **说明**：内置浏览器当前无可见视口，截图接口不可用（`NATIVE_BROWSER_VIEWPORT_UNAVAILABLE`），页面验收改以 DOM/无障碍树文本断言完成，未产出截图。
+
+### 11.4 明确未做 / 后续
+
+| 项 | 原因 |
+|:--|:--|
+| R4 生产切 ONNX 重排模型 | 运维决策；代码侧已能如实报 `health=degraded` |
+| E1 真实模型 transcript 评估 | 需模型与配额；离线 25 条选型基线已接 CI |
+| JSON-RPC `-32602` 未知工具 | 保留 `isError` 形态兼容现有容错客户端，同时给出 `errorCode` |
+| `matchedTerms` 单列字段 | `channels + coverage + isFloor` 已表达同等信息，避免再加字段 |
