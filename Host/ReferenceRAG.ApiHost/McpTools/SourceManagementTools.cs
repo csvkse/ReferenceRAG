@@ -218,8 +218,7 @@ public class SourceManagementTools
             // 所以要先拿 IRerankService 再按接口判断，否则 GetService<IRerankRuntimeTelemetryProvider>() 恒为 null。
             var rerankHealth = "unknown";
             string? rerankDegradationReason = null;
-            var rerankRuntime = scope.ServiceProvider.GetService<IRerankRuntimeTelemetryProvider>()
-                                ?? scope.ServiceProvider.GetService<IRerankService>() as IRerankRuntimeTelemetryProvider;
+            var rerankRuntime = ResolveRerankTelemetry(scope.ServiceProvider);
             if (rerankRuntime is not null)
             {
                 rerankHealth = rerankRuntime.IsDegraded
@@ -286,6 +285,15 @@ public class SourceManagementTools
             return McpResult.FailException(ex);
         }
     }
+
+    /// <summary>
+    /// 重排健康度提供者的唯一解析入口。
+    /// provider 可能只注册为 <see cref="IRerankService"/>（实现同时带遥测接口但没单独注册），
+    /// 因此必须先取 IRerankService 再按接口判断，否则配置面恒为 unknown。
+    /// </summary>
+    internal static IRerankRuntimeTelemetryProvider? ResolveRerankTelemetry(IServiceProvider sp) =>
+        sp.GetService<IRerankRuntimeTelemetryProvider>()
+        ?? sp.GetService<IRerankService>() as IRerankRuntimeTelemetryProvider;
 
     private static ISourceCatalog GetCatalog(IServiceProvider sp) =>
         sp.GetService<ISourceCatalog>() ?? new SourceCatalog(sp);
