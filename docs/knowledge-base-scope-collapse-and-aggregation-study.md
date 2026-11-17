@@ -258,3 +258,69 @@ const getActiveKbId = () => (selectedKbId.value === '__all__' ? '__all__' : sele
 - Google Cloud API Design Guide（可选字段默认值语义与破坏性变更）<https://docs.cloud.google.com/apis/design/changelog>；AIP-157 关于「改变默认值是破坏性变更」<https://google.aip.dev/157>
 - 隐式默认值导致错误行为的实践总结 <https://parottasalna.com/blog/learning-notes-49-pitfall-of-implicit-default-values-in-apis/>
 - 本仓库相关实现：`GraphController.cs:55-63/386-395`、`BM25IndexController.cs:47-62/245-281`、`KnowledgeBaseStorageManager.cs:85-100`、`Graph.js:40-42`、`BM25Index.js:74/94/124`、`GraphSearchTools.cs:66/141`
+
+---
+
+## 10. 实施状态（2026-11-17）
+
+### 10.1 交付清单
+
+| 方案项 | 落地位置 | 状态 |
+|:--|:--|:--|
+| 统一作用域解析器 | [KnowledgeBaseScopeResolver.cs](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/Host/ReferenceRAG.ApiHost/Services/KnowledgeBaseScopeResolver.cs)（读 null/""/`__all__`→All；写 null/""→`scope_required`；未知 ID→404 且不触达存储层） | ✅ |
+| Graph 读端点聚合 | `stats` 求和 + `{scope,kbIds,knowledgeBases[]}` 信封；`search`/`neighbors`/`subgraph`/`node` 跨库合并去重、节点回填 `knowledgeBaseId` | ✅ |
+| Graph 写端点作用域 | `rebuild` 逐库循环 + `_rebuildingByKb` 分锁（原 static 全局锁）；节点/边增删限定单库，`__all__` 返回 400 | ✅ |
+| BM25 聚合口径 | `AverageDocLength = Σ(chunks_i × avgLen_i) / Σchunks_i`；summary 返回 `scope` + 逐库明细 | ✅ |
+| BM25 作用域 | `search` 全量逐库召回合并；`index`/`clear` 逐库执行并回显 `knowledgeBaseIds`；无参写 → 400 | ✅ |
+| 前端作用域传递 | `Graph.js`/`BM25Index.js` 转发 `__all__`（不再折叠成 null）；统计区显示「全部知识库（N 个库合计）」；BM25 增逐库明细表 | ✅ |
+| MCP 图谱跨库 | `graph_search`/`graph_search_by_title` 省略 `knowledgeBaseId` → 跨全部启用库；节点带 `knowledgeBaseId`；响应带 `kbScope` | ✅ |
+
+### 10.2 门禁（新增 12 项）
+
+| 门禁 | 文件 | 锁定 |
+|:--|:--|:--|
+| G-KB1（5） | `KnowledgeBaseScopeResolverGateTests` | 读缺省=全部；写缺省=400；未知 ID 抛异常且**未创建** `kbs/<id>` 目录 |
+| G-KB2（1） | `KnowledgeBaseScopeAggregationGateTests` | Graph `stats` 无参与 `__all__` 都等于逐库求和；`scope` 与 `knowledgeBases[]` 存在 |
+| G-KB3（1） | 同上 | 两库分块 3:1 时 `AverageDocLength` = 加权 775（而非算术 550） |
+| G-KB4（1） | 同上 + `LexicalAuthorizationTests`（2 处期望更新） | 写操作无参 → 400 `scope_required`；显式 `__all__` 才继续 |
+| G-KB5（2） | `KnowledgeBaseScopePropagationGateTests` | `Graph.js`/`BM25Index.js` 不得出现「`!=='__all__' ? … : null`」写法 |
+| G-KB6（3） | 同上 | MCP 省略作用域搜两库、节点带 `knowledgeBaseId`；显式单库仍单库 |
+
+> G-KB4 顺带修改了两条既有门禁的期望：`LexicalAuthorizationTests` 与 `LexicalRegressionHostTests` 原先断言写操作在词法模式下返回 409；现在缺省作用域先被 400 拦下，显式 `__all__` 才是 409。这是**契约变更**导致，非回归。
+
+### 10.3 dev 真机验收（`referencerag-dev`）
+
+**接口矩阵（dev 两库：`test` 0 文档 / `金庸武侠测试知识库` 32 文档）**
+
+| 端点 | 无参 | `__all__` | test | 金庸 | 求和 |
+|:--|--:|--:|--:|--:|--:|
+| `graph/stats` nodes | **32**（scope=all, 2 库） | 32 | 0 | 32 | 32 |
+| `bm25/summary` chunks | **57733**（scope=all） | 57733 | 0 | 57733 | 57733 |
+| `bm25/summary` avg | 403.74 | 403.74 | 200 | 403.74 | 403.74 |
+
+- 写端点：`POST /api/bm25index/index` 与 `POST /api/graph/rebuild` 无参 → **400 `scope_required`**；带 `?kbId=__all__` → 正常执行。
+- 未知 ID：`graph/stats` / `graph/search` / `graph/neighbors` / `bm25/summary` 的 `kbId=nope` → **404 `knowledge_base_not_found`**，且 `kbs/` 下**未新增目录**（清理了此前探测遗留的 `kbs/deadbeef`）。
+
+**MCP**
+
+```
+graph_search_by_title(query=侠)                 → kbScope=all, kbs=[2 个], count=4, 节点 knowledgeBaseId 均标注
+graph_search_by_title(query=侠, kbId=test)       → kbScope=single, count=0
+graph_search(nodeId=…, depth=1)                  → kbScope=all, totalNodes=1
+graph_search(kbId=nope)                          → knowledge_base_not_found
+```
+
+**页面（内置浏览器 DOM 断言）**
+
+- `/graph`：统计卡显示 `节点总数 32 / 全部知识库（2 个库合计）`，下拉为「全部知识库 (聚合统计)」。
+- `/bm25-index`：索引概览显示 `已索引文档 57733 / 平均文档长度 403.74`，口径说明「平均长度按分块数加权；全部知识库（2 个库合计）」，并出现逐库明细表（test 0 / 金庸 57733）。
+- 网络证据：页面加载即请求 `GET /api/bm25index/summary?kbId=__all__`（此前是 `?kbId=` 空值，后端回落首库）。
+- **单库切换未做 DOM 交互验证**：Naive UI 下拉为浮层渲染，合成事件无法可靠驱动；单库行为改由 API 层矩阵（上表 `test`/`金庸` 两列）覆盖。未截图（内置浏览器无可见视口）。
+
+### 10.4 明确未做
+
+| 项 | 原因 |
+|:--|:--|
+| Graph 全量重建并行化 | 当前逐库串行循环 + 单锁，语义正确；并行需评估 IO/CPU 争用，非本次范围 |
+| `bm25index/documents/{chunkId}` 补齐 kb 参数 | 该端点只写 legacy store，与本作用域体系无关；已在文档标注为 legacy-only |
+| `SourcesController` 的「未指定库时挂到第一个启用库」 | 语义是「挂载默认库」而非「读取统计」，保持现状但应回显目标库（后续小改） |
