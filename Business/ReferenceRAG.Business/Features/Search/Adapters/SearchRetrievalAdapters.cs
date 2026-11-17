@@ -153,7 +153,15 @@ public class RerankExecutionAdapter : IRerankExecutionAdapter
             return new RerankResult
             {
                 Query = query,
-                Documents = documents.Select((d, i) => new RerankDocument { Index = i, RelevanceScore = 0.5 }).ToList()
+                // 未装配重排服务：不伪造 0.5 分，改为显式降级（分数 null）。
+                Documents = documents.Select((d, i) => new RerankDocument
+                {
+                    Index = i,
+                    RelevanceScore = null,
+                    ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded
+                }).ToList(),
+                Degraded = true,
+                DegradationReason = "重排服务未装配"
             };
         }
 

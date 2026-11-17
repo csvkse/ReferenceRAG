@@ -218,9 +218,16 @@ public class LlamaAdapterTests
 
         var score = await adapter.RerankAsync("你好", "你好，很高兴认识你。");
         _output.WriteLine($"Single rerank score: {score}");
-        Assert.False(double.IsNaN(score), "Single rerank score must not be NaN");
-        Assert.False(double.IsInfinity(score), "Single rerank score must not be Infinity");
-        Assert.InRange(score, 0.0, 1.0);
+
+        // 单值接口在降级时返回 NaN（不再回 0.75/0.5 伪值）；批次接口用 Degraded 标志表达同一件事。
+        if (double.IsNaN(score))
+        {
+            Assert.True(adapter.IsPermanentlyDegraded, "NaN 必须伴随永久降级标记");
+        }
+        else
+        {
+            Assert.InRange(score, 0.0, 1.0);
+        }
 
         var docs = new[] { "你好，世界", "今天天气真好", "这是一个测试文档" };
         var batch = await adapter.RerankBatchAsync("你好", docs);
@@ -229,16 +236,27 @@ public class LlamaAdapterTests
         Assert.Equal(docs.Length, batch.Documents.Count);
         foreach (var doc in batch.Documents)
         {
-            _output.WriteLine($"  [{doc.Index}] score: {doc.RelevanceScore:F4}, doc: {doc.Document}");
-            Assert.False(double.IsNaN(doc.RelevanceScore), "Document RelevanceScore must not be NaN");
-            Assert.False(double.IsInfinity(doc.RelevanceScore), "Document RelevanceScore must not be Infinity");
-            Assert.InRange(doc.RelevanceScore, 0.0, 1.0);
+            _output.WriteLine($"  [{doc.Index}] score: {doc.RelevanceScore?.ToString("F4") ?? "degraded"}, doc: {doc.Document}");
+            if (doc.RelevanceScore is { } s)
+            {
+                Assert.False(double.IsNaN(s), "Document RelevanceScore must not be NaN");
+                Assert.False(double.IsInfinity(s), "Document RelevanceScore must not be Infinity");
+                Assert.InRange(s, 0.0, 1.0);
+            }
+            else
+            {
+                // GGUF 缺 Rank 头时分数留空，整批必须标记降级。
+                Assert.Equal(ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded, doc.ScoreKind);
+                Assert.True(batch.Degraded, "null 分数必须伴随 Degraded=true");
+            }
         }
 
         // Verify JSON serialization works seamlessly
         var json = System.Text.Json.JsonSerializer.Serialize(batch);
         Assert.NotNull(json);
-        Assert.DoesNotContain("NaN", json);
+        // 只禁止「数值 NaN」（JSON 非法字面量）；降级原因文本里出现 "NaN" 是正常的诊断描述。
+        Assert.DoesNotContain(":NaN", json);
+        Assert.DoesNotContain(":Infinity", json);
     }
 }
 

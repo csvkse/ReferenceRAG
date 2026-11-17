@@ -251,4 +251,17 @@ public sealed record CrossKnowledgeBaseSearchResponse(
     /// 只能回落到虚词做宽松兜底。前端应提示"未找到匹配内容，以下为宽松结果"，
     /// 否则这些结果会被误认为精确命中（上一轮遗留的 P1）。
     /// </summary>
-    bool UsedRecallFloor = false);
+    bool UsedRecallFloor = false,
+    /// <summary>
+    /// 各库实际走的召回通道（kbId → "lexical" / "vector" / "hybrid"）。
+    /// 纯词法库（spec_lexical_only）会被自动切到词法通道，但此前响应里没有任何字段说明这件事，
+    /// 导致「语义检索」在纯词法库上看起来和真向量命中一样。
+    /// </summary>
+    IReadOnlyDictionary<string, string>? KbChannels = null,
+    /// <summary>
+    /// 没有任何一条结果达到可用阈值（或查询词在本语料完全不存在）。
+    /// 与「返回 0 条」不同：此前不存在的词也会凑满 topK 条，模型无法识别「其实没命中」。
+    /// </summary>
+    bool NoMatch = false,
+    /// <summary>NoMatch 的可读说明（模型据此决定是否改写查询）。</summary>
+    string? NoMatchReason = null);

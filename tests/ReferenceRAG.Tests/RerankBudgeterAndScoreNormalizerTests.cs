@@ -110,11 +110,16 @@ public class RerankBudgeterAndScoreNormalizerTests
         var docs = new[] { "Doc A", "Doc B", "Doc C" };
         var result = await service.RerankBatchAsync("test query", docs);
 
-        // 异常触发弹性降级，保证检索调用方不崩溃，并按原顺序赋予降序分值
+        // 远端失败：保底保留原顺序，但不再伪造相关性分值（分数留 null + Degraded）。
         Assert.NotNull(result);
         Assert.Equal(3, result.Documents.Count);
         Assert.Equal("Doc A", result.Documents[0].Document);
-        Assert.True(result.Documents[0].RelevanceScore > result.Documents[1].RelevanceScore);
-        Assert.True(result.Documents[1].RelevanceScore > result.Documents[2].RelevanceScore);
+        Assert.True(result.Degraded, "远端失败必须标记 Degraded");
+        Assert.False(string.IsNullOrWhiteSpace(result.DegradationReason));
+        Assert.All(result.Documents, d =>
+        {
+            Assert.Null(d.RelevanceScore);
+            Assert.Equal(ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded, d.ScoreKind);
+        });
     }
 }

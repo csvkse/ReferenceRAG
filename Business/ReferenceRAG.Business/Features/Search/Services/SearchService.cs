@@ -625,18 +625,21 @@ public class SearchService : ISearchService, IRougamo<SearchTraceAttribute>
                 foreach (var doc in rerankResult.Documents.Take(topN))
                 {
                     var originalResult = topResults[doc.Index];
-                    var score = doc.RelevanceScore;
-                    if (double.IsNaN(score) || double.IsInfinity(score))
+                    // 降级批次不覆盖主分数：保留召回分数，避免用伪相关性污染排序与阈值过滤。
+                    if (doc.RelevanceScore is { } score && !double.IsNaN(score) && !double.IsInfinity(score))
                     {
-                        score = 0.5;
+                        originalResult.RerankScore = score;
+                        originalResult.Score = (float)score;
                     }
-                    originalResult.RerankScore = score;
-                    originalResult.Score = (float)score; // 更新主分数
+                    else
+                    {
+                        originalResult.RerankScore = null;
+                    }
                     rerankedResults.Add(originalResult);
                 }
 
-                // 应用分数阈值过滤
-                if (rerankConfig.ScoreThreshold > 0)
+                // 降级批次没有真实分数：跳过阈值过滤，否则 null>=threshold 会把全部结果滤掉。
+                if (!rerankResult.Degraded && rerankConfig.ScoreThreshold > 0)
                 {
                     var beforeCount = rerankedResults.Count;
                     rerankedResults = rerankedResults

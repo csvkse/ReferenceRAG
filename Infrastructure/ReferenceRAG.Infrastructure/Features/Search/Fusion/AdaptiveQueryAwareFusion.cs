@@ -89,7 +89,9 @@ public static class AdaptiveQueryAwareFusion
 
             if (fusedMap.TryGetValue(v.ChunkId, out var existing))
             {
-                fusedMap[v.ChunkId] = (existing.FusedScore + wVector * normScore, existing.BaseItem);
+                // 同一 chunk 两路命中：通道取并集，而不是只留先到的那一路。
+                fusedMap[v.ChunkId] = (existing.FusedScore + wVector * normScore,
+                    existing.BaseItem with { Channels = existing.BaseItem.Channels | v.Channels });
             }
             else
             {
@@ -100,7 +102,14 @@ public static class AdaptiveQueryAwareFusion
         return fusedMap.Values
             .OrderByDescending(x => x.FusedScore)
             .Take(topK)
-            .Select(x => x.BaseItem with { Score = x.FusedScore, ScoreKind = ScoreKind.RRF })
+            .Select(x => x.BaseItem with
+            {
+                Score = x.FusedScore,
+                ScoreKind = ScoreKind.RRF,
+                Channels = x.BaseItem.Channels == RecallChannel.None
+                    ? (x.BaseItem.ScoreKind == ScoreKind.Cosine ? RecallChannel.Vector : RecallChannel.Lexical)
+                    : x.BaseItem.Channels
+            })
             .ToList();
     }
 

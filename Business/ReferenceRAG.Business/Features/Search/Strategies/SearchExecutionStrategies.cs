@@ -270,15 +270,21 @@ public class HybridRerankSearchStrategy : ISearchExecutionStrategy
                 if (doc.Index >= 0 && doc.Index < candidates.Count)
                 {
                     var orig = candidates[doc.Index];
-                    var score = doc.RelevanceScore;
-                    if (double.IsNaN(score) || double.IsInfinity(score)) score = 0.5;
-                    orig.RerankScore = score;
-                    orig.Score = (float)score;
+                    // 降级（null）时不覆盖召回分数。
+                    if (doc.RelevanceScore is { } score && !double.IsNaN(score) && !double.IsInfinity(score))
+                    {
+                        orig.RerankScore = score;
+                        orig.Score = (float)score;
+                    }
+                    else
+                    {
+                        orig.RerankScore = null;
+                    }
                     reranked.Add(orig);
                 }
             }
 
-            if (rerankConfig.ScoreThreshold > 0)
+            if (!rerankResult.Degraded && rerankConfig.ScoreThreshold > 0)
             {
                 reranked = reranked.Where(r => r.RerankScore >= rerankConfig.ScoreThreshold).ToList();
             }
@@ -406,15 +412,21 @@ public class DeepSearchStrategy : ISearchExecutionStrategy
                 if (doc.Index >= 0 && doc.Index < candidates.Count)
                 {
                     var orig = candidates[doc.Index];
-                    var score = doc.RelevanceScore;
-                    if (double.IsNaN(score) || double.IsInfinity(score)) score = 0.5;
-                    orig.RerankScore = score;
-                    orig.Score = (float)score;
+                    // 降级（null）时不覆盖召回分数。
+                    if (doc.RelevanceScore is { } score && !double.IsNaN(score) && !double.IsInfinity(score))
+                    {
+                        orig.RerankScore = score;
+                        orig.Score = (float)score;
+                    }
+                    else
+                    {
+                        orig.RerankScore = null;
+                    }
                     reranked.Add(orig);
                 }
             }
 
-            if (rerankConfig.ScoreThreshold > 0)
+            if (!rerankResult.Degraded && rerankConfig.ScoreThreshold > 0)
             {
                 reranked = reranked.Where(r => r.RerankScore >= rerankConfig.ScoreThreshold).ToList();
             }

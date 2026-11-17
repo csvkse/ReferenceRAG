@@ -245,7 +245,7 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
     public async Task<double> RerankAsync(string query, string document, CancellationToken cancellationToken = default)
     {
         var result = await RerankBatchAsync(query, new[] { document }, cancellationToken);
-        return result.Documents.FirstOrDefault()?.RelevanceScore ?? 0.0;
+        return result.Documents.FirstOrDefault()?.RelevanceScore ?? double.NaN;
     }
 
     /// <summary>
@@ -270,7 +270,7 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
 
         if (_simulationMode || _session == null)
         {
-            // 模拟模式：返回随机分数
+            // 模拟模式：随机分数仅供链路打通，必须对外标记为降级，否则会被当成真实相关性。
             var random = Random.Shared;
             for (int i = 0; i < docList.Count; i++)
             {
@@ -278,9 +278,14 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
                 {
                     Index = i,
                     Document = docList[i],
-                    RelevanceScore = random.NextDouble()
+                    RelevanceScore = random.NextDouble(),
+                    ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded
                 });
             }
+            result.Degraded = true;
+            result.DegradationReason = _session == null
+                ? "ONNX 重排模型未加载（session 为空），返回随机占位分数"
+                : "ONNX 重排模拟模式，返回随机占位分数";
             result.DurationMs = sw.ElapsedMilliseconds;
             return result;
         }
@@ -300,7 +305,9 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
             }, cancellationToken);
 
             // 按分数降序排列
-            result.Documents = scores.OrderByDescending(d => d.RelevanceScore).ToList();
+            result.Documents = scores
+                .OrderByDescending(d => d.RelevanceScore ?? double.NegativeInfinity)
+                .ToList();
             result.DurationMs = sw.ElapsedMilliseconds;
 
             return result;
@@ -325,7 +332,8 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
             {
                 Index = index,
                 Document = doc,
-                RelevanceScore = Random.Shared.NextDouble()
+                RelevanceScore = Random.Shared.NextDouble(),
+                ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded
             }).ToList();
         }
 
@@ -444,7 +452,8 @@ public class OnnxRerankService : IRerankService, IDisposable, IRougamo<SearchTra
             {
                 Index = startIndex + i,
                 Document = documents[i],
-                RelevanceScore = score
+                RelevanceScore = score,
+                ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Measured
             });
         }
 

@@ -76,7 +76,11 @@ public sealed class CrossEncoderEvidenceAdapter : ICognitiveEvidenceEvaluator
             {
                 var item = candidates[i];
                 var docScore = rerankResult.Documents.FirstOrDefault(d => d.Index == i);
-                var rawScore = docScore?.RelevanceScore ?? 0.5;
+                if (docScore?.RelevanceScore is not { } rawScore || double.IsNaN(rawScore))
+                {
+                    // 降级：不产生证据分，交由下游按「无重排证据」处理。
+                    continue;
+                }
 
                 // Logit 自适应 Sigmoid 归一化
                 var normalized = NormalizeScore(rawScore);

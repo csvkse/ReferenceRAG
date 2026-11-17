@@ -10,7 +10,8 @@ namespace ReferenceRAG.Service.McpTools;
 [McpServerToolType]
 public class TestTools
 {
-    [McpServerTool, Description("测试 MCP 连通性，返回 pong")]
+    [McpServerTool(Title = "连通性探活")]
+    [Description("测试 MCP 连通性，返回 pong")]
     public static string Ping()
     {
         return JsonSerializer.Serialize(new
@@ -21,7 +22,8 @@ public class TestTools
         });
     }
 
-    [McpServerTool, Description("获取 ReferenceRAG MCP 服务信息")]
+    [McpServerTool(Title = "服务信息")]
+    [Description("获取 ReferenceRAG MCP 服务信息")]
     public static string GetServiceInfo()
     {
         return JsonSerializer.Serialize(new

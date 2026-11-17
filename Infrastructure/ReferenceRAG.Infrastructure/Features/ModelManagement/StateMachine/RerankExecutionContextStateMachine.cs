@@ -175,17 +175,16 @@ public sealed class RerankExecutionContextStateMachine
         var total = documents.Count;
         var list = new List<RerankDocument>(total);
 
+        // 保底只保证「原始顺序」不丢，不伪造相关性：分数留 null + ScoreKind=Degraded。
         for (int i = 0; i < total; i++)
         {
             var rawIndex = startIndex + i;
-            var step = total > 1 ? 0.35 / total : 0.0;
-            var score = Math.Clamp(0.85 - (rawIndex * step), 0.10, 0.99);
-
             list.Add(new RerankDocument
             {
                 Index = rawIndex,
                 Document = documents[i],
-                RelevanceScore = score
+                RelevanceScore = null,
+                ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded
             });
         }
 

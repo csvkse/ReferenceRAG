@@ -76,8 +76,10 @@ public class RerankAdapterStrategyStateMachineTests
     }
 
     [Fact]
-    public void StateMachine_GenerateFallbackDocuments_YieldsValidOrderedScores()
+    public void StateMachine_GenerateFallbackDocuments_PreservesOrderWithoutFakeScores()
     {
+        // 契约变更：保底只保证「原始顺序不丢」，不再伪造 0.85 - i*step 的相关性分数。
+        // 旧行为会让 rerank_results 把名次当成相关性发布出去（生产 P0）。
         var docs = new[] { "Doc A", "Doc B", "Doc C", "Doc D" };
         var results = RerankExecutionContextStateMachine.GenerateFallbackDocuments(docs);
 
@@ -86,12 +88,8 @@ public class RerankAdapterStrategyStateMachineTests
         {
             Assert.Equal(i, results[i].Index);
             Assert.Equal(docs[i], results[i].Document);
-            Assert.True(results[i].RelevanceScore >= 0.1 && results[i].RelevanceScore <= 0.99);
-            if (i > 0)
-            {
-                Assert.True(results[i - 1].RelevanceScore > results[i].RelevanceScore,
-                    "Higher ranked initial candidates should maintain higher fallback scores");
-            }
+            Assert.Null(results[i].RelevanceScore);
+            Assert.Equal(ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded, results[i].ScoreKind);
         }
     }
 
@@ -141,7 +139,12 @@ public class RerankAdapterStrategyStateMachineTests
 
         Assert.Equal(3, res.Documents.Count);
         Assert.Equal(0, res.DurationMs);
-        Assert.True(res.Documents[0].RelevanceScore > res.Documents[1].RelevanceScore);
+        Assert.True(res.Degraded, "fallback adapter 必须标记 Degraded");
+        Assert.All(res.Documents, d =>
+        {
+            Assert.Null(d.RelevanceScore);
+            Assert.Equal(ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded, d.ScoreKind);
+        });
     }
 
     [Fact]

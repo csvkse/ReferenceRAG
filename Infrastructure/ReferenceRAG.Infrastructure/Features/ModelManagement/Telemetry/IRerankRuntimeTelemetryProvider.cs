@@ -29,4 +29,13 @@ public interface IRerankRuntimeTelemetryProvider
     /// GPU 设备 ID
     /// </summary>
     int DeviceId { get; }
+
+    /// <summary>
+    /// 当前后端是否处于「不可产出真实相关性」的降级态（如 GGUF 缺 Rank 头）。
+    /// 配置面必须能看到，否则「模型名/设备都对」会掩盖完全失效的重排。
+    /// </summary>
+    bool IsDegraded { get; }
+
+    /// <summary>降级原因（IsDegraded=true 时给出）。</summary>
+    string? DegradationReason { get; }
 }

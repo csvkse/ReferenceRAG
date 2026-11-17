@@ -232,11 +232,12 @@ public sealed class DeterministicRerankService : IRerankService
             {
                 Index = i,
                 Document = doc,
-                RelevanceScore = score
+                RelevanceScore = score,
+                ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Measured
             });
         }
 
-        results.Sort((a, b) => b.RelevanceScore.CompareTo(a.RelevanceScore));
+        results.Sort((a, b) => (b.RelevanceScore ?? 0).CompareTo(a.RelevanceScore ?? 0));
 
         return Task.FromResult(new RerankResult
         {

@@ -31,21 +31,24 @@ public class RagSearchTools
         _serviceProvider = serviceProvider;
     }
 
-    [McpServerTool, Description("知识库语义检索（免向量词法）。适合精确词汇、错误码、API 名。可指定 knowledgeBaseIds 限定范围。")]
+    [McpServerTool(Title = "词法检索（知识库）")]
+    [Description("知识库语义检索（免向量词法）。适合精确词汇、错误码、API 名。可指定 knowledgeBaseIds 限定范围。")]
     public Task<string> LexicalSearch(
         [Description("关键词或查询文本（必填）")] string query,
         [Description("返回结果数量，默认 5，上限 50")] int topK = 5,
         [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
         => SearchAsync(nameof(LexicalSearch), query, topK, knowledgeBaseIds, useLexical: true);
 
-    [McpServerTool, Description("知识库语义检索（向量召回）。适合问答与信息检索。可指定 knowledgeBaseIds 限定范围。")]
+    [McpServerTool(Title = "语义检索（向量）")]
+    [Description("知识库语义检索（向量召回）。适合问答与信息检索。可指定 knowledgeBaseIds 限定范围。")]
     public Task<string> SemanticSearch(
         [Description("搜索查询文本（必填），建议补充同义词与中英文术语")] string query,
         [Description("返回结果数量，默认 5，建议 1-20，上限 50")] int topK = 5,
         [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
         => SearchAsync(nameof(SemanticSearch), query, topK, knowledgeBaseIds, useLexical: false);
 
-    [McpServerTool, Description("知识库混合检索（向量 + 词法 RRF 融合），兼顾精确匹配与语义理解。可指定 knowledgeBaseIds 限定范围。")]
+    [McpServerTool(Title = "混合检索（向量+词法）")]
+    [Description("知识库混合检索（向量 + 词法 RRF 融合），兼顾精确匹配与语义理解。可指定 knowledgeBaseIds 限定范围。")]
     public Task<string> HybridSearch(
         [Description("搜索查询文本（必填）")] string query,
         [Description("返回结果数量，默认 5，上限 50")] int topK = 5,
@@ -53,9 +56,10 @@ public class RagSearchTools
         [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
         => SearchAsync(nameof(HybridSearch), query, topK, knowledgeBaseIds, useLexical: lexicalOnly);
 
-    [McpServerTool, Description("展开某个知识库切片的完整正文（按 chunkId 或 documentId + 序号）。用于检索结果被截断时补全上下文。")]
+    [McpServerTool(Title = "展开切片正文")]
+    [Description("展开某个知识库切片的完整正文（按 chunkId 或 documentId + 序号）。用于检索结果被截断时补全上下文。")]
     public async Task<string> KnowledgeBaseDrillDown(
-        [Description("目标知识库 ID（必填）。可用 kb_list 获取")]
+        [Description("目标知识库 ID（必填）。可用 knowledge_base_list 获取")]
         string knowledgeBaseId,
         [Description("切片 ID（来自检索结果的 chunkId）。与 documentId 二选一")]
         string? chunkId = null,
@@ -103,11 +107,12 @@ public class RagSearchTools
         }
     }
 
-    [McpServerTool, Description("对候选文档进行重排，用深度语义理解重新评估每个文档与查询的相关性。")]
+    [McpServerTool(Title = "候选重排")]
+    [Description("对候选文档进行重排，用深度语义理解重新评估每个文档与查询的相关性。")]
     public async Task<string> RerankResults(
         [Description("原始查询（必填）")] string query,
-        [Description("待重排序的文本列表（必填），须为 JSON 数组字符串，如[\"文档1\",\"文档2\"]")] string documents,
-        [Description("最终返回数量，默认 5，上限 50")] int topK = 5)
+        [Description("待重排序的文本列表（必填，最多 100 条），须为 JSON 数组字符串，如[\"文档1\",\"文档2\"]")] string documents,
+        [Description("最终返回数量，默认 5，上限 50（超出按 50 处理）")] int topK = 5)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(RerankResults), out var permErr))
@@ -115,29 +120,48 @@ public class RagSearchTools
 
         try
         {
-            var docs = JsonSerializer.Deserialize<List<string>>(documents) ?? new List<string>();
+            List<string> docs;
+            (_, var effectiveTopK) = McpInputAdapters.ClampInt(nameof(topK), topK, 1, 50);
+            try
+            {
+                docs = McpInputAdapters.ParseStringArray(documents, nameof(documents));
+                McpInputAdapters.EnsureItemCount(nameof(documents), docs.Count, McpInputAdapters.MaxRerankDocuments);
+            }
+            catch (McpInputArgumentException ex)
+            {
+                return Fail(ex.Message, McpErrorCodes.InvalidArgument);
+            }
+
             var rerankService = scope.ServiceProvider.GetRequiredService<IRerankService>();
             var result = await rerankService.RerankBatchAsync(query, docs);
 
             var topResults = result.Documents
-                .OrderByDescending(d => d.RelevanceScore)
-                .Take(topK)
+                .OrderByDescending(d => d.RelevanceScore ?? double.NegativeInfinity)
+                .Take(effectiveTopK)
                 .ToList();
 
-            return JsonSerializer.Serialize(new
+            // 降级时 relevanceScore 为 null 且 scoreKind=degraded：
+            // 模型据此知道「这只是原顺序，不是相关性」，不会拿 0.85 之类的保底值做裁剪。
+            return McpResult.OkBounded(new
             {
                 success = true,
                 query,
+                requestedTopK = topK,
+                effectiveTopK,
                 inputCount = docs.Count,
                 outputCount = topResults.Count,
                 durationMs = result.DurationMs,
+                degraded = result.Degraded,
+                degradationReason = result.DegradationReason,
+                scoreKind = result.ScoreKind.ToString().ToLowerInvariant(),
                 results = topResults.Select(d => new
                 {
                     index = d.Index,
                     document = d.Document.Length > 300 ? d.Document[..300] + "..." : d.Document,
-                    relevanceScore = d.RelevanceScore
+                    relevanceScore = d.RelevanceScore,
+                    scoreKind = d.ScoreKind.ToString().ToLowerInvariant()
                 })
-            }, PrettyOptions());
+            });
         }
         catch (Exception ex)
         {
@@ -162,7 +186,17 @@ public class RagSearchTools
             if (kbService == null || kbSearch == null)
                 return Fail("知识库服务未装配，无法执行检索（请检查宿主是否注册 AddKnowledgeBaseServices）", McpErrorCodes.ServiceUnavailable);
 
-            var targetIds = ParseIds(knowledgeBaseIds);
+            List<string> targetIds;
+            (_, var effectiveTopK) = McpInputAdapters.ClampInt(nameof(topK), topK, 1, 50);
+            try
+            {
+                targetIds = McpInputAdapters.ParseKnowledgeBaseIds(knowledgeBaseIds);
+            }
+            catch (McpInputArgumentException ex)
+            {
+                return Fail(ex.Message, McpErrorCodes.InvalidArgument);
+            }
+
             if (targetIds.Count == 0)
             {
                 var accessible = await kbService.ListKnowledgeBasesAsync();
@@ -174,7 +208,7 @@ public class RagSearchTools
 
             var request = new CrossKnowledgeBaseSearchRequest(
                 Query: query,
-                TopK: Math.Clamp(topK, 1, 50),
+                TopK: effectiveTopK,
                 KnowledgeBaseIds: targetIds,
                 UseLexicalTokenizer: useLexical,
                 FailurePolicy: FailurePolicy.AllowPartial,
@@ -185,7 +219,7 @@ public class RagSearchTools
 
             var response = await kbSearch.SearchAsync(request);
 
-            return McpResult.OkRaw(JsonSerializer.Serialize(new
+            return McpResult.OkBounded(new
             {
                 success = true,
                 tool = toolName,
@@ -193,13 +227,17 @@ public class RagSearchTools
                 knowledgeBaseIds = targetIds,
                 requestedTopK = topK,
                 // 回显真正生效的上限（原先 topK=900 被静默钳到 50，调用方无从判断）
-                effectiveTopK = Math.Clamp(topK, 1, 50),
+                effectiveTopK,
                 count = response.Items.Count,
                 scoreKind = response.ScoreKind.ToString(),
                 elapsedMs = Math.Round(response.Elapsed.TotalMilliseconds, 1),
                 degraded = response.Degraded,
                 degradationReason = response.DegradationReason,
                 indexDegraded = response.IndexDegraded,
+                // 通道事实：融合把 ScoreKind 统一成 RRF，只有这里能说清「向量还是关键词命中」。
+                kbChannels = response.KbChannels,
+                noMatch = response.NoMatch,
+                noMatchReason = response.NoMatchReason,
                 successfulKbs = response.SuccessfulKnowledgeBaseIds,
                 failedKbs = response.FailedKnowledgeBaseIds,
                 usedRecallFloor = response.UsedRecallFloor,
@@ -213,13 +251,14 @@ public class RagSearchTools
                     text = Truncate(i.Text),
                     score = Math.Round(i.Score, 4),
                     scoreKind = i.ScoreKind.ToString(),
+                    channels = ChannelsOf(i.Channels),
                     startLine = i.StartLine,
                     endLine = i.EndLine,
                     headingPath = i.HeadingPath,
                     coverage = i.Coverage,
                     isFloor = i.IsFloor
                 })
-            }, PrettyOptions()));
+            });
         }
         catch (Exception ex)
         {
@@ -242,19 +281,12 @@ public class RagSearchTools
         headingPath = chunk.HeadingPath
     };
 
-    private static List<string> ParseIds(string? json)
+    private static IReadOnlyList<string> ChannelsOf(RecallChannel channels)
     {
-        if (string.IsNullOrWhiteSpace(json)) return new List<string>();
-        try
-        {
-            var parsed = JsonSerializer.Deserialize<List<string>>(json);
-            return parsed?.Where(x => !string.IsNullOrWhiteSpace(x)).ToList() ?? new List<string>();
-        }
-        catch
-        {
-            // 容错：也接受逗号分隔
-            return json.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-        }
+        var list = new List<string>();
+        if (channels.HasFlag(RecallChannel.Lexical)) list.Add("lexical");
+        if (channels.HasFlag(RecallChannel.Vector)) list.Add("vector");
+        return list;
     }
 
     private static string Truncate(string text) =>

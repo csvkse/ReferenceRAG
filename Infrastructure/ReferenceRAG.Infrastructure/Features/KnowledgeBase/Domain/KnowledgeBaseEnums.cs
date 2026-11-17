@@ -134,6 +134,22 @@ public enum ScoreKind
 }
 
 /// <summary>
+/// 召回通道位标志：融合后 <see cref="ScoreKind"/> 会被统一改写为 RRF，
+/// 「这条是向量命中还是关键词命中」只能靠这个标志保留下来。
+/// </summary>
+[Flags]
+public enum RecallChannel
+{
+    None = 0,
+
+    /// <summary>词法 / BM25 / 关键词扫描。</summary>
+    Lexical = 1,
+
+    /// <summary>向量 / 余弦相似度。</summary>
+    Vector = 2
+}
+
+/// <summary>
 /// 数据源变更类型（ChangeKind）
 /// </summary>
 public enum ChangeKind

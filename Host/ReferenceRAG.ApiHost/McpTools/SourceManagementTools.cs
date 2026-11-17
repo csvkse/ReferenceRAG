@@ -6,6 +6,7 @@ using ReferenceRAG.Business.Features.KnowledgeBase.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
 using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Service.McpTools;
@@ -28,7 +29,7 @@ public class SourceManagementTools
         _serviceProvider = serviceProvider;
     }
 
-    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(ListSourcesResult))]
+    [McpServerTool(Title = "数据源清单", UseStructuredContent = true, OutputSchemaType = typeof(ListSourcesResult))]
     [Description("列出所有已配置的知识库数据源及其索引统计。第一次接触服务时先调它拿到合法 sourceName 与 connectorId。")]
     public async Task<string> ListSources(
         [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示全部已启用知识库")] string? knowledgeBaseIds = null)
@@ -130,7 +131,8 @@ public class SourceManagementTools
         }
     }
 
-    [McpServerTool, Description("获取指定数据源的详细信息：路径状态、文档数、分块数、物理文件数量与大小。源名可来自 list_sources（含知识库连接器）。")]
+    [McpServerTool(Title = "数据源详情")]
+    [Description("获取指定数据源的详细信息：路径状态、文档数、分块数、物理文件数量与大小。源名可来自 list_sources（含知识库连接器）。")]
     public async Task<string> GetSourceInfo(
         [Description("数据源名称或完整路径（必填），可来自 list_sources")] string sourceName)
     {
@@ -195,7 +197,7 @@ public class SourceManagementTools
         }
     }
 
-    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(SystemStatsResult))]
+    [McpServerTool(Title = "系统统计", UseStructuredContent = true, OutputSchemaType = typeof(SystemStatsResult))]
     [Description("获取整体系统统计：配置概览、Embedding 模型参数、搜索与重排配置、按库汇总的索引统计。排查配置问题或确认当前模型参数时使用。")]
     public async Task<string> GetSystemStats()
     {
@@ -210,6 +212,16 @@ public class SourceManagementTools
         try
         {
             var sources = await GetCatalog(scope.ServiceProvider).ListAsync();
+
+            // 重排健康度：GGUF 缺 Rank 头时 IsDegraded=true，此时不该让调用方以为重排生效。
+            var rerankHealth = "unknown";
+            string? rerankDegradationReason = null;
+            var rerankRuntime = scope.ServiceProvider.GetService<IRerankRuntimeTelemetryProvider>();
+            if (rerankRuntime is not null)
+            {
+                rerankHealth = rerankRuntime.IsDegraded ? "degraded" : (rerankRuntime.GetLifecycleSnapshot().IsReady ? "ok" : "idle");
+                rerankDegradationReason = rerankRuntime.DegradationReason;
+            }
 
             int chunks = 0, docs = 0, vectors = 0;
             if (kbService != null && kbStorage != null)
@@ -250,7 +262,11 @@ public class SourceManagementTools
                     enabled = config.Rerank.Enabled,
                     modelName = config.Rerank.ModelName,
                     topN = config.Rerank.TopN,
-                    useCuda = config.Rerank.UseCuda
+                    useCuda = config.Rerank.UseCuda,
+                    modelPath = config.Rerank.ModelPath,
+                    // 配置面必须能看出「模型名/设备都对，但其实完全打不出可信分数」。
+                    health = rerankHealth,
+                    degradationReason = rerankDegradationReason
                 },
                 index = new
                 {

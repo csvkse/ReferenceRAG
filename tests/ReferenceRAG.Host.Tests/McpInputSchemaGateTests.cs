@@ -201,7 +201,14 @@ public sealed class McpInputSchemaGateTests
         var registry = BuildRegistry();
         var outputSchema = registry.GetAllTools()["list_files"].OutputSchema;
         Assert.NotNull(outputSchema);
-        var props = outputSchema!["properties"] as System.Text.Json.Nodes.JsonObject;
+
+        // 2.4.0 起 outputSchema 是 anyOf[成功形态, 失败信封]（规范要求失败载荷也符合 schema），
+        // 因此字段断言取第一个分支。
+        var props = (outputSchema!["anyOf"] is System.Text.Json.Nodes.JsonArray variants
+                        && variants.Count > 0
+                        ? variants[0]?["properties"]
+                        : outputSchema["properties"])
+                    as System.Text.Json.Nodes.JsonObject;
         Assert.NotNull(props);
         foreach (var field in new[] { "success", "count", "totalMatched", "truncated", "appliedFilters", "files" })
         {

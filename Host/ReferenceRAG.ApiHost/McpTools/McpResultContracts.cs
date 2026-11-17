@@ -11,6 +11,8 @@ public sealed class ListFilesResult
 {
     public bool Success { get; set; }
     public ListFilesAppliedFilters AppliedFilters { get; set; } = new();
+    public int RequestedLimit { get; set; }
+    public int EffectiveLimit { get; set; }
     public int Count { get; set; }
     public int TotalMatched { get; set; }
     public bool Truncated { get; set; }
@@ -19,6 +21,7 @@ public sealed class ListFilesResult
 
 public sealed class ListFilesAppliedFilters
 {
+    // 未应用该过滤时为 null：必须声明可空，否则客户端按 string 校验必然失败。
     public string? ConnectorId { get; set; }
     public string? PathKeyword { get; set; }
 }
@@ -112,6 +115,13 @@ public sealed class KnowledgeBaseSearchResult
     public double ElapsedMs { get; set; }
     public List<string> SuccessfulKbs { get; set; } = new();
     public List<string> FailedKbs { get; set; } = new();
+    public bool Degraded { get; set; }
+    public string? DegradationReason { get; set; }
+    public bool IndexDegraded { get; set; }
+    public bool NoMatch { get; set; }
+    public string? NoMatchReason { get; set; }
+    public bool UsedRecallFloor { get; set; }
+    public Dictionary<string, string>? KbChannels { get; set; }
     public List<KnowledgeBaseSearchItem> Items { get; set; } = new();
 }
 
@@ -123,6 +133,8 @@ public sealed class KnowledgeBaseSearchItem
     public string Text { get; set; } = "";
     public double Score { get; set; }
     public string ScoreKind { get; set; } = "";
+    /// <summary>命中通道（lexical / vector，可同时）。</summary>
+    public List<string>? Channels { get; set; }
     public long DocumentVersion { get; set; }
     public string? ConnectorId { get; set; }
 }
@@ -152,11 +164,61 @@ public sealed class DocumentInfoFile
     public string Path { get; set; } = "";
 }
 
-/// <summary>get_system_stats 的响应契约：只声明顶层，嵌套配置按 object 泛化。</summary>
+/// <summary>
+/// get_system_stats 的响应契约。
+/// 逐块强类型：此前用 <c>Dictionary&lt;string,object&gt;</c> 反射，schema 里出现
+/// count/capacity/comparer 且被标为 required，与真实载荷完全不符。
+/// </summary>
 public sealed class SystemStatsResult
 {
     public bool Success { get; set; }
-    public Dictionary<string, object?> System { get; set; } = new();
-    public Dictionary<string, object?> Embedding { get; set; } = new();
-    public Dictionary<string, object?> Search { get; set; } = new();
+    public SystemStatsSystem System { get; set; } = new();
+    public SystemStatsEmbedding Embedding { get; set; } = new();
+    public SystemStatsSearch Search { get; set; } = new();
+    public SystemStatsRerank Rerank { get; set; } = new();
+    public SystemStatsIndex Index { get; set; } = new();
+}
+
+public sealed class SystemStatsSystem
+{
+    public string? DataPath { get; set; }
+    public string? ModelsRootPath { get; set; }
+    public int SourcesCount { get; set; }
+    public int KnowledgeBaseConnectorCount { get; set; }
+    public int EnabledSourcesCount { get; set; }
+}
+
+public sealed class SystemStatsEmbedding
+{
+    public string? ModelName { get; set; }
+    public int MaxSequenceLength { get; set; }
+    public int BatchSize { get; set; }
+    public bool UseCuda { get; set; }
+}
+
+public sealed class SystemStatsSearch
+{
+    public int DefaultTopK { get; set; }
+    public double SimilarityThreshold { get; set; }
+    public bool EnableMmr { get; set; }
+    public string? Bm25Provider { get; set; }
+}
+
+public sealed class SystemStatsRerank
+{
+    public bool Enabled { get; set; }
+    public string? ModelName { get; set; }
+    public int TopN { get; set; }
+    public bool UseCuda { get; set; }
+    public string? ModelPath { get; set; }
+    /// <summary>ok / degraded / idle / unknown。degraded 表示分数不可信（如 GGUF 缺 Rank 头）。</summary>
+    public string Health { get; set; } = "unknown";
+    public string? DegradationReason { get; set; }
+}
+
+public sealed class SystemStatsIndex
+{
+    public int TotalChunks { get; set; }
+    public int TotalDocuments { get; set; }
+    public int TotalVectors { get; set; }
 }

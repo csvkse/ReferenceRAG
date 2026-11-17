@@ -32,7 +32,7 @@ public class IndexStatusTools
     /// 获取当前索引状态，包括向量索引和BM25索引的统计信息。
     /// 在需要了解知识库索引情况时使用，如确认索引是否已完成。
     /// </summary>
-    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(IndexStatusResult))]
+    [McpServerTool(Title = "索引状态", UseStructuredContent = true, OutputSchemaType = typeof(IndexStatusResult))]
     [Description("按物理知识库逐库统计分块数/文档数/向量数。确认索引是否建完、或检索为空时排查索引问题使用。")]
     public async Task<string> GetIndexStatus()
     {
@@ -137,7 +137,7 @@ public class IndexStatusTools
     /// 在需要查看某个具体文档内容或调试检索结果时使用。
     /// </summary>
     /// <param name="chunkId">文档片段ID（Chunk ID）</param>
-    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(DocumentInfoResult))]
+    [McpServerTool(Title = "切片归属文件", UseStructuredContent = true, OutputSchemaType = typeof(DocumentInfoResult))]
     [Description("获取指定分片的详细信息（内容、行号、所属文件）。查某个 chunkId 属于哪个文件时使用；要看完整正文改用 knowledge_base_drill_down。必须同时传 knowledgeBaseId。")]
     public async Task<string> GetDocumentInfo(
         [Description("文档分片 ID（必填）。来自 knowledge_base_search / list_files 的 chunkId")] string chunkId,
@@ -226,13 +226,13 @@ public class IndexStatusTools
     /// <param name="connectorId">连接器 ID（精确过滤），可来自 list_sources</param>
     /// <param name="pathKeyword">路径关键词（sourceKey / locator 子串，LIKE 已 ESCAPE）</param>
     /// <param name="limit">返回数量限制，默认20</param>
-    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(ListFilesResult))]
+    [McpServerTool(Title = "已索引文件清单", UseStructuredContent = true, OutputSchemaType = typeof(ListFilesResult))]
     [Description("列出知识库中已索引的文件（文档 ID、路径、切片数）。支持按 connectorId 精确过滤，或按 pathKeyword 做路径子串过滤（可叠加）。")]
     public async Task<string> ListFiles(
         [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\"]（可选）。留空表示全部已启用知识库")] string? knowledgeBaseIds = null,
         [Description("连接器 ID（可选，精确匹配）。可由 list_sources 的 connectorId 字段获得")] string? connectorId = null,
         [Description("路径关键词（可选，sourceKey / locator 的子串匹配，% 与 _ 按字面处理）")] string? pathKeyword = null,
-        [Description("返回文件数量限制，默认 20，上限 200")] int limit = 20)
+        [Description("返回文件数量限制，默认 20，上限 200（多库时按库合计截断，超出按 200 处理）")] int limit = 20)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(ListFiles), out var permErr))
@@ -250,9 +250,17 @@ public class IndexStatusTools
 
         try
         {
-            var requested = string.IsNullOrWhiteSpace(knowledgeBaseIds)
-                ? new List<string>()
-                : JsonSerializer.Deserialize<List<string>>(knowledgeBaseIds) ?? new List<string>();
+            (_, var effectiveLimit) = McpInputAdapters.ClampInt(nameof(limit), limit, 1, 200);
+
+            List<string> requested;
+            try
+            {
+                requested = McpInputAdapters.ParseKnowledgeBaseIds(knowledgeBaseIds);
+            }
+            catch (McpInputArgumentException ex)
+            {
+                return McpResult.Fail(ex.Message, McpErrorCodes.InvalidArgument);
+            }
             var kbs = await kbService.ListKnowledgeBasesAsync();
             var targetKbs = requested.Count > 0
                 ? kbs.Where(k => requested.Contains(k.Id, StringComparer.OrdinalIgnoreCase)).ToList()
@@ -287,9 +295,9 @@ public class IndexStatusTools
             foreach (var kb in targetKbs)
             {
                 var (docs, total) = await kbService.GetDocumentsAsync(
-                    kb.Id, page: 1, pageSize: limit, search: pathKeyword, connectorId: connectorId);
+                    kb.Id, page: 1, pageSize: effectiveLimit, search: pathKeyword, connectorId: connectorId);
                 totalMatched += total;
-                if (rows.Count >= limit) continue;
+                if (rows.Count >= effectiveLimit) continue;
                 foreach (var d in docs)
                 {
                     rows.Add(new
@@ -303,11 +311,11 @@ public class IndexStatusTools
                         chunkCount = d.ChunkCount,
                         updatedAt = d.UpdatedAt
                     });
-                    if (rows.Count >= limit) break;
+                    if (rows.Count >= effectiveLimit) break;
                 }
             }
 
-            var files = rows.Take(limit).ToList();
+            var files = rows.Take(effectiveLimit).ToList();
             return McpResult.OkBounded(new
             {
                 success = true,
@@ -316,6 +324,8 @@ public class IndexStatusTools
                     connectorId = string.IsNullOrWhiteSpace(connectorId) ? null : connectorId,
                     pathKeyword = string.IsNullOrWhiteSpace(pathKeyword) ? null : pathKeyword
                 },
+                requestedLimit = limit,
+                effectiveLimit,
                 count = files.Count,
                 totalMatched,
                 truncated = totalMatched > files.Count,

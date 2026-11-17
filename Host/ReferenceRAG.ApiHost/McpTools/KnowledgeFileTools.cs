@@ -33,7 +33,8 @@ public class KnowledgeFileTools
         _serviceProvider = serviceProvider;
     }
 
-    [McpServerTool, Description("获取指定知识库数据源或子目录下的文件与目录列表结构。用于探索知识库结构、定位笔记文件。")]
+    [McpServerTool(Title = "浏览目录树")]
+    [Description("获取指定知识库数据源或子目录下的文件与目录列表结构。用于探索知识库结构、定位笔记文件。")]
     public async Task<string> GetFileTree(
         [Description("数据源名称（可选，可来自 list_sources）。若为空则默认使用第一个可用知识源")] string? sourceName = null,
         [Description("相对子路径（可选），如 \"docs/api\"")] string? subPath = null)
@@ -95,7 +96,8 @@ public class KnowledgeFileTools
         }
     }
 
-    [McpServerTool, Description("读取知识库中指定笔记的内容。支持指定起止行范围（startLine, endLine），避免一次性读取超长文件撑爆 Token。")]
+    [McpServerTool(Title = "按行读取文件")]
+    [Description("读取知识库中指定笔记的内容。支持指定起止行范围（startLine, endLine），避免一次性读取超长文件撑爆 Token。")]
     public async Task<string> ReadNoteContent(
         [Description("笔记文件相对路径或绝对路径（必填），如 \"docs/architecture.md\" 或完整路径")] string filePath,
         [Description("所属数据源名称（可选，可来自 list_sources）。若提供则在该源沙箱内解析相对路径")] string? sourceName = null,
@@ -158,7 +160,8 @@ public class KnowledgeFileTools
         }
     }
 
-    [McpServerTool, Description("获取指定文档的大纲目录（Markdown H1~H6 标题树与对应行号）、Frontmatter 元数据及向量知识库分块索引状态。")]
+    [McpServerTool(Title = "文件大纲")]
+    [Description("获取指定文档的大纲目录（Markdown H1~H6 标题树与对应行号）、Frontmatter 元数据及向量知识库分块索引状态。")]
     public async Task<string> GetNoteOutline(
         [Description("笔记文件相对路径或绝对路径（必填）")] string filePath,
         [Description("所属数据源名称（可选，可来自 list_sources）")] string? sourceName = null)
@@ -204,7 +207,8 @@ public class KnowledgeFileTools
         }
     }
 
-    [McpServerTool, Description("在知识库或源码工程中执行高性能关键字或正则表达式内容检索（类似 ripgrep / grep）。支持指定数据源、文件名过滤、返回带行号的匹配上下文代码块（Hunk）。专为精确查找函数、变量、配置项、错误码或 TODO 设计。")]
+    [McpServerTool(Title = "文件内容检索")]
+    [Description("在知识库或源码工程中执行高性能关键字或正则表达式内容检索（类似 ripgrep / grep）。支持指定数据源、文件名过滤、返回带行号的匹配上下文代码块（Hunk）。专为精确查找函数、变量、配置项、错误码或 TODO 设计。")]
     public async Task<string> SearchFileContent(
         [Description("搜索文本或正则表达式（必填）")] string pattern,
         [Description("是否作为正则表达式解析（默认 false，纯文本极速查找）")] bool isRegex = false,
@@ -213,7 +217,7 @@ public class KnowledgeFileTools
         [Description("相对子目录（可选，如 \"src/api\"）")] string? subPath = null,
         [Description("文件名通配过滤（可选，如 \"*.md\" 或 \"*.cs\"）")] string? filePattern = null,
         [Description("匹配行前后上下文行数（0 ~ 5，默认 1）")] int contextLines = 1,
-        [Description("最大匹配命中条数（默认 50，上限 300）")] int maxMatches = 50)
+        [Description("最大匹配命中条数（默认 50，上限 500，超出按 500 处理）")] int maxMatches = 50)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(SearchFileContent), out var permErr))
@@ -241,6 +245,18 @@ public class KnowledgeFileTools
                 targetSources = allowed.ToList();
             }
 
+            // 边界统一走适配器：0/负数属于调用方笔误，直接拒绝而不是静默夹成 1。
+            int effectiveContext, effectiveMax;
+            try
+            {
+                (_, effectiveContext) = McpInputAdapters.ClampInt(nameof(contextLines), contextLines, 0, 5);
+                (_, effectiveMax) = McpInputAdapters.ClampInt(nameof(maxMatches), maxMatches, 1, 500);
+            }
+            catch (McpInputArgumentException ex)
+            {
+                return McpResult.Fail(ex.Message, McpErrorCodes.InvalidArgument);
+            }
+
             var query = new FileSearchQuery
             {
                 Pattern = pattern,
@@ -249,8 +265,8 @@ public class KnowledgeFileTools
                 Sources = targetSources,
                 SubPath = subPath,
                 FilePattern = filePattern,
-                ContextLines = contextLines,
-                MaxMatches = maxMatches
+                ContextLines = effectiveContext,
+                MaxMatches = effectiveMax
             };
 
             var result = await searchEngine.SearchAsync(query);
@@ -258,7 +274,23 @@ public class KnowledgeFileTools
                 return McpResult.Fail(result.Error ?? "搜索失败", McpErrorCodes.SearchFailed);
 
             // 引擎内部已夹取 MaxMatches 到 [1,500]；超预算直接拒绝，避免 439KB 级响应。
-            return McpResult.OkBounded(result);
+            return McpResult.OkBounded(new
+            {
+                success = true,
+                queryPattern = result.QueryPattern,
+                isRegex = result.IsRegex,
+                requestedContextLines = contextLines,
+                effectiveContextLines = effectiveContext,
+                requestedMaxMatches = maxMatches,
+                effectiveMaxMatches = effectiveMax,
+                totalMatches = result.TotalMatches,
+                matchedFilesCount = result.MatchedFilesCount,
+                totalFilesScanned = result.TotalFilesScanned,
+                elapsedMilliseconds = result.ElapsedMilliseconds,
+                truncated = result.Truncated,
+                error = result.Error,
+                files = result.Files
+            });
         }
         catch (Exception ex)
         {
@@ -266,11 +298,12 @@ public class KnowledgeFileTools
         }
     }
 
-    [McpServerTool, Description("根据通配符模式快速查找并定位知识库中的文件路径列表（类似 fd-find / glob，零内容读取开销）。")]
+    [McpServerTool(Title = "按模式找文件")]
+    [Description("根据通配符模式快速查找并定位知识库中的文件路径列表（类似 fd-find / glob，零内容读取开销）。")]
     public async Task<string> FindFilesByPattern(
         [Description("文件名或路径通配符（必填，如 \"*.json\"、\"*architecture*.md\"、\"*.cs\"）")] string globPattern,
         [Description("所属数据源名称（可选，可来自 list_sources）")] string? sourceName = null,
-        [Description("最大返回文件数，默认 100，上限 500")] int maxResults = 100)
+        [Description("最大返回文件数，默认 100，上限 500（超出按 500 处理）")] int maxResults = 100)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!CheckToolPermission(scope.ServiceProvider, nameof(FindFilesByPattern), out var permErr))
@@ -293,7 +326,15 @@ public class KnowledgeFileTools
             }
 
             // 硬上限 500：此前 maxResults=5000 会返回 500 条 / 77KB，且描述未声明上限。
-            var effectiveMaxResults = Math.Clamp(maxResults, 1, 500);
+            int effectiveMaxResults;
+            try
+            {
+                (_, effectiveMaxResults) = McpInputAdapters.ClampInt(nameof(maxResults), maxResults, 1, 500);
+            }
+            catch (McpInputArgumentException ex)
+            {
+                return McpResult.Fail(ex.Message, McpErrorCodes.InvalidArgument);
+            }
             var files = await searchEngine.FindFilesAsync(sourceName, globPattern, effectiveMaxResults);
             return McpResult.OkBounded(new
             {

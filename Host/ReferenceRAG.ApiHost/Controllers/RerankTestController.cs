@@ -62,6 +62,7 @@ public class RerankTestController : ControllerBase
                     Id = originalDoc?.Id ?? Guid.NewGuid().ToString(),
                     Tag = originalDoc?.Tag,
                     Text = rerankDoc.Document.Length > 200 ? rerankDoc.Document[..200] + "..." : rerankDoc.Document,
+                    // 降级返回 null：诊断接口必须如实透出，不能补 0/0.5 伪装成测量值。
                     RelevanceScore = rerankDoc.RelevanceScore,
                     OriginalIndex = rerankDoc.Index >= 0 ? rerankDoc.Index : originalIndex,
                     NewRank = i + 1,
@@ -70,6 +71,10 @@ public class RerankTestController : ControllerBase
             }
 
             result.Documents = documentResults;
+            // 降级标志始终透出：即使没有期望分数，调用方也要知道这批分数不可信。
+            result.Degraded = rerankResult.Degraded;
+            result.DegradationReason = rerankResult.DegradationReason;
+            result.ScoreKind = rerankResult.ScoreKind.ToString().ToLowerInvariant();
 
             // 计算评估指标（如果有期望相关性分数）
             var hasExpectedScores = request.Documents.Any(d => d.ExpectedRelevance.HasValue);
@@ -486,7 +491,7 @@ public class RerankTestController : ControllerBase
 
         // 计算实际排序
         var actualOrder = results
-            .OrderByDescending(r => r.RelevanceScore)
+            .OrderByDescending(r => r.RelevanceScore ?? double.NegativeInfinity)
             .Select(r => r.OriginalIndex)
             .ToList();
 
@@ -519,8 +524,9 @@ public class RerankTestController : ControllerBase
         {
             if (doc.OriginalIndex >= 0 && doc.OriginalIndex < expectedRelevance.Count)
             {
+                if (doc.RelevanceScore is not { } score) continue; // 降级条目不参与误差统计
                 var expected = expectedRelevance[doc.OriginalIndex];
-                errors.Add(Math.Abs(doc.RelevanceScore - expected));
+                errors.Add(Math.Abs(score - expected));
             }
         }
 
@@ -771,6 +777,11 @@ public class RerankTestResult
     public double Map { get; set; }
     public double RankingAccuracy { get; set; }
     public double MeanAbsoluteError { get; set; }
+
+    /// <summary>本批分数是否来自降级保底（模型缺 Rank 头 / 熔断 / 远端不可用）。</summary>
+    public bool Degraded { get; set; }
+    public string? DegradationReason { get; set; }
+    public string ScoreKind { get; set; } = "measured";
 }
 
 public class RerankDocumentResult
@@ -778,11 +789,14 @@ public class RerankDocumentResult
     public string Id { get; set; } = "";
     public string? Tag { get; set; }
     public string Text { get; set; } = "";
-    public double RelevanceScore { get; set; }
+    /// <summary>重排分数；降级（模型不可用）时为 null。</summary>
+    public double? RelevanceScore { get; set; }
     public int OriginalIndex { get; set; }
     public int NewRank { get; set; }
     public double? ExpectedRelevance { get; set; }
-    public double? Deviation => ExpectedRelevance.HasValue ? Math.Abs(RelevanceScore - ExpectedRelevance.Value) : null;
+    public double? Deviation => ExpectedRelevance.HasValue && RelevanceScore is { } score
+        ? Math.Abs(score - ExpectedRelevance.Value)
+        : null;
 }
 
 public class RerankPresetSuiteInfo

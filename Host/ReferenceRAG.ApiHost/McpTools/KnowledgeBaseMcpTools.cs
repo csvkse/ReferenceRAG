@@ -26,7 +26,7 @@ public class KnowledgeBaseMcpTools
     /// <summary>
     /// 列出所有可用的物理隔离知识库
     /// </summary>
-    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(KnowledgeBaseListResult))]
+    [McpServerTool(Title = "知识库清单", UseStructuredContent = true, OutputSchemaType = typeof(KnowledgeBaseListResult))]
     [Description("列出系统中已注册的知识库（ID、名称、配置代次、嵌入规格）。需要知识库 ID 来限定检索范围时使用。")]
     public async Task<string> KnowledgeBaseList()
     {
@@ -65,7 +65,7 @@ public class KnowledgeBaseMcpTools
     /// <summary>
     /// 在指定的多个隔离知识库中执行跨库多路召回与融合检索
     /// </summary>
-    [McpServerTool(UseStructuredContent = true, OutputSchemaType = typeof(KnowledgeBaseSearchResult))]
+    [McpServerTool(Title = "跨库融合检索", UseStructuredContent = true, OutputSchemaType = typeof(KnowledgeBaseSearchResult))]
     [Description("在指定知识库中执行跨库多路召回与 RRF 融合检索。已确定库范围时使用；不确定用 semantic_search / hybrid_search。")]
     public async Task<string> KnowledgeBaseSearch(
         [Description("检索查询文本（必填）。使用完整的问题或查询短语")] string query,
@@ -84,21 +84,17 @@ public class KnowledgeBaseMcpTools
             if (string.IsNullOrWhiteSpace(query))
                 return McpResult.Fail("query 不能为空", McpErrorCodes.InvalidArgument);
 
+            // 与另三个检索工具共用同一解析器：JSON 数组 / 逗号分隔 / 空数组=全部，只有一种语义。
             List<string> targetIds;
-            if (!string.IsNullOrWhiteSpace(knowledgeBaseIds))
+            try
             {
-                try
-                {
-                    targetIds = JsonSerializer.Deserialize<List<string>>(knowledgeBaseIds) ?? new List<string>();
-                }
-                catch (JsonException)
-                {
-                    return McpResult.Fail(
-                        $"knowledgeBaseIds 必须是 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]，收到: {knowledgeBaseIds}",
-                        McpErrorCodes.InvalidArgument);
-                }
+                targetIds = McpInputAdapters.ParseKnowledgeBaseIds(knowledgeBaseIds);
             }
-            else
+            catch (McpInputArgumentException ex)
+            {
+                return McpResult.Fail(ex.Message, McpErrorCodes.InvalidArgument);
+            }
+            if (targetIds.Count == 0)
             {
                 var allKbs = await kbService.ListKnowledgeBasesAsync();
                 targetIds = allKbs.Where(k => k.Enabled).Select(k => k.Id).ToList();
@@ -111,7 +107,7 @@ public class KnowledgeBaseMcpTools
 
             // 与另三个检索工具一致：topK 硬夹取到 [1,50]，并回显生效值。
             // 此前 topK=900 会返回 900 条 / 2.37MB，单次调用即可打爆模型上下文。
-            var effectiveTopK = Math.Clamp(topK, 1, 50);
+            (_, var effectiveTopK) = McpInputAdapters.ClampInt(nameof(topK), topK, 1, 50);
 
             var request = new CrossKnowledgeBaseSearchRequest(
                 Query: query,
@@ -132,6 +128,14 @@ public class KnowledgeBaseMcpTools
                 count = response.Items.Count,
                 scoreKind = response.ScoreKind.ToString(),
                 elapsedMs = response.Elapsed.TotalMilliseconds,
+                // 降级三值 + 通道事实 + 无结果信号：此前本工具只回 items，模型无法判断是否真的命中。
+                degraded = response.Degraded,
+                degradationReason = response.DegradationReason,
+                indexDegraded = response.IndexDegraded,
+                kbChannels = response.KbChannels,
+                noMatch = response.NoMatch,
+                noMatchReason = response.NoMatchReason,
+                usedRecallFloor = response.UsedRecallFloor,
                 successfulKbs = response.SuccessfulKnowledgeBaseIds,
                 failedKbs = response.FailedKnowledgeBaseIds,
                 items = response.Items.Select(item => new
@@ -143,6 +147,7 @@ public class KnowledgeBaseMcpTools
                     text = item.Text.Length <= 500 ? item.Text : item.Text[..500] + "...",
                     score = item.Score,
                     scoreKind = item.ScoreKind.ToString(),
+                    channels = ChannelsOf(item.Channels),
                     documentVersion = item.DocumentVersion,
                     connectorId = item.ConnectorId
                 })
@@ -152,6 +157,14 @@ public class KnowledgeBaseMcpTools
         {
             return McpResult.FailException(ex);
         }
+    }
+
+    private static IReadOnlyList<string> ChannelsOf(RecallChannel channels)
+    {
+        var list = new List<string>();
+        if (channels.HasFlag(RecallChannel.Lexical)) list.Add("lexical");
+        if (channels.HasFlag(RecallChannel.Vector)) list.Add("vector");
+        return list;
     }
 
     private static IReadOnlyList<string>? GetAllowedSources(IServiceProvider serviceProvider)

@@ -28,7 +28,8 @@ public sealed class SafeFallbackRerankAdapter : IRerankBackendAdapter
     public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
     public Task<double> RerankAsync(string query, string document, CancellationToken cancellationToken = default) =>
-        Task.FromResult(0.75);
+        // 单值接口无法表达「不可用」：返回 NaN，调用方据此判定降级（不再回 0.75 伪值）。
+        Task.FromResult(double.NaN);
 
     public Task<RerankResult> RerankBatchAsync(string query, IEnumerable<string> documents, CancellationToken cancellationToken = default)
     {
@@ -37,6 +38,8 @@ public sealed class SafeFallbackRerankAdapter : IRerankBackendAdapter
         {
             Query = query,
             DurationMs = 0,
+            Degraded = true,
+            DegradationReason = _reason,
             Documents = RerankExecutionContextStateMachine.GenerateFallbackDocuments(docList)
         };
         return Task.FromResult(result);

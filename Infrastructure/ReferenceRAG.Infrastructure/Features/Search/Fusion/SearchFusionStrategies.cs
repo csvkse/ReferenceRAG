@@ -42,7 +42,9 @@ public sealed class RrfSearchFusionStrategy : ISearchFusionStrategy
                 var key = $"{snapshot.KnowledgeBaseId}::{item.ChunkId}";
                 if (merged.TryGetValue(key, out var existing))
                 {
-                    merged[key] = (existing.TotalScore + rrfScore, existing.Item, existing.KbId);
+                    merged[key] = (existing.TotalScore + rrfScore,
+                        existing.Item with { Channels = existing.Item.Channels | item.Channels },
+                        existing.KbId);
                 }
                 else
                 {
@@ -59,6 +61,10 @@ public sealed class RrfSearchFusionStrategy : ISearchFusionStrategy
             {
                 Score = v.TotalScore,
                 ScoreKind = ScoreKind.RRF,
+                // ScoreKind 被统一改写为 RRF，通道事实单独保留（并在此刻做并按位或）。
+                Channels = v.Item.Channels == RecallChannel.None
+                    ? (v.Item.ScoreKind == ScoreKind.Cosine ? RecallChannel.Vector : RecallChannel.Lexical)
+                    : v.Item.Channels,
                 KnowledgeBaseId = v.Item.KnowledgeBaseId ?? v.KbId
             })
             .ToList();

@@ -1542,7 +1542,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     Locator: reader.IsDBNull(6) ? null : reader.GetString(6),
                     StartLine: reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
                     EndLine: reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
-                    HeadingPath: reader.IsDBNull(9) ? null : reader.GetString(9)));
+                    HeadingPath: reader.IsDBNull(9) ? null : reader.GetString(9),
+                    Channels: RecallChannel.Lexical));
             }
         }
         catch (SqliteException ex)
@@ -2169,7 +2170,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                                 Locator: reader.IsDBNull(7) ? null : reader.GetString(7),
                                 StartLine: startLine,
                                 EndLine: endLine,
-                                HeadingPath: headingPath
+                                HeadingPath: headingPath,
+                                Channels: RecallChannel.Vector
                             ));
                         }
                     }

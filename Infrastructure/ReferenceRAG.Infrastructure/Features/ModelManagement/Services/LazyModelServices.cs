@@ -514,6 +514,28 @@ internal sealed class LazyRerankService : IRerankService, IModelRetentionPolicyT
     public IRerankBackendAdapter? CurrentAdapter => _stateMachine.CurrentAdapter;
 
     /// <summary>
+    /// 后端降级态：GGUF 重排缺少 Rank 头时 IsPermanentlyDegraded=true，此时分数不可信。
+    /// </summary>
+    public bool IsDegraded => CurrentAdapter switch
+    {
+        ReferenceRAG.Core.Features.ModelManagement.Adapters.LlamaRerankAdapter l => l.IsPermanentlyDegraded,
+        _ => false
+    };
+
+    /// <summary>降级原因：优先取最近一次重排结果的自述原因。</summary>
+    public string? DegradationReason
+    {
+        get
+        {
+            if (CurrentAdapter is ReferenceRAG.Core.Features.ModelManagement.Adapters.LlamaRerankAdapter l && l.IsPermanentlyDegraded)
+            {
+                return $"{_modelName} 为 GGUF 格式且缺少 Rank 分类头，重排分数不可用；建议改用 ONNX Cross-Encoder";
+            }
+            return null;
+        }
+    }
+
+    /// <summary>
     /// 获取当前重排模型的状态机生命周期快照
     /// </summary>
     public ModelLifecycleSnapshot GetLifecycleSnapshot()

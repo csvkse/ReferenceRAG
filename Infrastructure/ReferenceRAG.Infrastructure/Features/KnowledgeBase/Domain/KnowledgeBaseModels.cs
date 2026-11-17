@@ -329,6 +329,11 @@ public sealed record RecallItem(
     /// <summary>该结果来自召回地板层（锚点内容词在本语料不存在时的宽松兜底）。</summary>
     bool IsFloor = false,
     /// <summary>
+    /// 命中通道（词法 / 向量，可同时）。融合会把 ScoreKind 统一改写为 RRF，
+    /// 通道事实必须单独保留，否则纯词法库上的「语义检索」看起来和真向量命中一样。
+    /// </summary>
+    RecallChannel Channels = RecallChannel.None,
+    /// <summary>
     /// 所属物理知识库 ID（跨库扇出后由 SearchService 回填）。
     /// 调用方以此把结果关联回具体库，例如 kb_drilldown 定位切片时必需。
     /// </summary>

@@ -151,6 +151,7 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
         var successfulKbs = new List<string>();
         var failedKbs = new List<string>();
         var snapshots = new List<RecallSnapshot>();
+        var channelByKb = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
 
         using var cts = request.Timeout.HasValue
             ? CancellationTokenSource.CreateLinkedTokenSource(ct)
@@ -181,6 +182,8 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
                 var kbQueryVector = isKbLexical ? null : queryVector;
                 var kbUseLexical = useLexical || isKbLexical;
                 recallSpan.AddAttribute("lexical", kbUseLexical.ToString());
+                // 通道事实：纯词法库被自动切到词法，调用方必须能看出来。
+                channelByKb[kbId] = isKbLexical ? "lexical" : (kbUseLexical ? "lexical" : "hybrid");
 
                 RecallSnapshot snapshot;
                 // 租约 Span 只覆盖"获取"本身：若把整个 recall 包进来，租约耗时会吞掉真正的检索耗时，
@@ -298,6 +301,11 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
         }
         sw.Stop();
 
+        // 无结果信号：检索结果里必须至少出现一个查询词（CJK 二元组 / ASCII 词），
+        // 否则就是「凑满 topK 条但与查询无关」，模型应当改写查询而不是把这批当命中。
+        var (noMatch, noMatchReason) = QueryMatchSignals.Evaluate(request.Query, fusedItems,
+            snapshots.Any(s => s.UsedRecallFloor));
+
         return new CrossKnowledgeBaseSearchResponse(
             Query: request.Query,
             Items: fusedItems,
@@ -311,7 +319,10 @@ public sealed class KnowledgeBaseSearchService : IKnowledgeBaseSearchService
             Degraded: isDegraded,
             DegradationReason: degradationReason,
             IndexDegraded: indexDegraded,
-            UsedRecallFloor: snapshots.Any(s => s.UsedRecallFloor)
+            UsedRecallFloor: snapshots.Any(s => s.UsedRecallFloor),
+            KbChannels: channelByKb.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal),
+            NoMatch: noMatch,
+            NoMatchReason: noMatchReason
         );
     }
 

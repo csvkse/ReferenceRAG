@@ -228,7 +228,8 @@ public sealed class InMemoryTensorProjectionPool
                 Locator: snap.Locators[idx],
                 StartLine: snap.StartLines[idx],
                 EndLine: snap.EndLines[idx],
-                HeadingPath: snap.HeadingPaths[idx]
+                HeadingPath: snap.HeadingPaths[idx],
+                Channels: RecallChannel.Vector
             ));
         }
 

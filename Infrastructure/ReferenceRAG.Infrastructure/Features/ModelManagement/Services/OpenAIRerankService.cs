@@ -93,7 +93,7 @@ public sealed class OpenAIRerankService : IRerankService, IDisposable, IRougamo<
             return new RerankResult
             {
                 Query = query,
-                Documents = mergedResults.OrderByDescending(r => r.RelevanceScore).ToList(),
+                Documents = mergedResults.OrderByDescending(r => r.RelevanceScore ?? double.NegativeInfinity).ToList(),
                 DurationMs = sw.ElapsedMilliseconds
             };
         }
@@ -103,18 +103,22 @@ public sealed class OpenAIRerankService : IRerankService, IDisposable, IRougamo<
             _logger.LogWarning(ex, "[OpenAIRerank] 远端重排服务调用失败，触发弹性保底策略（按召回原始顺序降序赋分）: {Message}", ex.Message);
 
             // 容灾平滑降级：按原有初筛顺序保底返回，避免搜索管线抛出未捕获异常引发前端崩溃
+            // 远端失败：保底保留原顺序，但不得发布伪相关性。
             var fallbackDocs = docs.Select((doc, i) => new RerankDocument
             {
                 Index = i,
                 Document = doc,
-                RelevanceScore = Math.Max(0.01, 1.0 - (double)i / Math.Max(1, docs.Count))
+                RelevanceScore = null,
+                ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded
             }).ToList();
 
             return new RerankResult
             {
                 Query = query,
                 Documents = fallbackDocs,
-                DurationMs = sw.ElapsedMilliseconds
+                DurationMs = sw.ElapsedMilliseconds,
+                Degraded = true,
+                DegradationReason = $"远端重排不可用: {ex.Message}"
             };
         }
     }
@@ -174,7 +178,8 @@ public sealed class OpenAIRerankService : IRerankService, IDisposable, IRougamo<
                     {
                         Index = originalIdx,
                         Document = partition.Documents[partitionIdx],
-                        RelevanceScore = normalizedScore
+                        RelevanceScore = normalizedScore,
+                        ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Measured
                     });
                 }
 
@@ -194,7 +199,7 @@ public sealed class OpenAIRerankService : IRerankService, IDisposable, IRougamo<
     public async Task<double> RerankAsync(string query, string document, CancellationToken ct = default)
     {
         var result = await RerankBatchAsync(query, [document], ct);
-        return result.Documents.FirstOrDefault()?.RelevanceScore ?? 0.0;
+        return result.Documents.FirstOrDefault()?.RelevanceScore ?? double.NaN;
     }
 
     public Task<bool> ReloadModelAsync(string modelPath, string modelName)

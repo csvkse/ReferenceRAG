@@ -159,7 +159,7 @@ public sealed class LlamaCausalLogitRerankAdapter : IRerankBackendAdapter
     public async Task<double> RerankAsync(string query, string document, CancellationToken cancellationToken = default)
     {
         var result = await RerankBatchAsync(query, new[] { document }, cancellationToken);
-        return result.Documents.Count > 0 ? result.Documents[0].RelevanceScore : 0.5;
+        return result.Documents.Count > 0 ? result.Documents[0].RelevanceScore ?? double.NaN : double.NaN;
     }
 
     public async Task<RerankResult> RerankBatchAsync(string query, IEnumerable<string> documents, CancellationToken cancellationToken = default)
@@ -196,12 +196,15 @@ public sealed class LlamaCausalLogitRerankAdapter : IRerankBackendAdapter
                 {
                     Index = i,
                     Document = doc,
-                    RelevanceScore = mockScore
+                    RelevanceScore = mockScore,
+                    ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded
                 });
             }
 
             _stateMachine.TransitionTo(RerankExecutionState.Idle, "Simulation finish");
-            result.Documents = result.Documents.OrderByDescending(d => d.RelevanceScore).ToList();
+            result.Degraded = true;
+            result.DegradationReason = "模拟模式打分（非真实模型输出）";
+            result.Documents = result.Documents.OrderByDescending(d => d.RelevanceScore ?? 0).ToList();
             sw.Stop();
             result.DurationMs = sw.ElapsedMilliseconds;
             return result;
@@ -267,16 +270,26 @@ public sealed class LlamaCausalLogitRerankAdapter : IRerankBackendAdapter
                 }
                 else
                 {
-                    // 词表超出范围，记录异常并降级
+                    // 词表超出范围：不再伪造分数，留 null 并标记本条降级。
                     _stateMachine.RecordAnomalyScore("Token index out of logits range");
-                    normalizedScore = Math.Clamp(0.85 - (i * (docList.Count > 1 ? 0.35 / docList.Count : 0)), 0.1, 0.99);
+                    result.Degraded = true;
+                    result.DegradationReason ??= "Logit 词表越界，部分文档无法打分";
+                    result.Documents.Add(new RerankDocument
+                    {
+                        Index = i,
+                        Document = docList[i],
+                        RelevanceScore = null,
+                        ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded
+                    });
+                    continue;
                 }
 
                 result.Documents.Add(new RerankDocument
                 {
                     Index = i,
                     Document = docList[i],
-                    RelevanceScore = Math.Clamp(normalizedScore, 0.0, 1.0)
+                    RelevanceScore = Math.Clamp(normalizedScore, 0.0, 1.0),
+                    ScoreKind = ReferenceRAG.Core.Interfaces.RerankScoreKind.Measured
                 });
             }
 
@@ -292,6 +305,8 @@ public sealed class LlamaCausalLogitRerankAdapter : IRerankBackendAdapter
             {
                 var remaining = docList.Skip(completedCount).ToList();
                 result.Documents.AddRange(RerankExecutionContextStateMachine.GenerateFallbackDocuments(remaining, completedCount));
+                result.Degraded = true;
+                result.DegradationReason ??= $"重排执行异常: {ex.Message}";
             }
         }
         finally
@@ -299,7 +314,9 @@ public sealed class LlamaCausalLogitRerankAdapter : IRerankBackendAdapter
             _inferenceSemaphore.Release();
         }
 
-        result.Documents = result.Documents.OrderByDescending(d => d.RelevanceScore).ToList();
+        result.Documents = result.Documents
+            .OrderByDescending(d => d.RelevanceScore ?? double.NegativeInfinity)
+            .ToList();
         sw.Stop();
         result.DurationMs = sw.ElapsedMilliseconds;
         return result;

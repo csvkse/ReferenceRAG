@@ -104,10 +104,24 @@ public class RerankServiceTests
 
             Assert.Equal(2, result.Documents.Count);
 
-            // 验证分数在 [0, 1] 范围
+            // 分数要么是真实测量值（[0,1]），要么是降级留空（null）。
+            // 后者不允许再用 0.85 - i*step 之类的伪值填满。
             foreach (var doc in result.Documents)
             {
-                Assert.InRange(doc.RelevanceScore, 0.0, 1.0);
+                if (doc.RelevanceScore is { } score)
+                {
+                    Assert.InRange(score, 0.0, 1.0);
+                    Assert.Equal(ReferenceRAG.Core.Interfaces.RerankScoreKind.Measured, doc.ScoreKind);
+                }
+                else
+                {
+                    Assert.Equal(ReferenceRAG.Core.Interfaces.RerankScoreKind.Degraded, doc.ScoreKind);
+                }
+            }
+            if (result.Documents.Any(d => d.RelevanceScore is null))
+            {
+                Assert.True(result.Degraded, "出现 null 分数时整批必须标记 Degraded");
+                Assert.False(string.IsNullOrWhiteSpace(result.DegradationReason), "降级必须给出原因");
             }
 
             // 验证相关文档分数 > 不相关文档分数
@@ -172,13 +186,13 @@ public class RerankServiceTests
         // 验证每个文档都有 Index 和 RelevanceScore
         foreach (var doc in result.Documents)
         {
-            Console.WriteLine($"  Index: {doc.Index}, Score: {doc.RelevanceScore:F4}");
+            Console.WriteLine($"  Index: {doc.Index}, Score: {doc.RelevanceScore?.ToString("F4") ?? "degraded"}");
             Assert.InRange(doc.Index, 0, 4);
-            Assert.InRange(doc.RelevanceScore, 0.0, 1.0);
+            if (doc.RelevanceScore is { } docScore) Assert.InRange(docScore, 0.0, 1.0);
         }
 
         // 验证结果按分数降序排列
-        var scores = result.Documents.Select(d => d.RelevanceScore).ToList();
+        var scores = result.Documents.Select(d => d.RelevanceScore ?? double.NegativeInfinity).ToList();
         var sortedScores = scores.OrderByDescending(s => s).ToList();
         Assert.Equal(sortedScores, scores);
 
@@ -448,14 +462,15 @@ public class RerankServiceTests
         Console.WriteLine($"并发请求数: {results.Length}");
         foreach (var r in results.OrderBy(x => x.Index))
         {
-            Console.WriteLine($"  Task {r.Index}: Score = {r.Score:F4}");
+            Console.WriteLine($"  Task {r.Index}: Score = {r.Score?.ToString("F4") ?? "degraded"}");
         }
 
         Assert.Equal(10, results.Length);
         // 每个结果都应该有效
         foreach (var r in results)
         {
-            Assert.InRange(r.Score, 0.0, 1.0);
+            // 并发路径同样只允许「真实分数」或「降级空值」两态。
+            if (r.Score is { } s1) Assert.InRange(s1, 0.0, 1.0);
         }
 
         Console.WriteLine("✓ 并发请求测试通过");
