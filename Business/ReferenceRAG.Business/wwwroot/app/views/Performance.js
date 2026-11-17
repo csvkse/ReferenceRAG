@@ -3353,6 +3353,24 @@ const component = /*@__PURE__*/ _defineComponent({
         const rerankEvaluation = computed(() => {
             if (!rerankResult.value) return null;
             const r = rerankResult.value;
+
+            // 降级（模型缺 Rank 头 / 远端不可用）：分数不可信，不能再给出 S/A/B 评级。
+            if (r.degraded) {
+                return {
+                    degraded: true,
+                    grade: '—',
+                    gradeType: 'warning',
+                    title: '重排模型降级：相关性分数不可用',
+                    tips: [
+                        r.degradationReason || '当前重排模型无法输出可信相关性分数',
+                        '结果按召回原始顺序返回，请勿据此裁剪候选',
+                        '建议在模型管理中切换到 ONNX Cross-Encoder（如 bge-reranker-base）'
+                    ],
+                    cutoffTip: '降级状态下不要依赖重排分数做 Top-K 截断',
+                    ndcg: 0, mrr: 0, map: 0, accuracy: 0, queryMs: r.queryMs || 0, mae: 0,
+                    scoreKind: (r.scoreKind || 'degraded').toLowerCase()
+                };
+            }
             const ndcg = r.ndcg || 0;
             const mrr = r.mrr || 0;
             const map = r.map || 0;
@@ -3401,7 +3419,7 @@ const component = /*@__PURE__*/ _defineComponent({
                 tips.push(`推理延迟 ${queryMs}ms 偏高，建议在模型管理中配置 GPU 加速或选用轻量量化模型`);
             }
 
-            const highScores = (r.documents || []).filter(d => (d.relevanceScore || 0) >= 0.7).length;
+            const highScores = (r.documents || []).filter(d => (d.relevanceScore ?? -1) >= 0.7).length;
             const cutoffTip = highScores > 0
                 ? `推荐生产环境 RAG Top-K 提取前 ${Math.min(highScores, 5)} 篇高相关文档注入 LLM 上下文，可有效过滤无关背景杂音`
                 : '当前测试文档相关度普遍较平缓，建议结合 BM25 混合检索进一步过滤';
@@ -3582,7 +3600,10 @@ const component = /*@__PURE__*/ _defineComponent({
                 key: 'relevanceScore',
                 width: 100,
                 render: (row) => {
-                    const score = row.relevanceScore || 0;
+                    if (row.relevanceScore === null || row.relevanceScore === undefined) {
+                        return h(NTag, { type: 'warning', size: 'small', round: true }, { default: () => '降级' });
+                    }
+                    const score = row.relevanceScore;
                     const type = score >= 0.75 ? 'success' : score >= 0.5 ? 'info' : score >= 0.3 ? 'warning' : 'default';
                     return h(NTag, {
                         type,
