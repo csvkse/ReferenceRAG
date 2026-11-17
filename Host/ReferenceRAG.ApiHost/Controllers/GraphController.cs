@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
+using ReferenceRAG.ApiHost.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Connectors;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
@@ -26,8 +27,10 @@ public class GraphController : ControllerBase
     private readonly IServiceProvider? _serviceProvider;
     private readonly WikiLinkExtractor _wikiLinkExtractor = new();
 
-    // 控制器是 Scoped，用 static 字段跨请求共享重建状态
-    private static volatile bool _isRebuilding;
+    // 控制器是 Scoped，用 static 字段跨请求共享重建状态。
+    // 按 kbId 分锁：全局单锁会让「全量重建」把其它库的重建请求一并挡掉（Conflict）。
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _rebuildingByKb =
+        new(StringComparer.Ordinal);
     private static readonly SemaphoreSlim _rebuildLock = new(1, 1);
 
     internal static Func<Task>? BeforeGraphClearHook { get; set; }
@@ -52,37 +55,46 @@ public class GraphController : ControllerBase
         _catalogStore = catalogStore ?? serviceProvider?.GetService<ICatalogStore>();
     }
 
-    private async Task<string?> ResolveKbIdAsync(string? kbId)
-    {
-        if (!string.IsNullOrWhiteSpace(kbId) && kbId != "__all__")
-            return kbId;
-
-        if (_catalogStore != null)
-        {
-            var kbs = await _catalogStore.ListKnowledgeBasesAsync();
-            return kbs.FirstOrDefault(k => k.Enabled)?.Id ?? kbs.FirstOrDefault()?.Id;
-        }
-
-        return null;
-    }
-
     /// <summary>
     /// 独立重建知识图谱（支持指定知识库或全局）
     /// </summary>
     [HttpPost("rebuild")]
     public async Task<IActionResult> StartRebuild([FromQuery] string? kbId = null)
     {
-        var targetKbId = await ResolveKbIdAsync(kbId);
-        if (_isRebuilding)
-            return Conflict(new { error = "图谱正在重建中，请稍候" });
+        KnowledgeBaseScope scope;
+        try
+        {
+            // 写接口：缺省作用域直接 400——重建必须能回答「到底重建哪个库」。
+            scope = await KnowledgeBaseScopeResolver.ResolveWriteAsync(_catalogStore, kbId);
+        }
+        catch (KnowledgeBaseScopeRequiredException ex)
+        {
+            return BadRequest(new { error = ex.Message, errorCode = "scope_required" });
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
 
-        if (string.IsNullOrEmpty(targetKbId) && LegacyGraphUnavailable())
-            return Conflict(new { error = "词法索引模式下旧知识图谱可能过期，暂不可用" });
+        if (scope.Ids.Count == 0)
+            return BadRequest(new { error = "没有已启用的知识库可供重建", errorCode = "no_knowledge_base" });
+
+        // 每个库一把「正在重建」标记；已占用则 409（而不是全局 409）。
+        var busy = scope.Ids.Where(id => _rebuildingByKb.ContainsKey(id)).ToList();
+        if (busy.Count > 0)
+            return Conflict(new { error = $"图谱正在重建中：{string.Join(",", busy)}", busyKbs = busy });
+        foreach (var id in scope.Ids) _rebuildingByKb[id] = true;
+
+        if (_kbStorageManager == null || _catalogStore == null)
+        {
+            foreach (var id in scope.Ids) _rebuildingByKb.TryRemove(id, out _);
+            if (LegacyGraphUnavailable())
+                return Conflict(new { error = "词法索引模式下旧知识图谱可能过期，暂不可用" });
+        }
 
         _ = Task.Run(async () =>
         {
-            if (!await _rebuildLock.WaitAsync(0)) return;
-            _isRebuilding = true;
+            await _rebuildLock.WaitAsync();
             var sw = Stopwatch.StartNew();
             int rebuilt = 0, failed = 0;
 
@@ -91,9 +103,11 @@ public class GraphController : ControllerBase
                 if (BeforeGraphClearHook != null)
                     await BeforeGraphClearHook();
 
-                // 如果指定了知识库，则执行单知识库图谱重建
-                if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null && _catalogStore != null)
+                // 按作用域逐库重建（全量 = 循环所有启用库；单库 = 只跑一个）
+                if (_kbStorageManager != null && _catalogStore != null && scope.Ids.Count > 0)
                 {
+                  foreach (var targetKbId in scope.Ids)
+                  {
                     _logger.LogInformation("开始单知识库图谱重建: {KbId}", targetKbId);
                     await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadWrite);
                     await lease.Store.GraphStore.ClearAllAsync();
@@ -194,7 +208,12 @@ public class GraphController : ControllerBase
                     sw.Stop();
                     _logger.LogInformation("知识库图谱独立重建完成: KbId={KbId}, rebuilt={Rebuilt}, failed={Failed}, elapsed={Elapsed}ms",
                         targetKbId, rebuilt, failed, sw.ElapsedMilliseconds);
-                    return;
+                  }
+
+                  sw.Stop();
+                  _logger.LogInformation("知识库图谱重建完成: scope={Scope}, kbs={Kbs}, rebuilt={Rebuilt}, failed={Failed}, elapsed={Elapsed}ms",
+                      scope.KindText, string.Join(",", scope.Ids), rebuilt, failed, sw.ElapsedMilliseconds);
+                  return;
                 }
 
                 // 回退到旧全局重建
@@ -255,18 +274,29 @@ public class GraphController : ControllerBase
             }
             finally
             {
-                _isRebuilding = false;
+                foreach (var id in scope.Ids) _rebuildingByKb.TryRemove(id, out _);
                 _rebuildLock.Release();
             }
         });
 
-        return Accepted(new { message = "图谱重建已在后台启动，可通过统计接口观察进度" });
+        return Accepted(new
+        {
+            message = scope.IsAll
+                ? $"图谱重建已在后台启动（{scope.Ids.Count} 个知识库）"
+                : "图谱重建已在后台启动",
+            scope = scope.KindText,
+            knowledgeBaseIds = scope.Ids
+        });
     }
 
-    /// <summary>获取图谱重建状态</summary>
+    /// <summary>获取图谱重建状态（逐库）</summary>
     [HttpGet("rebuild/status")]
     public ActionResult<object> GetRebuildStatus()
-        => Ok(new { isRebuilding = _isRebuilding });
+        => Ok(new
+        {
+            isRebuilding = !_rebuildingByKb.IsEmpty,
+            buildingKbs = _rebuildingByKb.Keys.ToArray()
+        });
 
     [HttpGet("node")]
     public async Task<ActionResult<GraphNode>> GetNode([FromQuery] string nodeId, [FromQuery] string? kbId = null)
@@ -274,13 +304,30 @@ public class GraphController : ControllerBase
         if (string.IsNullOrWhiteSpace(nodeId))
             return BadRequest(new { error = "nodeId 不能为空" });
 
-        var targetKbId = await ResolveKbIdAsync(kbId);
-        if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
+        KnowledgeBaseScope scope;
+        try
         {
-            await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
-            var node = await lease.Store.GraphStore.GetNodeAsync(nodeId);
-            if (node == null) return NotFound(new { error = $"节点不存在: {nodeId}" });
-            return Ok(node);
+            scope = await KnowledgeBaseScopeResolver.ResolveReadAsync(_catalogStore, kbId);
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
+
+        if (_kbStorageManager != null && scope.Ids.Count > 0)
+        {
+            // 全量作用域下逐库查找，返回第一个命中的节点（并标注所属库）。
+            foreach (var targetKbId in scope.Ids)
+            {
+                if (!await _kbStorageManager.ExistsAsync(targetKbId)) continue;
+                await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
+                var found = await lease.Store.GraphStore.GetNodeAsync(nodeId);
+                if (found is null) continue;
+                found.Metadata ??= new Dictionary<string, string>();
+                found.Metadata["knowledgeBaseId"] = targetKbId;
+                return Ok(found);
+            }
+            return NotFound(new { error = $"节点不存在: {nodeId}" });
         }
 
         if (LegacyGraphUnavailable()) return Conflict(new { error = "词法索引模式下旧知识图谱可能过期，暂不可用" });
@@ -302,12 +349,48 @@ public class GraphController : ControllerBase
         depth = Math.Clamp(depth, 1, 3);
         var types = edgeTypes?.Split(',', StringSplitOptions.RemoveEmptyEntries);
 
-        var targetKbId = await ResolveKbIdAsync(kbId);
-        if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
+        KnowledgeBaseScope scope;
+        try
         {
-            await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
-            var result = await lease.Store.GraphStore.GetNeighborsAsync(nodeId, depth, types);
-            return Ok(result);
+            scope = await KnowledgeBaseScopeResolver.ResolveReadAsync(_catalogStore, kbId);
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
+
+        if (_kbStorageManager != null && scope.Ids.Count > 0)
+        {
+            var merged = new GraphTraversalResult { RootId = nodeId, Depth = depth };
+            var seenNodes = new HashSet<string>(StringComparer.Ordinal);
+            var seenEdges = new HashSet<string>(StringComparer.Ordinal);
+            var nodeKb = new Dictionary<string, string>(StringComparer.Ordinal);
+
+            foreach (var id in scope.Ids)
+            {
+                if (!await _kbStorageManager.ExistsAsync(id)) continue;
+                await using var lease = await _kbStorageManager.AcquireLeaseAsync(id, StorageAccess.ReadOnly);
+                var result = await lease.Store.GraphStore.GetNeighborsAsync(nodeId, depth, types);
+                foreach (var n in result.Nodes)
+                {
+                    if (!seenNodes.Add(n.Id)) continue;
+                    // 节点同名可能来自不同库：记录归属，避免「找到了但不知道在哪个库」。
+                    n.Metadata ??= new Dictionary<string, string>();
+                    n.Metadata["knowledgeBaseId"] = id;
+                    nodeKb[n.Id] = id;
+                    merged.Nodes.Add(n);
+                }
+                foreach (var e in result.Edges)
+                {
+                    var key = $"{nodeKb.GetValueOrDefault(e.FromId, id)}>{e.ToId}>{e.Type}";
+                    if (seenEdges.Add(key)) merged.Edges.Add(e);
+                }
+                // 单库时保留原 RootId 语义；全量时 root 可能只存在于某一个库，取第一个命中即可。
+                if (!string.IsNullOrEmpty(result.RootId) && string.IsNullOrEmpty(merged.RootId))
+                    merged.RootId = result.RootId;
+            }
+            merged.RootId = nodeId;
+            return Ok(merged);
         }
 
         if (LegacyGraphUnavailable()) return Conflict(new { error = "词法索引模式下旧知识图谱可能过期，暂不可用" });
@@ -325,12 +408,37 @@ public class GraphController : ControllerBase
             return BadRequest(new { error = "查询不能为空" });
 
         limit = Math.Clamp(limit, 1, 50);
-        var targetKbId = await ResolveKbIdAsync(kbId);
-        if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
+
+        KnowledgeBaseScope scope;
+        try
         {
-            await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
-            var nodes = await lease.Store.GraphStore.SearchNodesAsync(q, limit);
-            return Ok(nodes);
+            scope = await KnowledgeBaseScopeResolver.ResolveReadAsync(_catalogStore, kbId);
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
+
+        if (_kbStorageManager != null && scope.Ids.Count > 0)
+        {
+            // 逐个库查询后按 nodeId 去重（同名节点在不同库是不同实体，用 (kbId,nodeId) 区分）。
+            var mergedList = new List<GraphNode>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var id in scope.Ids)
+            {
+                if (!await _kbStorageManager.ExistsAsync(id)) continue;
+                await using var lease = await _kbStorageManager.AcquireLeaseAsync(id, StorageAccess.ReadOnly);
+                foreach (var n in await lease.Store.GraphStore.SearchNodesAsync(q, limit))
+                {
+                    if (!seen.Add($"{id}::{n.Id}")) continue;
+                    n.Metadata ??= new Dictionary<string, string>();
+                    n.Metadata["knowledgeBaseId"] = id;
+                    mergedList.Add(n);
+                    if (mergedList.Count >= limit) break;
+                }
+                if (mergedList.Count >= limit) break;
+            }
+            return Ok(mergedList);
         }
 
         if (LegacyGraphUnavailable()) return Conflict(new { error = "词法索引模式下旧知识图谱可能过期，暂不可用" });
@@ -349,19 +457,37 @@ public class GraphController : ControllerBase
         var seenNodes = new HashSet<string>();
         var seenEdges = new HashSet<string>();
 
-        var targetKbId = await ResolveKbIdAsync(kbId ?? request.KnowledgeBaseId);
-        if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
+        KnowledgeBaseScope scope;
+        try
         {
-            await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
-            foreach (var id in request.RootIds.Distinct())
+            scope = await KnowledgeBaseScopeResolver.ResolveReadAsync(_catalogStore, kbId ?? request.KnowledgeBaseId);
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
+
+        if (_kbStorageManager != null && scope.Ids.Count > 0)
+        {
+            foreach (var targetKbId in scope.Ids)
             {
-                var sub = await lease.Store.GraphStore.GetNeighborsAsync(id, depth);
-                foreach (var n in sub.Nodes)
-                    if (seenNodes.Add(n.Id)) mergedResult.Nodes.Add(n);
-                foreach (var e in sub.Edges)
+                if (!await _kbStorageManager.ExistsAsync(targetKbId)) continue;
+                await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
+                foreach (var id in request.RootIds.Distinct())
                 {
-                    var key = $"{e.FromId}>{e.ToId}>{e.Type}";
-                    if (seenEdges.Add(key)) mergedResult.Edges.Add(e);
+                    var sub = await lease.Store.GraphStore.GetNeighborsAsync(id, depth);
+                    foreach (var n in sub.Nodes)
+                    {
+                        if (!seenNodes.Add($"{targetKbId}::{n.Id}")) continue;
+                        n.Metadata ??= new Dictionary<string, string>();
+                        n.Metadata["knowledgeBaseId"] = targetKbId;
+                        mergedResult.Nodes.Add(n);
+                    }
+                    foreach (var e in sub.Edges)
+                    {
+                        var key = $"{targetKbId}::{e.FromId}>{e.ToId}>{e.Type}";
+                        if (seenEdges.Add(key)) mergedResult.Edges.Add(e);
+                    }
                 }
             }
             return Ok(mergedResult);
@@ -384,26 +510,93 @@ public class GraphController : ControllerBase
     }
 
     [HttpGet("stats")]
-    public async Task<ActionResult<GraphStats>> GetStats([FromQuery] string? kbId = null)
+    public async Task<ActionResult<GraphStatsEnvelope>> GetStats([FromQuery] string? kbId = null)
     {
-        var targetKbId = await ResolveKbIdAsync(kbId);
-        if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
+        KnowledgeBaseScope scope;
+        try
         {
-            await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
-            var stats = await lease.Store.GraphStore.GetStatsAsync();
-            return Ok(stats);
+            // 读接口：省略作用域 = 全部启用库（与 Elasticsearch 省略索引目标等价）。
+            scope = await KnowledgeBaseScopeResolver.ResolveReadAsync(_catalogStore, kbId);
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
+
+        if (_kbStorageManager != null && scope.Ids.Count > 0)
+        {
+            var perKb = new List<GraphStatsPerKb>();
+            var total = new GraphStats();
+
+            foreach (var id in scope.Ids)
+            {
+                if (!await _kbStorageManager.ExistsAsync(id))
+                    continue;
+
+                await using var lease = await _kbStorageManager.AcquireLeaseAsync(id, StorageAccess.ReadOnly);
+                var stats = await lease.Store.GraphStore.GetStatsAsync();
+                perKb.Add(new GraphStatsPerKb(id, stats.NodeCount, stats.DocCount, stats.TagCount,
+                    stats.HeadingCount, stats.ExternalCount, stats.EdgeCount));
+
+                total.NodeCount += stats.NodeCount;
+                total.DocCount += stats.DocCount;
+                total.TagCount += stats.TagCount;
+                total.HeadingCount += stats.HeadingCount;
+                total.ExternalCount += stats.ExternalCount;
+                total.EdgeCount += stats.EdgeCount;
+            }
+
+            return Ok(Wrap(scope, total, perKb));
         }
 
         if (LegacyGraphUnavailable()) return Conflict(new { error = "词法索引模式下旧知识图谱可能过期，暂不可用" });
         var legacyStats = await _graphStore.GetStatsAsync();
-        return Ok(legacyStats);
+        return Ok(Wrap(scope, legacyStats, new List<GraphStatsPerKb>()));
     }
+
+    /// <summary>
+    /// 统一响应信封：聚合值 + 作用域 + 逐库明细。
+    /// 只回一个裸数字时，调用方无法判断它是「某个库」还是「全部库之和」——这正是本次缺陷。
+    /// </summary>
+    private static GraphStatsEnvelope Wrap(KnowledgeBaseScope scope, GraphStats stats, List<GraphStatsPerKb> perKb) =>
+        new(scope.KindText, scope.Ids, scope.RequestedRaw,
+            stats.NodeCount, stats.DocCount, stats.TagCount, stats.HeadingCount,
+            stats.ExternalCount, stats.EdgeCount, perKb);
 
     private bool LegacyGraphUnavailable()
     {
         var config = _configManager.Load();
         return !config.Indexing.EmbeddingEnabled || config.Search.EnableLexical ||
             LexicalIndexCoordinator.HasPersistedStaleVectors(Path.Combine(config.DataPath ?? "data", "vectors.db"));
+    }
+
+    /// <summary>
+    /// 人工干预（节点/边增删）必须落到「一个具体的库」：全量作用域对写入没有意义。
+    /// 返回 400 语义一致的错误（scope_required）。
+    /// </summary>
+    private async Task<(string? KbId, IActionResult? Error)> ResolveWriteKbAsync(string? kbId, CancellationToken ct)
+    {
+        try
+        {
+            var scope = await KnowledgeBaseScopeResolver.ResolveWriteAsync(_catalogStore, kbId, ct);
+            if (scope.IsAll)
+            {
+                return (null, BadRequest(new
+                {
+                    error = "人工干预（节点/关系增删）必须指定具体知识库（kbId），不接受 __all__",
+                    errorCode = "scope_required"
+                }));
+            }
+            return (scope.Ids[0], null);
+        }
+        catch (KnowledgeBaseScopeRequiredException ex)
+        {
+            return (null, BadRequest(new { error = ex.Message, errorCode = "scope_required" }));
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return (null, NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" }));
+        }
     }
 
     // ==================== 实体与关系人工干预 CRUD ====================
@@ -416,7 +609,9 @@ public class GraphController : ControllerBase
         if (string.IsNullOrWhiteSpace(request?.Id))
             return BadRequest(new { error = "节点 Id 不能为空" });
 
-        var targetKbId = await ResolveKbIdAsync(kbId);
+        var (targetKbId, scopeError) = await ResolveWriteKbAsync(kbId, ct);
+        if (scopeError != null) return scopeError;
+
         var node = new GraphNode
         {
             Id = request.Id.Trim(),
@@ -452,7 +647,9 @@ public class GraphController : ControllerBase
         [FromQuery] string? kbId = null,
         CancellationToken ct = default)
     {
-        var targetKbId = await ResolveKbIdAsync(kbId);
+        var (targetKbId, scopeError) = await ResolveWriteKbAsync(kbId, ct);
+        if (scopeError != null) return scopeError;
+
         if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
         {
             await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadWrite, ct);
@@ -481,7 +678,9 @@ public class GraphController : ControllerBase
             LineNumber = request.LineNumber
         };
 
-        var targetKbId = await ResolveKbIdAsync(kbId);
+        var (targetKbId, scopeError) = await ResolveWriteKbAsync(kbId, ct);
+        if (scopeError != null) return scopeError;
+
         if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
         {
             await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadWrite, ct);
@@ -505,7 +704,9 @@ public class GraphController : ControllerBase
             return BadRequest(new { error = "fromId 与 toId 不能为空" });
 
         var edgeType = string.IsNullOrWhiteSpace(type) ? "related" : type.Trim();
-        var targetKbId = await ResolveKbIdAsync(kbId);
+        var (targetKbId, scopeError) = await ResolveWriteKbAsync(kbId, ct);
+        if (scopeError != null) return scopeError;
+
         if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
         {
             await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadWrite, ct);
@@ -524,6 +725,23 @@ public class SubgraphRequest
     public int Depth { get; set; } = 1;
     public string? KnowledgeBaseId { get; set; }
 }
+
+/// <summary>图谱统计信封：聚合值 + 作用域 + 逐库明细（让「全部」可被拆解核对）。</summary>
+public sealed record GraphStatsEnvelope(
+    string Scope,
+    IReadOnlyList<string> KbIds,
+    string? RequestedScope,
+    int NodeCount,
+    int DocCount,
+    int TagCount,
+    int HeadingCount,
+    int ExternalCount,
+    int EdgeCount,
+    IReadOnlyList<GraphStatsPerKb> KnowledgeBases);
+
+public sealed record GraphStatsPerKb(
+    string KnowledgeBaseId, int NodeCount, int DocCount, int TagCount,
+    int HeadingCount, int ExternalCount, int EdgeCount);
 
 public sealed record CreateOrUpdateGraphNodeDto(string Id, string? Title, string? Type, Dictionary<string, string>? Metadata);
 public sealed record CreateOrDeleteGraphEdgeDto(string FromId, string ToId, string? Type = "related", int LineNumber = 0);

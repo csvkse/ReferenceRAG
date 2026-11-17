@@ -354,7 +354,9 @@ public class LexicalAuthorizationTests
             new ConfigManager(config), NullLogger<GraphController>.Instance,
             new Mock<IVectorStore>().Object);
         Assert.IsType<ConflictObjectResult>((await controller.GetNode("note.md")).Result);
-        Assert.IsType<ConflictObjectResult>(controller.StartRebuild().Result);
+        // 写操作（重建）在缺省作用域下先被作用域契约拦下（400 scope_required），
+        // 语义仍是「拒绝执行」，且旧图存储一次都没被调用。
+        Assert.IsType<BadRequestObjectResult>(controller.StartRebuild().Result);
         graph.VerifyNoOtherCalls();
     }
 
@@ -529,9 +531,10 @@ public class LexicalAuthorizationTests
             NullLogger<IndexService>.Instance);
         var controller = new BM25IndexController(bm25.Object, vector.Object, manager, index,
             NullLogger<BM25IndexController>.Instance);
+        // 搜索（读）在词法模式下仍走 409；清空/重建（写）先被作用域契约拦下（400）。
         Assert.IsType<ConflictObjectResult>((await controller.Search("secret")).Result);
-        Assert.IsType<ConflictObjectResult>(await controller.ClearIndex());
-        Assert.IsType<ConflictObjectResult>((await controller.IndexAllDocuments()).Result);
+        Assert.IsType<BadRequestObjectResult>(await controller.ClearIndex());
+        Assert.IsType<BadRequestObjectResult>((await controller.IndexAllDocuments()).Result);
         bm25.VerifyNoOtherCalls();
         vector.VerifyNoOtherCalls();
     }

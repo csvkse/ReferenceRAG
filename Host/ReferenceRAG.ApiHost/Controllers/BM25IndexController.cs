@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.ApiHost.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
@@ -44,23 +45,6 @@ public class BM25IndexController : ControllerBase
         _catalogStore = catalogStore ?? serviceProvider?.GetService<ICatalogStore>();
     }
 
-    private async Task<string?> ResolveKbIdAsync(string? kbId)
-    {
-        if (kbId == "__root__" || kbId == "root" || kbId == "__global__")
-            return null;
-
-        if (!string.IsNullOrWhiteSpace(kbId) && kbId != "__all__")
-            return kbId;
-
-        if (_catalogStore != null)
-        {
-            var kbs = await _catalogStore.ListKnowledgeBasesAsync();
-            return kbs.FirstOrDefault(k => k.Enabled)?.Id ?? kbs.FirstOrDefault()?.Id;
-        }
-
-        return null;
-    }
-
     // ==================== 索引操作 ====================
 
     /// <summary>
@@ -69,18 +53,42 @@ public class BM25IndexController : ControllerBase
     [HttpPost("index")]
     public async Task<ActionResult<IndexProgressResponse>> IndexAllDocuments([FromQuery] string? kbId = null)
     {
-        var targetKbId = await ResolveKbIdAsync(kbId);
-        if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
+        KnowledgeBaseScope scope;
+        try
         {
-            _logger.LogInformation("执行知识库单库 BM25 全文索引重建: {KbId}", targetKbId);
-            await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadWrite);
-            var count = await lease.Store.RebuildFtsIndexAsync();
+            // 写接口：缺省作用域直接 400（重建索引必须知道动哪个库）。
+            scope = await KnowledgeBaseScopeResolver.ResolveWriteAsync(_catalogStore, kbId);
+        }
+        catch (KnowledgeBaseScopeRequiredException ex)
+        {
+            return BadRequest(new { error = ex.Message, errorCode = "scope_required" });
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
+
+        if (_kbStorageManager != null && scope.Ids.Count > 0)
+        {
+            long total = 0;
+            var touched = new List<string>();
+            foreach (var id in scope.Ids)
+            {
+                if (!await _kbStorageManager.ExistsAsync(id)) continue;
+                _logger.LogInformation("执行知识库 BM25 全文索引重建: {KbId}", id);
+                await using var lease = await _kbStorageManager.AcquireLeaseAsync(id, StorageAccess.ReadWrite);
+                total += await lease.Store.RebuildFtsIndexAsync();
+                touched.Add(id);
+            }
             return Ok(new IndexProgressResponse
             {
-                TotalDocuments = (int)count,
-                ProcessedDocuments = (int)count,
+                TotalDocuments = (int)total,
+                ProcessedDocuments = (int)total,
                 ProgressPercent = 100,
-                Message = $"知识库词法索引重建完成，共更新 {count} 个分块"
+                Message = touched.Count == 0
+                    ? "没有可重建的知识库"
+                    : $"词法索引重建完成（{touched.Count} 个知识库），共更新 {total} 个分块",
+                KnowledgeBaseIds = touched
             });
         }
 
@@ -162,12 +170,38 @@ public class BM25IndexController : ControllerBase
     [HttpDelete("index")]
     public async Task<ActionResult> ClearIndex([FromQuery] string? kbId = null)
     {
-        var targetKbId = await ResolveKbIdAsync(kbId);
-        if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
+        KnowledgeBaseScope scope;
+        try
         {
-            await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadWrite);
-            await lease.Store.EnsureLexicalIndexAsync();
-            return Ok(new { message = $"知识库 {targetKbId} 词法索引已重置" });
+            // 写接口：缺省作用域直接 400（清空索引必须知道动哪个库）。
+            scope = await KnowledgeBaseScopeResolver.ResolveWriteAsync(_catalogStore, kbId);
+        }
+        catch (KnowledgeBaseScopeRequiredException ex)
+        {
+            return BadRequest(new { error = ex.Message, errorCode = "scope_required" });
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
+
+        if (_kbStorageManager != null && scope.Ids.Count > 0)
+        {
+            var touched = new List<string>();
+            foreach (var id in scope.Ids)
+            {
+                if (!await _kbStorageManager.ExistsAsync(id)) continue;
+                await using var lease = await _kbStorageManager.AcquireLeaseAsync(id, StorageAccess.ReadWrite);
+                await lease.Store.EnsureLexicalIndexAsync();
+                touched.Add(id);
+            }
+            return Ok(new
+            {
+                message = touched.Count == 1
+                    ? $"知识库 {touched[0]} 词法索引已重置"
+                    : $"词法索引已重置（{touched.Count} 个知识库）",
+                knowledgeBaseIds = touched
+            });
         }
 
         if (LegacyIndexUnavailable()) return Conflict(new { error = "词法模式下旧 BM25 索引不可用。" });
@@ -192,12 +226,58 @@ public class BM25IndexController : ControllerBase
             return BadRequest(new { error = "查询语句不能为空" });
         }
 
-        if (LegacyIndexUnavailable()) return Conflict(new { error = "词法模式下旧 BM25 索引不可用。" });
-
         var startTime = DateTime.UtcNow;
-        var targetKbId = await ResolveKbIdAsync(kbId);
-        if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
+
+        KnowledgeBaseScope scope;
+        try
         {
+            scope = await KnowledgeBaseScopeResolver.ResolveReadAsync(_catalogStore, kbId);
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
+
+        if (LegacyIndexUnavailable() && (_kbStorageManager == null || scope.Ids.Count == 0))
+            return Conflict(new { error = "词法模式下旧 BM25 索引不可用。" });
+
+        if (_kbStorageManager != null && scope.Ids.Count > 0)
+        {
+            // 全量作用域：逐库召回后按 RRF 名次合并（与知识库检索同一口径）。
+            if (scope.IsAll)
+            {
+                var merged = new List<(double Score, BM25SearchResultItem Item)>();
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var id in scope.Ids)
+                {
+                    if (!await _kbStorageManager.ExistsAsync(id)) continue;
+                    await using var kbLease = await _kbStorageManager.AcquireLeaseAsync(id, StorageAccess.ReadOnly);
+                    var kbSnapshot = await kbLease.Store.RecallAsync(new RecallRequest(query, topK, UseLexicalTokenizer: true));
+                    foreach (var r in kbSnapshot.Items)
+                    {
+                        if (!seen.Add($"{id}::{r.ChunkId}")) continue;
+                        merged.Add((r.Score, new BM25SearchResultItem
+                        {
+                            ChunkId = r.ChunkId,
+                            Content = r.Text,
+                            Score = r.Score,
+                            Rank = 0
+                        }));
+                    }
+                }
+                var ordered = merged.OrderByDescending(m => m.Score).Take(topK).ToList();
+                for (var i = 0; i < ordered.Count; i++) ordered[i].Item.Rank = i + 1;
+
+                return Ok(new BM25SearchResponse
+                {
+                    Query = query,
+                    TotalResults = ordered.Count,
+                    DurationMs = (int)(DateTime.UtcNow - startTime).TotalMilliseconds,
+                    Results = ordered.Select(o => o.Item).ToList()
+                });
+            }
+
+            var targetKbId = scope.Ids[0];
             await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
             var snapshot = await lease.Store.RecallAsync(new RecallRequest(query, topK, UseLexicalTokenizer: true));
             var duration = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
@@ -242,30 +322,46 @@ public class BM25IndexController : ControllerBase
     [HttpGet("summary")]
     public async Task<ActionResult<BM25Summary>> GetSummary([FromQuery] string? kbId = null)
     {
-        if (kbId == "__all__" && _catalogStore != null && _kbStorageManager != null)
+        KnowledgeBaseScope scope;
+        try
         {
-            var kbs = await _catalogStore.ListKnowledgeBasesAsync();
+            // 读接口：省略作用域 = 全部启用库（此前被解释成「第一个库」）。
+            scope = await KnowledgeBaseScopeResolver.ResolveReadAsync(_catalogStore, kbId);
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message, errorCode = "knowledge_base_not_found" });
+        }
+
+        if (_kbStorageManager != null && scope.Ids.Count > 0)
+        {
             int totalChunks = 0;
             int totalFiles = 0;
             int totalVocab = 0;
-            double totalLengthSum = 0;
-            int kbCount = 0;
+            // 平均长度必须按分块数加权：各库分块数可能相差一个数量级，
+            // 对「平均值」再取算术平均得到的是另一个量（Simpson 型聚合偏差）。
+            double weightedLengthSum = 0;
+            var perKb = new List<BM25SummaryPerKb>();
 
-            foreach (var kb in kbs.Where(k => k.Enabled))
+            foreach (var id in scope.Ids)
             {
                 try
                 {
-                    await using var lease = await _kbStorageManager.AcquireLeaseAsync(kb.Id, StorageAccess.ReadOnly);
+                    if (!await _kbStorageManager.ExistsAsync(id)) continue;
+                    await using var lease = await _kbStorageManager.AcquireLeaseAsync(id, StorageAccess.ReadOnly);
                     var stats = await lease.Store.GetLexicalStatsAsync();
+
                     totalChunks += stats.TotalChunks;
                     totalFiles += stats.TotalDocuments;
                     totalVocab += stats.TotalVocabularySize;
-                    totalLengthSum += stats.AverageDocumentLength;
-                    kbCount++;
+                    weightedLengthSum += stats.TotalChunks * stats.AverageDocumentLength;
+
+                    perKb.Add(new BM25SummaryPerKb(id, stats.TotalChunks, stats.TotalDocuments,
+                        stats.TotalVocabularySize, stats.AverageDocumentLength));
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "[BM25IndexController] 获取知识库 {KbId} 词法统计失败", kb.Id);
+                    _logger.LogWarning(ex, "[BM25IndexController] 获取知识库 {KbId} 词法统计失败", id);
                 }
             }
 
@@ -273,24 +369,14 @@ public class BM25IndexController : ControllerBase
             {
                 TotalIndexedDocuments = totalChunks,
                 TotalVocabularySize = totalVocab,
-                AverageDocLength = kbCount > 0 ? Math.Round(totalLengthSum / kbCount, 2) : 200.0,
+                AverageDocLength = totalChunks > 0
+                    ? Math.Round(weightedLengthSum / totalChunks, 2)
+                    : 200.0,
                 TotalFiles = totalFiles,
-                TotalChunks = totalChunks
-            });
-        }
-
-        var targetKbId = await ResolveKbIdAsync(kbId);
-        if (!string.IsNullOrEmpty(targetKbId) && _kbStorageManager != null)
-        {
-            await using var lease = await _kbStorageManager.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
-            var stats = await lease.Store.GetLexicalStatsAsync();
-            return Ok(new BM25Summary
-            {
-                TotalIndexedDocuments = stats.TotalChunks,
-                TotalVocabularySize = stats.TotalVocabularySize,
-                AverageDocLength = stats.AverageDocumentLength,
-                TotalFiles = stats.TotalDocuments,
-                TotalChunks = stats.TotalChunks
+                TotalChunks = totalChunks,
+                Scope = scope.KindText,
+                KnowledgeBaseIds = scope.Ids.ToList(),
+                KnowledgeBases = perKb
             });
         }
 
@@ -331,6 +417,8 @@ public class IndexProgressResponse
     public int ProgressPercent { get; set; }
     public int TotalTerms { get; set; }
     public string Message { get; set; } = string.Empty;
+    /// <summary>本次实际重建的库（全量作用域下可能是多个）。</summary>
+    public List<string>? KnowledgeBaseIds { get; set; }
 }
 
 public class BM25SearchResponse
@@ -356,4 +444,31 @@ public class BM25Summary
     public double AverageDocLength { get; set; }
     public int TotalFiles { get; set; }
     public int TotalChunks { get; set; }
+
+    /// <summary>本次统计的作用域：all / single。</summary>
+    public string Scope { get; set; } = "single";
+    /// <summary>参与统计的库（全量时是全部启用库）。</summary>
+    public List<string> KnowledgeBaseIds { get; set; } = new();
+    /// <summary>逐库明细：聚合值可被拆解核对。</summary>
+    public List<BM25SummaryPerKb> KnowledgeBases { get; set; } = new();
+}
+
+public class BM25SummaryPerKb
+{
+    public BM25SummaryPerKb() { }
+    public BM25SummaryPerKb(string knowledgeBaseId, int totalChunks, int totalDocuments,
+        int totalVocabularySize, double averageDocLength)
+    {
+        KnowledgeBaseId = knowledgeBaseId;
+        TotalChunks = totalChunks;
+        TotalDocuments = totalDocuments;
+        TotalVocabularySize = totalVocabularySize;
+        AverageDocLength = averageDocLength;
+    }
+
+    public string KnowledgeBaseId { get; set; } = "";
+    public int TotalChunks { get; set; }
+    public int TotalDocuments { get; set; }
+    public int TotalVocabularySize { get; set; }
+    public double AverageDocLength { get; set; }
 }

@@ -68,10 +68,24 @@ const component = /*@__PURE__*/ _defineComponent({
             }
         };
 
+        // 作用域可读说明：让「全部 = N 个库合计」在页面上可见。
+        const scopeLabel = computed(() => {
+            if (!summary.value) return '加载中…';
+            if (summary.value.scope === 'all') {
+                const n = (summary.value.knowledgeBases || []).length || (summary.value.knowledgeBaseIds || []).length;
+                return `全部知识库（${n} 个库合计）`;
+            }
+            const id = (summary.value.knowledgeBaseIds || [])[0];
+            const kb = knowledgeBases.value.find((k) => k.id === id);
+            return kb ? `仅 ${kb.name}` : '单个知识库';
+        });
+
         const loadSummary = async () => {
             loading.value = true;
             try {
-                const targetKb = selectedKbId.value && selectedKbId.value !== '__all__' ? selectedKbId.value : null;
+                // 原实现把「全部」折叠成 null，后端据此选中第一个库 → 页面显示单库数字。
+        // 现在统一转发显式哨兵，后端才能走聚合分支。
+                const targetKb = selectedKbId.value || '__all__';
                 const response = await bm25IndexApi.getSummary(targetKb);
                 summary.value = response.data || summary.value;
             } catch (error) {
@@ -91,7 +105,9 @@ const component = /*@__PURE__*/ _defineComponent({
                 totalTerms: 0
             };
             try {
-                const targetKb = selectedKbId.value && selectedKbId.value !== '__all__' ? selectedKbId.value : null;
+                // 原实现把「全部」折叠成 null，后端据此选中第一个库 → 页面显示单库数字。
+        // 现在统一转发显式哨兵，后端才能走聚合分支。
+                const targetKb = selectedKbId.value || '__all__';
                 const response = await bm25IndexApi.indexAll(targetKb);
                 const result = response.data;
                 indexProgress.value = {
@@ -121,7 +137,9 @@ const component = /*@__PURE__*/ _defineComponent({
         const handleClear = async () => {
             clearing.value = true;
             try {
-                const targetKb = selectedKbId.value && selectedKbId.value !== '__all__' ? selectedKbId.value : null;
+                // 原实现把「全部」折叠成 null，后端据此选中第一个库 → 页面显示单库数字。
+        // 现在统一转发显式哨兵，后端才能走聚合分支。
+                const targetKb = selectedKbId.value || '__all__';
                 await bm25IndexApi.clearIndex(targetKb);
                 message.success('词法索引已清空');
                 showClearDialog.value = false;
@@ -199,7 +217,7 @@ const component = /*@__PURE__*/ _defineComponent({
         const __returned__ = {
             message, loading, indexing, clearing, searching, showClearDialog, summary,
             indexProgress, searchResults, searchDuration, searchForm, knowledgeBases,
-            selectedKbId, kbSpecMap, kbOptions, loadKnowledgeBases, loadSummary, handleIndexAll,
+            selectedKbId, kbSpecMap, kbOptions, loadKnowledgeBases, loadSummary, handleIndexAll, scopeLabel,
             handleClear, handleSearch,
             get NButton() { return NButton; },
             get NSpace() { return NSpace; },
@@ -250,9 +268,12 @@ component.template = `
             placeholder="选择测试或诊断的知识库"
           />
         </n-space>
-        <n-tag type="info" size="small" round secondary>
-          SQLite FTS5 + SAG-Wiki 多列加权 (标题 5.0x / 章节 2.5x / 正文 1.0x)
-        </n-tag>
+        <n-space align="center" :size="8">
+          <n-tag size="small" round :bordered="false" type="success">{{ scopeLabel }}</n-tag>
+          <n-tag type="info" size="small" round secondary>
+            SQLite FTS5 + SAG-Wiki 多列加权 (标题 5.0x / 章节 2.5x / 正文 1.0x)
+          </n-tag>
+        </n-space>
       </n-space>
     </n-card>
 
@@ -279,6 +300,11 @@ component.template = `
                 <n-descriptions-item label="总分块数">
                   <n-text strong>{{ summary.totalChunks }}</n-text>
                 </n-descriptions-item>
+                <n-descriptions-item label="统计口径">
+                  <n-text depth="3" style="font-size: 12px">
+                    平均长度按分块数加权；{{ scopeLabel }}
+                  </n-text>
+                </n-descriptions-item>
                 <n-descriptions-item label="BM25F 多列权重">
                   <n-space :size="4">
                     <n-tag size="small" type="primary" :bordered="false">标题 5.0x</n-tag>
@@ -287,6 +313,26 @@ component.template = `
                   </n-space>
                 </n-descriptions-item>
               </n-descriptions>
+
+              <!-- 逐库明细：聚合值可被拆解核对（全量作用域才有意义） -->
+              <n-table v-if="summary.scope === 'all' && summary.knowledgeBases?.length" :bordered="false" :single-line="false" style="margin-top: 12px">
+                <thead>
+                  <tr>
+                    <th>知识库</th>
+                    <th>分块数</th>
+                    <th>文件数</th>
+                    <th>平均长度</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="k in summary.knowledgeBases" :key="k.knowledgeBaseId">
+                    <td>{{ (knowledgeBases.find(x => x.id === k.knowledgeBaseId) || {}).name || k.knowledgeBaseId }}</td>
+                    <td>{{ k.totalChunks }}</td>
+                    <td>{{ k.totalDocuments }}</td>
+                    <td>{{ k.averageDocLength?.toFixed(2) }}</td>
+                  </tr>
+                </tbody>
+              </n-table>
             </n-spin>
           </n-space>
         </n-tab-pane>

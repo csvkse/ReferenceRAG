@@ -37,8 +37,11 @@ const component = /*@__PURE__*/ _defineComponent({
             }))
         ]);
 
+        // 「全部知识库」必须以显式哨兵转发：传 null 会被后端当成「第一个库」，
+        // 于是页面显示的是某一个库的数字而不是合计（历史缺陷）。
         const getActiveKbId = () => {
-            return selectedKbId.value && selectedKbId.value !== '__all__' ? selectedKbId.value : null;
+            if (!selectedKbId.value) return undefined;
+            return selectedKbId.value;
         };
 
         const loadKnowledgeBases = async () => {
@@ -74,7 +77,21 @@ const component = /*@__PURE__*/ _defineComponent({
             tagCount: 0,
             headingCount: 0,
             externalCount: 0,
-            edgeCount: 0
+            edgeCount: 0,
+            // 作用域回显：让「全部 = N 个库合计」可见，而不是只看到一个裸数字。
+            scope: 'single',
+            kbIds: [],
+            knowledgeBases: []
+        });
+        // 当前作用域的可读说明（用于统计卡副标题）。
+        const scopeLabel = computed(() => {
+            if (stats.value?.scope === 'all') {
+                const n = (stats.value?.knowledgeBases || []).length || (stats.value?.kbIds || []).length;
+                return `全部知识库（${n} 个库合计）`;
+            }
+            const id = (stats.value?.kbIds || [])[0];
+            const kb = knowledgeBases.value.find((k) => k.id === id);
+            return kb ? `仅 ${kb.name}` : '单个知识库';
         });
         const filteredSearchResults = computed(() => searchResults.value.filter((node) => selectedNodeTypes.value.includes(node.type)));
         const filteredTraversalNodes = computed(() => traversalResult.value?.nodes.filter((node) => selectedNodeTypes.value.includes(node.type)) ?? []);
@@ -168,7 +185,9 @@ const component = /*@__PURE__*/ _defineComponent({
             statsLoading.value = true;
             try {
                 const res = await graphApi.stats(getActiveKbId());
-                stats.value = res.data;
+                // 后端返回信封 {scope, kbIds, nodeCount..., knowledgeBases[]}；
+                // 直接整体替换，保留 scope/明细用于「作用域可见」。
+                stats.value = { ...stats.value, ...(res.data || {}) };
             }
             catch {
                 // ignore
@@ -311,7 +330,7 @@ const component = /*@__PURE__*/ _defineComponent({
         const __returned__ = {
             nodeTypeMeta, nodeTypeOptions, message, indexStore, searchQuery, nodeId, depth,
             searching, traversing, statsLoading, rebuilding, selectedNodeTypes,
-            knowledgeBases, selectedKbId, kbSpecMap, kbOptions, loadKnowledgeBases, getActiveKbId,
+            knowledgeBases, selectedKbId, kbSpecMap, kbOptions, loadKnowledgeBases, getActiveKbId, scopeLabel,
             get rebuildPollTimer() { return rebuildPollTimer; }, set rebuildPollTimer(v) { rebuildPollTimer = v; },
             searchResults, traversalResult, stats, filteredSearchResults, filteredTraversalNodes,
             normalizeNodeId, getShortNodeId, renderNodeIdCell, nodeColumns, edgeColumns,
@@ -354,7 +373,9 @@ component.template = `
         <n-space justify="space-between" align="center">
           <n-grid cols="2 s:3 m:6" responsive="screen" :x-gap="12" style="flex: 1">
             <n-grid-item>
-              <n-statistic label="节点总数" :value="stats.nodeCount" />
+              <n-statistic label="节点总数" :value="stats.nodeCount">
+                <template #suffix><n-text depth="3" style="font-size: 12px">{{ scopeLabel }}</n-text></template>
+              </n-statistic>
             </n-grid-item>
             <n-grid-item>
               <n-statistic label="文档节点" :value="stats.docCount" />

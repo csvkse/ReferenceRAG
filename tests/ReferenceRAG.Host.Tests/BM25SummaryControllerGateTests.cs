@@ -73,6 +73,9 @@ public class BM25SummaryControllerGateTests : IDisposable
         var mockStorageManager = new Mock<IKnowledgeBaseStorageManager>();
         mockStorageManager.Setup(m => m.AcquireLeaseAsync("kb_real_stats", It.IsAny<StorageAccess>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(mockLease.Object);
+        // 作用域解析器会先确认库存在（且不落盘），这里必须让 ExistsAsync 说「在」。
+        mockStorageManager.Setup(m => m.ExistsAsync("kb_real_stats", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
 
         var mockCatalog = new Mock<ICatalogStore>();
         mockCatalog.Setup(c => c.ListKnowledgeBasesAsync(It.IsAny<CancellationToken>()))

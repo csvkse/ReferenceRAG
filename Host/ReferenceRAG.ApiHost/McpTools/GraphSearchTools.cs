@@ -6,6 +6,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
+using ReferenceRAG.ApiHost.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
@@ -37,7 +38,7 @@ public class GraphSearchTools
     public async Task<string> GraphSearch(
         [Description("节点 ID（文件相对路径，如 'Projects/foo.md'）")] string nodeId,
         [Description("遍历深度范围 1–3，默认 1（超出上限按 3 处理）")] int depth = 1,
-        [Description("目标知识库 ID（可选）。若留空则自动查询首个有效知识库")] string? knowledgeBaseId = null)
+        [Description("目标知识库 ID（可选）。留空或传 __all__ 表示遍历全部已启用知识库并合并结果；不要依赖「默认第一个库」")] string? knowledgeBaseId = null)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GraphSearch), out var permErr))
@@ -59,17 +60,44 @@ public class GraphSearchTools
         var kbStorage = scope.ServiceProvider.GetService<IKnowledgeBaseStorageManager>();
         var catalog = scope.ServiceProvider.GetService<ICatalogStore>();
 
-        string? targetKbId = knowledgeBaseId;
-        if (string.IsNullOrWhiteSpace(targetKbId) && catalog != null)
+        KnowledgeBaseScope kbScope;
+        try
         {
-            var kbs = await catalog.ListKnowledgeBasesAsync();
-            targetKbId = kbs.FirstOrDefault(k => k.Enabled)?.Id ?? kbs.FirstOrDefault()?.Id;
+            kbScope = await KnowledgeBaseScopeResolver.ResolveReadAsync(catalog, knowledgeBaseId);
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return McpResult.Fail(ex.Message, McpErrorCodes.KnowledgeBaseNotFound);
         }
 
-        if (!string.IsNullOrEmpty(targetKbId) && kbStorage != null && await kbStorage.ExistsAsync(targetKbId))
+        string? targetKbId = kbScope.IsAll ? null : kbScope.Ids[0];
+
+        if (kbStorage != null && kbScope.Ids.Count > 0)
         {
-            await using var lease = await kbStorage.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
-            result = await lease.Store.GraphStore.GetNeighborsAsync(nodeId, depth);
+            var merged = new GraphTraversalResult { RootId = nodeId, Depth = depth };
+            var seenNodes = new HashSet<string>(StringComparer.Ordinal);
+            var seenEdges = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var id in kbScope.Ids)
+            {
+                if (!await kbStorage.ExistsAsync(id)) continue;
+                await using var lease = await kbStorage.AcquireLeaseAsync(id, StorageAccess.ReadOnly);
+                var sub = await lease.Store.GraphStore.GetNeighborsAsync(nodeId, depth);
+                foreach (var n in sub.Nodes)
+                {
+                    if (!seenNodes.Add($"{id}::{n.Id}")) continue;
+                    // 回填所属库：否则模型拿到节点也无法判断它来自哪个库（同 chunkId 场景）。
+                    n.Metadata ??= new Dictionary<string, string>();
+                    n.Metadata["knowledgeBaseId"] = id;
+                    merged.Nodes.Add(n);
+                }
+                foreach (var e in sub.Edges)
+                {
+                    if (seenEdges.Add($"{id}::{e.FromId}>{e.ToId}>{e.Type}")) merged.Edges.Add(e);
+                }
+            }
+            result = merged;
+            if (kbScope.IsAll) targetKbId = null;
         }
         else
         {
@@ -88,13 +116,17 @@ public class GraphSearchTools
             requestedDepth,
             effectiveDepth = depth,
             knowledgeBaseId = targetKbId,
+            // 作用域事实：省略/__all__ = 全部启用库（合并结果），不要读成「就是这个库」。
+            kbScope = kbScope.KindText,
+            knowledgeBaseIds = kbScope.Ids,
             totalNodes = result.Nodes.Count,
             totalEdges = result.Edges.Count,
             nodes = result.Nodes.Select(n => new
             {
                 id = n.Id,
                 title = n.Title,
-                type = n.Type
+                type = n.Type,
+                knowledgeBaseId = n.Metadata != null && n.Metadata.TryGetValue("knowledgeBaseId", out var kbOfNode) ? kbOfNode : null
             }),
             edges = result.Edges.Select(e => new
             {
@@ -112,7 +144,7 @@ public class GraphSearchTools
     public async Task<string> GraphSearchByTitle(
         [Description("搜索关键词")] string query,
         [Description("最大返回数量，默认 10，上限 50（超出按 50 处理）")] int limit = 10,
-        [Description("目标知识库 ID（可选）。若留空则自动查询首个有效知识库")] string? knowledgeBaseId = null)
+        [Description("目标知识库 ID（可选）。留空或传 __all__ 表示搜全部已启用知识库；不要依赖「默认第一个库」")] string? knowledgeBaseId = null)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(GraphSearchByTitle), out var permErr))
@@ -134,17 +166,37 @@ public class GraphSearchTools
         var kbStorage = scope.ServiceProvider.GetService<IKnowledgeBaseStorageManager>();
         var catalog = scope.ServiceProvider.GetService<ICatalogStore>();
 
-        string? targetKbId = knowledgeBaseId;
-        if (string.IsNullOrWhiteSpace(targetKbId) && catalog != null)
+        KnowledgeBaseScope kbScope;
+        try
         {
-            var kbs = await catalog.ListKnowledgeBasesAsync();
-            targetKbId = kbs.FirstOrDefault(k => k.Enabled)?.Id ?? kbs.FirstOrDefault()?.Id;
+            kbScope = await KnowledgeBaseScopeResolver.ResolveReadAsync(catalog, knowledgeBaseId);
+        }
+        catch (KnowledgeBaseScopeNotFoundException ex)
+        {
+            return McpResult.Fail(ex.Message, McpErrorCodes.KnowledgeBaseNotFound);
         }
 
-        if (!string.IsNullOrEmpty(targetKbId) && kbStorage != null && await kbStorage.ExistsAsync(targetKbId))
+        string? targetKbId = kbScope.IsAll ? null : kbScope.Ids[0];
+
+        if (kbStorage != null && kbScope.Ids.Count > 0)
         {
-            await using var lease = await kbStorage.AcquireLeaseAsync(targetKbId, StorageAccess.ReadOnly);
-            nodes = await lease.Store.GraphStore.SearchNodesAsync(query, limit);
+            var mergedNodes = new List<GraphNode>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var id in kbScope.Ids)
+            {
+                if (!await kbStorage.ExistsAsync(id)) continue;
+                await using var lease = await kbStorage.AcquireLeaseAsync(id, StorageAccess.ReadOnly);
+                foreach (var n in await lease.Store.GraphStore.SearchNodesAsync(query, limit))
+                {
+                    if (!seen.Add($"{id}::{n.Id}")) continue;
+                    n.Metadata ??= new Dictionary<string, string>();
+                    n.Metadata["knowledgeBaseId"] = id;
+                    mergedNodes.Add(n);
+                    if (mergedNodes.Count >= limit) break;
+                }
+                if (mergedNodes.Count >= limit) break;
+            }
+            nodes = mergedNodes;
         }
         else
         {
@@ -162,8 +214,19 @@ public class GraphSearchTools
             requestedLimit,
             effectiveLimit = limit,
             knowledgeBaseId = targetKbId,
+            kbScope = kbScope.KindText,
+            knowledgeBaseIds = kbScope.Ids,
             count = nodes.Count,
-            nodes = nodes.Select(n => new { id = n.Id, title = n.Title, type = n.Type })
+            nodes = nodes.Select(n => new
+            {
+                id = n.Id,
+                title = n.Title,
+                type = n.Type,
+                // 回填所属库：跨库聚合时模型必须能把节点回链到具体库。
+                knowledgeBaseId = n.Metadata != null && n.Metadata.TryGetValue("knowledgeBaseId", out var kbOfNode)
+                    ? kbOfNode
+                    : (kbScope.IsAll ? null : targetKbId)
+            })
         });
     }
 

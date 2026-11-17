@@ -240,12 +240,17 @@ public class LexicalRegressionHostTests
     {
         await using var f = await RegressionFixture.CreateAsync();
 
-        // Direct BM25 write endpoints reject in lexical mode
+        // Direct BM25 write endpoints reject in lexical mode.
+        // 契约变更：写操作先被作用域契约拦下（缺省 kbId → 400 scope_required），
+        // 显式 __all__ 时才落到词法模式的 409。
         var (postStatus, _) = await f.RequestAsync("POST", "/api/bm25index/index", "{}");
-        Assert.Equal(409, postStatus);
+        Assert.Equal(400, postStatus);
 
         var (delStatus, _) = await f.RequestAsync("DELETE", "/api/bm25index/index");
-        Assert.Equal(409, delStatus);
+        Assert.Equal(400, delStatus);
+
+        var (postAll, _) = await f.RequestAsync("POST", "/api/bm25index/index?kbId=__all__", "{}");
+        Assert.Equal(409, postAll);
     }
 
     [Fact]
