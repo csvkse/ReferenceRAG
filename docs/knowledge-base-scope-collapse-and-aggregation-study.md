@@ -324,3 +324,35 @@ graph_search(kbId=nope)                          → knowledge_base_not_found
 | Graph 全量重建并行化 | 当前逐库串行循环 + 单锁，语义正确；并行需评估 IO/CPU 争用，非本次范围 |
 | `bm25index/documents/{chunkId}` 补齐 kb 参数 | 该端点只写 legacy store，与本作用域体系无关；已在文档标注为 legacy-only |
 | `SourcesController` 的「未指定库时挂到第一个启用库」 | 语义是「挂载默认库」而非「读取统计」，保持现状但应回显目标库（后续小改） |
+
+### 10.5 正式环境部署与复验（`referencerag:deploy-982ac031463f`，2026-11-17）
+
+**产物溯源**：容器内 `/app/McpHelper.Core.dll` md5 `dce874f61e6e569b8bc50239a1f42077` = `packages/McpHelper.Core.2.4.0.nupkg` 内 DLL = 新建镜像内 DLL；镜像 tag = 仓库 HEAD 短哈希 `982ac031463f`；容器 `Up (healthy)`、`/api/system/health` 200、ROCm 设备参数（`/dev/kfd /dev/dri`）沿用。
+
+**接口矩阵（生产两库：Notes 24 万+ 分块 / 默认知识库 2.4 万+ 分块）**
+
+| 端点 | 无参 | `__all__` | Notes | 默认 | 求和 |
+|:--|--:|--:|--:|--:|--:|
+| `graph/stats` nodes | **17767**（scope=all，2 库明细） | 17767 | 17196 | 571 | 17767 |
+| `graph/stats` edges | **32705** | 32705 | 31749 | 956 | 32705 |
+| `bm25/summary` chunks | **262497**（scope=all） | 262497 | 237721 | 24776 | 262497 |
+| `bm25/summary` avg | **539.64** | 539.64 | 503.85 | 883.03 | 加权 539.64 |
+
+对照修复前的 17196 / 237721 / 693.44：**三处全部纠正**，且无参与 `__all__` 现在完全一致。
+
+**写作用域**：`POST /api/bm25index/index`、`POST /api/graph/rebuild` 无参 → **400 `scope_required`**。
+
+**未知 ID**：`graph/stats` / `bm25/summary` 的 `kbId=nope` → **404 `knowledge_base_not_found`**；探测后 `kbs/` 未新增目录。宿主机残留的 `kbs/deadbeef`（2026-11-16 同类探测遗留，未被 catalog 注册）本次未删除——它不影响聚合（聚合按 catalog 启用库枚举），留待单独清理。
+
+**MCP**：`graph_search_by_title` 无参 → `kbScope=all`、`kbIds` 两库、10 条结果节点均带 `knowledgeBaseId`；显式 `kbId=Notes` → `kbScope=single`、10 条；`graph_search` 无参 → `kbScope=all`。
+
+**页面（内置浏览器 DOM 断言）**
+
+- `/graph`：`节点总数 17767 / 全部知识库（2 个库合计）`、文档 6930 / 标签 10274 / 标题 563 / 边 32705。
+- `/bm25-index`：`已索引文档 262497 / 平均文档长度 539.64`、统计口径「平均长度按分块数加权；全部知识库（2 个库合计）」，逐库明细表 `Notes 237721 / 默认知识库 24776`。
+- 加权口径独立复核：`Σ(chunks×avg)/Σchunks = 539.64` 与接口值一致。
+- 未截图（内置浏览器无可视视口）；单库下拉切换未做合成事件验证（Naive UI 浮层），由接口矩阵单库两列覆盖。
+
+**回归复验**：MCP 生产断言 **39/39** 通过（重排降级、通道事实、边界、outputSchema 全部保持）；离线审计 `tools=25 compact=29,541B outputSchema=25.8%`、warn 0、选型 17 明确 / 1 错误（与基线一致）。
+
+**遗留观察项**：`bm25/summary` 的 `TotalVocabularySize` 为各库之和（500000），但各库值都是按分块数估算的上限 250000，属估算口径叠加而非真实去重词表规模。若要精确值需按库读 FTS 词表大小，成本较高，暂不处理，已在页面「统计口径」文案中只声明平均长度口径。
