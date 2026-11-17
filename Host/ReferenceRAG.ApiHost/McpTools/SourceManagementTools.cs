@@ -7,6 +7,7 @@ using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Features.ModelManagement.Telemetry;
+using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Services;
 
 namespace ReferenceRAG.Service.McpTools;
@@ -213,13 +214,17 @@ public class SourceManagementTools
         {
             var sources = await GetCatalog(scope.ServiceProvider).ListAsync();
 
-            // 重排健康度：GGUF 缺 Rank 头时 IsDegraded=true，此时不该让调用方以为重排生效。
+            // 重排健康度：provider 只注册为 IRerankService（非独立注册），
+            // 所以要先拿 IRerankService 再按接口判断，否则 GetService<IRerankRuntimeTelemetryProvider>() 恒为 null。
             var rerankHealth = "unknown";
             string? rerankDegradationReason = null;
-            var rerankRuntime = scope.ServiceProvider.GetService<IRerankRuntimeTelemetryProvider>();
+            var rerankRuntime = scope.ServiceProvider.GetService<IRerankRuntimeTelemetryProvider>()
+                                ?? scope.ServiceProvider.GetService<IRerankService>() as IRerankRuntimeTelemetryProvider;
             if (rerankRuntime is not null)
             {
-                rerankHealth = rerankRuntime.IsDegraded ? "degraded" : (rerankRuntime.GetLifecycleSnapshot().IsReady ? "ok" : "idle");
+                rerankHealth = rerankRuntime.IsDegraded
+                    ? "degraded"
+                    : (rerankRuntime.GetLifecycleSnapshot().IsReady ? "ok" : "idle");
                 rerankDegradationReason = rerankRuntime.DegradationReason;
             }
 
