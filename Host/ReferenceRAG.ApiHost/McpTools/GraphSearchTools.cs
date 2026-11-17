@@ -36,7 +36,7 @@ public class GraphSearchTools
     [Description("查找与给定文件节点通过 wiki-link 相关联的知识节点（知识图谱遍历）。返回直接链接和反向链接的相关文档列表，可用于发现主题关联内容。nodeId 为文件相对路径（如 'Projects/foo.md'），depth 为遍历深度（1-3，默认1）。")]
     public async Task<string> GraphSearch(
         [Description("节点 ID（文件相对路径，如 'Projects/foo.md'）")] string nodeId,
-        [Description("遍历深度，1-3，默认为 1")] int depth = 1,
+        [Description("遍历深度范围 1–3，默认 1（超出上限按 3 处理）")] int depth = 1,
         [Description("目标知识库 ID（可选）。若留空则自动查询首个有效知识库")] string? knowledgeBaseId = null)
     {
         using var scope = _serviceProvider.CreateScope();
@@ -45,7 +45,15 @@ public class GraphSearchTools
             return permErr!;
         }
 
-        depth = Math.Clamp(depth, 1, 3);
+        int requestedDepth;
+        try
+        {
+            (requestedDepth, depth) = McpInputAdapters.ClampInt(nameof(depth), depth, 1, 3);
+        }
+        catch (McpInputArgumentException ex)
+        {
+            return McpResult.Fail(ex.Message, McpErrorCodes.InvalidArgument);
+        }
         GraphTraversalResult? result = null;
 
         var kbStorage = scope.ServiceProvider.GetService<IKnowledgeBaseStorageManager>();
@@ -76,7 +84,9 @@ public class GraphSearchTools
         var response = new
         {
             rootId = nodeId,
-            depth,
+            // 回显请求值与生效值：传入 99 被夹到 3，调用方必须能看出来。
+            requestedDepth,
+            effectiveDepth = depth,
             knowledgeBaseId = targetKbId,
             totalNodes = result.Nodes.Count,
             totalEdges = result.Edges.Count,
@@ -101,7 +111,7 @@ public class GraphSearchTools
     [Description("在知识图谱中搜索节点（按标题模糊匹配）。返回匹配的文档节点列表，可结合 graph_search 进一步遍历。")]
     public async Task<string> GraphSearchByTitle(
         [Description("搜索关键词")] string query,
-        [Description("最大返回数量，默认 10")] int limit = 10,
+        [Description("最大返回数量，默认 10，上限 50（超出按 50 处理）")] int limit = 10,
         [Description("目标知识库 ID（可选）。若留空则自动查询首个有效知识库")] string? knowledgeBaseId = null)
     {
         using var scope = _serviceProvider.CreateScope();
@@ -110,7 +120,15 @@ public class GraphSearchTools
             return permErr!;
         }
 
-        limit = Math.Clamp(limit, 1, 50);
+        int requestedLimit;
+        try
+        {
+            (requestedLimit, limit) = McpInputAdapters.ClampInt(nameof(limit), limit, 1, 50);
+        }
+        catch (McpInputArgumentException ex)
+        {
+            return McpResult.Fail(ex.Message, McpErrorCodes.InvalidArgument);
+        }
         List<GraphNode> nodes;
 
         var kbStorage = scope.ServiceProvider.GetService<IKnowledgeBaseStorageManager>();
@@ -141,6 +159,8 @@ public class GraphSearchTools
         return McpResult.Ok(new
         {
             query,
+            requestedLimit,
+            effectiveLimit = limit,
             knowledgeBaseId = targetKbId,
             count = nodes.Count,
             nodes = nodes.Select(n => new { id = n.Id, title = n.Title, type = n.Type })
