@@ -435,3 +435,35 @@ L1/L2 的共性：**"降级"是内部实现的细节，出口契约没有它的�
 | E1 真实模型 transcript 评估 | 需模型与配额；离线 25 条选型基线已接 CI |
 | JSON-RPC `-32602` 未知工具 | 保留 `isError` 形态兼容现有容错客户端，同时给出 `errorCode` |
 | `matchedTerms` 单列字段 | `channels + coverage + isFloor` 已表达同等信息，避免再加字段 |
+
+### 11.5 正式环境复验（`referencerag:deploy-b3a30719c303`，2026-11-17）
+
+**产物溯源**：容器内 `/app/McpHelper.Core.dll` md5 `dce874f61e6e569b8bc50239a1f42077` = `packages/McpHelper.Core.2.4.0.nupkg` 内 DLL = 新建镜像内 DLL；nuspec `commit=2296d3b`。部署镜像 tag 为仓库 HEAD 短哈希 `b3a3071`。
+
+**镜像构建注意事项（本次实际遇到）**：
+- 宿主 `/var/lib/docker` 是 20G loop 设备（74% 占用），`rocblas` 解包时因空间不足失败。清理 `docker builder prune -af` + `docker buildx prune -af` 后恢复至 45%。
+- Docker Hub 匿名 token 偶发 IPv6 超时；改为预拉 `docker/dockerfile:1`、`ubuntu:24.04`、`mcr.microsoft.com/dotnet/{sdk,aspnet}:10.0` 后再 build 可规避。
+- **正式环境实际运行的是 `Dockerfile`（universal + Vulkan），不是 `Dockerfile.rocm`**：运行容器内 `/opt/rocm` 不存在，`runtimes/linux-x64/native/vulkan` 存在，日志为 `Vulkan0 compute buffer`；`HARDWARE_ACCELERATION=rocm` 只影响容器设备参数（`--device /dev/kfd /dev/dri`）。部署必须沿用该变体，否则会改变推理后端。
+
+**接口面 39/39 断言通过**：
+
+| 组 | 结果 |
+|:--|:--|
+| `instructions` / 25 工具 / `title` 25/25 / `outputSchema` 7 且均 `anyOf` | ✅ |
+| 未知参数 4 例 → `invalid_argument`（列出可用参数） | ✅ |
+| 缺参 3 例 → `structuredContent{errorCode, missing}` | ✅ |
+| `knowledgeBaseIds` 5 种写法语义一致；非法 JSON 不泄漏 `LineNumber` | ✅ |
+| `items[].channels` / `kbChannels` / `degraded` / `indexDegraded` / `noMatch` | ✅ |
+| **重排 P0 修复生效**：`degraded=true scoreKind=degraded relevanceScore=null`，原因「GGUF 缺 Rank 分类头」，无 `0.85` 序列 | ✅ |
+| `get_system_stats.rerank.health=degraded` 且与 `rerank_results` 一致 | ✅（修复后） |
+| `limit=0→invalid_argument`、`limit=5000→200`、`maxResults→500`、`contextLines=99→5`、`9000 字符→too_large`、`topK=900→50` | ✅ |
+| 7 个 `outputSchema` 自建校验 0 违规 | ✅ |
+| 未知工具 → `unknown_tool` | ✅ |
+
+**复验中发现并修复的真实缺陷（一个）**：`rerank_results` 已报 `degraded=true`，但 `get_system_stats.rerank.health` 恒为 `unknown` —— `LazyRerankService` 实现了 `IRerankRuntimeTelemetryProvider` 却只注册为 `IRerankService`，`GetService<IRerankRuntimeTelemetryProvider>()` 返回 null。已抽出 `SourceManagementTools.ResolveRerankTelemetry` 并新增门禁 G-M11（仅注册 `IRerankService` 时也必须解析出 `IsDegraded`）。这条只能靠真机复验发现，纯接口断言不会暴露。
+
+**另一处验收脚本误判**：`search_file_content(maxMatches=300, contextLines=99)` 在正式环境返回 `too_large`（结果 650 KB > 40 万字符上限），因此读不到 `effectiveContextLines`。这是**正确行为**（体积守卫优先），已把断言改为 `maxMatches=20` 后再验回显。
+
+**离线审计（正式环境，带 `MCP_API_KEY`）**：`tools=25 compact=29,427B outputSchema=25.9%`；选型 17 明确 / 7 歧义 / 1 错误；warns 0 —— 与 dev 完全一致。
+
+**未做**：R4（生产切 ONNX Cross-Encoder）仍需运维决策；当前生产已能如实报告降级，`rerank_results` 不再返回伪分数，模型侧不会把名次当相关性使用。
