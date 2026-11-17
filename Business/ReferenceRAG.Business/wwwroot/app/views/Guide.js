@@ -711,6 +711,41 @@ component.template = `
 
               <n-divider />
 
+              <n-text strong>响应语义与失败约定</n-text>
+              <n-table :bordered="false" :single-line="false">
+                <thead>
+                  <tr><th>字段 / 约定</th><th>含义</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><n-text code>channels</n-text> / <n-text code>kbChannels</n-text></td>
+                    <td>这条命中来自<strong>词法</strong>还是<strong>向量</strong>（可同时）。纯词法知识库上的语义检索会如实标 <code>lexical</code></td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>degraded</n-text> / <n-text code>indexDegraded</n-text> / <n-text code>degradationReason</n-text></td>
+                    <td>模型级降级（断路器 / 推理异常）与索引级降级（词法未就绪 / 向量未覆盖）分列；纯词法库自动切通道不算降级</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>noMatch</n-text> / <n-text code>noMatchReason</n-text></td>
+                    <td>返回的切片与查询内容词无关（含查询标识未命中）：应改写查询，不要把这批当命中</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>scoreKind</n-text> = <code>degraded</code></td>
+                    <td>重排模型无法给出可信分数（如 GGUF 缺 Rank 头）：<code>relevanceScore</code> 为 <code>null</code>，结果按召回原顺序返回</td>
+                  </tr>
+                  <tr>
+                    <td><n-text code>requestedXxx</n-text> / <n-text code>effectiveXxx</n-text></td>
+                    <td>topK / limit / maxMatches / depth / contextLines 超上限会夹取并回显生效值</td>
+                  </tr>
+                  <tr>
+                    <td>失败信封 <n-text code>errorCode</n-text></td>
+                    <td><code>invalid_argument</code>（含未知参数、缺必填、0/负数）、<code>too_large</code>、<code>path_denied</code>、<code>source_not_found</code>、<code>chunk_not_found</code>、<code>unknown_tool</code> 等，可按码分支</td>
+                  </tr>
+                </tbody>
+              </n-table>
+
+              <n-divider />
+
               <n-text strong>在 Claude Desktop 中使用</n-text>
               <n-collapse>
                 <n-collapse-item title="配置步骤" name="claude-steps">

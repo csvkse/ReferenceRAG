@@ -8,7 +8,7 @@ export function enableLexicalSearchTemplate(template) {
         // 宽松兜底提示：地板层结果与精确命中在界面上完全一样，必须显式区分，
         // 否则用户会把"回落虚词"的结果当成真的匹配到了自己的查询。
         .replace('<n-tag size="small">耗时 {{ searchResponse.stats.durationMs }}ms</n-tag>',
-            '<n-tag v-if="searchResponse.usedRecallFloor" type="warning" size="small" round title="查询的内容词在本知识库中不存在，以下为回落高频虚词的宽松结果">⚠ 宽松兜底</n-tag>\n          <n-tag size="small">耗时 {{ searchResponse.stats.durationMs }}ms</n-tag>')
+            '<n-tag v-if="searchResponse.noMatch" type="error" size="small" round :title="searchResponse.noMatchReason || \'返回内容与查询无关\'">⚠ 未命中查询</n-tag>\n          <n-tag v-if="searchResponse.usedRecallFloor" type="warning" size="small" round title="查询的内容词在本知识库中不存在，以下为回落高频虚词的宽松结果">⚠ 宽松兜底</n-tag>\n          <n-tag v-if="searchResponse.kbChannels" size="small" :bordered="false" round :title="`各库召回通道：${Object.values(searchResponse.kbChannels).join(\' / \')}`">通道 {{ Object.values(searchResponse.kbChannels).some(c => c === \'hybrid\') ? \'向量+词法\' : \'词法\' }}</n-tag>\n          <n-tag size="small">耗时 {{ searchResponse.stats.durationMs }}ms</n-tag>')
         // 逐条覆盖率标签：覆盖率 = 命中锚点数 / 锚点总数。< 20% 基本等于"只是碰巧共享了虚词"。
         .replace('<n-tag :type="getScoreType(chunk.score)" size="small" title="融合分数">',
             '<n-tag v-if="chunk.coverage != null && chunk.coverage < 0.2" type="warning" size="small" :bordered="false" round :title="`查询词覆盖率 ${Math.round(chunk.coverage * 100)}%`">宽松匹配 {{ Math.round(chunk.coverage * 100) }}%</n-tag>\n                <n-tag :type="getScoreType(chunk.score)" size="small" title="融合分数">')
@@ -33,13 +33,20 @@ export function knowledgeBaseResponse(data, mode) {
         // 宽松兜底标记：锚点内容词在语料中不存在时，后端会回落到虚词层，
         // 这里必须透出，否则这些结果在界面上与精确命中完全一样。
         usedRecallFloor: !!data.usedRecallFloor,
+        // 无结果信号：返回的切片与查询内容词无关（含查询标识未命中）。
+        noMatch: !!data.noMatch,
+        noMatchReason: data.noMatchReason || null,
+        // 各库实际召回通道（lexical / vector / hybrid），纯词法库会被自动切到词法。
+        kbChannels: data.kbChannels || null,
         chunks: (data.items || []).map(item => ({
             refId: item.chunkId, fileId: item.documentId, filePath: item.sourceKey,
             title: item.sourceKey, content: item.text, score: item.score, scoreKind: item.scoreKind, source: item.connectorId,
             locator: item.locator, startLine: item.startLine, endLine: item.endLine, headingPath: item.headingPath,
             // 查询词覆盖率（0~1）；null 表示本次未计算（短查询无区分度）
             coverage: item.coverage ?? null,
-            isFloor: !!item.isFloor
+            isFloor: !!item.isFloor,
+            // 通道事实：融合后 scoreKind 一律是 RRF，只有 channels 能说明向量还是关键词命中。
+            channels: item.channels || null
         })), files: [], context: '', stats: {
             durationMs: Math.round(durationMs),
             estimatedTokens: 0,
