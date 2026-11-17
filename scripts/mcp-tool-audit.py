@@ -7,6 +7,8 @@
   3) 25 条真实任务的工具选型（IDF 加权 + 名称加权 + 区分度阈值）
 
 用法：
+    # 正式环境需带 key（从 env/.envprod 动态读取，勿硬编码）
+    set MCP_API_KEY=<from env/.envprod REFERENCERAG_API_KEY>
     python scripts/mcp-tool-audit.py http://127.0.0.1:5123/api/mcp
     python scripts/mcp-tool-audit.py http://127.0.0.1:5124/api/mcp --emit-json /tmp/listing.json
     python scripts/mcp-tool-audit.py listing.json --tasks scripts/mcp-tool-tasks.json
@@ -16,6 +18,7 @@
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import urllib.request
@@ -72,10 +75,15 @@ def rpc(base, method, params=None):
     body = {"jsonrpc": "2.0", "id": 1, "method": method}
     if params is not None:
         body["params"] = params
+    headers = {"Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream"}
+    # 正式环境启用认证：从环境变量或 env/.envprod 取 key（不写进脚本/文档）。
+    key = os.environ.get("MCP_API_KEY", "")
+    if key:
+        headers["X-API-Key"] = key
     req = urllib.request.Request(
         base, data=json.dumps(body, ensure_ascii=False).encode(), method="POST",
-        headers={"Content-Type": "application/json",
-                 "Accept": "application/json, text/event-stream"})
+        headers=headers)
     with urllib.request.urlopen(req, timeout=60) as r:
         raw = r.read().decode("utf-8", "replace")
     data = [l[5:].strip() for l in raw.splitlines() if l.startswith("data:")]
