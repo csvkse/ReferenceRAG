@@ -125,3 +125,46 @@ npm test
 - **Git 隔离防护**：`/env/.envdev` 已被根目录 `.gitignore` 全局严格忽略（`env/`, `.envdev`, `*.envdev`, `docs_secret/`），绝对禁止将其提交到版本库中。
 - **环境回退机制**：测试脚本在未检测到 `/env/.envdev` 中的特定凭据时，应设计优雅降级或跳过远程鉴权逻辑，绝不允许通过在代码中硬编码真实密钥来“临时跑通”测试。
 
+---
+
+## 6. 版本发布与构建版本同步规范 (Version Release & Tagging Governance)
+
+> [!IMPORTANT]
+> 本项目已全面启用 **MSBuild Git 动态版本注入**（位于根目录 `Directory.Build.props` 的 `PopulateVersionFromGit` Target）。
+> **严禁在任何 `.csproj`、代码或配置文件中硬编码静态版本号！**
+
+### 1) 动态版本工作机制
+- **动态衍生**：`dotnet build`、`dotnet publish` 及 `build-desktop.bat` 在编译时自动通过 `git describe --tags --always --match "v*"` 动态获取当前标签与提交步长。
+- **PE 与二进制属性**：`AssemblyVersion` 与 `FileVersion` 自动匹配为 `Major.Minor.Patch.CommitsAhead`（例如 `1.0.51.64`）；若直接基于 Tag 编译则为 `1.0.52.0`。
+- **语义化版本**：`Version` 与 `InformationalVersion` 自动携带完整 Commit 哈希与预发布标记。
+- **API 联动**：后端 [SystemController.cs](file:///e:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/Host/ReferenceRAG.ApiHost/Controllers/SystemController.cs#L188) 通过程序集反射动态返回最新版本，诊断中心与前端自动显示真实版本号，彻底解决桌面端软件版本停留在 `v1.0.0` 的问题。
+
+### 2) 统一规范化发版命令 (Agent 发版唯一指定操作)
+后续 AI Agent 在协助用户发版、生成标签与触发发布流水线时，**必须统一调用状态机脚本，严禁直接手敲 `git tag` 或手动改文件**：
+
+```powershell
+# 标准发版命令（自动完成工作区纯净度校验 -> 标签唯一性检查 -> 打 Git Tag -> 推送远程触发 CI/CD）
+pwsh scripts/release.ps1 -Version <版本号> -Message "<说明>" -Push
+
+# 示例：发布 v1.0.52
+pwsh scripts/release.ps1 -Version 1.0.52 -Message "Release v1.0.52: 修复桌面端版本号同步与发版门禁" -Push
+```
+
+- **状态机守卫规则**：发版前工作区必须干净（无未暂存/未提交的代码），杜绝因果倒置。
+- **自动化 CI 触发**：推送标签后，GitHub Actions (`desktop-release.yml`) 将自动启动构建全硬件架构（Universal / CUDA / AMD / Intel / CPU）分包并发布 GitHub Release。
+
+### 3) 本地桌面端打包规范
+```powershell
+# 本地打包桌面软件 (自动继承最新 Git 标签作为软件版本):
+.\build-desktop.bat
+```
+
+### 4) Git 客户端门禁与守门员钩子
+项目统一使用 `.githooks` 进行版本化管理。新工作区或 Agent 协助配置环境时，执行：
+```powershell
+pwsh scripts/install-hooks.ps1
+```
+- **`pre-commit`**：自动运行 [scripts/security-scan.ps1](file:///e:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/scripts/security-scan.ps1) 进行安全凭据与敏感信息扫描。
+- **`pre-push`**：作为防呆守门员，拦截不合规的标签推送（非 `v*` 格式）、提醒未提交代码，并确认 MSBuild 动态版本注入状态。
+
+

@@ -61,6 +61,7 @@ public sealed class ApiKeysController : ControllerBase
                 allowedScopes: request.AllowedScopes ?? "[\"*\"]",
                 allowedMcpTools: request.AllowedMcpTools ?? "[\"*\"]",
                 sourceScopeMode: request.SourceScopeMode ?? "all",
+                allowedKnowledgeBaseIds: request.AllowedKnowledgeBaseIds ?? "[]",
                 allowedSources: request.AllowedSources ?? "[]",
                 expiresAt: request.ExpiresAt
             );
@@ -93,6 +94,7 @@ public sealed class ApiKeysController : ControllerBase
                 allowedScopes: request.AllowedScopes ?? "[\"*\"]",
                 allowedMcpTools: request.AllowedMcpTools ?? "[\"*\"]",
                 sourceScopeMode: request.SourceScopeMode ?? "all",
+                allowedKnowledgeBaseIds: request.AllowedKnowledgeBaseIds ?? "[]",
                 allowedSources: request.AllowedSources ?? "[]",
                 expiresAt: request.ExpiresAt
             );
@@ -207,6 +209,7 @@ public sealed record CreateApiKeyRequest(
     string? AllowedScopes = "[\"*\"]",
     string? AllowedMcpTools = "[\"*\"]",
     string? SourceScopeMode = "all",
+    string? AllowedKnowledgeBaseIds = "[]",
     string? AllowedSources = "[]",
     DateTime? ExpiresAt = null
 );
@@ -225,6 +228,7 @@ public sealed record UpdateApiKeyRequest(
     string? AllowedScopes,
     string? AllowedMcpTools,
     string? SourceScopeMode,
+    string? AllowedKnowledgeBaseIds,
     string? AllowedSources,
     DateTime? ExpiresAt = null
 );

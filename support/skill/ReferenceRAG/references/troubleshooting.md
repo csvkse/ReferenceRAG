@@ -1,216 +1,53 @@
-# 故障排查与易错点
+﻿# ReferenceRAG 故障排查与易错点手册 (v2)
 
-调用报错或结果异常时先查这里。
+> **基础地址**：`http://127.0.0.1:5123`
+> **鉴权凭据**：`X-API-Key: rag_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
 
----
-
-## 快速自检顺序
-
-```
-1. GET /api/system/health          服务是否活着
-2. GET /api/ai/status              索引/模型是否就绪（IndexRequiresRebuild、RerankEnabled、IsGpu）
-3. GET /api/sources                数据源是否存在、FileCount 是否 > 0
-4. GET /api/bm25index/summary      索引规模（TotalIndexedDocuments）
-5. GET /api/graph/stats            EdgeCount 是否 > 0（判断图谱能否用）
-```
-
-`IndexRequiresRebuild: true` 时检索结果可能过期，需 `/api/index/rebuild`。
+调用报错或结果异常时，请按本手册排查定位。
 
 ---
 
-## 故障排查表
-
-| 现象 | 原因 | 处理 |
-|------|------|------|
-| 空白 500，`Content-Length: 0` | 请求体非 UTF-8 编码（旧版本服务） | 用 heredoc + `--data-binary`，或 PowerShell UTF-8 字节。见下 |
-| 400 `must be valid UTF-8 encoded text` | 同上（新版本服务） | 同上 |
-| 400 `input must be valid UTF-8 encoded text` | `/v1/embeddings` 的 `input` 非 UTF-8 | 同上 |
-| 400 `documents contains an item that is not valid UTF-8 encoded text` | `/v1/rerank` 的 `documents` 非 UTF-8 | 同上 |
-| 400 `The q field is required.` | `/api/graph/search` 缺 `q` | 加 `q` 参数 |
-| 400 `The nodeId field is required.` | `/api/graph/node` 参数名写错 | 该接口参数是 `nodeId`，**不是 `id`** |
-| 404 `节点不存在: <乱码路径>` | `nodeId` 含中文未 URL 编码 | 用 `curl --get --data-urlencode "nodeId=..."` |
-| 400 `query is required and must be a string` | `/v1/rerank` 缺 `query` 或类型错 | 补 `query`，必须是字符串 |
-| 400 `documents is required and must be an array` | `/v1/rerank` 缺 `documents` | 补 `documents` 数组 |
-| 400 `items 不能为空` | `/api/sources/file/lines` 的 `Items` 空 | 至少一条 |
-| 400 `路径无效` | 路径为空或含 `..` | 用绝对路径，去掉 `..` |
-| `Edges` 恒为空数组 | 数据源无 `[[双链]]`，`.txt` 不解析链接 | 图谱未建边。改用 `/api/ai/query` 检索 |
-| 召回小说正文 | 索引含非技术文件（`操虫师.txt`、`剑来.txt`） | 预期噪声。用更精确的技术词 |
-| `FullContext` 为空字符串 | `RefIds` 传错（传了 `FileId` 或 chunk 序号） | 必须用 `/api/ai/query` 返回的 `RefId` GUID |
-| BM25 的 `Content` 是乱码空格文本 | 那是分词结果，不是原文 | 拿 `ChunkId` 对应 `FilePath` 走 `/api/sources/file/lines` |
-| `Chunks[*].Content` 全空串 | 开了 `Slim: true` | 想要内容就别开 Slim，`Context` 字段仍有全文 |
-| 首次查询 3-5 秒 | 模型冷加载 | 正常，看 `Stats.Phases.ModelLoadMs` |
-| 小写 `query`/`topK` 无效 | 字段名大小写 | `/api/*` 用 PascalCase |
-| `TopK` 不是预期值 | 未显式传，用了模式默认 | 显式传 `TopK` |
-| 503 `Chat API Key is not configured` | 聊天后端未就绪 | 配置 `chat.activeBackend` 对应后端的模型/Key |
-| Web UI `http://localhost:7897` 打不开 | DesktopHost 前端走 `app://` 协议 | 启动 DesktopHost 窗口，或改用 WebHost |
-| 端点不在 Swagger 里 | Swagger 未覆盖全部端点 | `file/lines`、`files/info`、`bm25index/search` 都不在，但确实存在 |
-
----
-
-## UTF-8 编码问题详解
-
-这是最容易踩的坑，单独说明。
-
-**根因**：Windows 控制台默认代码页是 936（GBK）。Git Bash 的 `curl -d '{"Query":"中文"}'`
-把命令行里的中文字节按 GBK 原样发出，服务端 `System.Text.Json` 按 UTF-8 解析，
-遇到 GBK 字节序列（如 `分` = `0xB7 0xD6`）抛：
-
-```
-System.InvalidOperationException: Cannot transcode invalid UTF-8 JSON text to UTF-16 string.
- ---> System.Text.DecoderFallbackException: Unable to translate bytes [B7] at index 4
-   at System.Text.Json.JsonReaderHelper.TranscodeHelper
-   at System.Text.Json.JsonElement.GetString()
-```
-
-`GetString()` 调用在控制器的 `try` 块**之外**，异常逃逸控制器，
-Kestrel 直接返回 `500` 且 `Content-Length: 0`，控制器内已有的 `catch` 永远不执行。
-
-**新版服务已修**：控制器改为 `TryGetString` + 返回 400 指明原因，并加了全局异常中间件。
-但客户端仍应发正确的 UTF-8。
-
-### 正确写法
+## 1. 快速自检顺序
 
 ```bash
-# Git Bash：heredoc + --data-binary（文件内容是 UTF-8）
-curl -s -X POST "http://localhost:7897/api/ai/query" \
-  -H "Content-Type: application/json; charset=utf-8" \
-  --data-binary @- << 'EOF'
-{"Query": "Git 分支管理 branch 版本控制", "Mode": "HybridRerank", "TopK": 5}
-EOF
-```
+# 1. 连通性探活 (验证服务是否存活)
+python scripts/rag_cli.py ping
 
-```powershell
-# PowerShell：显式转 UTF-8 字节
-$body = '{"Query": "Git 分支管理", "Mode": "HybridRerank", "TopK": 5}'
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-Invoke-WebRequest -Uri "http://localhost:7897/api/ai/query" `
-  -Method Post -Body $bytes -ContentType "application/json; charset=utf-8"
-```
+# 2. 系统与模型状态 (检查 GPU、模型加载、重排健康度)
+python scripts/rag_cli.py stats
 
-**纯 ASCII 查询词无此问题**，`curl -d '{"Query":"docker network"}'` 可正常工作。
+# 3. 知识库清单 (验证当前 API Key 能否看见知识库)
+python scripts/rag_cli.py list-kbs
+
+# 4. 数据源清单 (验证各物理挂载源的文件数与切片数)
+python scripts/rag_cli.py list-sources
+```
 
 ---
 
-## 字段名大小写映射
+## 2. 常见故障排查表
 
-服务端 `PropertyNamingPolicy = null`，`/api/*` 全部 PascalCase。
-`/v1/*` 是 camelCase。
-
-| `/api/*`（PascalCase） | `/v1/*`（camelCase） |
-|------------------------|----------------------|
-| `Query` | `query` |
-| `Mode` | — |
-| `TopK` | `top_n`（仅 rerank） |
-| `Sources` | — |
-| `Filters.Tags` | — |
-| `Filters.Folders` | — |
-| `Slim` | — |
-| `EnableRerank` | — |
-| `Paths` | — |
-| `Items` | — |
-| `Path` | — |
-| `StartLine` | — |
-| `EndLine` | — |
-| — | `documents` |
-| — | `input` |
-| — | `messages` |
-| — | `return_documents` |
-| — | `encoding_mode` |
-
-响应字段同样遵循此规则：
-
-| `/api/*` | 含义 |
-|----------|------|
-| `Chunks` | 结果分块数组 |
-| `RefId` | drill-down 用（GUID） |
-| `FileId` | 文件 ID（**不能**用于 drill-down） |
-| `FilePath` | 文件绝对路径 |
-| `HeadingPath` | 章节路径 |
-| `BM25Score` | BM25 分 |
-| `EmbeddingScore` | 向量相似度 |
-| `RerankScore` | 重排分 |
-| `StartLine` / `EndLine` | chunk 行范围 |
-| `ObsidianLink` | `[[文件#L行号]]` 链接 |
-| `Context` | 拼装好的上下文（直接用） |
-| `Stats.Phases` | 各阶段耗时 |
-| `RerankStats` | 重排统计 |
+| 现象 / 错误码 | 根本原因 | 处置方案 |
+|:---|:---|:---|
+| **401 Unauthorized** | 请求未附带 API Key，或 Key 已过期/被禁用 | 在请求头中补充 `X-API-Key: rag_live_xxx` 或 `Authorization: Bearer rag_live_xxx` |
+| **检索恒返回空，且 `knowledgeBases: []`** | **API Key 作用域失配陷阱**：Key 的 `AllowedSources` 配成了知识库名（如 `["Notes"]`），而系统底层数据源名为连接器动态生成的 `"Notes - Note"` | 登录系统管理后台或调用 `PUT /api/ApiKeys/{id}`，将 `sourceScopeMode` 改为 `"all"`，或授权实际源名称通配符 `"*"` |
+| **检索返回切片但标记 `NoMatch: true`** | **质检拦截**：服务端 `QueryMatchSignals` 判定查询词核心标识或二元组未在任何切片正文中重叠，返回的是宽松兜底凑数切片 | **不可采信这批切片生成答案**。提取核心名词去停用词后重试，或加上 `--lexical` 精确模式；若多次未命中，如实向用户反馈未收录 |
+| **400 `must be valid UTF-8 encoded text`** | Windows 控制台将中文按本地代码页（GBK）发出，破坏了请求体字节 | **强烈推荐直接使用 `scripts/rag_cli.py`**（原生 UTF-8 字节流）。若必须用 curl，Git Bash 必须使用 `heredoc + --data-binary`，PowerShell 必须传 `[System.Text.Encoding]::UTF8.GetBytes()` |
+| **MCP 报错: 参数 'x' 类型无效，期望 schema 未声明的参数** | 服务端开启了严格的入参 Schema 门禁，传入了未声明的额外参数（如拼错的参数名 `kbIds` 代替 `knowledgeBaseIds`） | 检查对应工具的 `inputSchema`（可查阅 `references/mcp-tools.md`），仅传入允许的字段 |
+| **获取大纲/读取正文报错: 路径不在任何已注册数据源内** | 传入的路径没有以数据源根为基准，或跨数据源访问 | 1. 先用 `python scripts/rag_cli.py list-sources` 获取合法源名；<br>2. 传 `--source "Notes - Note"` 明确指定源；<br>3. 相对路径需包含子目录（如 `Note/1 工作/...`） |
+| **重排模型返回 `health: degraded`** | 生产环境 GGUF 格式重排模型缺少分类头，系统自动降级以保护服务不崩溃 | 正常行为。当前环境检索排序已自动回退至高可靠的 RRF 融合排序，不要依据重排绝对分值做硬性截断 |
+| **长文档检索截断** | 切片正文默认按 500~1000 字进行了摘要保护 | 先调用 `outline` 查看章节大纲，再调用 `read` 传入目标 `startLine` 与 `endLine` 精确获取全文 |
 
 ---
 
-## 图谱接口特殊情况
+## 3. 未命中 (NoMatch) 语义改写规则
 
-当前实例（2026-10-22）`EdgeCount` 为 0，原因是：
+当服务返回 `NoMatch: true` 时，说明当前自然语言查询与词法/向量索引存在词表落差（Vocabulary Gap）。
 
-1. 数据源里 `.md` 文件没有 `[[双链]]`
-2. `.txt` 小说不做链接解析
-3. `WikiLinkExtractor` 只识别 `[[wikilink]]`、`![[embed]]`、`#tag` 三种边
+| 用户原始输入 | 失败原因分析 | 推荐改写策略 |
+|:---|:---|:---|
+| `帮我查下那个关于状态机是怎么写的` | 口语化助词（`帮我查下`、`那个`、`关于`、`是怎么写的`）稀释了核心词权重 | 提取核心术语：`状态机 MoveNext 异步实现` |
+| `IndexOutOfRangeException` | 代码异常类名若走向量可能被泛化为一般性"数组越界异常" | 强制走词法精确匹配：`python scripts/rag_cli.py search "IndexOutOfRangeException" --lexical` |
+| `docker 网络配置` | 笔记中可能用英文写为 `network bridge overlay` | 补充同义词中英混合：`docker 网络 network bridge 端口映射 port mapping` |
 
-**表现**：`/api/graph/neighbors` 和 `/api/graph/subgraph` 返回 `Nodes: []`、`Edges: []`，
-不报错，看起来像调用成功但没数据。
 
-**判断方法**：
-```bash
-curl -s "http://localhost:7897/api/graph/stats"
-```
-`EdgeCount > 0` 才值得用图谱接口。
-
-**替代方案**：直接用 `/api/ai/query` 做语义检索，不依赖图谱关联。
-
-### 节点 ID 格式
-
-`/api/graph/search` 返回的 `Id` 是 `文件路径#标题` 复合串：
-
-```
-E:/Content/Down/新建文件夹/note.md#章节标题
-```
-
-- 传给 `/api/graph/neighbors` 要 URL 编码（含中文和 `#`）
-- 传给 `/api/graph/subgraph` 的 `RootIds` 建议用**纯文件路径**（不带 `#标题`），能命中 `document` 节点
-- `/api/graph/node` 用 `nodeId` 参数，不是 `id`
-
----
-
-## 认证
-
-当前实例 `ReferenceRAG:Service:apiKey` 为空字符串，`ApiKeyMiddleware` 直接放行，
-**所有端点无需认证头**。
-
-配置了 Key 后，以下路径需要认证：
-
-- `/api/*`
-- `/v1/*`
-- `/indexHub`（SignalR）
-
-支持三种传法：
-
-```bash
-# 1. X-API-Key 头
-curl -H "X-API-Key: <key>" ...
-
-# 2. Authorization Bearer
-curl -H "Authorization: Bearer <key>" ...
-
-# 3. SignalR 用 query string
-/IndexHub?access_token=<key>
-```
-
-缺失返回 401，错误返回 403。
-
-> `ApiKeyMiddleware` 对每个请求都重新读 `ConfigManager.Load()`，
-> 改 Key 后立即生效，无需重启。
-
----
-
-## Swagger 覆盖不全
-
-`http://localhost:7897/swagger` 可达（DesktopHost 返回 301 重定向，跟随后缀）。
-
-但以下端点**不在 Swagger 里**，不代表不存在，本文档已实测可用：
-
-- `POST /api/sources/file/lines`
-- `POST /api/sources/files/info`
-- `GET /api/bm25index/search`
-- `GET /api/bm25index/summary`
-
-Web UI `http://localhost:7897` **返回 404** —— DesktopHost 前端由 `app://` 自定义协议提供，
-不经 HTTP。要看界面需启动 DesktopHost 窗口，或改用 WebHost。

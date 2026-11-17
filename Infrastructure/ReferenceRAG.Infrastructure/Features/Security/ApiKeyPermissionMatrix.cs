@@ -47,6 +47,40 @@ public static class ApiKeyPermissionMatrix
         return false;
     }
 
+    public static bool CanAccessKnowledgeBase(ApiKeyEntity? key, string kbId)
+    {
+        if (key == null) return true;
+        if (string.Equals(key.SourceScopeMode, "all", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (string.IsNullOrWhiteSpace(kbId)) return false;
+        var allowedKbs = ParseJsonOrTokens(key.AllowedKnowledgeBaseIds);
+        if (allowedKbs.Contains("*"))
+            return true;
+        if (allowedKbs.Count > 0)
+            return allowedKbs.Contains(kbId, StringComparer.OrdinalIgnoreCase);
+
+        // 未配置具体知识库 ID 限制时，不阻断知识库访问（交由底层数据源权限过滤）
+        return true;
+    }
+
+    /// <summary>
+    /// 获取当前 Key 限制的有效知识库 ID 集合。若返回 null，代表允许全知识库无限制访问。
+    /// </summary>
+    public static IReadOnlyList<string>? GetEffectiveAllowedKnowledgeBases(ApiKeyEntity? key)
+    {
+        if (key == null) return null;
+        if (string.Equals(key.SourceScopeMode, "all", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var kbs = ParseJsonOrTokens(key.AllowedKnowledgeBaseIds);
+        if (kbs.Contains("*")) return null;
+        if (kbs.Count > 0) return kbs.ToList();
+
+        // 仅当明确配置了具体的 allowed_knowledge_base_ids 时返回非 null 限制
+        return null;
+    }
+
     public static bool CanAccessSource(ApiKeyEntity key, string sourceName)
     {
         if (string.Equals(key.SourceScopeMode, "all", StringComparison.OrdinalIgnoreCase))

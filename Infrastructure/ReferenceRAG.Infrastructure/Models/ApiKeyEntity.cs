@@ -26,6 +26,9 @@ public sealed class ApiKeyEntity
     // 数据源隔离模式: "all" (全部知识源) | "custom" (限制特定知识源)
     public string SourceScopeMode { get; set; } = "all";
 
+    // 授权的知识库 ID 列表 (JSON 数组，如 ["40745ffb28444648"] 或 ["*"])
+    public string AllowedKnowledgeBaseIds { get; set; } = "[]";
+
     // 授权的知识源名称/标识 (JSON 数组，如 ["VNote", "TechDoc"])
     public string AllowedSources { get; set; } = "[]";
 

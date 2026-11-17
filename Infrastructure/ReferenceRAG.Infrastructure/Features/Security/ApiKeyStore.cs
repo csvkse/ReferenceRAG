@@ -74,6 +74,7 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
                     allowed_scopes TEXT NOT NULL DEFAULT '[""*""]',
                     allowed_mcp_tools TEXT NOT NULL DEFAULT '[""*""]',
                     source_scope_mode TEXT NOT NULL DEFAULT 'all',
+                    allowed_knowledge_base_ids TEXT NOT NULL DEFAULT '[]',
                     allowed_sources TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL,
                     last_used_at TEXT,
@@ -89,13 +90,22 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
                 await cmd.ExecuteNonQueryAsync();
             }
 
+            // 动态迁移：确保已有数据库无损补齐 allowed_knowledge_base_ids 列
+            try
+            {
+                await using var alterCmd = conn.CreateCommand();
+                alterCmd.CommandText = "ALTER TABLE api_keys ADD COLUMN allowed_knowledge_base_ids TEXT NOT NULL DEFAULT '[]';";
+                await alterCmd.ExecuteNonQueryAsync();
+            }
+            catch { /* 列已存在时忽略 */ }
+
             // 加载全部 Key 到内存缓存
             _cachedByHash.Clear();
             _cachedById.Clear();
 
             await using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT id, name, key_prefix, key_hash, is_enabled, allow_api, allow_mcp, allowed_scopes, allowed_mcp_tools, source_scope_mode, allowed_sources, created_at, last_used_at, expires_at FROM api_keys";
+                cmd.CommandText = "SELECT id, name, key_prefix, key_hash, is_enabled, allow_api, allow_mcp, allowed_scopes, allowed_mcp_tools, source_scope_mode, allowed_sources, created_at, last_used_at, expires_at, allowed_knowledge_base_ids FROM api_keys";
                 await using var reader = await cmd.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
                 {
@@ -149,6 +159,7 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
         string allowedScopes = "[\"*\"]",
         string allowedMcpTools = "[\"*\"]",
         string sourceScopeMode = "all",
+        string allowedKnowledgeBaseIds = "[]",
         string allowedSources = "[]",
         DateTime? expiresAt = null)
     {
@@ -171,6 +182,7 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
             AllowedScopes = string.IsNullOrWhiteSpace(allowedScopes) ? "[\"*\"]" : allowedScopes.Trim(),
             AllowedMcpTools = string.IsNullOrWhiteSpace(allowedMcpTools) ? "[\"*\"]" : allowedMcpTools.Trim(),
             SourceScopeMode = string.Equals(sourceScopeMode, "custom", StringComparison.OrdinalIgnoreCase) ? "custom" : "all",
+            AllowedKnowledgeBaseIds = string.IsNullOrWhiteSpace(allowedKnowledgeBaseIds) ? "[]" : allowedKnowledgeBaseIds.Trim(),
             AllowedSources = string.IsNullOrWhiteSpace(allowedSources) ? "[]" : allowedSources.Trim(),
             CreatedAt = DateTime.UtcNow,
             ExpiresAt = expiresAt
@@ -186,11 +198,11 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
             cmd.CommandText = @"
                 INSERT INTO api_keys (
                     id, name, key_prefix, key_hash, is_enabled, allow_api, allow_mcp,
-                    allowed_scopes, allowed_mcp_tools, source_scope_mode, allowed_sources,
+                    allowed_scopes, allowed_mcp_tools, source_scope_mode, allowed_knowledge_base_ids, allowed_sources,
                     created_at, last_used_at, expires_at
                 ) VALUES (
                     @id, @name, @key_prefix, @key_hash, @is_enabled, @allow_api, @allow_mcp,
-                    @allowed_scopes, @allowed_mcp_tools, @source_scope_mode, @allowed_sources,
+                    @allowed_scopes, @allowed_mcp_tools, @source_scope_mode, @allowed_knowledge_base_ids, @allowed_sources,
                     @created_at, @last_used_at, @expires_at
                 );
             ";
@@ -204,6 +216,7 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
             cmd.Parameters.AddWithValue("@allowed_scopes", entity.AllowedScopes);
             cmd.Parameters.AddWithValue("@allowed_mcp_tools", entity.AllowedMcpTools);
             cmd.Parameters.AddWithValue("@source_scope_mode", entity.SourceScopeMode);
+            cmd.Parameters.AddWithValue("@allowed_knowledge_base_ids", entity.AllowedKnowledgeBaseIds);
             cmd.Parameters.AddWithValue("@allowed_sources", entity.AllowedSources);
             cmd.Parameters.AddWithValue("@created_at", entity.CreatedAt.ToString("O"));
             cmd.Parameters.AddWithValue("@last_used_at", (object?)entity.LastUsedAt?.ToString("O") ?? DBNull.Value);
@@ -231,6 +244,7 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
         string allowedScopes,
         string allowedMcpTools,
         string sourceScopeMode,
+        string allowedKnowledgeBaseIds,
         string allowedSources,
         DateTime? expiresAt = null)
     {
@@ -252,6 +266,7 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
                     allowed_scopes = @allowed_scopes,
                     allowed_mcp_tools = @allowed_mcp_tools,
                     source_scope_mode = @source_scope_mode,
+                    allowed_knowledge_base_ids = @allowed_knowledge_base_ids,
                     allowed_sources = @allowed_sources,
                     expires_at = @expires_at
                 WHERE id = @id;
@@ -263,6 +278,7 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
             cmd.Parameters.AddWithValue("@allowed_scopes", allowedScopes);
             cmd.Parameters.AddWithValue("@allowed_mcp_tools", allowedMcpTools);
             cmd.Parameters.AddWithValue("@source_scope_mode", sourceScopeMode);
+            cmd.Parameters.AddWithValue("@allowed_knowledge_base_ids", string.IsNullOrWhiteSpace(allowedKnowledgeBaseIds) ? "[]" : allowedKnowledgeBaseIds.Trim());
             cmd.Parameters.AddWithValue("@allowed_sources", allowedSources);
             cmd.Parameters.AddWithValue("@expires_at", (object?)expiresAt?.ToString("O") ?? DBNull.Value);
 
@@ -275,6 +291,7 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
                 entity.AllowedScopes = allowedScopes;
                 entity.AllowedMcpTools = allowedMcpTools;
                 entity.SourceScopeMode = sourceScopeMode;
+                entity.AllowedKnowledgeBaseIds = string.IsNullOrWhiteSpace(allowedKnowledgeBaseIds) ? "[]" : allowedKnowledgeBaseIds.Trim();
                 entity.AllowedSources = allowedSources;
                 entity.ExpiresAt = expiresAt;
                 return true;
@@ -389,7 +406,8 @@ public sealed class ApiKeyStore : IApiKeyStore, IDisposable
             AllowedSources = reader.GetString(10),
             CreatedAt = DateTime.Parse(reader.GetString(11)),
             LastUsedAt = reader.IsDBNull(12) ? null : DateTime.Parse(reader.GetString(12)),
-            ExpiresAt = reader.IsDBNull(13) ? null : DateTime.Parse(reader.GetString(13))
+            ExpiresAt = reader.IsDBNull(13) ? null : DateTime.Parse(reader.GetString(13)),
+            AllowedKnowledgeBaseIds = reader.FieldCount > 14 && !reader.IsDBNull(14) ? reader.GetString(14) : "[]"
         };
     }
 

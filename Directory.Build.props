@@ -5,4 +5,40 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
+
+  <!-- Git 动态版本提取与注入 Target -->
+  <Target Name="PopulateVersionFromGit" BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;GetPackageVersion" Condition="'$(Version)' == '' or '$(Version)' == '1.0.0'">
+    <Exec Command="git describe --tags --always --match &quot;v*&quot; 2>nul" ConsoleToMSBuild="true" StandardOutputImportance="low" IgnoreExitCode="true">
+      <Output TaskParameter="ConsoleOutput" ItemName="_RawGitOutput" />
+      <Output TaskParameter="ExitCode" PropertyName="_GitExitCode" />
+    </Exec>
+
+    <PropertyGroup Condition="'$(_GitExitCode)' == '0' and '@(_RawGitOutput)' != ''">
+      <_GitDesc>@(_RawGitOutput)</_GitDesc>
+      
+      <!-- 提取基础三段版本号，如 v1.0.51-64-g50ce9f9 -> 1.0.51 -->
+      <_BaseVersionMatch>$([System.Text.RegularExpressions.Regex]::Match($(_GitDesc), `^v?(\d+\.\d+\.\d+)`))</_BaseVersionMatch>
+      <_BaseVersion Condition="'$(_BaseVersionMatch)' != ''">$([System.Text.RegularExpressions.Regex]::Match($(_GitDesc), `^v?(\d+\.\d+\.\d+)`).Groups[1].Value)</_BaseVersion>
+      <_BaseVersion Condition="'$(_BaseVersion)' == ''">1.0.0</_BaseVersion>
+
+      <!-- 提取偏移提交数，如 v1.0.51-64-g50ce9f9 -> 64 -->
+      <_CommitsAheadMatch>$([System.Text.RegularExpressions.Regex]::Match($(_GitDesc), `^v?\d+\.\d+\.\d+-(\d+)`))</_CommitsAheadMatch>
+      <_CommitsAhead Condition="'$(_CommitsAheadMatch)' != ''">$([System.Text.RegularExpressions.Regex]::Match($(_GitDesc), `^v?\d+\.\d+\.\d+-(\d+)`).Groups[1].Value)</_CommitsAhead>
+      <_CommitsAhead Condition="'$(_CommitsAhead)' == ''">0</_CommitsAhead>
+
+      <!-- 规范化四位二进制版本号: 1.0.51.64 -->
+      <AssemblyVersion>$(_BaseVersion).$(_CommitsAhead)</AssemblyVersion>
+      <FileVersion>$(_BaseVersion).$(_CommitsAhead)</FileVersion>
+
+      <!-- 语义化版本号 (SemVer) -->
+      <Version Condition="'$(_CommitsAhead)' == '0'">$(_BaseVersion)</Version>
+      <Version Condition="'$(_CommitsAhead)' != '0'">$(_BaseVersion)-dev.$(_CommitsAhead)</Version>
+      
+      <!-- 详细信息版本号 (去除前导 v) -->
+      <_CleanDesc>$([System.Text.RegularExpressions.Regex]::Replace($(_GitDesc), `^v`, ``))</_CleanDesc>
+      <InformationalVersion>$(_CleanDesc)</InformationalVersion>
+    </PropertyGroup>
+
+    <Message Importance="high" Condition="'$(_BaseVersion)' != ''" Text="[GitVersionHook] 动态解析并注入程序集版本: Version=$(Version), FileVersion=$(FileVersion), InformationalVersion=$(InformationalVersion)" />
+  </Target>
 </Project>

@@ -18,6 +18,7 @@ public interface IApiKeyStore
         string allowedScopes = "[\"*\"]",
         string allowedMcpTools = "[\"*\"]",
         string sourceScopeMode = "all",
+        string allowedKnowledgeBaseIds = "[]",
         string allowedSources = "[]",
         DateTime? expiresAt = null);
     Task<bool> UpdateAsync(
@@ -28,6 +29,7 @@ public interface IApiKeyStore
         string allowedScopes,
         string allowedMcpTools,
         string sourceScopeMode,
+        string allowedKnowledgeBaseIds,
         string allowedSources,
         DateTime? expiresAt = null);
     Task<bool> ToggleAsync(string id, bool isEnabled);

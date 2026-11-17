@@ -73,6 +73,11 @@ public static class McpCatalogRegistry
             "语义搜索、混合搜索、重排、图谱遍历与文本向量化（REST: /api/AIQuery, /api/Search, /v1/embeddings; MCP: 搜索工具）",
             new List<McpToolCatalogItem>
             {
+                new("KnowledgeSearch", "知识库通用检索（统一入口）。支持通用语义理解、精准代码/关键词匹配与多路混合检索。默认 auto 模式会自动依据查询特征和知识库规格智能决策最优策略。",
+                    "Read", "search",
+                    WhenToUse: "在知识库中进行任何内容检索时的首选主力工具。可指定 mode 参数切换 auto / hybrid / semantic / lexical。",
+                    UseInstead: "只想按行通读已知文件时用 read_note_content；已知文档想看大纲用 get_note_outline。",
+                    Limits: "topK 默认 5，建议 1-20，上限 50；返回切片正文按 500 字截断。"),
                 new("SemanticSearch", "在知识库中执行向量语义搜索，基于自然语言查找相关文档片段。",
                     "Read", "search",
                     WhenToUse: "适合问「是什么 / 为什么 / 怎么理解」这类概念性或描述性问题。",

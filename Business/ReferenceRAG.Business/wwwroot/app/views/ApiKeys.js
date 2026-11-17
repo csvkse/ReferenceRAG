@@ -32,6 +32,7 @@ const component = /*@__PURE__*/ _defineComponent({
             allTools: true,
             selectedTools: [],
             sourceScopeMode: 'all',
+            selectedKnowledgeBases: [],
             selectedSources: []
         });
 
@@ -258,6 +259,7 @@ const component = /*@__PURE__*/ _defineComponent({
             form.allTools = true;
             form.selectedTools = categories.flatMap(c => (c.tools || []).map(t => t.name));
             form.sourceScopeMode = 'all';
+            form.selectedKnowledgeBases = (metaCatalog.value.knowledgeBases || []).map(k => k.id);
             form.selectedSources = (metaCatalog.value.sources || []).map(s => s.name);
 
             collapsedCategories.value.clear();
@@ -296,6 +298,8 @@ const component = /*@__PURE__*/ _defineComponent({
             }
 
             form.sourceScopeMode = row.sourceScopeMode || 'all';
+            const kbIds = parseJsonArray(row.allowedKnowledgeBaseIds);
+            form.selectedKnowledgeBases = kbIds.length > 0 ? kbIds : (metaCatalog.value.knowledgeBases || []).map(k => k.id);
             const sources = parseJsonArray(row.allowedSources);
             form.selectedSources = sources.length > 0 ? sources : (metaCatalog.value.sources || []).map(s => s.name);
 
@@ -328,6 +332,7 @@ const component = /*@__PURE__*/ _defineComponent({
                     allowedScopes: form.allScopes ? '["*"]' : JSON.stringify(form.selectedScopes),
                     allowedMcpTools: form.allTools ? '["*"]' : JSON.stringify(form.selectedTools),
                     sourceScopeMode: form.sourceScopeMode,
+                    allowedKnowledgeBaseIds: form.sourceScopeMode === 'all' ? '[]' : JSON.stringify(form.selectedKnowledgeBases),
                     allowedSources: form.sourceScopeMode === 'all' ? '[]' : JSON.stringify(form.selectedSources)
                 };
 
@@ -461,13 +466,19 @@ const component = /*@__PURE__*/ _defineComponent({
             {
                 title: '知识库/源范围',
                 key: 'sourceScopeMode',
-                width: 150,
+                width: 170,
                 render: (row) => {
                     if (row.sourceScopeMode === 'all') {
-                        return h(NTag, { type: 'success', size: 'small', secondary: true }, { default: () => '全部知识库/源' });
+                        return h(NTag, { type: 'success', size: 'small', secondary: true }, { default: () => '全部知识库/源 (*)' });
                     }
+                    const kbs = parseJsonArray(row.allowedKnowledgeBaseIds);
                     const sources = parseJsonArray(row.allowedSources);
-                    return h(NTag, { type: 'warning', size: 'small' }, { default: () => `限制: ${sources.length} 项` });
+                    return h(NSpace, { size: 'small' }, {
+                        default: () => [
+                            h(NTag, { type: 'primary', size: 'small' }, { default: () => `知识库: ${kbs.length} 个` }),
+                            sources.length > 0 ? h(NTag, { type: 'warning', size: 'small' }, { default: () => `源: ${sources.length} 个` }) : null
+                        ].filter(Boolean)
+                    });
                 }
             },
             {
@@ -718,11 +729,12 @@ component.template = `
 
               <div v-if="form.sourceScopeMode === 'custom'" style="background: rgba(128,128,128,0.06); padding: 12px; border-radius: 6px; margin-top: 8px;">
                 <div v-if="metaCatalog.knowledgeBases && metaCatalog.knowledgeBases.length > 0" style="margin-bottom: 12px;">
-                  <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">📚 授权知识库：</div>
-                  <n-checkbox-group v-model:value="form.selectedSources">
+                  <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">📚 授权知识库（物理库隔离）：</div>
+                  <n-checkbox-group v-model:value="form.selectedKnowledgeBases">
                     <n-space vertical :size="6">
-                      <n-checkbox v-for="kb in metaCatalog.knowledgeBases" :key="'kb:' + kb.id" :value="kb.name">
+                      <n-checkbox v-for="kb in metaCatalog.knowledgeBases" :key="'kb:' + kb.id" :value="kb.id">
                         <span style="font-weight: 500;">📚 {{ kb.name }}</span>
+                        <span style="font-family: monospace; font-size: 11px; margin-left: 6px; color: #18a058;">#{{ kb.id }}</span>
                         <n-text depth="3" style="margin-left: 8px; font-size: 12px;">({{ kbLabel(kb) }})</n-text>
                       </n-checkbox>
                     </n-space>

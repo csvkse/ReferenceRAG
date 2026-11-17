@@ -35,10 +35,33 @@ public class KnowledgeBaseMcpTools
             return error ?? McpResult.Fail("权限检查失败", McpErrorCodes.Forbidden);
         try
         {
-            var allowed = GetAllowedSources(scope.ServiceProvider);
-            var kbs = allowed == null
-                ? await scope.ServiceProvider.GetRequiredService<IKnowledgeBaseService>().ListKnowledgeBasesAsync()
-                : await scope.ServiceProvider.GetRequiredService<IKnowledgeBaseSearchService>().ListAccessibleKnowledgeBasesAsync(allowed);
+            var key = scope.ServiceProvider.GetService<IHttpContextAccessor>()?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+            var allowedSources = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(key);
+            var allowedKbs = ApiKeyPermissionMatrix.GetEffectiveAllowedKnowledgeBases(key);
+
+            IReadOnlyList<KnowledgeBaseDefinition> kbs;
+            if (allowedSources != null)
+            {
+                var search = scope.ServiceProvider.GetService<IKnowledgeBaseSearchService>();
+                if (search != null)
+                {
+                    kbs = await search.ListAccessibleKnowledgeBasesAsync(allowedSources);
+                }
+                else
+                {
+                    kbs = await scope.ServiceProvider.GetRequiredService<IKnowledgeBaseService>().ListKnowledgeBasesAsync();
+                }
+            }
+            else
+            {
+                kbs = await scope.ServiceProvider.GetRequiredService<IKnowledgeBaseService>().ListKnowledgeBasesAsync();
+            }
+
+            if (allowedKbs != null)
+            {
+                var allowedSet = new HashSet<string>(allowedKbs, StringComparer.OrdinalIgnoreCase);
+                kbs = kbs.Where(k => allowedSet.Contains(k.Id) || allowedSet.Contains(k.Name)).ToList();
+            }
             return McpResult.Ok(new
             {
                 success = true,
@@ -94,7 +117,25 @@ public class KnowledgeBaseMcpTools
             {
                 return McpResult.Fail(ex.Message, McpErrorCodes.InvalidArgument);
             }
-            if (targetIds.Count == 0)
+            var key = scope.ServiceProvider.GetService<IHttpContextAccessor>()?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+            var allowedKbs = ApiKeyPermissionMatrix.GetEffectiveAllowedKnowledgeBases(key);
+            if (allowedKbs != null)
+            {
+                var allowedSet = new HashSet<string>(allowedKbs, StringComparer.OrdinalIgnoreCase);
+                if (targetIds.Count > 0)
+                {
+                    targetIds = targetIds.Where(id => allowedSet.Contains(id)).ToList();
+                    if (targetIds.Count == 0)
+                    {
+                        return McpResult.Fail("无权访问指定的知识库或目标库未在授权列表中", McpErrorCodes.Forbidden);
+                    }
+                }
+                else
+                {
+                    targetIds = allowedKbs.ToList();
+                }
+            }
+            else if (targetIds.Count == 0)
             {
                 var allKbs = await kbService.ListKnowledgeBasesAsync();
                 targetIds = allKbs.Where(k => k.Enabled).Select(k => k.Id).ToList();

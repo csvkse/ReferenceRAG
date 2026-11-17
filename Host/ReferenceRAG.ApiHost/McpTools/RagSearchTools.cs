@@ -6,8 +6,10 @@ using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services;
+using ReferenceRAG.Infrastructure.Features.Security;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace ReferenceRAG.Service.McpTools;
 
@@ -31,30 +33,39 @@ public class RagSearchTools
         _serviceProvider = serviceProvider;
     }
 
+    [McpServerTool(Title = "知识库检索（统一入口）")]
+    [Description("知识库高精度检索。支持通用语义理解、精准代码/关键词匹配及混合检索。默认 auto 模式智能决策。")]
+    public Task<string> KnowledgeSearch(
+        [Description("检索查询文本（必填），支持自然语言问题、精确关键词、代码符号或错误码")] string query,
+        [Description("检索模式：auto (默认，自动决策)、hybrid (混合检索)、semantic (语义检索)、lexical (精确词法)")] string mode = "auto",
+        [Description("返回结果数量，默认 5，建议 1-20，上限 50")] int topK = 5,
+        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有授权知识库")] string? knowledgeBaseIds = null)
+        => SearchAsync(nameof(KnowledgeSearch), query, topK, knowledgeBaseIds, mode: mode);
+
     [McpServerTool(Title = "词法检索（知识库）")]
-    [Description("知识库语义检索（免向量词法）。适合精确词汇、错误码、API 名。可指定 knowledgeBaseIds 限定范围。")]
+    [Description("知识库语义检索（免向量词法）。推荐使用 knowledge_search(mode='lexical')。")]
     public Task<string> LexicalSearch(
         [Description("关键词或查询文本（必填）")] string query,
         [Description("返回结果数量，默认 5，上限 50")] int topK = 5,
-        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
-        => SearchAsync(nameof(LexicalSearch), query, topK, knowledgeBaseIds, useLexical: true);
+        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有授权知识库")] string? knowledgeBaseIds = null)
+        => SearchAsync(nameof(LexicalSearch), query, topK, knowledgeBaseIds, mode: "lexical", legacyUseLexical: true);
 
     [McpServerTool(Title = "语义检索（向量）")]
-    [Description("知识库语义检索（向量召回）。适合问答与信息检索。可指定 knowledgeBaseIds 限定范围。")]
+    [Description("知识库语义检索（向量召回）。推荐使用 knowledge_search(mode='semantic')。")]
     public Task<string> SemanticSearch(
         [Description("搜索查询文本（必填），建议补充同义词与中英文术语")] string query,
         [Description("返回结果数量，默认 5，建议 1-20，上限 50")] int topK = 5,
-        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
-        => SearchAsync(nameof(SemanticSearch), query, topK, knowledgeBaseIds, useLexical: false);
+        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有授权知识库")] string? knowledgeBaseIds = null)
+        => SearchAsync(nameof(SemanticSearch), query, topK, knowledgeBaseIds, mode: "semantic", legacyUseLexical: false);
 
     [McpServerTool(Title = "混合检索（向量+词法）")]
-    [Description("知识库混合检索（向量 + 词法 RRF 融合），兼顾精确匹配与语义理解。可指定 knowledgeBaseIds 限定范围。")]
+    [Description("知识库混合检索（向量 + 词法 RRF 融合）。推荐使用 knowledge_search(mode='hybrid')。")]
     public Task<string> HybridSearch(
         [Description("搜索查询文本（必填）")] string query,
         [Description("返回结果数量，默认 5，上限 50")] int topK = 5,
         [Description("是否只走词法通道（跳过向量），默认 false")] bool lexicalOnly = false,
-        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有已启用知识库")] string? knowledgeBaseIds = null)
-        => SearchAsync(nameof(HybridSearch), query, topK, knowledgeBaseIds, useLexical: lexicalOnly);
+        [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有授权知识库")] string? knowledgeBaseIds = null)
+        => SearchAsync(nameof(HybridSearch), query, topK, knowledgeBaseIds, mode: lexicalOnly ? "lexical" : "hybrid", legacyUseLexical: lexicalOnly);
 
     [McpServerTool(Title = "展开切片正文")]
     [Description("展开某个知识库切片的完整正文（按 chunkId 或 documentId + 序号）。用于检索结果被截断时补全上下文。")]
@@ -70,6 +81,10 @@ public class RagSearchTools
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(KnowledgeBaseDrillDown), out var permErr))
             return Fail(permErr, McpErrorCodes.Forbidden);
+
+        var currentKey = scope.ServiceProvider.GetService<IHttpContextAccessor>()?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+        if (!ApiKeyPermissionMatrix.CanAccessKnowledgeBase(currentKey, knowledgeBaseId))
+            return Fail($"无权访问指定的知识库 {knowledgeBaseId}", McpErrorCodes.Forbidden);
 
         if (string.IsNullOrWhiteSpace(chunkId) && string.IsNullOrWhiteSpace(documentId))
             return Fail("必须提供 chunkId 或 documentId", McpErrorCodes.InvalidArgument);
@@ -170,7 +185,7 @@ public class RagSearchTools
     }
 
     private async Task<string> SearchAsync(
-        string toolName, string query, int topK, string? knowledgeBaseIds, bool useLexical)
+        string toolName, string query, int topK, string? knowledgeBaseIds, string mode = "auto", bool? legacyUseLexical = null)
     {
         using var scope = _serviceProvider.CreateScope();
         if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, toolName, out var permErr))
@@ -197,7 +212,26 @@ public class RagSearchTools
                 return Fail(ex.Message, McpErrorCodes.InvalidArgument);
             }
 
-            if (targetIds.Count == 0)
+            var currentKey = scope.ServiceProvider.GetService<IHttpContextAccessor>()?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+            var allowedKbs = ApiKeyPermissionMatrix.GetEffectiveAllowedKnowledgeBases(currentKey);
+
+            if (allowedKbs != null)
+            {
+                var allowedSet = new HashSet<string>(allowedKbs, StringComparer.OrdinalIgnoreCase);
+                if (targetIds.Count > 0)
+                {
+                    targetIds = targetIds.Where(id => allowedSet.Contains(id)).ToList();
+                    if (targetIds.Count == 0)
+                    {
+                        return Fail("无权访问指定的知识库或目标库未在授权列表中", McpErrorCodes.Forbidden);
+                    }
+                }
+                else
+                {
+                    targetIds = allowedKbs.ToList();
+                }
+            }
+            else if (targetIds.Count == 0)
             {
                 var accessible = await kbService.ListKnowledgeBasesAsync();
                 targetIds = accessible.Where(k => k.Enabled).Select(k => k.Id).ToList();
@@ -205,6 +239,8 @@ public class RagSearchTools
 
             if (targetIds.Count == 0)
                 return Fail("当前没有可检索的知识库，请先创建知识库并挂载数据源", McpErrorCodes.NoKnowledgeBase);
+
+            var useLexical = legacyUseLexical ?? ResolveUseLexical(mode, query);
 
             var request = new CrossKnowledgeBaseSearchRequest(
                 Query: query,
@@ -223,6 +259,7 @@ public class RagSearchTools
             {
                 success = true,
                 tool = toolName,
+                mode,
                 query,
                 knowledgeBaseIds = targetIds,
                 requestedTopK = topK,
@@ -264,6 +301,29 @@ public class RagSearchTools
         {
             return McpResult.FailException(ex);
         }
+    }
+
+    private static bool ResolveUseLexical(string? mode, string query)
+    {
+        if (string.Equals(mode, "lexical", StringComparison.OrdinalIgnoreCase)) return true;
+        if (string.Equals(mode, "semantic", StringComparison.OrdinalIgnoreCase)) return false;
+        if (string.Equals(mode, "hybrid", StringComparison.OrdinalIgnoreCase)) return false;
+
+        // auto 智能模式：精确代码标识符、错误码、引号包裹走词法，其余走混合融合
+        return IsCodeOrExactToken(query);
+    }
+
+    private static bool IsCodeOrExactToken(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return false;
+        var trimmed = query.Trim();
+        if ((trimmed.StartsWith('"') && trimmed.EndsWith('"')) || (trimmed.StartsWith('“') && trimmed.EndsWith('”')))
+            return true;
+        if (Regex.IsMatch(trimmed, @"^[A-Za-z0-9_]{2,40}$") && (trimmed.Contains('_') || trimmed.Any(char.IsUpper)))
+            return true;
+        if (Regex.IsMatch(trimmed, @"(?i)\b(error|err|code|status|cs|e)\s*[:#\-]?\s*\d{3,5}\b"))
+            return true;
+        return false;
     }
 
     private static object MapChunk(KnowledgeBaseChunkRecord chunk) => new

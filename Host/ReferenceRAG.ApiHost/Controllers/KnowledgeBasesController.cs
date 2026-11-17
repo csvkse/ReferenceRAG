@@ -61,14 +61,27 @@ public class KnowledgeBasesController : ControllerBase
     public async Task<ActionResult<IReadOnlyList<KnowledgeBaseDefinition>>> ListKnowledgeBases(CancellationToken ct)
     {
         var context = ControllerContext.HttpContext;
-        var allowed = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(context?.Items["CurrentApiKey"] as ApiKeyEntity);
-        if (allowed != null)
+        var key = context?.Items["CurrentApiKey"] as ApiKeyEntity;
+        var allowedSources = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(key);
+        var allowedKbs = ApiKeyPermissionMatrix.GetEffectiveAllowedKnowledgeBases(key);
+
+        IReadOnlyList<KnowledgeBaseDefinition> list;
+        if (allowedSources != null)
         {
             var search = context?.RequestServices.GetService<IKnowledgeBaseSearchService>();
             if (search == null) return StatusCode(403, new { message = "无法验证独立知识库的数据源权限。" });
-            return Ok(await search.ListAccessibleKnowledgeBasesAsync(allowed, ct));
+            list = await search.ListAccessibleKnowledgeBasesAsync(allowedSources, ct);
         }
-        var list = await _kbService.ListKnowledgeBasesAsync(ct);
+        else
+        {
+            list = await _kbService.ListKnowledgeBasesAsync(ct);
+        }
+
+        if (allowedKbs != null)
+        {
+            var allowedSet = new HashSet<string>(allowedKbs, StringComparer.OrdinalIgnoreCase);
+            list = list.Where(k => allowedSet.Contains(k.Id) || allowedSet.Contains(k.Name)).ToList();
+        }
         return Ok(list);
     }
 
@@ -137,6 +150,11 @@ public class KnowledgeBasesController : ControllerBase
     [HttpGet("{id}")]
     public async Task<ActionResult<KnowledgeBaseDefinition>> GetKnowledgeBase(string id, CancellationToken ct)
     {
+        var key = ControllerContext.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+        if (key != null && !ApiKeyPermissionMatrix.CanAccessKnowledgeBase(key, id))
+        {
+            return Forbid();
+        }
         var kb = await _kbService.GetKnowledgeBaseAsync(id, ct);
         if (kb == null) return NotFound(new { message = $"知识库不存在: {id}" });
         return Ok(kb);
@@ -595,6 +613,11 @@ public class KnowledgeBasesController : ControllerBase
         [FromQuery] string? connectorId = null,
         CancellationToken ct = default)
     {
+        var key = ControllerContext.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+        if (key != null && !ApiKeyPermissionMatrix.CanAccessKnowledgeBase(key, id))
+        {
+            return Forbid();
+        }
         var (docs, total) = await _kbService.GetDocumentsAsync(id, page, pageSize, search, connectorId, ct);
         return Ok(new { items = docs, total, page, pageSize });
     }
@@ -654,6 +677,11 @@ public class KnowledgeBasesController : ControllerBase
         [FromQuery] bool? enabledOnly = null,
         CancellationToken ct = default)
     {
+        var key = ControllerContext.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+        if (key != null && !ApiKeyPermissionMatrix.CanAccessKnowledgeBase(key, id))
+        {
+            return Forbid();
+        }
         var (chunks, total) = await _kbService.GetChunksAsync(id, documentId, page, pageSize, search, enabledOnly, ct);
         return Ok(new { items = chunks, total, page, pageSize });
     }
@@ -982,6 +1010,35 @@ public class KnowledgeBaseSearchController : ControllerBase
         try
         {
             var key = ControllerContext.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+            var allowedKbs = ApiKeyPermissionMatrix.GetEffectiveAllowedKnowledgeBases(key);
+            if (allowedKbs != null)
+            {
+                var allowedSet = new HashSet<string>(allowedKbs, StringComparer.OrdinalIgnoreCase);
+                if (request.KnowledgeBaseIds is { Count: > 0 })
+                {
+                    var targetIds = request.KnowledgeBaseIds.Where(id => allowedSet.Contains(id)).ToList();
+                    if (targetIds.Count == 0)
+                    {
+                        return Ok(new CrossKnowledgeBaseSearchResponse(
+                            Query: request.Query,
+                            Items: Array.Empty<RecallItem>(),
+                            SuccessfulKnowledgeBaseIds: Array.Empty<string>(),
+                            FailedKnowledgeBaseIds: Array.Empty<string>(),
+                            PartialSuccess: false,
+                            ScoreKind: ScoreKind.RRF,
+                            Elapsed: TimeSpan.Zero,
+                            NoMatch: true,
+                            NoMatchReason: "无权访问指定的知识库或目标库未在授权列表中"
+                        ));
+                    }
+                    request = request with { KnowledgeBaseIds = targetIds };
+                }
+                else
+                {
+                    request = request with { KnowledgeBaseIds = allowedKbs };
+                }
+            }
+
             var allowed = ApiKeyPermissionMatrix.GetEffectiveAllowedSources(key);
             request = request with { AuthorizedSourceNames = allowed };
             var response = await _searchService.SearchAsync(request, ct);

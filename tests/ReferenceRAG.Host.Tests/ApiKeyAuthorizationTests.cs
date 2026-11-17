@@ -65,6 +65,7 @@ public sealed class ApiKeyAuthorizationTests
                 allowedScopes: "[\"*\"]",
                 allowedMcpTools: "[\"*\"]",
                 sourceScopeMode: "all",
+                allowedKnowledgeBaseIds: "[]",
                 allowedSources: "[]"
             );
             Assert.True(updated);
@@ -369,5 +370,65 @@ public sealed class ApiKeyAuthorizationTests
                 try { File.Delete(tempDb); } catch { }
             }
         }
+    }
+
+    [Fact]
+    public async Task ApiKeyStore_KnowledgeBaseIds_PersistenceAndReload()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"kb-key-test-{Guid.NewGuid():N}.db");
+        try
+        {
+            var store = new ApiKeyStore(tempDb, NullLogger<ApiKeyStore>.Instance);
+            await store.InitializeAsync();
+
+            var (created, rawKey) = await store.CreateAsync(
+                name: "KB Scoped Key",
+                allowApi: true,
+                allowMcp: true,
+                allowedScopes: "[\"search\"]",
+                allowedMcpTools: "[\"KnowledgeSearch\"]",
+                sourceScopeMode: "custom",
+                allowedKnowledgeBaseIds: "[\"kb_notes\", \"40745ffb28444648\"]",
+                allowedSources: "[]"
+            );
+
+            Assert.Equal("custom", created.SourceScopeMode);
+            Assert.Contains("40745ffb28444648", created.AllowedKnowledgeBaseIds);
+
+            // 重新初始化，测试落库与持久化读取
+            var storeReloaded = new ApiKeyStore(tempDb, NullLogger<ApiKeyStore>.Instance);
+            await storeReloaded.InitializeAsync();
+            var reloaded = storeReloaded.FindByHash(ApiKeyStore.ComputeHash(rawKey));
+
+            Assert.NotNull(reloaded);
+            Assert.Equal(created.Id, reloaded.Id);
+            Assert.Equal("[\"kb_notes\", \"40745ffb28444648\"]", reloaded.AllowedKnowledgeBaseIds);
+
+            // 验证 ApiKeyPermissionMatrix 鉴权逻辑
+            Assert.True(ApiKeyPermissionMatrix.CanAccessKnowledgeBase(reloaded, "kb_notes"));
+            Assert.True(ApiKeyPermissionMatrix.CanAccessKnowledgeBase(reloaded, "40745ffb28444648"));
+            Assert.False(ApiKeyPermissionMatrix.CanAccessKnowledgeBase(reloaded, "unauthorized_kb"));
+
+            var effectiveKbs = ApiKeyPermissionMatrix.GetEffectiveAllowedKnowledgeBases(reloaded);
+            Assert.NotNull(effectiveKbs);
+            Assert.Equal(2, effectiveKbs.Count);
+            Assert.Contains("kb_notes", effectiveKbs);
+            Assert.Contains("40745ffb28444648", effectiveKbs);
+        }
+        finally
+        {
+            if (File.Exists(tempDb))
+            {
+                try { File.Delete(tempDb); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public void McpCatalog_Includes_KnowledgeSearchTool()
+    {
+        var tools = ReferenceRAG.Core.Services.McpCatalogRegistry.GetCatalog();
+        var searchCat = Assert.Single(tools, c => c.Key == "search");
+        Assert.Contains(searchCat.Tools, t => t.Name == "KnowledgeSearch");
     }
 }
