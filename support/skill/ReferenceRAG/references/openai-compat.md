@@ -4,14 +4,15 @@
 
 **字段命名是 camelCase**（`query`、`documents`、`input`），与 `/api/*` 的 PascalCase 相反。
 
-所有端点遵循 `ReferenceRAG:Service:apiKey` 认证规则（当前实例未配置，无需认证头）。
+> **服务地址**：`http://127.0.0.1:5123` (开发) / `http://<server-ip>:5123` (生产)
+> **鉴权方式**：所有端点均须携带认证头 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`。
 
 ---
 
 ## GET /v1/models — 模型列表
 
 ```bash
-curl -s "http://localhost:7897/v1/models"
+curl -s "http://127.0.0.1:5123/v1/models" -H "Authorization: Bearer rag_live_xxx"
 ```
 
 **响应：**
@@ -38,8 +39,9 @@ curl -s "http://localhost:7897/v1/models"
 ## POST /v1/chat/completions — 聊天补全
 
 ```bash
-curl -s -X POST "http://localhost:7897/v1/chat/completions" \
+curl -s -X POST "http://127.0.0.1:5123/v1/chat/completions" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer rag_live_xxx" \
   --data-binary @- << 'EOF'
 {"model": "reference-rag", "stream": false, "messages": [{"role": "user", "content": "向量检索的原理"}]}
 EOF

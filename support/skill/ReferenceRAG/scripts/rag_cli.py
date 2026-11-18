@@ -6,11 +6,13 @@ ReferenceRAG CLI - 跨平台知识库检索与管理客户端门面
 1. 双通道交互：支持直接调用 REST API (/api/knowledge-base-search) 与 MCP JSON-RPC (/api/mcp)
 2. 跨平台编码安全：强制采用 UTF-8 字节流输入输出，消除 Windows 控制台 GBK 乱码
 3. Token 预算优化：紧凑 Markdown 格式化输出，过滤无用长 UUID 与复杂跟踪日志，降低 Agent 上下文开销
-4. 零外部依赖：纯 Python 3 标准库（urllib + json + argparse）实现
+4. 参数位置解耦：支持全局参数 (--base-url, --api-key, --json) 放置在子命令前或后任意位置
+5. 零外部依赖：纯 Python 3 标准库（urllib + json + argparse + re）实现
 """
 
 import sys
 import os
+import re
 import json
 import argparse
 import urllib.request
@@ -21,7 +23,7 @@ DEFAULT_BASE_URL = os.environ.get("OBSIDIAN_RAG_API_URL", "http://127.0.0.1:5123
 DEFAULT_API_KEY = os.environ.get("OBSIDIAN_RAG_API_KEY", "rag_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 
 def request_http(endpoint: str, method: str = "GET", payload: dict = None,
-                 base_url: str = DEFAULT_BASE_URL, api_key: str = DEFAULT_API_KEY, timeout: int = 30):
+                 base_url: str = DEFAULT_BASE_URL, api_key: str = DEFAULT_API_KEY, timeout: int = 40):
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     headers = {
         "User-Agent": "ReferenceRAG-Skill-CLI/2.0",
@@ -79,6 +81,19 @@ def call_mcp_tool(tool_name: str, arguments: dict, base_url: str = DEFAULT_BASE_
         return {"success": False, "error": res["error"]}
     return res
 
+def is_code_or_exact_token(query: str) -> bool:
+    """智能模式启发式规则：识别代码标识符、错误码、引号"""
+    if not query:
+        return False
+    trimmed = query.strip()
+    if (trimmed.startswith('"') and trimmed.endswith('"')) or (trimmed.startswith('“') and trimmed.endswith('”')):
+        return True
+    if re.match(r"^[A-Za-z0-9_]{2,40}$", trimmed) and ('_' in trimmed or any(c.isupper() for c in trimmed)):
+        return True
+    if re.search(r"(?i)\b(error|err|code|status|cs|e)\s*[:#\-]?\s*\d{3,5}\b", trimmed):
+        return True
+    return False
+
 # ----------------- 子命令实现 -----------------
 
 def cmd_ping(args):
@@ -101,7 +116,6 @@ def cmd_stats(args):
         print(json.dumps(res, ensure_ascii=False, indent=2))
         return
 
-    sys_info = res.get("system", {})
     embed_info = res.get("embedding", {})
     rerank_info = res.get("rerank", {})
     idx_info = res.get("index", {})
@@ -189,7 +203,18 @@ def cmd_search(args):
         score_kind = res.get("scoreKind", "RRF")
         tool_mode = res.get("mode", mode)
     else:
-        use_lexical = mode == "lexical"
+        # REST 模式：支持客户端 auto 意图路由
+        if mode == "auto":
+            is_code = is_code_or_exact_token(args.query)
+            use_lexical = is_code
+            tool_mode = "auto (词法代码通道)" if is_code else "auto (混合向量通道)"
+        elif mode == "lexical":
+            use_lexical = True
+            tool_mode = "lexical"
+        else:
+            use_lexical = False
+            tool_mode = mode
+
         payload = {
             "Query": args.query,
             "KnowledgeBaseIds": [args.kb] if args.kb else [],
@@ -207,7 +232,6 @@ def cmd_search(args):
         no_match = res.get("NoMatch") or res.get("noMatch") or False
         elapsed = res.get("Elapsed") or f"{res.get('elapsedMs', 0)}ms"
         score_kind = res.get("ScoreKind") or res.get("scoreKind") or "RRF"
-        tool_mode = mode
 
     print(f"### ReferenceRAG 知识库检索: `{args.query}` (模式: `{tool_mode}`)")
     print(f"- **状态**: {'⚠️ 未命中 (NoMatch)' if no_match else '✅ 成功命中'}")
@@ -230,13 +254,75 @@ def cmd_search(args):
         end_line = it.get("EndLine") or it.get("endLine") or 0
         score = round(float(it.get("Score") or it.get("score") or 0), 4)
         kb_id = it.get("KnowledgeBaseId") or it.get("knowledgeBaseId") or ""
+        chunk_id = it.get("ChunkId") or it.get("chunkId") or ""
         text = it.get("Text") or it.get("text") or ""
 
         print(f"#### {i}. `[[{source}#L{start_line}-L{end_line}]]`{heading}")
-        print(f"- **得分**: `{score}` ({score_kind}) | **通道**: `{channels}` | **库ID**: `{kb_id}`")
+        print(f"- **得分**: `{score}` ({score_kind}) | **通道**: `{channels}` | **库ID**: `{kb_id}` | **切片ID**: `{chunk_id}`")
         print("```markdown")
         print(text.strip())
         print("```\n")
+
+def cmd_chunk(args):
+    """根据 chunkId 与 knowledgeBaseId 精确展开切片完整正文 (无须指定物理文件路径)"""
+    kb_id = args.kb
+    chunk_id = args.chunk_id.strip()
+
+    # 若未指定 kb_id，自动从可用库中探测目标切片
+    if not kb_id:
+        kbs = request_http("api/knowledge-bases", method="GET", base_url=args.base_url, api_key=args.api_key)
+        if isinstance(kbs, list) and len(kbs) > 0:
+            for candidate in kbs:
+                cid = candidate.get("Id")
+                probe = request_http(f"api/knowledge-bases/{cid}/chunks/{chunk_id}",
+                                     method="GET", base_url=args.base_url, api_key=args.api_key)
+                if isinstance(probe, dict) and (probe.get("Id") == chunk_id or probe.get("id") == chunk_id):
+                    kb_id = cid
+                    break
+
+    if not kb_id:
+        # 回退至 MCP knowledge_base_drill_down 探测
+        mcp_res = call_mcp_tool("knowledge_base_drill_down", {"chunkId": chunk_id},
+                                base_url=args.base_url, api_key=args.api_key)
+        if isinstance(mcp_res, dict) and mcp_res.get("chunk"):
+            chunk_data = mcp_res["chunk"]
+            kb_id = mcp_res.get("knowledgeBaseId", "未知库")
+            if args.json:
+                print(json.dumps(mcp_res, ensure_ascii=False, indent=2))
+                return
+            print_chunk_detail(chunk_id, kb_id, chunk_data)
+            return
+        print(f"❌ 未找到切片 `{chunk_id}`，请通过 `--kb <kbId>` 明确指定所属知识库。")
+        return
+
+    res = request_http(f"api/knowledge-bases/{kb_id}/chunks/{chunk_id}",
+                       method="GET", base_url=args.base_url, api_key=args.api_key)
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return
+
+    if res.get("Id") or res.get("id"):
+        print_chunk_detail(chunk_id, kb_id, res)
+    else:
+        print(f"❌ 获取切片失败: {res.get('error', res)}")
+
+def print_chunk_detail(chunk_id: str, kb_id: str, chunk_obj: dict):
+    text = chunk_obj.get("Text") or chunk_obj.get("text") or ""
+    source = chunk_obj.get("DocumentSourceKey") or chunk_obj.get("documentSourceKey") or "未知文档"
+    start = chunk_obj.get("StartLine") or chunk_obj.get("startLine") or 0
+    end = chunk_obj.get("EndLine") or chunk_obj.get("endLine") or 0
+    heading = chunk_obj.get("HeadingPath") or chunk_obj.get("headingPath") or ""
+    tokens = chunk_obj.get("TokenCount") or chunk_obj.get("tokenCount") or 0
+    ordinal = chunk_obj.get("Ordinal") if chunk_obj.get("Ordinal") is not None else chunk_obj.get("ordinal", 0)
+
+    print(f"### 切片正文详情: `{chunk_id}`")
+    print(f"- **所属知识库**: `{kb_id}` | **来源文档**: `[[{source}#L{start}-L{end}]]`")
+    if heading:
+        print(f"- **章节大纲路径**: `{heading}`")
+    print(f"- **分块序号**: {ordinal} | **Token 预估**: {tokens} | **行号范围**: L{start} ~ L{end}\n")
+    print("```markdown")
+    print(text.strip())
+    print("```")
 
 def cmd_outline(args):
     """获取指定文档大纲（H1-H6 标题树与分块状态）"""
@@ -297,9 +383,32 @@ def cmd_read(args):
 
 # ----------------- CLI 入口解析 -----------------
 
+def reorder_argv(argv):
+    """将放置在子命令之后的全局选项 (--base-url, --api-key, --json) 提升至前面，实现位置无关性"""
+    global_options = {'--base-url', '--api-key'}
+    global_flags = {'--json'}
+    pre = []
+    post = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in global_options and i + 1 < len(argv):
+            pre.extend([arg, argv[i+1]])
+            i += 2
+        elif any(arg.startswith(opt + '=') for opt in global_options):
+            pre.append(arg)
+            i += 1
+        elif arg in global_flags:
+            pre.append(arg)
+            i += 1
+        else:
+            post.append(arg)
+            i += 1
+    return pre + post
+
 def main():
     parser = argparse.ArgumentParser(description="ReferenceRAG CLI 跨平台客户端门面")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="服务基础地址 (默认: 127.0.0.1:5123)")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help=f"服务基础地址 (默认: {DEFAULT_BASE_URL})")
     parser.add_argument("--api-key", default=DEFAULT_API_KEY, help="鉴权密钥 (X-API-Key)")
     parser.add_argument("--json", action="store_true", help="以原始格式化 JSON 打印输出")
 
@@ -339,13 +448,19 @@ def main():
     p_search.add_argument("--mcp", action="store_true", help="走 MCP JSON-RPC 协议调用 knowledge_search")
     p_search.set_defaults(func=cmd_search)
 
-    # 7. outline
+    # 7. chunk (下钻查看完整切片正文)
+    p_chunk = subparsers.add_parser("chunk", aliases=["drill-down"], help="展开指定切片完整正文 (无须提供本地磁盘路径)")
+    p_chunk.add_argument("chunk_id", help="切片 ID (32 位 Hex)")
+    p_chunk.add_argument("--kb", default=None, help="指定切片所属知识库 ID (留空自动在授权库中探测)")
+    p_chunk.set_defaults(func=cmd_chunk)
+
+    # 8. outline
     p_outline = subparsers.add_parser("outline", help="获取指定 Markdown 文档大纲")
     p_outline.add_argument("file_path", help="文档相对路径或名称")
     p_outline.add_argument("--source", default=None, help="限定数据源名称")
     p_outline.set_defaults(func=cmd_outline)
 
-    # 8. read
+    # 9. read
     p_read = subparsers.add_parser("read", help="按行号读取笔记正文")
     p_read.add_argument("file_path", help="文档相对路径或名称")
     p_read.add_argument("--start-line", type=int, default=1, help="起始行号 (从 1 开始)")
@@ -353,10 +468,10 @@ def main():
     p_read.add_argument("--source", default=None, help="限定数据源名称")
     p_read.set_defaults(func=cmd_read)
 
-    args = parser.parse_args()
+    raw_args = sys.argv[1:]
+    normalized_args = reorder_argv(raw_args)
+    args = parser.parse_args(normalized_args)
     args.func(args)
 
 if __name__ == "__main__":
     main()
-
-

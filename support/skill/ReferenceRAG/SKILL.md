@@ -39,11 +39,14 @@ python <skill-dir>/scripts/rag_cli.py search "IndexOutOfRangeException" --mode l
 # 3. 指定知识库检索 (例如限定 Notes 纯词法库: 40745ffb28444648)
 python <skill-dir>/scripts/rag_cli.py search "状态机设计" --kb 40745ffb28444648
 
-# 4. 查看大纲与按行读取长文档
+# 4. 精确切片下钻 (当搜索切片内容截断时，按 chunkId 展开完整正文，无需物理文件路径)
+python <skill-dir>/scripts/rag_cli.py chunk <chunkId> [--kb <kbId>]
+
+# 5. 查看大纲与按行读取长文档
 python <skill-dir>/scripts/rag_cli.py outline "Note/1 工作/笔记/NET/Csharp进阶语法/7.3 异步的状态机设计.md" --source "Notes - Note"
 python <skill-dir>/scripts/rag_cli.py read "Note/1 工作/笔记/NET/Csharp进阶语法/7.3 异步的状态机设计.md" --start-line 6 --end-line 50 --source "Notes - Note"
 
-# 5. 查看系统状态与已授权知识库清单
+# 6. 查看系统状态与已授权知识库清单
 python <skill-dir>/scripts/rag_cli.py list-kbs
 python <skill-dir>/scripts/rag_cli.py stats
 ```
@@ -77,7 +80,8 @@ python <skill-dir>/scripts/rag_cli.py stats
    ▼
 [按需下钻]
    ├── 切片内容足够 ──> 直接采信
-   └── 切片内容截断 ──> 调用 outline 查看标题行号，再调用 read 精确提取目标章节
+   └── 切片内容截断 ──> (首选) 调用 chunk 直接展开完整切片正文
+                     └── (次选/长文档通读) 调用 outline 查看结构，再调用 read 精确提取目标章节
    │
    ▼
 [回答生成]

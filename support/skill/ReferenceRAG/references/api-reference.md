@@ -28,7 +28,7 @@
 | 参数 | 类型 | 必填 | 说明 |
 |:---|:---|:---|:---|
 | `Query` | string | 是 | 搜索查询文本（中文须确保 UTF-8 编码）。 |
-| `KnowledgeBaseIds` | string[] | 是 | 目标知识库 ID 数组。传 `[]` 表示在所有已启用的知识库中跨库检索。 |
+| `KnowledgeBaseIds` | string[]? | 否 | 目标知识库 ID 数组。传 `null` 或 `[]`（或缺省）表示在当前 API Key 授权的所有已启用知识库中跨库检索。 |
 | `TopK` | int | 否 | 返回数量（默认 10）。 |
 | `UseLexicalTokenizer`| bool | 否 | 强制走纯词法检索（免向量计算，适合错误码、API 名精确查找）。 |
 | `FailurePolicy` | int | 否 | 部分库失败策略：0 = AllowPartial（允许部分成功），1 = Strict。 |
