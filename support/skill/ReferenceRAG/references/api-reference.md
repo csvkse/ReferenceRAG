@@ -98,7 +98,7 @@
 
 ## 3. POST /api/mcp — MCP JSON-RPC 2.0 端点
 
-提供 25 个强类型 MCP 工具调用服务。
+提供 26 个强类型 MCP 工具调用服务。
 
 ```bash
 curl -s -X POST "http://127.0.0.1:5123/api/mcp" \
@@ -109,8 +109,8 @@ curl -s -X POST "http://127.0.0.1:5123/api/mcp" \
     "id": 1,
     "method": "tools/call",
     "params": {
-      "name": "hybrid_search",
-      "arguments": { "query": "测试", "topK": 3 }
+      "name": "knowledge_search",
+      "arguments": { "query": "测试", "mode": "auto", "topK": 3 }
     }
   }'
 ```
@@ -122,5 +122,17 @@ curl -s -X POST "http://127.0.0.1:5123/api/mcp" \
 ## 4. GET /api/system/stats — 系统运行状态与模型遥测
 
 返回存储路径、挂载源统计、各库文档/切片/向量汇总、嵌入模型规格、重排健康度（`health: "ok" | "degraded"`）。
+
+---
+
+## 5. POST /v1/chat/completions — OpenAI 兼容自主智能问答
+
+基于 ReferenceRAG 知识库自主执行工具检索、推理与总结的 ReAct 循环问答接口。
+
+- **请求体**：
+  - `model`: `"reference-rag"`
+  - `messages`: `[{"role": "user", "content": "问题"}]`
+  - `temperature`: `0.2`
+- **响应**：标准 OpenAI `ChatCompletion` 格式，`choices[0].message.content` 包含执行工具日志、思维链 `<think>` 与最终答案。
 
 
