@@ -20,10 +20,12 @@ export function knowledgeBaseRequest(query, ids, topK, mode, folders = []) {
     const isLexical = (mode || '').toLowerCase() === 'lexical';
     const payload = {
         query,
-        knowledgeBaseIds: ids && ids.length > 0 ? [...ids] : [],
         topK,
         useLexicalTokenizer: isLexical
     };
+    if (ids && ids.length > 0) {
+        payload.knowledgeBaseIds = [...ids];
+    }
     if (folders && folders.length > 0) {
         payload.folders = folders;
     }
