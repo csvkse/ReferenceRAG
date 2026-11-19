@@ -107,7 +107,7 @@ public class KnowledgeBasesControllerTests : IDisposable
             CancellationToken.None);
 
         var okSearch = Assert.IsType<OkObjectResult>(searchResult.Result);
-        var response = Assert.IsType<CrossKnowledgeBaseSearchResponse>(okSearch.Value);
+        var response = Assert.IsType<KnowledgeBaseSearchResponse>(okSearch.Value);
         Assert.NotNull(response);
         Assert.Contains(kb.Id, response.SuccessfulKnowledgeBaseIds);
 

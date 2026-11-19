@@ -112,6 +112,18 @@ public static class ApiKeyPermissionMatrix
     }
 
     /// <summary>
+    /// 获取当前 Key 限制的有效工具白名单集合。若返回 null，代表允许全工具访问。
+    /// </summary>
+    public static IReadOnlyList<string>? GetEffectiveAllowedTools(ApiKeyEntity? key)
+    {
+        if (key == null) return null;
+        if (string.IsNullOrWhiteSpace(key.AllowedMcpTools)) return null;
+        var tools = ParseJsonOrTokens(key.AllowedMcpTools);
+        if (tools.Contains("*")) return null;
+        return tools.Count > 0 ? tools.ToList() : null;
+    }
+
+    /// <summary>
     /// 依据双层权限（所属业务功能模块 + 细粒度工具白名单）决断是否允许调用 MCP 工具
     /// 遵循 WebToolForLinux 架构方案：按业务功能模块划分，统一授权 API 与 MCP。
     /// 1. 若 AllowMcp = false，直接拒绝；

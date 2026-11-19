@@ -28,6 +28,7 @@ TEST_CASES: List[Tuple[List[str], int, str, str]] = [
     # 检索通道与策略
     (["search", "PR", "--mode", "lexical", "--top-k", "2"], 0, "切片ID", "精确词法检索"),
     (["search", "PR", "--format", "brief", "--top-k", "2"], 0, "[[", "精简模式 brief 格式"),
+    (["search", "PR", "--rest", "--top-k", "2"], 0, "PR", "REST 单轨检索通道 search --rest"),
     (["search", "人类每日状态曲线", "--policy", "concept", "--top-k", "2"], 0, "concept", "概念型策略 concept 检索"),
     (["search", "完全不存在的词zzzz_impossible_token_999"], 3, "未命中", "无命中断言 NoMatch (exit 3)"),
 
@@ -35,6 +36,7 @@ TEST_CASES: List[Tuple[List[str], int, str, str]] = [
     (["search", "PR", "--api-key", "invalid_bad_key_test"], 5, "", "鉴权失败检测 (exit 5)"),
     (["read", "non_existent_file_xyz_12345.md"], 4, "", "文件不存在定位 (exit 4)"),
     (["read", "知识库/PR含义.md", "--source", "Temp", "--start-line", "10", "--end-line", "5"], 2, "起始行号", "行号逆序边界校验 (exit 2)"),
+    (["read", "--citations", "[{\"knowledgeBaseId\":\"test\",\"documentId\":\"doc1\",\"chunkId\":\"chunk1\",\"documentVersion\":1,\"digest\":\"abc\"}]"], 0, "证据回读结果", "证据批量回读 read --citations"),
 
     # 内容阅读与结构解析
     (["read", "知识库/PR含义.md", "--source", "Temp", "--start-line", "1", "--end-line", "10"], 0, "文件正文", "正文分段读取 read"),
@@ -44,7 +46,8 @@ TEST_CASES: List[Tuple[List[str], int, str, str]] = [
 
     # 图谱与系统任务状态
     (["graph", "#authors-note"], 0, "知识图谱", "Wiki-links 关系图谱遍历 graph"),
-    (["status"], 0, "ReferenceRAG 运行与任务状态", "后台同步任务与健康度 status"),
+    (["status"], 0, "ReferenceRAG", "后台同步任务与健康度 status"),
+    (["ask", "什么是PR？", "--top-k", "2"], 0, "问答", "知识库单轨有据问答 ask"),
 ]
 
 def run_test_case(cli_path: str, args: List[str], expected_code: int, expected_keyword: str,

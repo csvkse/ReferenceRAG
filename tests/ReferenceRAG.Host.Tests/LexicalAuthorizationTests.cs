@@ -303,11 +303,18 @@ public class LexicalAuthorizationTests
             // v2：MCP 检索改走物理知识库，此处补一个只读 KB 搜索桩（返回含 allowed 源的切片），
             // 用于验证「模块化数据源授权（AuthorizedSourceNames）在 KB 通道上同样生效」。
             var kbSearch = new Mock<IKnowledgeBaseSearchService>();
-            kbSearch.Setup(s => s.SearchAsync(It.IsAny<CrossKnowledgeBaseSearchRequest>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new CrossKnowledgeBaseSearchResponse(
-                    "integrationneedle",
-                    new List<RecallItem> { new("chunk-1", "doc-1", "note.md", "integrationneedle allowed", 1.0, ScoreKind.BM25, 1, KnowledgeBaseId: "kb-1") },
-                    new[] { "kb-1" }, Array.Empty<string>(), false, ScoreKind.BM25, TimeSpan.Zero));
+            kbSearch.Setup(s => s.SearchAsync(It.IsAny<KnowledgeBaseSearchRequest>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new KnowledgeBaseSearchResponse(
+                    Outcome: "matched",
+                    Completeness: "complete",
+                    RequestedMode: "lexical",
+                    Hits: new List<KnowledgeEvidenceHit> {
+                        new(new CitationRef("kb-1", "doc-1", "chunk-1", 1, "digest"), "note.md", "note.md", 1, 1, "integrationneedle allowed", 1.0, new[] { "lexical" }, "kb-1")
+                    },
+                    Executions: new List<KnowledgeBaseExecutionRecord> {
+                        new("kb-1", new[] { "lexical" }, new[] { "lexical" }, "success")
+                    }
+                ));
             services.AddSingleton<IKnowledgeBaseSearchService>(kbSearch.Object);
             services.AddSingleton<IKnowledgeBaseService>(new Mock<IKnowledgeBaseService>().Object);
             await using var provider = services.BuildServiceProvider();
@@ -364,16 +371,24 @@ public class LexicalAuthorizationTests
     public async Task CrossKnowledgeBaseControllerDoesNotTreatSourceNameAsKnowledgeBasePermission()
     {
         var search = new Mock<IKnowledgeBaseSearchService>(MockBehavior.Strict);
-        search.Setup(s => s.SearchAsync(It.Is<CrossKnowledgeBaseSearchRequest>(r =>
+        search.Setup(s => s.SearchAsync(It.Is<KnowledgeBaseSearchRequest>(r =>
                 r.KnowledgeBaseIds.SequenceEqual(new[] { "allowed", "secret" }) &&
                 r.AuthorizedSourceNames != null && r.AuthorizedSourceNames.SequenceEqual(new[] { "allowed" })), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new CrossKnowledgeBaseSearchResponse("needle", Array.Empty<RecallItem>(),
-                new[] { "allowed", "secret" }, Array.Empty<string>(), false, ScoreKind.RRF, TimeSpan.Zero));
+            .ReturnsAsync(new KnowledgeBaseSearchResponse(
+                Outcome: "no_match",
+                Completeness: "complete",
+                RequestedMode: "auto",
+                Hits: Array.Empty<KnowledgeEvidenceHit>(),
+                Executions: new List<KnowledgeBaseExecutionRecord> {
+                    new("allowed", new[] { "lexical" }, new[] { "lexical" }, "success"),
+                    new("secret", new[] { "lexical" }, new[] { "lexical" }, "success")
+                }
+            ));
         var controller = new KnowledgeBaseSearchController(search.Object);
         var context = new DefaultHttpContext();
         context.Items["CurrentApiKey"] = new ApiKeyEntity { SourceScopeMode = "custom", AllowedSources = "[\"allowed\"]" };
         controller.ControllerContext = new ControllerContext { HttpContext = context };
-        var result = await controller.Search(new CrossKnowledgeBaseSearchRequest("needle", new[] { "allowed", "secret" }), CancellationToken.None);
+        var result = await controller.Search(new KnowledgeBaseSearchRequest("needle", KnowledgeBaseIds: new[] { "allowed", "secret" }), CancellationToken.None);
         Assert.IsType<OkObjectResult>(result.Result);
         search.VerifyAll();
     }
@@ -483,15 +498,20 @@ public class LexicalAuthorizationTests
         // 未指定库且系统无库 → 明确报错，绝不静默返回空或回落旧单库。
         var kbSearch = new Mock<IKnowledgeBaseSearchService>(MockBehavior.Strict);
         kbSearch.Setup(s => s.SearchAsync(
-                It.Is<CrossKnowledgeBaseSearchRequest>(r =>
-                    r.UseLexicalTokenizer && r.KnowledgeBaseIds.Count == 1 && r.KnowledgeBaseIds[0] == "kb-public"),
+                It.Is<KnowledgeBaseSearchRequest>(r =>
+                    (r.UseLexicalTokenizer || r.Mode == "lexical") && r.KnowledgeBaseIds.Count == 1 && r.KnowledgeBaseIds[0] == "kb-public"),
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new CrossKnowledgeBaseSearchResponse(
-                "needle",
-                new List<RecallItem> { new("chunk-1", "doc-1", "note.md", "needle", 0.9, ScoreKind.BM25, 1, KnowledgeBaseId: "kb-public") },
-                new[] { "kb-public" },
-                Array.Empty<string>(),
-                false, ScoreKind.BM25, TimeSpan.Zero));
+            .ReturnsAsync(new KnowledgeBaseSearchResponse(
+                Outcome: "matched",
+                Completeness: "complete",
+                RequestedMode: "lexical",
+                Hits: new List<KnowledgeEvidenceHit> {
+                    new(new CitationRef("kb-public", "doc-1", "chunk-1", 1, "digest"), "note.md", "note.md", 1, 1, "needle", 0.9, new[] { "lexical" }, "kb-public")
+                },
+                Executions: new List<KnowledgeBaseExecutionRecord> {
+                    new("kb-public", new[] { "lexical" }, new[] { "lexical" }, "success")
+                }
+            ));
 
         var kbService = new Mock<IKnowledgeBaseService>();
         kbService.Setup(s => s.ListKnowledgeBasesAsync(It.IsAny<CancellationToken>()))
@@ -561,6 +581,90 @@ public class LexicalAuthorizationTests
         Assert.True(parsed.IsError);
         Assert.Contains("知识库", parsed.Text);
         kbSearch.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task EmptyKnowledgeBaseListReturnsBadRequest()
+    {
+        var search = new Mock<IKnowledgeBaseSearchService>(MockBehavior.Strict);
+        var controller = new KnowledgeBaseSearchController(search.Object);
+        var req = new KnowledgeBaseSearchRequest("query", KnowledgeBaseIds: Array.Empty<string>());
+        var res = await controller.Search(req, CancellationToken.None);
+        var badReq = Assert.IsType<BadRequestObjectResult>(res.Result);
+        Assert.Contains("knowledgeBaseIds 不能为空数组", badReq.Value?.ToString() ?? "");
+    }
+
+    [Fact]
+    public async Task ExceedingMaxKnowledgeBaseLimitReturnsBadRequest()
+    {
+        var search = new Mock<IKnowledgeBaseSearchService>(MockBehavior.Strict);
+        var controller = new KnowledgeBaseSearchController(search.Object);
+        var targetIds = Enumerable.Range(1, 9).Select(i => $"kb_{i}").ToArray();
+        var req = new KnowledgeBaseSearchRequest("query", KnowledgeBaseIds: targetIds);
+        var res = await controller.Search(req, CancellationToken.None);
+        var badReq = Assert.IsType<BadRequestObjectResult>(res.Result);
+        Assert.Contains("超出服务端知识库数量上限", badReq.Value?.ToString() ?? "");
+    }
+
+    [Fact]
+    public async Task ConnectorOrPathPrefixWithoutExactSingleKbReturnsBadRequest()
+    {
+        var search = new Mock<IKnowledgeBaseSearchService>(MockBehavior.Strict);
+        var controller = new KnowledgeBaseSearchController(search.Object);
+
+        // PathPrefix with 2 KBs -> 400
+        var reqTwoKbs = new KnowledgeBaseSearchRequest("query", KnowledgeBaseIds: new[] { "kb_1", "kb_2" }, PathPrefix: "notes/");
+        var resTwo = await controller.Search(reqTwoKbs, CancellationToken.None);
+        Assert.IsType<BadRequestObjectResult>(resTwo.Result);
+
+        // PathPrefix with '..' -> 400
+        var reqParentPath = new KnowledgeBaseSearchRequest("query", KnowledgeBaseIds: new[] { "kb_1" }, PathPrefix: "../notes/");
+        var resParent = await controller.Search(reqParentPath, CancellationToken.None);
+        Assert.IsType<BadRequestObjectResult>(resParent.Result);
+    }
+
+    [Fact]
+    public async Task ExplicitMixedOrUnauthorizedKbListReturnsForbidden()
+    {
+        var search = new Mock<IKnowledgeBaseSearchService>(MockBehavior.Strict);
+        var controller = new KnowledgeBaseSearchController(search.Object);
+        var context = new DefaultHttpContext();
+        context.Items["CurrentApiKey"] = new ApiKeyEntity
+        {
+            SourceScopeMode = "custom",
+            AllowedKnowledgeBaseIds = "[\"kb_allowed\"]"
+        };
+        controller.ControllerContext = new ControllerContext { HttpContext = context };
+
+        // Requesting mixed authorized & unauthorized KB
+        var req = new KnowledgeBaseSearchRequest("query", KnowledgeBaseIds: new[] { "kb_allowed", "kb_secret" });
+        var res = await controller.Search(req, CancellationToken.None);
+        var objResult = Assert.IsType<ObjectResult>(res.Result);
+        Assert.Equal(403, objResult.StatusCode);
+        search.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task KnowledgeAnswers_ShortCircuitsOnNoMatchWithoutInvokingLLM()
+    {
+        var search = new Mock<IKnowledgeBaseSearchService>(MockBehavior.Strict);
+        search.Setup(s => s.SearchAsync(It.IsAny<KnowledgeBaseSearchRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new KnowledgeBaseSearchResponse(
+                Outcome: "no_match",
+                Completeness: "complete",
+                RequestedMode: "auto",
+                Hits: Array.Empty<KnowledgeEvidenceHit>(),
+                Executions: Array.Empty<KnowledgeBaseExecutionRecord>(),
+                TraceId: "test-trace"
+            ));
+
+        var controller = new KnowledgeAnswersController(search.Object, chatService: null);
+        var res = await controller.Answer(new KnowledgeAnswerRequest("完全不存在的问题"), CancellationToken.None);
+        var okRes = Assert.IsType<OkObjectResult>(res.Result);
+        var answerRes = Assert.IsType<KnowledgeAnswerResponse>(okRes.Value);
+        Assert.Equal("no_match", answerRes.Status);
+        Assert.Empty(answerRes.Citations);
+        search.VerifyAll();
     }
 
     [Fact]

@@ -67,6 +67,63 @@ public class RagSearchTools
         [Description("目标知识库 ID 列表，须为 JSON 数组字符串，如 [\"kb_a\",\"kb_b\"]。留空表示检索所有授权知识库")] string? knowledgeBaseIds = null)
         => SearchAsync(nameof(HybridSearch), query, topK, knowledgeBaseIds, mode: lexicalOnly ? "lexical" : "hybrid", legacyUseLexical: lexicalOnly);
 
+    [McpServerTool(Title = "批量回读证据正文")]
+    [Description("根据检索返回的 citationRef 批量回读已验证证据正文与精确行号范围。支持版本漂移检验。")]
+    public async Task<string> ReadEvidence(
+        [Description("CitationRef 列表，须为 JSON 数组字符串，包含 knowledgeBaseId, documentId, chunkId, documentVersion, digest")] string citations)
+    {
+        using var scope = _serviceProvider.CreateScope();
+        if (!McpPermissionGuard.CheckPermission(scope.ServiceProvider, nameof(ReadEvidence), out var permErr))
+            return Fail(permErr, McpErrorCodes.Forbidden);
+
+        if (string.IsNullOrWhiteSpace(citations))
+            return Fail("citations 不能为空", McpErrorCodes.InvalidArgument);
+
+        try
+        {
+            var kbSearch = scope.ServiceProvider.GetService<IKnowledgeBaseSearchService>();
+            if (kbSearch == null)
+                return Fail("知识库检索服务未装配", McpErrorCodes.ServiceUnavailable);
+
+            List<CitationRef>? list;
+            try
+            {
+                list = JsonSerializer.Deserialize<List<CitationRef>>(citations, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch (Exception ex)
+            {
+                return Fail($"citations 解析失败: {ex.Message}", McpErrorCodes.InvalidArgument);
+            }
+
+            if (list == null || list.Count == 0)
+                return Fail("citations 列表不能为空", McpErrorCodes.InvalidArgument);
+
+            if (list.Count > 50)
+                return Fail("citations 数量超过单次 50 项上限", McpErrorCodes.InvalidArgument);
+
+            var key = scope.ServiceProvider.GetService<IHttpContextAccessor>()?.HttpContext?.Items["CurrentApiKey"] as ApiKeyEntity;
+            var caller = new SearchCaller(
+                ClientId: key?.Id ?? "anonymous",
+                IsAdmin: key == null || string.Equals(key.SourceScopeMode, "all", StringComparison.OrdinalIgnoreCase),
+                AuthorizedSourceNames: ApiKeyPermissionMatrix.GetEffectiveAllowedSources(key),
+                AuthorizedKnowledgeBaseIds: ApiKeyPermissionMatrix.GetEffectiveAllowedKnowledgeBases(key),
+                AuthorizedTools: ApiKeyPermissionMatrix.GetEffectiveAllowedTools(key)
+            );
+
+            var res = await kbSearch.ReadEvidenceAsync(new EvidenceReadRequest(list), caller);
+            return McpResult.OkBounded(new
+            {
+                success = true,
+                count = res.Items.Count,
+                items = res.Items
+            });
+        }
+        catch (Exception ex)
+        {
+            return McpResult.FailException(ex);
+        }
+    }
+
     [McpServerTool(Title = "展开切片正文")]
     [Description("展开某个知识库切片的完整正文（按 chunkId 或 documentId + 序号）。用于检索结果被截断时补全上下文。")]
     public async Task<string> KnowledgeBaseDrillDown(
@@ -242,15 +299,24 @@ public class RagSearchTools
 
             var useLexical = legacyUseLexical ?? ResolveUseLexical(mode, query);
 
-            var request = new CrossKnowledgeBaseSearchRequest(
+            var caller = new SearchCaller(
+                ClientId: currentKey?.Id ?? "anonymous",
+                IsAdmin: currentKey == null || string.Equals(currentKey.SourceScopeMode, "all", StringComparison.OrdinalIgnoreCase),
+                AuthorizedSourceNames: ApiKeyPermissionMatrix.GetEffectiveAllowedSources(currentKey),
+                AuthorizedKnowledgeBaseIds: allowedKbs,
+                AuthorizedTools: ApiKeyPermissionMatrix.GetEffectiveAllowedTools(currentKey)
+            );
+
+            var request = new KnowledgeBaseSearchRequest(
                 Query: query,
-                TopK: effectiveTopK,
+                Mode: mode,
                 KnowledgeBaseIds: targetIds,
-                UseLexicalTokenizer: useLexical,
-                FailurePolicy: FailurePolicy.AllowPartial,
-                AllowDegrade: true)
+                TopK: effectiveTopK,
+                AllowDegrade: true,
+                UseLexicalTokenizer: useLexical)
             {
-                AuthorizedSourceNames = GetAllowedSources(scope.ServiceProvider)
+                Caller = caller,
+                AuthorizedSourceNames = caller.AuthorizedSourceNames
             };
 
             var response = await kbSearch.SearchAsync(request);
@@ -261,11 +327,13 @@ public class RagSearchTools
                 tool = toolName,
                 mode,
                 query,
+                outcome = response.Outcome,
+                completeness = response.Completeness,
                 knowledgeBaseIds = targetIds,
                 requestedTopK = topK,
                 // 回显真正生效的上限（原先 topK=900 被静默钳到 50，调用方无从判断）
                 effectiveTopK,
-                count = response.Items.Count,
+                count = response.Hits.Count,
                 scoreKind = response.ScoreKind.ToString(),
                 elapsedMs = Math.Round(response.Elapsed.TotalMilliseconds, 1),
                 degraded = response.Degraded,
@@ -278,6 +346,26 @@ public class RagSearchTools
                 successfulKbs = response.SuccessfulKnowledgeBaseIds,
                 failedKbs = response.FailedKnowledgeBaseIds,
                 usedRecallFloor = response.UsedRecallFloor,
+                hits = response.Hits.Select(h => new
+                {
+                    citationRef = h.CitationRef,
+                    knowledgeBaseId = h.KnowledgeBaseId,
+                    chunkId = h.CitationRef.ChunkId,
+                    documentId = h.CitationRef.DocumentId,
+                    documentVersion = h.CitationRef.DocumentVersion,
+                    digest = h.CitationRef.Digest,
+                    title = h.Title,
+                    sourceKey = h.SourceKey,
+                    text = Truncate(h.Excerpt),
+                    score = Math.Round(h.Score, 4),
+                    scoreKind = h.ScoreKind.ToString(),
+                    channels = h.Channels,
+                    startLine = h.StartLine,
+                    endLine = h.EndLine,
+                    headingPath = h.HeadingPath,
+                    coverage = h.Coverage,
+                    isFloor = h.IsFloor
+                }),
                 items = response.Items.Select(i => new
                 {
                     knowledgeBaseId = i.KnowledgeBaseId,

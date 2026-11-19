@@ -209,6 +209,19 @@ public interface IKnowledgeBaseSearchService
     Task<CrossKnowledgeBaseSearchResponse> SearchAsync(
         CrossKnowledgeBaseSearchRequest request,
         CancellationToken ct = default);
+
+    Task<KnowledgeBaseSearchResponse> SearchAsync(
+        KnowledgeBaseSearchRequest request,
+        CancellationToken ct = default);
+
+    Task<EvidenceReadResponse> ReadEvidenceAsync(
+        EvidenceReadRequest request,
+        SearchCaller? caller = null,
+        CancellationToken ct = default);
+
+    Task<KnowledgeBaseSearchStatusResponse> GetStatusAsync(
+        SearchCaller? caller = null,
+        CancellationToken ct = default);
 }
 
 public sealed record CrossKnowledgeBaseSearchRequest(

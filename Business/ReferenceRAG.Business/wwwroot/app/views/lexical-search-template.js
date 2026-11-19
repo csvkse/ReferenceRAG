@@ -17,7 +17,13 @@ export function enableLexicalSearchTemplate(template) {
 }
 
 export function knowledgeBaseRequest(query, ids, topK, mode, folders = []) {
-    const payload = { query, knowledgeBaseIds: [...ids], topK, useLexicalTokenizer: mode === 'Lexical' };
+    const isLexical = (mode || '').toLowerCase() === 'lexical';
+    const payload = {
+        query,
+        knowledgeBaseIds: ids && ids.length > 0 ? [...ids] : [],
+        topK,
+        useLexicalTokenizer: isLexical
+    };
     if (folders && folders.length > 0) {
         payload.folders = folders;
     }
@@ -25,36 +31,67 @@ export function knowledgeBaseRequest(query, ids, topK, mode, folders = []) {
 }
 
 export function knowledgeBaseResponse(data, mode) {
-    const elapsed = /^(?:(\d+)\.)?(\d+):(\d+):(\d+(?:\.\d+)?)$/.exec(data.elapsed || '');
-    const durationMs = elapsed ? ((+(elapsed[1] || 0) * 24 + +elapsed[2]) * 3600 + +elapsed[3] * 60 + +elapsed[4]) * 1000 : 0;
+    const durationMs = data.elapsedMs || (data.elapsed ? (() => {
+        const elapsed = /^(?:(\d+)\.)?(\d+):(\d+):(\d+(?:\.\d+)?)$/.exec(data.elapsed || '');
+        return elapsed ? ((+(elapsed[1] || 0) * 24 + +elapsed[2]) * 3600 + +elapsed[3] * 60 + +elapsed[4]) * 1000 : 0;
+    })() : 0);
     const isEarlyPruned = !!(data.earlyPruned || (mode !== 'Lexical' && (data.items || []).length > 0 && (data.items || []).every(i => i.scoreKind === 'BM25' || i.scoreKind === 2)));
-    return {
-        knowledgeBase: true, mode,
-        // 宽松兜底标记：锚点内容词在语料中不存在时，后端会回落到虚词层，
-        // 这里必须透出，否则这些结果在界面上与精确命中完全一样。
-        usedRecallFloor: !!data.usedRecallFloor,
-        // 无结果信号：返回的切片与查询内容词无关（含查询标识未命中）。
-        noMatch: !!data.noMatch,
-        noMatchReason: data.noMatchReason || null,
-        // 各库实际召回通道（lexical / vector / hybrid），纯词法库会被自动切到词法。
-        kbChannels: data.kbChannels || null,
-        chunks: (data.items || []).map(item => ({
-            refId: item.chunkId, fileId: item.documentId, filePath: item.sourceKey,
-            title: item.sourceKey, content: item.text, score: item.score, scoreKind: item.scoreKind, source: item.connectorId,
-            locator: item.locator, startLine: item.startLine, endLine: item.endLine, headingPath: item.headingPath,
-            // 查询词覆盖率（0~1）；null 表示本次未计算（短查询无区分度）
+    const hits = data.hits || [];
+    const items = data.items || [];
+    const chunks = hits.length > 0
+        ? hits.map(hit => ({
+            refId: hit.chunkId || hit.citationRef?.chunkId,
+            fileId: hit.documentId || hit.citationRef?.documentId,
+            filePath: hit.sourceKey,
+            title: hit.title || hit.sourceKey,
+            content: hit.excerpt,
+            score: hit.score,
+            scoreKind: hit.scoreKind,
+            source: hit.sourceKey,
+            citationRef: hit.citationRef,
+            startLine: hit.startLine,
+            endLine: hit.endLine,
+            headingPath: hit.headingPath,
+            coverage: hit.coverage ?? null,
+            isFloor: !!hit.isFloor,
+            channels: hit.channels || null
+        }))
+        : items.map(item => ({
+            refId: item.chunkId,
+            fileId: item.documentId,
+            filePath: item.sourceKey,
+            title: item.sourceKey,
+            content: item.text,
+            score: item.score,
+            scoreKind: item.scoreKind,
+            source: item.connectorId,
+            locator: item.locator,
+            startLine: item.startLine,
+            endLine: item.endLine,
+            headingPath: item.headingPath,
             coverage: item.coverage ?? null,
             isFloor: !!item.isFloor,
-            // 通道事实：融合后 scoreKind 一律是 RRF，只有 channels 能说明向量还是关键词命中。
             channels: item.channels || null
-        })), files: [], context: '', stats: {
+        }));
+
+    return {
+        knowledgeBase: true,
+        mode,
+        outcome: data.outcome || (chunks.length > 0 ? 'matched' : 'no_match'),
+        completeness: data.completeness || 'complete',
+        usedRecallFloor: !!data.usedRecallFloor,
+        noMatch: !!data.noMatch,
+        noMatchReason: data.noMatchReason || null,
+        kbChannels: data.kbChannels || null,
+        chunks,
+        files: [],
+        context: '',
+        stats: {
             durationMs: Math.round(durationMs),
             estimatedTokens: 0,
-            // 模型级降级（断路器/推理失败）与索引级降级（词法索引补齐中）都要如实透出
             isDegraded: !!(data.degraded || data.indexDegraded),
             degradeReason: data.degradationReason || null,
             isEarlyPruned,
-            // 后端跨库检索的全链路耗时链（扇出 / 各库召回 / 融合），用于瀑布图
             timingChain: data.timingChain || null
         }
     };

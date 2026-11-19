@@ -354,9 +354,12 @@ export const knowledgeBasesApi = {
     getLinkEvents: (take = 50) => api.get('/knowledge-bases/link-events', { params: { take } })
 };
 
-// 跨知识库受控检索 API
+// 跨知识库受控单轨检索与证据链 API
 export const knowledgeBaseSearchApi = {
-    search: (data) => api.post('/knowledge-base-search', data)
+    search: (data) => api.post('/knowledge-base-search', data),
+    getStatus: () => api.get('/knowledge-base-search/status'),
+    readEvidence: (data) => api.post('/knowledge-evidence/read', data),
+    answer: (data) => api.post('/knowledge-answers', data)
 };
 
 export default api;

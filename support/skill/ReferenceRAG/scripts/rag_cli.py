@@ -456,25 +456,32 @@ def cmd_search(args):
     no_match = False
     no_match_reason = ""
 
-    # 2. 通道调用 (默认走权威 MCP 通道)
+    # 2. 通道调用 (REST 与 MCP 共享单轨检索契约)
     if args.rest:
-        # 显式指定 REST 降级通道
-        print(f"{SYM_WARN} 注意: REST 传输通道仅支持词法/向量二态，无法完整区分语义与混合策略。", file=sys.stderr)
         payload = {
-            "Query": args.query,
-            "KnowledgeBaseIds": [args.kb] if args.kb else [],
-            "TopK": top_k,
-            "UseLexicalTokenizer": (mode == "lexical")
+            "query": args.query,
+            "mode": mode,
+            "topK": top_k,
+            "allowDegrade": True
         }
+        if args.kb:
+            payload["knowledgeBaseIds"] = [args.kb]
+        if getattr(args, "connector", None):
+            payload["connectorId"] = args.connector
+        if getattr(args, "path_prefix", None):
+            payload["pathPrefix"] = args.path_prefix
+
         res = request_http("api/knowledge-base-search", method="POST", payload=payload,
                            base_url=args.base_url, api_key=args.api_key)
         raw_response = res
-        items = res.get("Items") or res.get("items") or []
-        chunks = [normalize_chunk(it) for it in items]
-        no_match = bool(res.get("NoMatch") or res.get("noMatch") or False)
-        no_match_reason = res.get("NoMatchReason") or res.get("noMatchReason") or ""
-        elapsed = res.get("Elapsed") or f"{res.get('elapsedMs', 0)}ms"
-        score_kind = res.get("ScoreKind") or res.get("scoreKind") or "RRF"
+        hits = res.get("hits") or []
+        items = res.get("items") or res.get("Items") or []
+        chunks = [normalize_chunk(h) for h in hits] if hits else [normalize_chunk(it) for it in items]
+        outcome = res.get("outcome") or ("matched" if chunks else "no_match")
+        no_match = outcome != "matched" or bool(res.get("noMatch") or res.get("NoMatch") or False)
+        no_match_reason = res.get("noMatchReason") or res.get("NoMatchReason") or ""
+        elapsed = res.get("elapsed") or f"{res.get('elapsedMs', 0)}ms"
+        score_kind = res.get("scoreKind") or res.get("ScoreKind") or "RRF"
     else:
         # 权威 MCP 通道
         mcp_args = {
@@ -486,9 +493,11 @@ def cmd_search(args):
             mcp_args["knowledgeBaseIds"] = json.dumps([args.kb])
         res = call_mcp_tool("knowledge_search", mcp_args, base_url=args.base_url, api_key=args.api_key)
         raw_response = res
+        hits = res.get("hits") or []
         items = res.get("items") or []
-        chunks = [normalize_chunk(it) for it in items]
-        no_match = bool(res.get("noMatch", False))
+        chunks = [normalize_chunk(h) for h in hits] if hits else [normalize_chunk(it) for it in items]
+        outcome = res.get("outcome") or ("matched" if chunks else "no_match")
+        no_match = outcome != "matched" or bool(res.get("noMatch", False))
         no_match_reason = res.get("noMatchReason", "")
         elapsed = f"{res.get('elapsedMs', 0)}ms"
         score_kind = res.get("scoreKind", "RRF")
@@ -633,7 +642,44 @@ def cmd_outline(args):
         print("\n> 该文档无 Markdown 标题层级。")
 
 def cmd_read(args):
-    """按行读取文件正文"""
+    """读取文件行正文或批量回读已验证证据"""
+    citation_input = getattr(args, "citations", None) or getattr(args, "citation", None)
+    if citation_input:
+        try:
+            raw_s = citation_input.strip()
+            if raw_s.startswith("{"):
+                cit_list = [json.loads(raw_s)]
+            else:
+                cit_list = json.loads(raw_s)
+        except Exception as e:
+            raise RagError("invalid_citation", f"citation JSON 解析失败: {e}", exit_code=EXIT_USAGE)
+
+        payload = {"citations": cit_list}
+        res = request_http("api/knowledge-evidence/read", method="POST", payload=payload,
+                           base_url=args.base_url, api_key=args.api_key)
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+            return
+
+        items = res.get("items") or []
+        print(f"### 批量证据回读结果 ({len(items)} 项)：\n")
+        for idx, item in enumerate(items, start=1):
+            cit = item.get("citation", {})
+            status = item.get("status", "unknown")
+            icon = SYM_OK if status == "ok" else SYM_FAIL
+            print(f"- {icon} [{idx}] **切片 `{cit.get('chunkId')}`** (知识库: `{cit.get('knowledgeBaseId')}`, 版本: v{cit.get('documentVersion')}, 状态: `{status}`)")
+            if status == "ok":
+                print(f"  源文件: `[[{item.get('sourceKey')}#L{item.get('startLine')}-L{item.get('endLine')}]]`")
+                if item.get("headingPath"):
+                    print(f"  大纲层级: `{item.get('headingPath')}`")
+                print("  ```markdown")
+                print((item.get("text") or "").strip())
+                print("  ```\n")
+        return
+
+    if not args.file_path:
+        raise RagError("missing_argument", "请提供 file_path 或指定 --citation/--citations", exit_code=EXIT_USAGE)
+
     if args.start_line > args.end_line:
         raise RagError("invalid_range", f"起始行号 ({args.start_line}) 不得大于结束行号 ({args.end_line})", exit_code=EXIT_USAGE)
 
@@ -809,7 +855,46 @@ def cmd_graph(args):
                 print(f"- `{e.get('from')}` --[{e.get('type')}]--> `{e.get('to')}`")
 
 def cmd_status(args):
-    """查看后台同步任务与数据源健康状态"""
+    """查看知识库单轨检索状态与后台作业"""
+    status_res = None
+    try:
+        status_res = request_http("api/knowledge-base-search/status", method="GET",
+                                  base_url=args.base_url, api_key=args.api_key)
+    except Exception:
+        status_res = None
+
+    if status_res and "accessibleKnowledgeBases" in status_res:
+        if args.json:
+            print(json.dumps(status_res, ensure_ascii=False, indent=2))
+            return
+
+        kbs = status_res.get("accessibleKnowledgeBases") or []
+        jobs = status_res.get("recentJobs") or []
+        print("### ReferenceRAG 知识库检索与作业状态\n")
+        print("#### 可访问受权知识库状态：")
+        if kbs:
+            for kb in kbs:
+                lexical_tag = "词法索引就绪" if kb.get("lexicalReady") else f"{SYM_WARN} 词法未就绪"
+                pure_tag = " [纯词法]" if kb.get("isPureLexical") else ""
+                status_icon = SYM_OK if kb.get("enabled") else "⏸️"
+                print(f"- {status_icon} **{kb.get('name')}** (`{kb.get('id')}`){pure_tag}")
+                print(f"  文档数: {kb.get('documentCount')} | 切片数: {kb.get('chunkCount')} | 规格: `{kb.get('embeddingSpecId')}` | {lexical_tag}")
+        else:
+            print("> 当前无有权访问的知识库。")
+
+        print("\n#### 最近同步与索引作业：")
+        if jobs:
+            limit = max(1, min(args.limit, 50))
+            for j in jobs[:limit]:
+                status_icon = SYM_OK if j.get("Status") == "Succeeded" else (SYM_FAIL if j.get("Status") == "Failed" else "⏳")
+                err = f" (错误: {j.get('ErrorMessage')})" if j.get("ErrorMessage") else ""
+                print(f"- {status_icon} **任务 `{j.get('Id')}`** [{j.get('Operation')}]: 状态 `{j.get('Status')}`{err}")
+                print(f"  知识库: `{j.get('KnowledgeBaseId')}` | 进度: {j.get('ProcessedUnits')}/{j.get('TotalUnits')} 单元 | 完成时间: {j.get('FinishedAt')}")
+        else:
+            print("> 暂无作业记录。")
+        return
+
+    # 降级走旧版 API
     jobs = request_http("api/jobs", method="GET", base_url=args.base_url, api_key=args.api_key)
     sources = request_http("api/sources", method="GET", base_url=args.base_url, api_key=args.api_key)
 
@@ -840,7 +925,51 @@ def cmd_status(args):
         print(f"> 获取任务记录失败: {jobs}")
 
 def cmd_ask(args):
-    """基于知识库自主智能问答 (调用兼容 OpenAI 规范的 /v1/chat/completions)"""
+    """基于知识库自主智能有据问答"""
+    # 优先使用单轨有据问答接口 POST /api/knowledge-answers
+    top_k = max(1, min(args.top_k, 50))
+    payload = {
+        "question": args.question,
+        "mode": getattr(args, "mode", "auto") or "auto",
+        "topK": top_k
+    }
+    if getattr(args, "kb", None):
+        payload["knowledgeBaseIds"] = [args.kb]
+
+    use_grounded = True
+    grounded_res = None
+    try:
+        grounded_res = request_http("api/knowledge-answers", method="POST", payload=payload,
+                                    base_url=args.base_url, api_key=args.api_key, timeout=120)
+    except Exception:
+        use_grounded = False
+
+    if use_grounded and grounded_res and "status" in grounded_res:
+        if args.json:
+            print(json.dumps(grounded_res, ensure_ascii=False, indent=2))
+            return
+
+        status = grounded_res.get("status")
+        answer = grounded_res.get("answer") or ""
+        citations = grounded_res.get("citations") or []
+
+        print(f"### ReferenceRAG 智能有据问答: `{args.question}`\n")
+        if status == "no_match":
+            print(f"{SYM_FAIL} **未匹配**: 知识库中未检索到相关事实证据，已短路退出以避免虚假生成。")
+            return
+        elif status == "insufficient_evidence":
+            print(f"{SYM_WARN} **证据不足**: 知识库中候选切片相关度不足，无法支撑确定性回答。")
+            return
+
+        print(answer)
+        if citations:
+            print("\n#### 证据引用链：")
+            for c in citations:
+                cref = c.get("citationRef", {})
+                print(f"- `{c.get('shortId')}` 源文件: `[[{c.get('sourceKey')}#L{c.get('startLine')}-L{c.get('endLine')}]]` (库: `{cref.get('knowledgeBaseId')}`, 切片: `{cref.get('chunkId')}`)")
+        return
+
+    # 降级走 /v1/chat/completions 兼容接口
     payload = {
         "model": args.model or "reference-rag",
         "messages": [
@@ -940,8 +1069,10 @@ def main():
                           help="检索质量策略：exact (纯词法无凑底), concept (语义保召回), balanced (默认平衡)")
     p_search.add_argument("--top-k", type=int, default=5, help="返回结果数量 (1-50, 默认 5)")
     p_search.add_argument("--kb", default=None, help="限定目标知识库 ID (留空表示全库)")
+    p_search.add_argument("--connector", default=None, help="限定连接器 ID")
+    p_search.add_argument("--path-prefix", default=None, help="限定库内相对路径前缀 (如 'notes/')")
     p_search.add_argument("--lexical", action="store_true", help="强制纯词法检索 (相当于 --mode lexical)")
-    p_search.add_argument("--rest", action="store_true", help="强制降级走 REST API 通道 (默认走权威 MCP)")
+    p_search.add_argument("--rest", action="store_true", help="强制走 REST API 通道 (默认走权威 MCP)")
     p_search.set_defaults(func=cmd_search)
 
     # chunk (下钻查看完整切片正文)
@@ -957,11 +1088,13 @@ def main():
     p_outline.set_defaults(func=cmd_outline)
 
     # read
-    p_read = subparsers.add_parser("read", help="按行号读取笔记正文")
-    p_read.add_argument("file_path", help="文档相对路径或名称")
+    p_read = subparsers.add_parser("read", help="按行号读取笔记正文或批量回读已验证证据")
+    p_read.add_argument("file_path", nargs="?", default=None, help="文档相对路径或名称（如果提供 --citation 则可省略）")
     p_read.add_argument("--start-line", type=int, default=1, help="起始行号 (从 1 开始)")
     p_read.add_argument("--end-line", type=int, default=100, help="结束行号")
     p_read.add_argument("--source", default=None, help="限定数据源名称")
+    p_read.add_argument("--citation", dest="citation", default=None, help="单条 CitationRef JSON 字符串")
+    p_read.add_argument("--citations", dest="citations", default=None, help="批量 CitationRef JSON 数组字符串")
     p_read.set_defaults(func=cmd_read)
 
     # tree
@@ -1000,8 +1133,11 @@ def main():
     p_status.set_defaults(func=cmd_status)
 
     # ask
-    p_ask = subparsers.add_parser("ask", help="基于知识库自主智能问答 (OpenAI兼容接口)")
+    p_ask = subparsers.add_parser("ask", help="基于知识库单轨有据问答 (优先 /api/knowledge-answers)")
     p_ask.add_argument("question", help="自然语言问题")
+    p_ask.add_argument("--kb", default=None, help="限定目标知识库 ID")
+    p_ask.add_argument("--mode", choices=["auto", "hybrid", "semantic", "lexical"], default="auto", help="检索模式")
+    p_ask.add_argument("--top-k", type=int, default=5, help="检索候选证据数量 (1-50, 默认 5)")
     p_ask.add_argument("--model", default="reference-rag", help="模型名称 (默认: reference-rag)")
     p_ask.add_argument("--temp", type=float, default=0.2, help="采样温度 (0.0 - 1.0)")
     p_ask.add_argument("--show-thinking", action="store_true", help="输出模型内部推理思考链 (<think>...)")
