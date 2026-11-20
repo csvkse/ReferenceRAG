@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     ReferenceRAG Remote Linux Deployment & Inner-Loop Pipeline Script
 .DESCRIPTION
@@ -529,7 +529,7 @@ try {
         }
 
         $envFileArg = Push-RuntimeEnvFile
-        $masterKeyEnv = if ($masterKey) { "-e MasterKey=$masterKey" } else { "" }
+        $masterKeyEnv = if ($masterKey) { "-e MasterKey=$masterKey -e REFERENCERAG_API_KEY=$masterKey -e API_KEY=$masterKey" } else { "" }
 
         # Three-volume mount strategy + live frontend mount for zero-rebuild updates
         $runCmd = @"
@@ -687,7 +687,7 @@ docker run -d \
         }
 
         $envFileArg = Push-RuntimeEnvFile
-        $masterKeyEnv = if ($masterKey) { "-e MasterKey=$masterKey" } else { "" }
+        $masterKeyEnv = if ($masterKey) { "-e MasterKey=$masterKey -e REFERENCERAG_API_KEY=$masterKey -e API_KEY=$masterKey" } else { "" }
 
         $prodRunCmd = @"
 docker rm -f $effectiveContainer 2>/dev/null || true
