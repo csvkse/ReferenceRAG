@@ -87,9 +87,9 @@ public class FileIndexPipeline : IFileIndexPipeline
         var chunking = config.Chunking;
 
         var content = await SafeReadFileAsync(filePath, ct);
-        if (content == null)
+        if (string.IsNullOrWhiteSpace(content))
         {
-            _logger?.LogWarning("无法读取文件或文件被独占，跳过本次分块处理: {FilePath}", filePath);
+            _logger?.LogWarning("无法读取文件、内容为空或检测为二进制格式，跳过本次分块处理: {FilePath}", filePath);
             return null;
         }
 

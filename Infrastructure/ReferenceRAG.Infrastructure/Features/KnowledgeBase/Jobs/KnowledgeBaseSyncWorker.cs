@@ -1,11 +1,16 @@
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Core.Features.DocumentExtraction.Domain;
+using ReferenceRAG.Core.Features.DocumentExtraction.Extractors;
+using ReferenceRAG.Core.Features.DocumentExtraction.Services;
+using ReferenceRAG.Core.Features.DocumentExtraction.Strategies;
 using ReferenceRAG.Core.Features.KnowledgeBase.Connectors;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Features.ModelManagement.Adapters;
 using ReferenceRAG.Core.Features.ModelManagement.Runtime;
+using ReferenceRAG.Core.Helpers;
 using ReferenceRAG.Core.Interfaces;
 using ReferenceRAG.Core.Models;
 using ReferenceRAG.Core.Services.Graph;
@@ -25,6 +30,7 @@ public sealed class KnowledgeBaseSyncWorker
     private readonly bool _enableEmbedding;
     private readonly IMarkdownChunker? _chunker;
     private readonly WikiLinkExtractor _linkExtractor = new();
+    private readonly IDocumentExtractorRouter _extractorRouter;
 
     public KnowledgeBaseSyncWorker(
         ICatalogStore catalog,
@@ -33,7 +39,8 @@ public sealed class KnowledgeBaseSyncWorker
         ILogger<KnowledgeBaseSyncWorker>? logger = null,
         ILoggerFactory? loggerFactory = null,
         bool enableEmbedding = true,
-        IMarkdownChunker? chunker = null)
+        IMarkdownChunker? chunker = null,
+        IDocumentExtractorRouter? extractorRouter = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _storageManager = storageManager ?? throw new ArgumentNullException(nameof(storageManager));
@@ -42,6 +49,10 @@ public sealed class KnowledgeBaseSyncWorker
         _loggerFactory = loggerFactory;
         _enableEmbedding = enableEmbedding;
         _chunker = chunker;
+        _extractorRouter = extractorRouter ?? DocumentExtractorRouter.CreateDefault(
+            loggerFactory?.CreateLogger<DocumentExtractorRouter>(),
+            loggerFactory?.CreateLogger<PdfPigDocumentExtractor>(),
+            loggerFactory?.CreateLogger<GracefulDegradeScannedStrategy>());
     }
 
     public async Task<JobDefinition> ExecuteSyncAsync(
@@ -101,15 +112,64 @@ public sealed class KnowledgeBaseSyncWorker
 
                 try
                 {
-                    string textContent;
+                    DocumentExtractResult extractResult;
                     await using (var stream = await connector.OpenReadAsync(change, ct))
-                    using (var reader = new StreamReader(stream, Encoding.UTF8))
                     {
-                        textContent = await reader.ReadToEndAsync(ct);
+                        extractResult = await _extractorRouter.ExtractAsync(stream, change.SourceKey, ct);
                     }
 
+                    if (extractResult.Status != DocumentParseStatus.Success)
+                    {
+                        _logger?.LogInformation("[KnowledgeBaseSyncWorker] 文档未生成有效文本切片 [{Status}]: {Key}, 诊断信息: {Msg}",
+                            extractResult.Status, change.SourceKey, extractResult.DiagnosticMessage);
+
+                        await using var cleanLease = await _storageManager.AcquireLeaseAsync(job.KnowledgeBaseId, StorageAccess.ReadWrite, ct);
+                        if (!_enableEmbedding || string.Equals(specId, "spec_lexical_only", StringComparison.OrdinalIgnoreCase))
+                            await cleanLease.Store.EnsureLexicalIndexAsync(ct);
+
+                        var emptyBatch = new IndexBatch(
+                            KnowledgeBaseId: job.KnowledgeBaseId,
+                            ExpectedIndexEpoch: cleanLease.IndexEpochSnapshot,
+                            ExpectedDocumentVersion: 0,
+                            ConnectorId: connector.Id,
+                            SourceKey: change.SourceKey,
+                            Locator: change.Locator,
+                            SourceRevision: change.SourceRevision,
+                            ContentHash: ComputeSha256(change.SourceKey + ":" + extractResult.Status),
+                            Chunks: Array.Empty<ChunkData>(),
+                            Vectors: null,
+                            ProducerCohort: specId
+                        );
+                        await cleanLease.Store.CommitDocumentAsync(emptyBatch, ct);
+                        await cleanLease.Store.GraphStore.DeleteNodeAsync(change.SourceKey, ct);
+
+                        processed++;
+                        await stateMachine.UpdateProgressAsync(processed, ct: ct);
+                        continue;
+                    }
+
+                    string textContent = extractResult.ExtractedText;
                     var hash = ComputeSha256(textContent);
                     var chunks = ChunkTextWithSpec(textContent, chunkSpec, _chunker);
+
+                    // 门禁 G-INGEST-TOKEN-02 & G-CHUNK-CORRUPT-04: 过滤残留的 PDF 语法噪音或高乱码率切片
+                    if (chunks.Count > 0)
+                    {
+                        var sanitizedChunks = new List<ChunkData>(chunks.Count);
+                        foreach (var c in chunks)
+                        {
+                            if (!NoiseChunkDetector.IsCorruptedOrPdfSyntaxNoise(c.Text))
+                            {
+                                sanitizedChunks.Add(c);
+                            }
+                            else
+                            {
+                                _logger?.LogWarning("[KnowledgeBaseSyncWorker] 门禁拦截了包含 PDF 语法或乱码的切片: 文档={Key}, 切片序号={Ordinal}",
+                                    change.SourceKey, c.Ordinal);
+                            }
+                        }
+                        chunks = sanitizedChunks;
+                    }
 
                     // 可选向量提取（纯词法模式下直接旁路跳过）
                     var isPureLexical = string.Equals(specId, "spec_lexical_only", StringComparison.OrdinalIgnoreCase);

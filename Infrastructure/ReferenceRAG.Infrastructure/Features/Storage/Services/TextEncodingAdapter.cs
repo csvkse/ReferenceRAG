@@ -3,6 +3,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using ReferenceRAG.Core.Features.DocumentExtraction.Guards;
 
 namespace ReferenceRAG.Infrastructure.Features.Storage.Services;
 
@@ -65,6 +66,12 @@ public static class TextEncodingAdapter
     public static string DetectAndDecode(ReadOnlySpan<byte> bytes)
     {
         if (bytes.IsEmpty) return string.Empty;
+
+        // 0. 二进制魔数嗅探门禁（G-INGEST-MAGIC-01）：若为 PDF 或已知二进制流，阻断回退至 GB18030 产生乱码汉字
+        if (BinaryMagicGuard.IsKnownBinary(bytes))
+        {
+            return string.Empty;
+        }
 
         // 1. 显式 BOM 探测
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)

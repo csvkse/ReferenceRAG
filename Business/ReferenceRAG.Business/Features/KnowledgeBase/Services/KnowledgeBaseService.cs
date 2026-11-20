@@ -1,3 +1,4 @@
+using ReferenceRAG.Core.Features.DocumentExtraction.Domain;
 using ReferenceRAG.Core.Interfaces;
 using Microsoft.Extensions.Logging;
 using ReferenceRAG.Business.Features.Indexing.Contracts;
@@ -30,6 +31,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
     private readonly KnowledgeBaseJobCoordinator _coordinator;
     private readonly IEmbeddingAdapterResolver? _adapterResolver;
     private readonly IIndexEventPublisher? _eventPublisher;
+    private readonly IDocumentExtractorRouter? _extractorRouter;
 
     public KnowledgeBaseService(
         ICatalogStore catalog,
@@ -43,7 +45,8 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         IMarkdownChunker? markdownChunker = null,
         KnowledgeBaseJobCoordinator? jobCoordinator = null,
         IEmbeddingAdapterResolver? adapterResolver = null,
-        IIndexEventPublisher? eventPublisher = null)
+        IIndexEventPublisher? eventPublisher = null,
+        IDocumentExtractorRouter? extractorRouter = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _storageManager = storageManager ?? throw new ArgumentNullException(nameof(storageManager));
@@ -57,6 +60,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         _coordinator = jobCoordinator ?? new KnowledgeBaseJobCoordinator();
         _adapterResolver = adapterResolver;
         _eventPublisher = eventPublisher;
+        _extractorRouter = extractorRouter;
     }
 
     public async Task<KnowledgeBaseDefinition> CreateKnowledgeBaseAsync(
@@ -708,7 +712,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
             try
             {
                 var workerLogger = _loggerFactory?.CreateLogger<KnowledgeBaseSyncWorker>();
-                var worker = new KnowledgeBaseSyncWorker(_catalog, _storageManager, _modelRouter, workerLogger, _loggerFactory, enableEmbedding, _markdownChunker);
+                var worker = new KnowledgeBaseSyncWorker(_catalog, _storageManager, _modelRouter, workerLogger, _loggerFactory, enableEmbedding, _markdownChunker, _extractorRouter);
                 await worker.ExecuteSyncAsync(job, connectorInstance, cts.Token);
             }
             finally

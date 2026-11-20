@@ -5,6 +5,7 @@
     <PackageReference Include="Google.Protobuf" />
     <PackageReference Include="LLamaSharp" />
     <PackageReference Include="Newtonsoft.Json" />
+    <PackageReference Include="PdfPig" />
     <PackageReference Include="Rougamo.Fody" />
     <PackageReference Include="Markdig" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />

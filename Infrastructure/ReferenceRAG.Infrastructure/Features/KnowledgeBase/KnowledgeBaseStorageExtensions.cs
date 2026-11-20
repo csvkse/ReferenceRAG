@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using ReferenceRAG.Core.Features.DocumentExtraction;
 using ReferenceRAG.Core.Features.KnowledgeBase.Profiles;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Features.ModelManagement.Runtime;
@@ -68,6 +69,7 @@ public static class KnowledgeBaseStorageExtensions
 
         services.AddSingleton<ISearchFusionStrategy, RrfSearchFusionStrategy>();
         services.AddSingleton<IContentProfileRegistry, ContentProfileRegistry>();
+        services.AddDocumentExtractionServices();
 
         return services;
     }

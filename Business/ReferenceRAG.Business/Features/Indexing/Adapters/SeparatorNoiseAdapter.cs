@@ -22,6 +22,14 @@ public class SeparatorNoiseAdapter : IChunkQualificationAdapter
                 IngestionActionType.Discard);
         }
 
+        if (NoiseChunkDetector.IsCorruptedOrPdfSyntaxNoise(content))
+        {
+            return ChunkQualificationResult.Unqualified(
+                "识别为PDF容器语法或乱码噪音 (G-INGEST-TOKEN-02 / G-CHUNK-CORRUPT-04)",
+                NoiseCategory.LowDensityFragment,
+                IngestionActionType.Discard);
+        }
+
         if (NoiseChunkDetector.IsNoiseOrSeparator(content))
         {
             bool hasPagination = content.Contains('(') && content.Contains(')') &&
