@@ -169,7 +169,7 @@ public class BM25IndexController : ControllerBase
                 ProcessedDocuments = 0,
                 ProgressPercent = 0,
                 Message = $"已启动 BM25 词法倒排索引重建任务（{scope.Ids.Count} 个知识库）",
-                KnowledgeBaseIds = scope.Ids.ToList()
+                KnowledgeBaseIds = scope.Ids
             });
         }
 
@@ -456,7 +456,7 @@ public class BM25IndexController : ControllerBase
                 TotalFiles = totalFiles,
                 TotalChunks = totalChunks,
                 Scope = scope.KindText,
-                KnowledgeBaseIds = scope.Ids.ToList().ToList(),
+                KnowledgeBaseIds = scope.Ids,
                 KnowledgeBases = perKb
             });
         }
@@ -525,7 +525,7 @@ public class IndexProgressResponse
     public int TotalTerms { get; set; }
     public string Message { get; set; } = string.Empty;
     /// <summary>本次实际重建的库（全量作用域下可能是多个）。</summary>
-    public List<string>? KnowledgeBaseIds { get; set; }
+    public IReadOnlyList<string>? KnowledgeBaseIds { get; set; }
 }
 
 public class BM25SearchResponse
@@ -555,7 +555,7 @@ public class BM25Summary
     /// <summary>本次统计的作用域：all / single。</summary>
     public string Scope { get; set; } = "single";
     /// <summary>参与统计的库（全量时是全部启用库）。</summary>
-    public List<string> KnowledgeBaseIds { get; set; } = new();
+    public IReadOnlyList<string> KnowledgeBaseIds { get; set; } = Array.Empty<string>();
     /// <summary>逐库明细：聚合值可被拆解核对。</summary>
     public List<BM25SummaryPerKb> KnowledgeBases { get; set; } = new();
 }

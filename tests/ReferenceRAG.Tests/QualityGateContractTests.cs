@@ -337,6 +337,54 @@ public class QualityGateContractTests : IDisposable
         }
     }
 
+    // ── 6. 架构质量门禁：严禁在 C# 源码中出现冗余链式调用（如 .ToList().ToList()、.ToArray().ToArray() 等） ──
+    [Fact]
+    public void Architecture_RedundantLinqAndTypeChains_MustNotExistInSourceCode()
+    {
+        var baseDir = AppContext.BaseDirectory;
+        var solutionRoot = FindSolutionRoot(baseDir);
+        Assert.NotNull(solutionRoot);
+
+        var regex = new System.Text.RegularExpressions.Regex(
+            @"\.(?<method>ToList|ToArray|AsEnumerable|ToString|Distinct)\s*\(\s*\)\s*\.\k<method>\s*\(\s*\)",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        var csharpFiles = Directory.EnumerateFiles(solutionRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar) &&
+                        !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar) &&
+                        !f.Contains(Path.DirectorySeparatorChar + ".git" + Path.DirectorySeparatorChar) &&
+                        !f.EndsWith("QualityGateContractTests.cs", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var violations = new List<string>();
+
+        foreach (var file in csharpFiles)
+        {
+            var lines = File.ReadAllLines(file);
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var trimmed = lines[i].Trim();
+                if (trimmed.StartsWith("//") || trimmed.StartsWith("/*") || trimmed.StartsWith("*"))
+                    continue;
+
+                // 移除单行中的普通字符串字面量，避免注释或错误提示字符串误报
+                var codeOnly = System.Text.RegularExpressions.Regex.Replace(trimmed, @"""(?:\\.|[^""\\])*""", "\"\"");
+
+                var match = regex.Match(codeOnly);
+                if (match.Success)
+                {
+                    var relPath = Path.GetRelativePath(solutionRoot, file);
+                    violations.Add($"{relPath}:{i + 1} -> 冗余连续调用: '{match.Value}' (第 {i + 1} 行: {trimmed})");
+                }
+            }
+        }
+
+        Assert.True(
+            violations.Count == 0,
+            $"发现 {violations.Count} 处冗余链式调用违背质量红线：\n" + string.Join("\n", violations) +
+            "\n提示：严禁连写 .ToList().ToList()、.ToArray().ToArray() 等无意义多次拷贝分配。对于 DTO 属性建议直接声明为 IReadOnlyList<T> 接收只读集合实现零拷贝。");
+    }
+
     private static string? FindSolutionRoot(string startDir)
     {
         var dir = new DirectoryInfo(startDir);
