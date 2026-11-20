@@ -2,7 +2,7 @@ import { defineComponent as _defineComponent } from 'vue';
 import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue';
 import { NIcon, NPopconfirm, NTag, NSelect, useMessage } from 'naive-ui';
 import { RefreshOutline, LayersOutline, AddOutline, TrashOutline } from '@vicons/ionicons5';
-import { graphApi, knowledgeBasesApi } from '/app/api/index.js';
+import { graphApi, indexJobsApi, knowledgeBasesApi } from '/app/api/index.js';
 import { loadKbSpecMap, kbOptionLabel } from '/shared/kb-label.js';
 import { useIndexStore } from '/app/stores/index.js';
 
@@ -67,6 +67,7 @@ const component = /*@__PURE__*/ _defineComponent({
         const traversing = ref(false);
         const statsLoading = ref(false);
         const rebuilding = ref(false);
+        const rebuildDetail = ref('');
         const selectedNodeTypes = ref(nodeTypeOptions.map((option) => option.value));
         let rebuildPollTimer = null;
         const searchResults = ref([]);
@@ -285,16 +286,30 @@ const component = /*@__PURE__*/ _defineComponent({
 
         const startRebuild = async () => {
             rebuilding.value = true;
+            rebuildDetail.value = '';
             try {
-                await graphApi.rebuild(getActiveKbId());
+                const startRes = await graphApi.rebuild(getActiveKbId());
+                const jobId = startRes.data?.jobId;
                 message.info('图谱重建已启动');
                 rebuildPollTimer = setInterval(async () => {
                     try {
+                        if (jobId) {
+                            try {
+                                const jobRes = await indexJobsApi.getJob(jobId);
+                                const job = jobRes.data;
+                                if (job) {
+                                    rebuildDetail.value = job.currentFile
+                                        ? `${job.currentFile} (${job.processedFiles || 0}/${job.totalFiles || 0})`
+                                        : `进度: ${job.progressPercent || 0}%`;
+                                }
+                            } catch { }
+                        }
                         const res = await graphApi.rebuildStatus();
                         if (!res.data.isRebuilding) {
                             clearInterval(rebuildPollTimer);
                             rebuildPollTimer = null;
                             rebuilding.value = false;
+                            rebuildDetail.value = '';
                             await loadStats();
                             message.success('图谱重建完成');
                         }
@@ -302,10 +317,11 @@ const component = /*@__PURE__*/ _defineComponent({
                     catch {
                         // ignore poll errors
                     }
-                }, 3000);
+                }, 2000);
             }
             catch (err) {
                 rebuilding.value = false;
+                rebuildDetail.value = '';
                 message.error(err.response?.data?.error || '重建失败');
             }
         };
@@ -329,7 +345,7 @@ const component = /*@__PURE__*/ _defineComponent({
         });
         const __returned__ = {
             nodeTypeMeta, nodeTypeOptions, message, indexStore, searchQuery, nodeId, depth,
-            searching, traversing, statsLoading, rebuilding, selectedNodeTypes,
+            searching, traversing, statsLoading, rebuilding, rebuildDetail, selectedNodeTypes,
             knowledgeBases, selectedKbId, kbSpecMap, kbOptions, loadKnowledgeBases, getActiveKbId, scopeLabel,
             get rebuildPollTimer() { return rebuildPollTimer; }, set rebuildPollTimer(v) { rebuildPollTimer = v; },
             searchResults, traversalResult, stats, filteredSearchResults, filteredTraversalNodes,
@@ -422,7 +438,7 @@ component.template = `
           </n-space>
         </n-space>
         <n-text v-if="rebuilding" type="warning" style="font-size: 12px; margin-top: 4px">
-          图谱重建中，完成后自动刷新统计…
+          图谱重建中{{ rebuildDetail ? ' (' + rebuildDetail + ')' : '，完成后自动刷新统计…' }}
         </n-text>
         <n-text v-else-if="indexStore.isIndexing" type="warning" style="font-size: 12px; margin-top: 4px">
           索引正在进行，完成后将自动刷新…

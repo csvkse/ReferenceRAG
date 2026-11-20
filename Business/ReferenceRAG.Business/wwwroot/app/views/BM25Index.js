@@ -6,7 +6,7 @@ import {
     NDescriptionsItem, NText, NIcon, NEllipsis, NEmpty, NSpin, NTabs, NTabPane, NSelect
 } from 'naive-ui';
 import { RefreshOutline, TrashOutline, SearchOutline, LayersOutline } from '@vicons/ionicons5';
-import { bm25IndexApi, knowledgeBasesApi, knowledgeBaseSearchApi } from '/app/api/index.js';
+import { bm25IndexApi, indexJobsApi, knowledgeBasesApi, knowledgeBaseSearchApi } from '/app/api/index.js';
 import { loadKbSpecMap, kbOptionLabel } from '/shared/kb-label.js';
 import { knowledgeBaseRequest, knowledgeBaseResponse } from '/app/views/lexical-search-template.js';
 
@@ -105,20 +105,63 @@ const component = /*@__PURE__*/ _defineComponent({
                 totalTerms: 0
             };
             try {
-                // 原实现把「全部」折叠成 null，后端据此选中第一个库 → 页面显示单库数字。
-        // 现在统一转发显式哨兵，后端才能走聚合分支。
+                // 统一转发显式哨兵，后端走聚合分支
                 const targetKb = selectedKbId.value || '__all__';
                 const response = await bm25IndexApi.indexAll(targetKb);
                 const result = response.data;
-                indexProgress.value = {
-                    progressPercent: result.progressPercent,
-                    status: 'success',
-                    message: result.message,
-                    totalDocuments: result.totalDocuments,
-                    totalTerms: result.totalTerms
-                };
-                message.success('词法索引建立完成');
-                await loadSummary();
+                const jobId = result.jobId;
+
+                if (jobId) {
+                    indexProgress.value = {
+                        progressPercent: 10,
+                        status: 'default',
+                        message: result.message || '正在后台构建 BM25 词法倒排索引...',
+                        totalDocuments: result.totalDocuments || 0,
+                        totalTerms: result.totalTerms || 0
+                    };
+                    const pollTimer = setInterval(async () => {
+                        try {
+                            const jobRes = await indexJobsApi.getJob(jobId);
+                            const job = jobRes.data;
+                            if (job) {
+                                const pct = job.progressPercent || (job.totalFiles > 0 ? Math.round((job.processedFiles / job.totalFiles) * 100) : 50);
+                                indexProgress.value = {
+                                    progressPercent: Math.min(100, Math.max(pct, 5)),
+                                    status: job.status === 'Failed' ? 'error' : (job.status === 'Succeeded' || job.status === 'Completed' ? 'success' : 'default'),
+                                    message: job.errors?.length ? job.errors.join('; ') : (job.currentFile || `正在构建: ${job.processedFiles} / ${job.totalFiles}`),
+                                    totalDocuments: job.totalFiles || result.totalDocuments || 0,
+                                    totalTerms: result.totalTerms || 0
+                                };
+                                if (job.status === 'Succeeded' || job.status === 'Completed') {
+                                    clearInterval(pollTimer);
+                                    indexing.value = false;
+                                    message.success('词法索引建立完成');
+                                    await loadSummary();
+                                } else if (job.status === 'Failed' || job.status === 'Cancelled') {
+                                    clearInterval(pollTimer);
+                                    indexing.value = false;
+                                    message.error(`词法索引构建终止: ${job.status}`);
+                                    await loadSummary();
+                                }
+                            }
+                        } catch {
+                            clearInterval(pollTimer);
+                            indexing.value = false;
+                            await loadSummary();
+                        }
+                    }, 1000);
+                } else {
+                    indexProgress.value = {
+                        progressPercent: result.progressPercent || 100,
+                        status: 'success',
+                        message: result.message,
+                        totalDocuments: result.totalDocuments,
+                        totalTerms: result.totalTerms
+                    };
+                    message.success('词法索引建立完成');
+                    await loadSummary();
+                    indexing.value = false;
+                }
             } catch (error) {
                 console.error('词法索引建立失败:', error);
                 indexProgress.value = {
@@ -129,7 +172,6 @@ const component = /*@__PURE__*/ _defineComponent({
                     totalTerms: 0
                 };
                 message.error(`索引失败: ${error.response?.data?.error || error.message}`);
-            } finally {
                 indexing.value = false;
             }
         };
