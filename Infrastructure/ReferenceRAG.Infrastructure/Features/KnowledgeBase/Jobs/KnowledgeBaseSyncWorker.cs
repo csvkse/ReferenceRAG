@@ -305,7 +305,7 @@ public sealed class KnowledgeBaseSyncWorker
         }
     }
 
-    private static IReadOnlyList<ChunkData> ChunkTextWithSpec(
+    public static IReadOnlyList<ChunkData> ChunkTextWithSpec(
         string text,
         ChunkingSpec chunkSpec,
         IMarkdownChunker? chunker)
@@ -435,7 +435,7 @@ public sealed class KnowledgeBaseSyncWorker
         return list;
     }
 
-    private static string ComputeSha256(string content)
+    public static string ComputeSha256(string content)
     {
         var bytes = Encoding.UTF8.GetBytes(content);
         var hash = SHA256.HashData(bytes);

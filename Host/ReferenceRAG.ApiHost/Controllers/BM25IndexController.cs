@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
+using ReferenceRAG.Business.Features.Indexing.Contracts;
+using ReferenceRAG.Business.Features.KnowledgeBase.Services;
 using ReferenceRAG.ApiHost.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
 using ReferenceRAG.Core.Interfaces;
@@ -25,6 +27,8 @@ public class BM25IndexController : ControllerBase
     private readonly ILogger<BM25IndexController> _logger;
     private readonly IKnowledgeBaseStorageManager? _kbStorageManager;
     private readonly ICatalogStore? _catalogStore;
+    private readonly KnowledgeBaseJobCoordinator? _jobCoordinator;
+    private readonly IIndexEventPublisher? _eventPublisher;
 
     public BM25IndexController(
         IBM25Store bm25Store,
@@ -34,7 +38,9 @@ public class BM25IndexController : ControllerBase
         ILogger<BM25IndexController> logger,
         IServiceProvider? serviceProvider = null,
         IKnowledgeBaseStorageManager? kbStorageManager = null,
-        ICatalogStore? catalogStore = null)
+        ICatalogStore? catalogStore = null,
+        KnowledgeBaseJobCoordinator? jobCoordinator = null,
+        IIndexEventPublisher? eventPublisher = null)
     {
         _bm25Store = bm25Store;
         _vectorStore = vectorStore;
@@ -43,6 +49,8 @@ public class BM25IndexController : ControllerBase
         _logger = logger;
         _kbStorageManager = kbStorageManager ?? serviceProvider?.GetService<IKnowledgeBaseStorageManager>();
         _catalogStore = catalogStore ?? serviceProvider?.GetService<ICatalogStore>();
+        _jobCoordinator = jobCoordinator ?? serviceProvider?.GetService<KnowledgeBaseJobCoordinator>();
+        _eventPublisher = eventPublisher ?? serviceProvider?.GetService<IIndexEventPublisher>();
     }
 
     // ==================== 索引操作 ====================
@@ -70,25 +78,98 @@ public class BM25IndexController : ControllerBase
 
         if (_kbStorageManager != null && scope.Ids.Count > 0)
         {
-            long total = 0;
-            var touched = new List<string>();
-            foreach (var id in scope.Ids)
+            var targetKbId = scope.Ids[0];
+            var jobId = Guid.NewGuid().ToString("N")[..16];
+            var job = new JobDefinition(
+                Id: jobId,
+                Operation: "bm25_rebuild",
+                KnowledgeBaseId: targetKbId,
+                ExpectedIndexEpoch: 1,
+                Status: JobStatus.Running,
+                Phase: OperationPhase.Building,
+                TotalUnits: scope.Ids.Count,
+                ProcessedUnits: 0,
+                IdempotencyKey: $"bm25:{targetKbId}:{DateTime.UtcNow.Ticks}",
+                ErrorMessage: null,
+                CreatedAt: DateTime.UtcNow,
+                FinishedAt: null
+            );
+
+            if (_catalogStore != null)
             {
-                if (!await _kbStorageManager.ExistsAsync(id)) continue;
-                _logger.LogInformation("执行知识库 BM25 全文索引重建: {KbId}", id);
-                await using var lease = await _kbStorageManager.AcquireLeaseAsync(id, StorageAccess.ReadWrite);
-                total += await lease.Store.RebuildFtsIndexAsync();
-                touched.Add(id);
+                await _catalogStore.SaveJobAsync(job);
             }
-            return Ok(new IndexProgressResponse
+
+            var cts = new CancellationTokenSource();
+            _jobCoordinator?.Register(jobId, cts);
+
+            _ = Task.Run(async () =>
             {
-                TotalDocuments = (int)total,
-                ProcessedDocuments = (int)total,
-                ProgressPercent = 100,
-                Message = touched.Count == 0
-                    ? "没有可重建的知识库"
-                    : $"词法索引重建完成（{touched.Count} 个知识库），共更新 {total} 个分块",
-                KnowledgeBaseIds = touched
+                long total = 0;
+                var touched = new List<string>();
+                try
+                {
+                    await PublishJobEventAsync("IndexStarted", jobId, 0, scope.Ids.Count, "开始重建 BM25 词法倒排索引", 0);
+                    await PublishJobEventAsync("ReindexJobStarted", jobId, 0, scope.Ids.Count, "开始重建 BM25 词法倒排索引", 0);
+
+                    for (int idx = 0; idx < scope.Ids.Count; idx++)
+                    {
+                        var id = scope.Ids[idx];
+                        if (cts.Token.IsCancellationRequested) break;
+                        if (!await _kbStorageManager.ExistsAsync(id)) continue;
+
+                        _logger.LogInformation("执行知识库 BM25 全文索引重建: {KbId}", id);
+                        await using var lease = await _kbStorageManager.AcquireLeaseAsync(id, StorageAccess.ReadWrite, cts.Token);
+                        total += await lease.Store.RebuildFtsIndexAsync(cts.Token);
+                        touched.Add(id);
+
+                        int processed = idx + 1;
+                        var pct = (int)Math.Round((double)processed * 100 / scope.Ids.Count);
+                        job = job with { ProcessedUnits = processed, TotalUnits = scope.Ids.Count };
+                        if (_catalogStore != null) await _catalogStore.SaveJobAsync(job);
+
+                        await PublishJobEventAsync("IndexProgress", jobId, processed, scope.Ids.Count, $"正在重建 {id} 词法索引", pct);
+                        await PublishJobEventAsync("ReindexJobProgress", jobId, processed, scope.Ids.Count, $"正在重建 {id} 词法索引", pct);
+                    }
+
+                    if (cts.Token.IsCancellationRequested)
+                    {
+                        job = job with { Status = JobStatus.Cancelled, FinishedAt = DateTime.UtcNow };
+                        if (_catalogStore != null) await _catalogStore.SaveJobAsync(job);
+                        await PublishJobEventAsync("IndexCompleted", jobId, touched.Count, scope.Ids.Count, "BM25 重建已取消", 100);
+                        await PublishJobEventAsync("ReindexJobCompleted", jobId, touched.Count, scope.Ids.Count, "BM25 重建已取消", 100);
+                    }
+                    else
+                    {
+                        job = job with { Status = JobStatus.Succeeded, FinishedAt = DateTime.UtcNow, ProcessedUnits = scope.Ids.Count };
+                        if (_catalogStore != null) await _catalogStore.SaveJobAsync(job);
+                        await PublishJobEventAsync("IndexCompleted", jobId, touched.Count, scope.Ids.Count, $"BM25 重建完成（{touched.Count} 个知识库）", 100);
+                        await PublishJobEventAsync("ReindexJobCompleted", jobId, touched.Count, scope.Ids.Count, $"BM25 重建完成（{touched.Count} 个知识库）", 100);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "BM25 重建异常失败: {JobId}", jobId);
+                    job = job with { Status = JobStatus.Failed, ErrorMessage = ex.Message, FinishedAt = DateTime.UtcNow };
+                    if (_catalogStore != null) await _catalogStore.SaveJobAsync(job);
+                    await PublishJobEventAsync("IndexCompleted", jobId, 0, scope.Ids.Count, $"BM25 重建失败: {ex.Message}", 0);
+                    await PublishJobEventAsync("ReindexJobCompleted", jobId, 0, scope.Ids.Count, $"BM25 重建失败: {ex.Message}", 0);
+                }
+                finally
+                {
+                    _jobCoordinator?.Unregister(jobId);
+                    cts.Dispose();
+                }
+            });
+
+            return Accepted(new IndexProgressResponse
+            {
+                JobId = jobId,
+                TotalDocuments = scope.Ids.Count,
+                ProcessedDocuments = 0,
+                ProgressPercent = 0,
+                Message = $"已启动 BM25 词法倒排索引重建任务（{scope.Ids.Count} 个知识库）",
+                KnowledgeBaseIds = scope.Ids.ToList()
             });
         }
 
@@ -375,7 +456,7 @@ public class BM25IndexController : ControllerBase
                 TotalFiles = totalFiles,
                 TotalChunks = totalChunks,
                 Scope = scope.KindText,
-                KnowledgeBaseIds = scope.Ids.ToList(),
+                KnowledgeBaseIds = scope.Ids.ToList().ToList(),
                 KnowledgeBases = perKb
             });
         }
@@ -399,6 +480,31 @@ public class BM25IndexController : ControllerBase
         return !config.Indexing.EmbeddingEnabled || config.Search.EnableLexical ||
             LexicalIndexCoordinator.HasPersistedStaleVectors(Path.Combine(config.DataPath ?? "data", "vectors.db"));
     }
+
+    private async Task PublishJobEventAsync(string eventName, string jobId, int processed, int total, string message, int percent)
+    {
+        if (_eventPublisher == null) return;
+        try
+        {
+            var payload = new
+            {
+                jobId,
+                status = percent >= 100 ? "Completed" : "Running",
+                phase = "Building",
+                processedFiles = processed,
+                totalFiles = total,
+                progressPercent = percent,
+                percent = (double)percent,
+                message,
+                currentFile = message
+            };
+            await _eventPublisher.PublishAsync(eventName, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "发布 BM25 作业事件失败（可忽略）: {Msg}", ex.Message);
+        }
+    }
 }
 
 // ==================== 请求模型 ====================
@@ -412,6 +518,7 @@ public class IndexDocumentRequest
 
 public class IndexProgressResponse
 {
+    public string? JobId { get; set; }
     public int TotalDocuments { get; set; }
     public int ProcessedDocuments { get; set; }
     public int ProgressPercent { get; set; }

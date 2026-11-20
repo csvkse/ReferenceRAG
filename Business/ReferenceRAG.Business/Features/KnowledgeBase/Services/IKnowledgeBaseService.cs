@@ -155,6 +155,14 @@ public interface IKnowledgeBaseService
         string? sourceKey = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// 对单篇文档执行重新切片与重索引（支持覆盖清除历史异常切片与向量）
+    /// </summary>
+    Task<RechunkDocumentResult> RechunkDocumentAsync(
+        string knowledgeBaseId,
+        string documentId,
+        CancellationToken ct = default);
+
     // ==================== 切片增删改查 (HITL) ====================
     Task<(IReadOnlyList<KnowledgeBaseChunkRecord> Chunks, int TotalCount)> GetChunksAsync(
         string knowledgeBaseId,

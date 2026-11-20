@@ -549,6 +549,17 @@ public sealed record RechunkResult(
     string Message);
 
 /// <summary>
+/// 单文档重新分段与索引结果
+/// </summary>
+public sealed record RechunkDocumentResult(
+    string DocumentId,
+    string SourceKey,
+    int ChunkCount,
+    long DocumentVersion,
+    string Status,
+    string? Message = null);
+
+/// <summary>
 /// 连接器更新请求
 /// </summary>
 public sealed record UpdateConnectorRequest(

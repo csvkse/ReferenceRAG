@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using ReferenceRAG.ApiHost.Services;
+using ReferenceRAG.Business.Features.Indexing.Contracts;
+using ReferenceRAG.Business.Features.KnowledgeBase.Services;
 using ReferenceRAG.Core.Features.KnowledgeBase.Connectors;
 using ReferenceRAG.Core.Features.KnowledgeBase.Domain;
 using ReferenceRAG.Core.Features.KnowledgeBase.Storage;
@@ -25,6 +27,8 @@ public class GraphController : ControllerBase
     private readonly IKnowledgeBaseStorageManager? _kbStorageManager;
     private readonly ICatalogStore? _catalogStore;
     private readonly IServiceProvider? _serviceProvider;
+    private readonly KnowledgeBaseJobCoordinator? _jobCoordinator;
+    private readonly IIndexEventPublisher? _eventPublisher;
     private readonly WikiLinkExtractor _wikiLinkExtractor = new();
 
     // 控制器是 Scoped，用 static 字段跨请求共享重建状态。
@@ -43,7 +47,9 @@ public class GraphController : ControllerBase
         IVectorStore? vectorStore = null,
         IServiceProvider? serviceProvider = null,
         IKnowledgeBaseStorageManager? kbStorageManager = null,
-        ICatalogStore? catalogStore = null)
+        ICatalogStore? catalogStore = null,
+        KnowledgeBaseJobCoordinator? jobCoordinator = null,
+        IIndexEventPublisher? eventPublisher = null)
     {
         _graphStore = graphStore;
         _vectorStore = vectorStore ?? serviceProvider?.GetService<IVectorStore>();
@@ -53,6 +59,8 @@ public class GraphController : ControllerBase
         _serviceProvider = serviceProvider;
         _kbStorageManager = kbStorageManager ?? serviceProvider?.GetService<IKnowledgeBaseStorageManager>();
         _catalogStore = catalogStore ?? serviceProvider?.GetService<ICatalogStore>();
+        _jobCoordinator = jobCoordinator ?? serviceProvider?.GetService<KnowledgeBaseJobCoordinator>();
+        _eventPublisher = eventPublisher ?? serviceProvider?.GetService<IIndexEventPublisher>();
     }
 
     /// <summary>
@@ -91,6 +99,31 @@ public class GraphController : ControllerBase
             if (LegacyGraphUnavailable())
                 return Conflict(new { error = "词法索引模式下旧知识图谱可能过期，暂不可用" });
         }
+
+        var targetKbId = scope.Ids.FirstOrDefault() ?? "default";
+        var jobId = Guid.NewGuid().ToString("N")[..16];
+        var job = new JobDefinition(
+            Id: jobId,
+            Operation: "graph_rebuild",
+            KnowledgeBaseId: targetKbId,
+            ExpectedIndexEpoch: 1,
+            Status: JobStatus.Running,
+            Phase: OperationPhase.Scanning,
+            TotalUnits: 0,
+            ProcessedUnits: 0,
+            IdempotencyKey: $"graph:{targetKbId}:{DateTime.UtcNow.Ticks}",
+            ErrorMessage: null,
+            CreatedAt: DateTime.UtcNow,
+            FinishedAt: null
+        );
+
+        if (_catalogStore != null)
+        {
+            await _catalogStore.SaveJobAsync(job);
+        }
+
+        var cts = new CancellationTokenSource();
+        _jobCoordinator?.Register(jobId, cts);
 
         _ = Task.Run(async () =>
         {
@@ -190,6 +223,13 @@ public class GraphController : ControllerBase
                                     }
                                     await lease.Store.GraphStore.UpsertFileGraphAsync(change.SourceKey, fileNode, extraNodes, edges);
                                     rebuilt++;
+                                    if (rebuilt % 10 == 0 || rebuilt == 1)
+                                    {
+                                        job = job with { ProcessedUnits = rebuilt, TotalUnits = Math.Max(rebuilt, job.TotalUnits) };
+                                        if (_catalogStore != null) await _catalogStore.SaveJobAsync(job);
+                                        await PublishJobEventAsync("IndexProgress", jobId, rebuilt, Math.Max(rebuilt, job.TotalUnits), $"正在提取知识图谱关系 ({rebuilt})", 50);
+                                        await PublishJobEventAsync("ReindexJobProgress", jobId, rebuilt, Math.Max(rebuilt, job.TotalUnits), $"正在提取知识图谱关系 ({rebuilt})", 50);
+                                    }
                                 }
                                 catch (Exception ex)
                                 {
@@ -213,6 +253,21 @@ public class GraphController : ControllerBase
                   sw.Stop();
                   _logger.LogInformation("知识库图谱重建完成: scope={Scope}, kbs={Kbs}, rebuilt={Rebuilt}, failed={Failed}, elapsed={Elapsed}ms",
                       scope.KindText, string.Join(",", scope.Ids), rebuilt, failed, sw.ElapsedMilliseconds);
+
+                  if (cts.Token.IsCancellationRequested)
+                  {
+                      job = job with { Status = JobStatus.Cancelled, FinishedAt = DateTime.UtcNow };
+                      if (_catalogStore != null) await _catalogStore.SaveJobAsync(job);
+                      await PublishJobEventAsync("IndexCompleted", jobId, rebuilt, rebuilt, "知识图谱重建已取消", 100);
+                      await PublishJobEventAsync("ReindexJobCompleted", jobId, rebuilt, rebuilt, "知识图谱重建已取消", 100);
+                  }
+                  else
+                  {
+                      job = job with { Status = JobStatus.Succeeded, TotalUnits = rebuilt, ProcessedUnits = rebuilt, FinishedAt = DateTime.UtcNow };
+                      if (_catalogStore != null) await _catalogStore.SaveJobAsync(job);
+                      await PublishJobEventAsync("IndexCompleted", jobId, rebuilt, rebuilt, $"知识图谱重建完成（共 {rebuilt} 篇）", 100);
+                      await PublishJobEventAsync("ReindexJobCompleted", jobId, rebuilt, rebuilt, $"知识图谱重建完成（共 {rebuilt} 篇）", 100);
+                  }
                   return;
                 }
 
@@ -271,9 +326,15 @@ public class GraphController : ControllerBase
             catch (Exception ex)
             {
                 _logger.LogError(ex, "图谱重建失败");
+                job = job with { Status = JobStatus.Failed, ErrorMessage = ex.Message, FinishedAt = DateTime.UtcNow };
+                if (_catalogStore != null) await _catalogStore.SaveJobAsync(job);
+                await PublishJobEventAsync("IndexCompleted", jobId, 0, 0, $"知识图谱重建失败: {ex.Message}", 0);
+                await PublishJobEventAsync("ReindexJobCompleted", jobId, 0, 0, $"知识图谱重建失败: {ex.Message}", 0);
             }
             finally
             {
+                _jobCoordinator?.Unregister(jobId);
+                cts.Dispose();
                 foreach (var id in scope.Ids) _rebuildingByKb.TryRemove(id, out _);
                 _rebuildLock.Release();
             }
@@ -281,12 +342,38 @@ public class GraphController : ControllerBase
 
         return Accepted(new
         {
+            jobId = jobId,
             message = scope.IsAll
                 ? $"图谱重建已在后台启动（{scope.Ids.Count} 个知识库）"
                 : "图谱重建已在后台启动",
             scope = scope.KindText,
             knowledgeBaseIds = scope.Ids
         });
+    }
+
+    private async Task PublishJobEventAsync(string eventName, string jobId, int processed, int total, string message, int percent)
+    {
+        if (_eventPublisher == null) return;
+        try
+        {
+            var payload = new
+            {
+                jobId,
+                status = percent >= 100 ? "Completed" : "Running",
+                phase = "Building",
+                processedFiles = processed,
+                totalFiles = total,
+                progressPercent = percent,
+                percent = (double)percent,
+                message,
+                currentFile = message
+            };
+            await _eventPublisher.PublishAsync(eventName, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "发布图谱作业事件失败（可忽略）: {Msg}", ex.Message);
+        }
     }
 
     /// <summary>获取图谱重建状态（逐库）</summary>

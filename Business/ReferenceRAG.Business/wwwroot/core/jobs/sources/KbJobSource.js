@@ -23,6 +23,6 @@ export const KbJobSource = {
     const list = res?.data || [];
     return list
       .map(item => normalizeReindexJob(item))
-      .filter(job => job.detail.operation === 'reindex' && isActiveStatus(job.status));
+      .filter(job => isActiveStatus(job.status));
   }
 };

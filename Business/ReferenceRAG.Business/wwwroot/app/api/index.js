@@ -340,6 +340,7 @@ export const knowledgeBasesApi = {
     getDocument: (id, docId) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/documents/${encodeURIComponent(docId)}`),
     createDocument: (id, data) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/documents`, data),
     deleteDocument: (id, docId) => api.delete(`/knowledge-bases/${encodeURIComponent(id)}/documents/${encodeURIComponent(docId)}`),
+    rechunkDocument: (id, docId) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/documents/${encodeURIComponent(docId)}/rechunk`),
     getChunks: (id, params) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/chunks`, { params }),
     getChunk: (id, chunkId) => api.get(`/knowledge-bases/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}`),
     createChunk: (id, data) => api.post(`/knowledge-bases/${encodeURIComponent(id)}/chunks`, data),

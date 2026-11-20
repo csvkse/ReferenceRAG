@@ -11,6 +11,11 @@ using ReferenceRAG.Core.Features.ModelManagement.Services;
 using ReferenceRAG.Core.Services;
 using ReferenceRAG.Core.Features.ModelManagement.Adapters;
 using ReferenceRAG.Core.Models;
+using ReferenceRAG.Core.Features.DocumentExtraction.Extractors;
+using ReferenceRAG.Core.Features.DocumentExtraction.Services;
+using ReferenceRAG.Core.Features.DocumentExtraction.Strategies;
+using ReferenceRAG.Core.Helpers;
+using ReferenceRAG.Core.Services.Graph;
 
 namespace ReferenceRAG.Business.Features.KnowledgeBase.Services;
 
@@ -1026,6 +1031,222 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
 
         await using var lease = await _storageManager.AcquireLeaseAsync(knowledgeBaseId, StorageAccess.ReadWrite, ct);
         return await lease.Store.CreateDocumentAsync(targetConnectorId, finalSourceKey, title, content, spec, ct);
+    }
+
+    public async Task<RechunkDocumentResult> RechunkDocumentAsync(
+        string knowledgeBaseId,
+        string documentId,
+        CancellationToken ct = default)
+    {
+        var kb = await _catalog.GetKnowledgeBaseAsync(knowledgeBaseId, ct)
+            ?? throw new KeyNotFoundException($"知识库未找到: {knowledgeBaseId}");
+
+        await using var lease = await _storageManager.AcquireLeaseAsync(knowledgeBaseId, StorageAccess.ReadWrite, ct);
+        var doc = await lease.Store.GetDocumentByIdAsync(documentId, ct)
+            ?? throw new KeyNotFoundException($"文档未找到: {documentId}");
+
+        var specId = kb.EmbeddingSpecId ?? "default-spec";
+        var chunkSpecId = kb.ChunkingSpecId ?? "spec_chunk_default";
+        var chunkSpec = await _catalog.GetChunkingSpecAsync(chunkSpecId, ct)
+            ?? await _catalog.GetChunkingSpecAsync("spec_chunk_default", ct)
+            ?? new ChunkingSpec("spec_chunk_default");
+
+        var isPureLexical = string.Equals(specId, "spec_lexical_only", StringComparison.OrdinalIgnoreCase);
+        var enableEmbedding = _configManager?.Load().Indexing.EmbeddingEnabled ?? true;
+
+        var router = _extractorRouter ?? DocumentExtractorRouter.CreateDefault(
+            _loggerFactory?.CreateLogger<DocumentExtractorRouter>(),
+            _loggerFactory?.CreateLogger<PdfPigDocumentExtractor>(),
+            _loggerFactory?.CreateLogger<GracefulDegradeScannedStrategy>());
+
+        // 1. 获取文档内容
+        string? textContent = null;
+
+        if (doc.Locator?.StartsWith("manual://", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            var (existingChunks, _) = await lease.Store.GetChunksAsync(documentId: doc.Id, pageSize: 10000, ct: ct);
+            if (existingChunks.Count > 0)
+            {
+                textContent = string.Join("\n\n", existingChunks.OrderBy(c => c.Ordinal).Select(c => c.Text));
+            }
+            else
+            {
+                textContent = string.Empty;
+            }
+        }
+        else
+        {
+            // 物理文件路径寻址
+            string? filePath = doc.Locator;
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+            {
+                var connectors = await _catalog.GetConnectorsByKnowledgeBaseAsync(knowledgeBaseId, ct);
+                var connDef = connectors.FirstOrDefault(c => c.Id == doc.ConnectorId);
+                if (connDef != null && !string.IsNullOrEmpty(connDef.TargetPath))
+                {
+                    var candidate = Path.Combine(connDef.TargetPath, doc.SourceKey.Replace('/', Path.DirectorySeparatorChar));
+                    if (File.Exists(candidate)) filePath = candidate;
+                }
+            }
+
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+            {
+                throw new FileNotFoundException($"无法重新切片：文档物理源文件不存在 [{doc.Locator ?? doc.SourceKey}]", filePath);
+            }
+
+            await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var extractResult = await router.ExtractAsync(stream, doc.SourceKey, ct);
+
+            if (extractResult.Status != DocumentParseStatus.Success)
+            {
+                _logger?.LogInformation("[KnowledgeBaseService] 文档重新切片被解析门禁标记为 [{Status}]: {Key}, 诊断: {Diag}",
+                    extractResult.Status, doc.SourceKey, extractResult.DiagnosticMessage);
+
+                // 门禁判定非普通文本（如扫描件需 OCR），原子化提交空批次清除全部历史噪音切片与向量
+                if (!enableEmbedding || isPureLexical)
+                    await lease.Store.EnsureLexicalIndexAsync(ct);
+
+                var emptyBatch = new IndexBatch(
+                    KnowledgeBaseId: knowledgeBaseId,
+                    ExpectedIndexEpoch: lease.IndexEpochSnapshot,
+                    ExpectedDocumentVersion: 0,
+                    ConnectorId: doc.ConnectorId,
+                    SourceKey: doc.SourceKey,
+                    Locator: doc.Locator ?? filePath,
+                    SourceRevision: doc.SourceRevision,
+                    ContentHash: KnowledgeBaseSyncWorker.ComputeSha256(doc.SourceKey + ":" + extractResult.Status),
+                    Chunks: Array.Empty<ChunkData>(),
+                    Vectors: null,
+                    ProducerCohort: specId
+                );
+
+                await lease.Store.CommitDocumentAsync(emptyBatch, ct);
+                await lease.Store.GraphStore.DeleteNodeAsync(doc.SourceKey, ct);
+
+                return new RechunkDocumentResult(
+                    DocumentId: doc.Id,
+                    SourceKey: doc.SourceKey,
+                    ChunkCount: 0,
+                    DocumentVersion: doc.DocumentVersion + 1,
+                    Status: extractResult.Status.ToString(),
+                    Message: $"文档被标记为 [{extractResult.Status}]，已彻底清理历史残留乱码切片: {extractResult.DiagnosticMessage}"
+                );
+            }
+
+            textContent = extractResult.ExtractedText;
+        }
+
+        // 2. 切分并过滤噪声
+        var rawChunks = KnowledgeBaseSyncWorker.ChunkTextWithSpec(textContent, chunkSpec, _markdownChunker);
+        var sanitizedChunks = new List<ChunkData>(rawChunks.Count);
+        foreach (var c in rawChunks)
+        {
+            if (!NoiseChunkDetector.IsCorruptedOrPdfSyntaxNoise(c.Text))
+            {
+                sanitizedChunks.Add(c);
+            }
+            else
+            {
+                _logger?.LogWarning("[KnowledgeBaseService] 重新切片过滤了噪音切片: {Key}#chunk{Ord}", doc.SourceKey, c.Ordinal);
+            }
+        }
+
+        // 3. 计算向量（若启用且非纯词法）
+        List<float[]>? vectors = null;
+        if (enableEmbedding && !isPureLexical && _modelRouter != null && sanitizedChunks.Count > 0)
+        {
+            try
+            {
+                await using var modelLease = await _modelRouter.AcquireLeaseAsync<IEmbeddingBackendAdapter>(
+                    new ModelSelection(specId, "embedding"),
+                    new WorkloadContext($"rechunk_{doc.Id}", Priority: 1),
+                    ct);
+                var texts = sanitizedChunks.Select(c => c.EmbeddingText ?? c.Text).ToList();
+                var rawVectors = await modelLease.Client.EncodeBatchAsync(texts, null, ct);
+                vectors = rawVectors.ToList();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "[KnowledgeBaseService] 重新切片向量提取异常，降级为词法索引: {Msg}", ex.Message);
+            }
+        }
+
+        // 4. 原子提交更新
+        if (!enableEmbedding || isPureLexical)
+            await lease.Store.EnsureLexicalIndexAsync(ct);
+
+        var batch = new IndexBatch(
+            KnowledgeBaseId: knowledgeBaseId,
+            ExpectedIndexEpoch: lease.IndexEpochSnapshot,
+            ExpectedDocumentVersion: 0,
+            ConnectorId: doc.ConnectorId,
+            SourceKey: doc.SourceKey,
+            Locator: doc.Locator,
+            SourceRevision: doc.SourceRevision,
+            ContentHash: KnowledgeBaseSyncWorker.ComputeSha256(textContent),
+            Chunks: sanitizedChunks,
+            Vectors: vectors,
+            ProducerCohort: specId
+        );
+
+        var commitResult = await lease.Store.CommitDocumentAsync(batch, ct);
+        if (!commitResult.Success)
+        {
+            throw new InvalidOperationException($"重新切片提交失败: {commitResult.ErrorMessage}");
+        }
+
+        // 5. 更新图谱节点
+        try
+        {
+            var graphLinks = new WikiLinkExtractor().Extract(textContent);
+            var fileNode = new GraphNode
+            {
+                Id = doc.SourceKey,
+                Title = Path.GetFileNameWithoutExtension(doc.SourceKey),
+                Type = "document",
+                ChunkIds = sanitizedChunks.Select(c => c.ChunkId).ToList()
+            };
+            var extraNodes = new List<GraphNode>();
+            var edges = new List<GraphEdge>();
+            foreach (var (target, heading, type, line) in graphLinks)
+            {
+                var targetId = target;
+                if (!string.IsNullOrEmpty(heading))
+                {
+                    targetId = $"{target}#{heading}";
+                    extraNodes.Add(new GraphNode { Id = targetId, Title = heading, Type = "heading" });
+                }
+                else if (type == "tag")
+                {
+                    targetId = $"#{target}";
+                    extraNodes.Add(new GraphNode { Id = targetId, Title = target, Type = "tag" });
+                }
+                edges.Add(new GraphEdge
+                {
+                    FromId = doc.SourceKey,
+                    ToId = targetId,
+                    Type = type,
+                    LineNumber = line
+                });
+            }
+            await lease.Store.GraphStore.UpsertFileGraphAsync(doc.SourceKey, fileNode, extraNodes, edges, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "更新图谱节点失败（忽略）: {Msg}", ex.Message);
+        }
+
+        _logger?.LogInformation("[KnowledgeBaseService] 单文档重新切片成功: {DocId} ({Key}), 生成 {Count} 个切片",
+            doc.Id, doc.SourceKey, sanitizedChunks.Count);
+
+        return new RechunkDocumentResult(
+            DocumentId: doc.Id,
+            SourceKey: doc.SourceKey,
+            ChunkCount: sanitizedChunks.Count,
+            DocumentVersion: doc.DocumentVersion + 1,
+            Status: "Success",
+            Message: $"文档重新切片完成，成功生成 {sanitizedChunks.Count} 个切片"
+        );
     }
 
     // ==================== 切片增删改查实现 (HITL) ====================

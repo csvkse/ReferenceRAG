@@ -1149,6 +1149,30 @@ const component = /*@__PURE__*/ _defineComponent({
             });
         };
 
+        const rechunkingDocId = ref(null);
+        const handleRechunkDoc = (doc) => {
+            dialog.warning({
+                title: '确认重新切片',
+                content: `确定要对文档「${doc.sourceKey}」重新切片吗？系统将按照当前知识库配置重新解析并生成切片与向量，历史异常或乱码切片将被彻底覆盖清除。`,
+                positiveText: '确认重新切片',
+                negativeText: '取消',
+                onPositiveClick: async () => {
+                    rechunkingDocId.value = doc.id;
+                    try {
+                        const res = await knowledgeBasesApi.rechunkDocument(explorerKb.value.id, doc.id);
+                        const info = res.data;
+                        message.success(info.message || `文档重新切片完成，生成 ${info.chunkCount} 个切片`);
+                        await loadExplorerDocuments();
+                        await loadExplorerChunks();
+                    } catch (err) {
+                        message.error('重新切片失败: ' + (err.response?.data?.message || err.response?.data?.error || err.message));
+                    } finally {
+                        rechunkingDocId.value = null;
+                    }
+                }
+            });
+        };
+
         const handleToggleChunk = async (chunk, enabled) => {
             try {
                 await knowledgeBasesApi.toggleChunk(explorerKb.value.id, chunk.id, enabled);
@@ -1297,6 +1321,7 @@ const component = /*@__PURE__*/ _defineComponent({
             
 
             router, message, dialog, loading, knowledgeBases, connectorsMap, embeddingSpecs, localSpecs, onlineSpecs, goToModelManagement, resetCreateForm,
+            rechunkingDocId, handleRechunkDoc,
             bindingModeOptions, specById, kbModelLabel, kbModelHint, defaultTemplateModelLabel,
             chunkingSpecLabel, chunkingSpecHint, currentGlobalModel, loadCurrentGlobalModel,
             showCreateModal, creating, fetchingModels, probingDimension, remoteModelOptions, createForm,
@@ -1962,6 +1987,9 @@ component.template = `
                           <n-space size="small">
                             <n-button size="small" secondary type="primary" @click="filterChunksByDoc(doc)">
                               查看切片
+                            </n-button>
+                            <n-button size="small" quaternary type="warning" :loading="rechunkingDocId === doc.id" @click="handleRechunkDoc(doc)">
+                              重新切片
                             </n-button>
                             <n-button size="small" quaternary type="error" @click="handleDeleteDoc(doc)">
                               删除文档

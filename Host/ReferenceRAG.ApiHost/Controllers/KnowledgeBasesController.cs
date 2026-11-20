@@ -644,6 +644,27 @@ public class KnowledgeBasesController : ControllerBase
         return NoContent();
     }
 
+    [HttpPost("{id}/documents/{docId}/rechunk")]
+    public async Task<ActionResult<RechunkDocumentResult>> RechunkDocument(
+        string id,
+        string docId,
+        CancellationToken ct)
+    {
+        try
+        {
+            var result = await _kbService.RechunkDocumentAsync(id, docId, ct);
+            return Ok(result);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (FileNotFoundException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
     [HttpPost("{id}/documents")]
     public async Task<ActionResult<KnowledgeBaseDocumentRecord>> CreateDocument(
         string id,
@@ -964,6 +985,29 @@ public class JobsController : ControllerBase
     {
         var list = await _kbService.ListJobsAsync(knowledgeBaseId, ct);
         return Ok(list);
+    }
+
+    [HttpGet("active")]
+    public async Task<ActionResult<IReadOnlyList<JobDefinition>>> GetActiveJobs(
+        [FromQuery] string? knowledgeBaseId,
+        CancellationToken ct)
+    {
+        var list = await _kbService.ListJobsAsync(knowledgeBaseId, ct);
+        var active = list.Where(j => j.Status is JobStatus.Queued or JobStatus.Running or JobStatus.WaitingForInput or JobStatus.Cancelling).ToList();
+        return Ok(active);
+    }
+
+    [HttpGet("history")]
+    public async Task<ActionResult<IReadOnlyList<JobDefinition>>> GetJobHistory(
+        [FromQuery] string? knowledgeBaseId,
+        CancellationToken ct)
+    {
+        var list = await _kbService.ListJobsAsync(knowledgeBaseId, ct);
+        var history = list.Where(j => j.Status is JobStatus.Succeeded or JobStatus.PartiallySucceeded or JobStatus.Failed or JobStatus.Cancelled)
+            .OrderByDescending(j => j.FinishedAt ?? j.CreatedAt)
+            .Take(50)
+            .ToList();
+        return Ok(history);
     }
 
     [HttpPost("{id}/cancel")]
