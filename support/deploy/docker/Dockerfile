@@ -64,6 +64,7 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 ENV DataPath=/app/data
 ENV LogsPath=/app/logs
 ENV DOTNET_RUNNING_IN_CONTAINER=true
+ENV DOTNET_USE_POLLING_FILE_WATCHER=true
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV LD_LIBRARY_PATH="/app:/app/runtimes/linux-x64/native:/app/runtimes/linux-x64/native/vulkan:${LD_LIBRARY_PATH}"

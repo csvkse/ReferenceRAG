@@ -704,6 +704,7 @@ docker run -d \
   -e ReferenceRAG__Service__port=5000 \
   -e ReferenceRAG__Service__host=0.0.0.0 \
   -e SwaggerEnabled=true \
+  -e DOTNET_USE_POLLING_FILE_WATCHER=true \
   $masterKeyEnv \
   -v ${remoteDataDir}:/app/data \
   -v ${remoteModelsDir}:/app/models \

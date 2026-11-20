@@ -1061,6 +1061,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
 
         // 1. 获取文档内容
         string? textContent = null;
+        string? filePath = null;
 
         if (doc.Locator?.StartsWith("manual://", StringComparison.OrdinalIgnoreCase) == true)
         {
@@ -1077,7 +1078,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         else
         {
             // 物理文件路径寻址
-            string? filePath = doc.Locator;
+            filePath = doc.Locator;
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
             {
                 var connectors = await _catalog.GetConnectorsByKnowledgeBaseAsync(knowledgeBaseId, ct);
@@ -1086,6 +1087,49 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
                 {
                     var candidate = Path.Combine(connDef.TargetPath, doc.SourceKey.Replace('/', Path.DirectorySeparatorChar));
                     if (File.Exists(candidate)) filePath = candidate;
+                }
+
+                // 2. 遍历该知识库下所有连接器候选根目录
+                if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+                {
+                    foreach (var conn in connectors)
+                    {
+                        if (string.IsNullOrEmpty(conn.TargetPath)) continue;
+                        var candidate = Path.Combine(conn.TargetPath, doc.SourceKey.Replace('/', Path.DirectorySeparatorChar));
+                        if (File.Exists(candidate))
+                        {
+                            filePath = candidate;
+                            break;
+                        }
+                    }
+                }
+
+                // 3. 容错探测：若连接器物理根目录曾发生层级调整（例如上移包含子文件夹 Note/ 等）
+                if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+                {
+                    var targetConns = connDef != null ? new[] { connDef } : connectors.ToArray();
+                    foreach (var conn in targetConns)
+                    {
+                        if (string.IsNullOrEmpty(conn.TargetPath) || !Directory.Exists(conn.TargetPath)) continue;
+                        try
+                        {
+                            var subDirs = Directory.GetDirectories(conn.TargetPath);
+                            foreach (var sub in subDirs)
+                            {
+                                var candidate = Path.Combine(sub, doc.SourceKey.Replace('/', Path.DirectorySeparatorChar));
+                                if (File.Exists(candidate))
+                                {
+                                    filePath = candidate;
+                                    break;
+                                }
+                            }
+                            if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath)) break;
+                        }
+                        catch
+                        {
+                            // 忽略文件系统遍历异常
+                        }
+                    }
                 }
             }
 
@@ -1112,7 +1156,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
                     ExpectedDocumentVersion: 0,
                     ConnectorId: doc.ConnectorId,
                     SourceKey: doc.SourceKey,
-                    Locator: doc.Locator ?? filePath,
+                    Locator: filePath ?? doc.Locator,
                     SourceRevision: doc.SourceRevision,
                     ContentHash: KnowledgeBaseSyncWorker.ComputeSha256(doc.SourceKey + ":" + extractResult.Status),
                     Chunks: Array.Empty<ChunkData>(),
@@ -1181,7 +1225,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
             ExpectedDocumentVersion: 0,
             ConnectorId: doc.ConnectorId,
             SourceKey: doc.SourceKey,
-            Locator: doc.Locator,
+            Locator: filePath ?? doc.Locator,
             SourceRevision: doc.SourceRevision,
             ContentHash: KnowledgeBaseSyncWorker.ComputeSha256(textContent),
             Chunks: sanitizedChunks,
