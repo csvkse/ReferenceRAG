@@ -7,7 +7,7 @@ using UglyToad.PdfPig;
 namespace ReferenceRAG.Core.Features.DocumentExtraction.Strategies;
 
 /// <summary>
-/// 扫描版 PDF 优雅降级策略（阶段一）
+/// 扫描版 PDF 优雅降级策略（默认策略）
 /// 识别无数字文本层的扫描图书或纯图片 PDF，优雅跳过并生成可诊断状态，绝不向向量库或词法库灌入垃圾切片
 /// </summary>
 public sealed class GracefulDegradeScannedStrategy : IScannedPdfHandlingStrategy
@@ -19,7 +19,11 @@ public sealed class GracefulDegradeScannedStrategy : IScannedPdfHandlingStrategy
         _logger = logger;
     }
 
-    public Task<DocumentExtractResult> HandleAsync(PdfDocument document, string sourceKey, CancellationToken ct = default)
+    public Task<DocumentExtractResult> HandleAsync(
+        PdfDocument document,
+        string sourceKey,
+        DocumentExtractionOptions? options = null,
+        CancellationToken ct = default)
     {
         _logger?.LogWarning("[PdfParser] 文档判定为扫描版/纯图片PDF，当前未开启OCR引擎，执行安全跳过: {Key}", sourceKey);
 

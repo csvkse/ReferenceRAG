@@ -1078,6 +1078,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
     public async Task<RechunkDocumentResult> RechunkDocumentAsync(
         string knowledgeBaseId,
         string documentId,
+        bool enableOcr = false,
         CancellationToken ct = default)
     {
         var kb = await _catalog.GetKnowledgeBaseAsync(knowledgeBaseId, ct)
@@ -1181,7 +1182,9 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
             }
 
             await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var extractResult = await router.ExtractAsync(stream, doc.SourceKey, ct);
+            var extractResult = enableOcr
+                ? await router.ExtractAsync(stream, doc.SourceKey, DocumentExtractionOptions.WithOcr(), ct)
+                : await router.ExtractAsync(stream, doc.SourceKey, ct);
 
             if (extractResult.Status != DocumentParseStatus.Success)
             {

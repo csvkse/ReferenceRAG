@@ -77,7 +77,14 @@ public sealed class DocumentExtractorRouter : IDocumentExtractorRouter
         return new UnsupportedBinaryDocumentExtractor();
     }
 
-    public async Task<DocumentExtractResult> ExtractAsync(Stream stream, string sourceKey, CancellationToken ct = default)
+    public Task<DocumentExtractResult> ExtractAsync(Stream stream, string sourceKey, CancellationToken ct = default)
+        => ExtractAsync(stream, sourceKey, null, ct);
+
+    public async Task<DocumentExtractResult> ExtractAsync(
+        Stream stream,
+        string sourceKey,
+        DocumentExtractionOptions? options,
+        CancellationToken ct = default)
     {
         string extension = Path.GetExtension(sourceKey) ?? string.Empty;
         byte[] header = new byte[512];
@@ -94,7 +101,7 @@ public sealed class DocumentExtractorRouter : IDocumentExtractorRouter
             var ms = new MemoryStream();
             await stream.CopyToAsync(ms, ct);
             ms.Position = 0;
-            return await ExtractAsync(ms, sourceKey, ct);
+            return await ExtractAsync(ms, sourceKey, options, ct);
         }
 
         ReadOnlySpan<byte> headerSpan = header.AsSpan(0, read);
@@ -104,7 +111,7 @@ public sealed class DocumentExtractorRouter : IDocumentExtractorRouter
             if (extractor.CanHandle(extension, headerSpan))
             {
                 _logger?.LogDebug("[DocumentExtractorRouter] 命中抽取器 [{Extractor}] 负责处理: {Key}", extractor.GetType().Name, sourceKey);
-                return await extractor.ExtractAsync(stream, sourceKey, ct);
+                return await extractor.ExtractAsync(stream, sourceKey, options, ct);
             }
         }
 

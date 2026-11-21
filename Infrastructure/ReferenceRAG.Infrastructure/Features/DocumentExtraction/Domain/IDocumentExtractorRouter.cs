@@ -16,7 +16,19 @@ public interface IDocumentExtractorRouter
     IDocumentContentExtractor Route(string sourceKey, Stream stream);
 
     /// <summary>
-    /// 直接从流中安全提取文档内容
+    /// 直接从流中安全提取文档内容（默认选项）
     /// </summary>
-    Task<DocumentExtractResult> ExtractAsync(Stream stream, string sourceKey, CancellationToken ct = default);
+    Task<DocumentExtractResult> ExtractAsync(
+        Stream stream,
+        string sourceKey,
+        CancellationToken ct = default) => ExtractAsync(stream, sourceKey, null, ct);
+
+    /// <summary>
+    /// 直接从流中安全提取文档内容（自定义选项）
+    /// </summary>
+    Task<DocumentExtractResult> ExtractAsync(
+        Stream stream,
+        string sourceKey,
+        DocumentExtractionOptions? options,
+        CancellationToken ct = default);
 }

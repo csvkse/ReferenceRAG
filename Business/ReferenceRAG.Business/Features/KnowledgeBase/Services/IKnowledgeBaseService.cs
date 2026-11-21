@@ -156,11 +156,12 @@ public interface IKnowledgeBaseService
         CancellationToken ct = default);
 
     /// <summary>
-    /// 对单篇文档执行重新切片与重索引（支持覆盖清除历史异常切片与向量）
+    /// 对单篇文档执行重新切片与重索引（支持覆盖清除历史异常切片与向量，支持按需开启端侧 OCR 识别）
     /// </summary>
     Task<RechunkDocumentResult> RechunkDocumentAsync(
         string knowledgeBaseId,
         string documentId,
+        bool enableOcr = false,
         CancellationToken ct = default);
 
     // ==================== 切片增删改查 (HITL) ====================

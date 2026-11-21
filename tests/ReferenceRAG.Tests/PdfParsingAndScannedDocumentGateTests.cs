@@ -370,9 +370,16 @@ public class PdfParsingAndScannedDocumentGateTests : IDisposable
 
         byte[] scannedPdfBytes = CreateScannedPdfBytes();
         using var ms = new MemoryStream(scannedPdfBytes);
-        var result = await extractor.ExtractAsync(ms, "scanned_with_ocr.pdf");
 
-        // 验证当 OCR 引擎可用时，扫描件成功提取出文字并标记为 Success
+        // 默认不开启 OCR：极速跳过返回 ScannedRequiresOcr，保护全库同步吞吐
+        var defaultResult = await extractor.ExtractAsync(ms, "scanned_with_ocr.pdf", DocumentExtractionOptions.Default);
+        Assert.Equal(DocumentParseStatus.ScannedRequiresOcr, defaultResult.Status);
+        Assert.True(defaultResult.IsScannedPdf);
+
+        // 显式开启按需 OCR：成功提取出文字并标记为 Success
+        ms.Position = 0;
+        var result = await extractor.ExtractAsync(ms, "scanned_with_ocr.pdf", DocumentExtractionOptions.WithOcr());
+
         Assert.Equal(DocumentParseStatus.Success, result.Status);
         Assert.True(result.IsScannedPdf);
         Assert.Contains("识别出的扫描件图书文字内容", result.ExtractedText);
@@ -393,6 +400,7 @@ public class PdfParsingAndScannedDocumentGateTests : IDisposable
         private readonly string _mockText;
         public MockOcrEngine(string mockText) => _mockText = mockText;
         public bool IsAvailable => true;
+        public string EngineName => "MockPP-OCRv4";
         public Task<OcrRecognitionResult> RecognizeImageAsync(ReadOnlyMemory<byte> imageBytes, CancellationToken ct = default)
         {
             return Task.FromResult(new OcrRecognitionResult(_mockText, 0.99f, "MockPP-OCRv4"));

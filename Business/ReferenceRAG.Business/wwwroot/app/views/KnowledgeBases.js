@@ -1150,6 +1150,37 @@ const component = /*@__PURE__*/ _defineComponent({
         };
 
         const rechunkingDocId = ref(null);
+        const ocrDocId = ref(null);
+        const handleOcrDoc = (doc) => {
+            dialog.info({
+                title: '确认启动端侧 OCR 识别',
+                content: `确定要对扫描文档「${doc.sourceKey}」启动端侧 OCR 识别吗？系统将逐页转录图像为 Markdown 文本，并重新生成切片与语义索引。`,
+                positiveText: '开始识别',
+                negativeText: '取消',
+                onPositiveClick: async () => {
+                    ocrDocId.value = doc.id;
+                    try {
+                        const res = await knowledgeBasesApi.ocrDocument(explorerKb.value.id, doc.id);
+                        const info = res.data;
+                        if (info.status === 'ScannedRequiresOcr') {
+                            message.warning(info.message || '系统尚未装配 OCR 推理模型或多模态服务，暂无法执行图像识别');
+                        } else if (info.status === 'ExtractionFailed') {
+                            message.error(info.message || 'OCR 识别执行失败');
+                        } else if (info.status === 'EmptyDocument') {
+                            message.info(info.message || 'OCR 识别完毕，但图像中未识别出有效文本');
+                        } else {
+                            message.success(info.message || `OCR 识别与重新切片完成，生成 ${info.chunkCount} 个切片`);
+                        }
+                        await loadExplorerDocuments();
+                        await loadExplorerChunks();
+                    } catch (err) {
+                        message.error('OCR 识别失败: ' + (err.response?.data?.message || err.response?.data?.error || err.message));
+                    } finally {
+                        ocrDocId.value = null;
+                    }
+                }
+            });
+        };
         const handleRechunkDoc = (doc) => {
             dialog.warning({
                 title: '确认重新切片',
@@ -1332,6 +1363,7 @@ const component = /*@__PURE__*/ _defineComponent({
 
             router, message, dialog, loading, knowledgeBases, connectorsMap, embeddingSpecs, localSpecs, onlineSpecs, goToModelManagement, resetCreateForm,
             rechunkingDocId, handleRechunkDoc,
+            ocrDocId, handleOcrDoc,
             bindingModeOptions, specById, kbModelLabel, kbModelHint, defaultTemplateModelLabel,
             chunkingSpecLabel, chunkingSpecHint, currentGlobalModel, loadCurrentGlobalModel,
             showCreateModal, creating, fetchingModels, probingDimension, remoteModelOptions, createForm,
@@ -1987,7 +2019,7 @@ component.template = `
                     <n-thing :title="doc.sourceKey" :description="'ID: ' + doc.id">
                       <template #header-extra>
                         <n-space align="center">
-                          <n-tooltip v-if="doc.chunkCount === 0 && doc.parseStatus === 'ScannedRequiresOcr'" trigger="hover">
+                          <n-tooltip v-if="doc.chunkCount === 0 && (doc.parseStatus === 'ScannedRequiresOcr' || (doc.sourceKey && doc.sourceKey.toLowerCase().endsWith('.pdf')))" trigger="hover">
                             <template #trigger>
                               <n-tag size="small" type="warning">扫描件 (需OCR)</n-tag>
                             </template>
@@ -2021,6 +2053,9 @@ component.template = `
                           <n-space size="small">
                             <n-button size="small" secondary type="primary" @click="filterChunksByDoc(doc)">
                               查看切片
+                            </n-button>
+                            <n-button v-if="doc.sourceKey && doc.sourceKey.toLowerCase().endsWith('.pdf')" size="small" quaternary type="info" :loading="ocrDocId === doc.id" @click="handleOcrDoc(doc)">
+                              OCR识别
                             </n-button>
                             <n-button size="small" quaternary type="warning" :loading="rechunkingDocId === doc.id" @click="handleRechunkDoc(doc)">
                               重新切片

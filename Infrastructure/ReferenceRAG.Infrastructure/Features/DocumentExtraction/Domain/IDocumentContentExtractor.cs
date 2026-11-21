@@ -19,5 +19,9 @@ public interface IDocumentContentExtractor
     /// <summary>
     /// 从文件流中提取文本内容
     /// </summary>
-    Task<DocumentExtractResult> ExtractAsync(Stream stream, string sourceKey, CancellationToken ct = default);
+    Task<DocumentExtractResult> ExtractAsync(
+        Stream stream,
+        string sourceKey,
+        DocumentExtractionOptions? options = null,
+        CancellationToken ct = default);
 }

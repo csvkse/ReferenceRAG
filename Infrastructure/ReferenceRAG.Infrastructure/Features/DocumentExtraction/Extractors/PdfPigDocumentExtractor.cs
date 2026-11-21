@@ -35,7 +35,11 @@ public sealed class PdfPigDocumentExtractor : IDocumentContentExtractor
         return string.Equals(extension, ".pdf", StringComparison.OrdinalIgnoreCase);
     }
 
-    public async Task<DocumentExtractResult> ExtractAsync(Stream stream, string sourceKey, CancellationToken ct = default)
+    public async Task<DocumentExtractResult> ExtractAsync(
+        Stream stream,
+        string sourceKey,
+        DocumentExtractionOptions? options = null,
+        CancellationToken ct = default)
     {
         try
         {
@@ -124,7 +128,7 @@ public sealed class PdfPigDocumentExtractor : IDocumentContentExtractor
             {
                 _logger?.LogInformation("[PdfPigDocumentExtractor] 判定为扫描版 PDF: {Key}, 总页数={Pages}, 总字数={Letters}, 含图页数={Images}",
                     sourceKey, pageCount, totalLetters, pagesWithImages);
-                return await _scannedStrategy.HandleAsync(document, sourceKey, ct);
+                return await _scannedStrategy.HandleAsync(document, sourceKey, options, ct);
             }
 
             string extractedText = sb.ToString();

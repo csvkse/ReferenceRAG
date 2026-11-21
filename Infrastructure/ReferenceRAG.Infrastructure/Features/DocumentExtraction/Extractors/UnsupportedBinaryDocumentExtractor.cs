@@ -16,7 +16,11 @@ public sealed class UnsupportedBinaryDocumentExtractor : IDocumentContentExtract
     public bool CanHandle(string extension, ReadOnlySpan<byte> magicHeader) =>
         BinaryMagicGuard.IsKnownBinary(magicHeader);
 
-    public Task<DocumentExtractResult> ExtractAsync(Stream stream, string sourceKey, CancellationToken ct = default)
+    public Task<DocumentExtractResult> ExtractAsync(
+        Stream stream,
+        string sourceKey,
+        DocumentExtractionOptions? options = null,
+        CancellationToken ct = default)
     {
         return Task.FromResult(new DocumentExtractResult(
             Status: DocumentParseStatus.UnsupportedBinary,

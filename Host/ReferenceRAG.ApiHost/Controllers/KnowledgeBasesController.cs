@@ -652,11 +652,33 @@ public class KnowledgeBasesController : ControllerBase
     public async Task<ActionResult<RechunkDocumentResult>> RechunkDocument(
         string id,
         string docId,
-        CancellationToken ct)
+        [FromQuery] bool enableOcr = false,
+        CancellationToken ct = default)
     {
         try
         {
-            var result = await _kbService.RechunkDocumentAsync(id, docId, ct);
+            var result = await _kbService.RechunkDocumentAsync(id, docId, enableOcr, ct);
+            return Ok(result);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (FileNotFoundException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpPost("{id}/documents/{docId}/ocr")]
+    public async Task<ActionResult<RechunkDocumentResult>> OcrDocument(
+        string id,
+        string docId,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var result = await _kbService.RechunkDocumentAsync(id, docId, enableOcr: true, ct);
             return Ok(result);
         }
         catch (KeyNotFoundException ex)

@@ -13,8 +13,20 @@ public sealed record OcrRecognitionResult(
     string? ModelName = null);
 
 /// <summary>
-/// 端侧 OCR 推理引擎契约（可拔插适配器模式）
-/// 预留给 RapidOCR / PaddleOCR.NET 或本地 VLM / 多模态推理
+/// OCR 识别细粒度进度报告
+/// </summary>
+public sealed record OcrProgressInfo(
+    int CurrentPage,
+    int TotalPages,
+    string StatusMessage,
+    int ExtractedChars = 0)
+{
+    public double ProgressPercentage => TotalPages > 0 ? Math.Round((double)CurrentPage / TotalPages * 100.0, 1) : 0;
+}
+
+/// <summary>
+/// 端侧与云端 OCR 推理引擎契约（可拔插适配器模式）
+/// 抹平 RapidOCR / PaddleOCR.NET、Windows 原生 OCR 或外部多模态 VLM 推理
 /// </summary>
 public interface IOcrInferenceEngine
 {
@@ -22,6 +34,11 @@ public interface IOcrInferenceEngine
     /// 当前 OCR 引擎模型与运行环境是否就绪
     /// </summary>
     bool IsAvailable { get; }
+
+    /// <summary>
+    /// OCR 引擎标识名称
+    /// </summary>
+    string EngineName { get; }
 
     /// <summary>
     /// 对图像字节执行文字识别

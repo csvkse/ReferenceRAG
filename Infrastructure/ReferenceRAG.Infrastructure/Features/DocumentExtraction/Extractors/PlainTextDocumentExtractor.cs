@@ -28,7 +28,11 @@ public sealed class PlainTextDocumentExtractor : IDocumentContentExtractor
         return SupportedExtensions.Contains(extension);
     }
 
-    public async Task<DocumentExtractResult> ExtractAsync(Stream stream, string sourceKey, CancellationToken ct = default)
+    public async Task<DocumentExtractResult> ExtractAsync(
+        Stream stream,
+        string sourceKey,
+        DocumentExtractionOptions? options = null,
+        CancellationToken ct = default)
     {
         using var ms = new MemoryStream();
         await stream.CopyToAsync(ms, ct);
