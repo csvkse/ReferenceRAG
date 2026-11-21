@@ -45,6 +45,8 @@ param(
 
     [switch]$SkipBuild,
 
+    [switch]$SyncOnly,
+
     [switch]$NoHealthCheck,
 
     [string]$Image = "",
@@ -484,6 +486,11 @@ try {
         }
         finally {
             if (Test-Path $localBundle) { Remove-Item $localBundle -Force -ErrorAction SilentlyContinue }
+        }
+
+        if ($SyncOnly) {
+            Write-Success "SyncOnly requested. Workspace successfully synchronized to $remoteWorkdir."
+            return
         }
 
         # ----------------------------------------------------------------------
