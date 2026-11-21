@@ -28,5 +28,10 @@ public enum DocumentParseStatus
     /// <summary>
     /// 解析器发生未知异常或格式损坏
     /// </summary>
-    ExtractionFailed
+    ExtractionFailed,
+
+    /// <summary>
+    /// 切片未通过质量门禁（切片包含过多底层语法噪音或乱码）
+    /// </summary>
+    QualityRejected
 }

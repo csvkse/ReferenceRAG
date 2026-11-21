@@ -1188,7 +1188,22 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
                 _logger?.LogInformation("[KnowledgeBaseService] 文档重新切片被解析门禁标记为 [{Status}]: {Key}, 诊断: {Diag}",
                     extractResult.Status, doc.SourceKey, extractResult.DiagnosticMessage);
 
-                // 门禁判定非普通文本（如扫描件需 OCR），原子化提交空批次清除全部历史噪音切片与向量
+                // 核心故障隔离门禁 (G-PDF-FAILSAFE-01)：
+                // 仅当确定物理文件无文本层（如纯图片扫描件、空文档、不支持二进制）时，才允许原子化清洗历史切片；
+                // 若为 ExtractionFailed（如解析器内部异常、I/O超时），必须严格保留旧切片，拒绝误删历史有效内容！
+                if (extractResult.Status == DocumentParseStatus.ExtractionFailed)
+                {
+                    return new RechunkDocumentResult(
+                        DocumentId: doc.Id,
+                        SourceKey: doc.SourceKey,
+                        ChunkCount: doc.ChunkCount,
+                        DocumentVersion: doc.DocumentVersion,
+                        Status: extractResult.Status.ToString(),
+                        Message: $"重新切片解析失败，已安全保留旧版本与切片: {extractResult.DiagnosticMessage}"
+                    );
+                }
+
+                // 确定是扫描件/空文档/不支持二进制，原子化提交空批次清除历史乱码切片，并持久化状态与诊断信息
                 if (!enableEmbedding || isPureLexical)
                     await lease.Store.EnsureLexicalIndexAsync(ct);
 
@@ -1200,20 +1215,27 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
                     SourceKey: doc.SourceKey,
                     Locator: filePath ?? doc.Locator,
                     SourceRevision: doc.SourceRevision,
-                    ContentHash: KnowledgeBaseSyncWorker.ComputeSha256(doc.SourceKey + ":" + extractResult.Status),
+                    ContentHash: KnowledgeBaseSyncWorker.ComputeSha256(filePath ?? doc.SourceKey),
                     Chunks: Array.Empty<ChunkData>(),
                     Vectors: null,
-                    ProducerCohort: specId
+                    ProducerCohort: specId,
+                    ParseStatus: extractResult.Status.ToString(),
+                    DiagnosticMessage: extractResult.DiagnosticMessage
                 );
 
-                await lease.Store.CommitDocumentAsync(emptyBatch, ct);
+                var emptyCommitResult = await lease.Store.CommitDocumentAsync(emptyBatch, ct);
+                if (!emptyCommitResult.Success)
+                {
+                    throw new InvalidOperationException($"清洗历史切片提交失败: {emptyCommitResult.ErrorMessage}");
+                }
+
                 await lease.Store.GraphStore.DeleteNodeAsync(doc.SourceKey, ct);
 
                 return new RechunkDocumentResult(
                     DocumentId: doc.Id,
                     SourceKey: doc.SourceKey,
                     ChunkCount: 0,
-                    DocumentVersion: doc.DocumentVersion + 1,
+                    DocumentVersion: emptyCommitResult.PublishedDocumentVersion > 0 ? emptyCommitResult.PublishedDocumentVersion : doc.DocumentVersion + 1,
                     Status: extractResult.Status.ToString(),
                     Message: $"文档被标记为 [{extractResult.Status}]，已彻底清理历史残留乱码切片: {extractResult.DiagnosticMessage}"
                 );
@@ -1261,6 +1283,14 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         if (!enableEmbedding || isPureLexical)
             await lease.Store.EnsureLexicalIndexAsync(ct);
 
+        string parseStatus = "Success";
+        string? diagMsg = null;
+        if (sanitizedChunks.Count == 0 && rawChunks.Count > 0)
+        {
+            parseStatus = "QualityRejected";
+            diagMsg = "切片包含过多底层语法噪音或乱码字符，未通过质量准入门禁 (G-CHUNK-CORRUPT-04)";
+        }
+
         var batch = new IndexBatch(
             KnowledgeBaseId: knowledgeBaseId,
             ExpectedIndexEpoch: lease.IndexEpochSnapshot,
@@ -1272,7 +1302,9 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
             ContentHash: KnowledgeBaseSyncWorker.ComputeSha256(textContent),
             Chunks: sanitizedChunks,
             Vectors: vectors,
-            ProducerCohort: specId
+            ProducerCohort: specId,
+            ParseStatus: parseStatus,
+            DiagnosticMessage: diagMsg
         );
 
         var commitResult = await lease.Store.CommitDocumentAsync(batch, ct);
@@ -1329,9 +1361,11 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
             DocumentId: doc.Id,
             SourceKey: doc.SourceKey,
             ChunkCount: sanitizedChunks.Count,
-            DocumentVersion: doc.DocumentVersion + 1,
-            Status: "Success",
-            Message: $"文档重新切片完成，成功生成 {sanitizedChunks.Count} 个切片"
+            DocumentVersion: commitResult.PublishedDocumentVersion > 0 ? commitResult.PublishedDocumentVersion : doc.DocumentVersion + 1,
+            Status: parseStatus,
+            Message: sanitizedChunks.Count > 0
+                ? $"文档重新切片完成，成功生成 {sanitizedChunks.Count} 个切片"
+                : (diagMsg ?? "文档未生成有效切片")
         );
     }
 

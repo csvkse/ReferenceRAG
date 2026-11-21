@@ -275,7 +275,9 @@ public sealed record IndexBatch(
     IReadOnlyList<ChunkData> Chunks,
     IReadOnlyList<float[]>? Vectors = null,
     string? ProducerCohort = null,
-    string? EmbeddingSpecHash = null);
+    string? EmbeddingSpecHash = null,
+    string? ParseStatus = null,
+    string? DiagnosticMessage = null);
 
 /// <summary>
 /// 文档提交结果
@@ -449,7 +451,9 @@ public sealed record KnowledgeBaseDocumentRecord(
     long DocumentVersion,
     int ChunkCount,
     DateTime CreatedAt,
-    DateTime UpdatedAt);
+    DateTime UpdatedAt,
+    string? ParseStatus = null,
+    string? DiagnosticMessage = null);
 
 /// <summary>
 /// 知识库关联切片记录

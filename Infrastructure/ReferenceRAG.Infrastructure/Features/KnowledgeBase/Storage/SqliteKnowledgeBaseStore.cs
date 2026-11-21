@@ -113,6 +113,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     source_revision TEXT,
                     content_hash TEXT NOT NULL,
                     document_version INTEGER NOT NULL DEFAULT 1,
+                    parse_status TEXT,
+                    diagnostic_message TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(connector_id, source_key)
@@ -223,6 +225,19 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 using var alterHeading = conn.CreateCommand();
                 alterHeading.CommandText = "ALTER TABLE chunks ADD COLUMN heading_path TEXT;";
                 await alterHeading.ExecuteNonQueryAsync(ct);
+            } catch (SqliteException) { }
+
+            // 确保 documents 表包含 parse_status 与 diagnostic_message 字段
+            try {
+                using var alterStatus = conn.CreateCommand();
+                alterStatus.CommandText = "ALTER TABLE documents ADD COLUMN parse_status TEXT;";
+                await alterStatus.ExecuteNonQueryAsync(ct);
+            } catch (SqliteException) { }
+
+            try {
+                using var alterDiag = conn.CreateCommand();
+                alterDiag.CommandText = "ALTER TABLE documents ADD COLUMN diagnostic_message TEXT;";
+                await alterDiag.ExecuteNonQueryAsync(ct);
             } catch (SqliteException) { }
 
             // 确保 chunks 表包含 enabled 字段与索引
@@ -1208,16 +1223,20 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 upsertCmd.CommandText = @"
                     INSERT INTO documents (
                         id, connector_id, source_key, locator, source_revision,
-                        content_hash, document_version, created_at, updated_at
+                        content_hash, document_version, parse_status, diagnostic_message,
+                        created_at, updated_at
                     ) VALUES (
                         @id, @c_id, @s_key, @locator, @s_rev,
-                        @hash, @ver, @now, @now
+                        @hash, @ver, @parse_status, @diag_msg,
+                        @now, @now
                     )
                     ON CONFLICT(connector_id, source_key) DO UPDATE SET
                         locator = excluded.locator,
                         source_revision = excluded.source_revision,
                         content_hash = excluded.content_hash,
                         document_version = excluded.document_version,
+                        parse_status = excluded.parse_status,
+                        diagnostic_message = excluded.diagnostic_message,
                         updated_at = excluded.updated_at;
                 ";
                 upsertCmd.Parameters.AddWithValue("@id", docId);
@@ -1227,6 +1246,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 upsertCmd.Parameters.AddWithValue("@s_rev", (object?)batch.SourceRevision ?? DBNull.Value);
                 upsertCmd.Parameters.AddWithValue("@hash", batch.ContentHash);
                 upsertCmd.Parameters.AddWithValue("@ver", nextDocVersion);
+                upsertCmd.Parameters.AddWithValue("@parse_status", (object?)batch.ParseStatus ?? DBNull.Value);
+                upsertCmd.Parameters.AddWithValue("@diag_msg", (object?)batch.DiagnosticMessage ?? DBNull.Value);
                 upsertCmd.Parameters.AddWithValue("@now", now);
                 await upsertCmd.ExecuteNonQueryAsync(ct);
             }
@@ -2921,7 +2942,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 SELECT d.id, d.connector_id, d.source_key, d.locator, d.source_revision,
                        d.content_hash, d.document_version,
                        (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id) AS chunk_count,
-                       d.created_at, d.updated_at
+                       d.created_at, d.updated_at,
+                       d.parse_status, d.diagnostic_message
                 FROM documents d
                 {whereSql}
                 ORDER BY d.updated_at DESC
@@ -2945,7 +2967,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                     DocumentVersion: reader.GetInt64(6),
                     ChunkCount: reader.GetInt32(7),
                     CreatedAt: DateTime.Parse(reader.GetString(8)),
-                    UpdatedAt: DateTime.Parse(reader.GetString(9))
+                    UpdatedAt: DateTime.Parse(reader.GetString(9)),
+                    ParseStatus: reader.IsDBNull(10) ? null : reader.GetString(10),
+                    DiagnosticMessage: reader.IsDBNull(11) ? null : reader.GetString(11)
                 ));
             }
         }
@@ -2961,7 +2985,8 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
             SELECT d.id, d.connector_id, d.source_key, d.locator, d.source_revision,
                    d.content_hash, d.document_version,
                    (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id) AS chunk_count,
-                   d.created_at, d.updated_at
+                   d.created_at, d.updated_at,
+                   d.parse_status, d.diagnostic_message
             FROM documents d
             WHERE d.id = @id;
         ";
@@ -2979,7 +3004,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 DocumentVersion: reader.GetInt64(6),
                 ChunkCount: reader.GetInt32(7),
                 CreatedAt: DateTime.Parse(reader.GetString(8)),
-                UpdatedAt: DateTime.Parse(reader.GetString(9))
+                UpdatedAt: DateTime.Parse(reader.GetString(9)),
+                ParseStatus: reader.IsDBNull(10) ? null : reader.GetString(10),
+                DiagnosticMessage: reader.IsDBNull(11) ? null : reader.GetString(11)
             );
         }
         return null;
@@ -3389,7 +3416,9 @@ public sealed class SqliteKnowledgeBaseStore : IKnowledgeBaseStore, IGraphStore,
                 DocumentVersion: 1,
                 ChunkCount: ordinal - 1,
                 CreatedAt: DateTime.UtcNow,
-                UpdatedAt: DateTime.UtcNow
+                UpdatedAt: DateTime.UtcNow,
+                ParseStatus: "Success",
+                DiagnosticMessage: null
             );
         }
         finally

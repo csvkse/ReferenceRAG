@@ -100,9 +100,25 @@ public sealed class PdfPigDocumentExtractor : IDocumentContentExtractor
 
             double avgLettersPerPage = pageCount > 0 ? (double)totalLetters / pageCount : 0;
 
-            // 扫描件启发式判定门禁 (G-PDF-DENSITY-03)：
-            // 若整本 PDF 提取字符为 0，或平均每页有效文字 < 15 且存在光栅图像，则认定为扫描版 PDF
-            bool isScanned = (avgLettersPerPage < 15 && pagesWithImages > 0) || totalLetters == 0;
+            // 1. 空白文档判定（既无文字也无图像）
+            if (totalLetters == 0 && pagesWithImages == 0)
+            {
+                return new DocumentExtractResult(
+                    Status: DocumentParseStatus.EmptyDocument,
+                    ExtractedText: string.Empty,
+                    PageCount: pageCount,
+                    ExtractedCharCount: 0,
+                    IsScannedPdf: false,
+                    DiagnosticMessage: "PDF 文档内容为空（未检测到有效文本或页面图像）"
+                );
+            }
+
+            // 2. 扫描件启发式判定门禁 (G-PDF-DENSITY-03)：
+            // - 纯图片扫描件：全书文字数为 0 且包含光栅图像（如《新政治学概要》等363页纯图）；
+            // - 稀疏文字扫描件：存在图像，且全书总文字极少 (< 200 字) 且平均每页文字 < 15 字
+            // 注意：若全书文字量丰富（如《资本论》含95.5万字），即便每页都包含光栅插图或背景图，也严禁判为扫描件
+            bool isScanned = (totalLetters == 0 && pagesWithImages > 0)
+                || (pagesWithImages > 0 && totalLetters < 200 && avgLettersPerPage < 15);
 
             if (isScanned)
             {
@@ -120,12 +136,19 @@ public sealed class PdfPigDocumentExtractor : IDocumentContentExtractor
                 IsScannedPdf: false
             );
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "[PdfPigDocumentExtractor] PDF 解析异常: {Key}", sourceKey);
             return new DocumentExtractResult(
                 Status: DocumentParseStatus.ExtractionFailed,
                 ExtractedText: string.Empty,
+                PageCount: 0,
+                ExtractedCharCount: 0,
+                IsScannedPdf: false,
                 DiagnosticMessage: $"PDF 解析失败: {ex.Message}"
             );
         }

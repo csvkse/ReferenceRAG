@@ -10,7 +10,8 @@ public static class DocumentExtractionExtensions
 {
     public static IServiceCollection AddDocumentExtractionServices(this IServiceCollection services)
     {
-        services.AddSingleton<IScannedPdfHandlingStrategy, GracefulDegradeScannedStrategy>();
+        services.AddSingleton<GracefulDegradeScannedStrategy>();
+        services.AddSingleton<IScannedPdfHandlingStrategy, OnnxOcrScannedStrategy>();
         services.AddSingleton<IDocumentContentExtractor, PdfPigDocumentExtractor>();
         services.AddSingleton<IDocumentContentExtractor, PlainTextDocumentExtractor>();
         services.AddSingleton<IDocumentContentExtractor, UnsupportedBinaryDocumentExtractor>();

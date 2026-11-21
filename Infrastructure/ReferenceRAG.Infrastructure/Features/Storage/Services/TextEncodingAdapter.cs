@@ -67,13 +67,7 @@ public static class TextEncodingAdapter
     {
         if (bytes.IsEmpty) return string.Empty;
 
-        // 0. 二进制魔数嗅探门禁（G-INGEST-MAGIC-01）：若为 PDF 或已知二进制流，阻断回退至 GB18030 产生乱码汉字
-        if (BinaryMagicGuard.IsKnownBinary(bytes))
-        {
-            return string.Empty;
-        }
-
-        // 1. 显式 BOM 探测
+        // 1. 显式 BOM 探测优先（UTF-8, UTF-16 LE, UTF-16 BE），避免正常 UTF-16 文本受空字节检测误伤
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
         {
             return Encoding.UTF8.GetString(bytes.Slice(3));
@@ -87,7 +81,13 @@ public static class TextEncodingAdapter
             return Encoding.BigEndianUnicode.GetString(bytes.Slice(2));
         }
 
-        // 2. 尝试严格模式的 UTF-8 解码
+        // 2. 二进制魔数嗅探门禁（G-INGEST-MAGIC-01）：若为 PDF 或已知二进制流，阻断回退至 GB18030 产生乱码汉字
+        if (BinaryMagicGuard.IsKnownBinary(bytes))
+        {
+            return string.Empty;
+        }
+
+        // 3. 尝试严格模式的 UTF-8 解码
         try
         {
             var strictUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);

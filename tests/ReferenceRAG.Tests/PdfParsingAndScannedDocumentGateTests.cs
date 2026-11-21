@@ -50,6 +50,14 @@ public class PdfParsingAndScannedDocumentGateTests : IDisposable
         }
     }
 
+    private static readonly byte[] TinyPngBytes = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+        0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+        0x42, 0x60, 0x82
+    ];
+
     private static byte[] CreateDigitalPdfBytes(string text)
     {
         var builder = new PdfDocumentBuilder();
@@ -61,7 +69,16 @@ public class PdfParsingAndScannedDocumentGateTests : IDisposable
 
     private static byte[] CreateScannedPdfBytes()
     {
-        // 构造一个包含页面但无任何文本字形的 PDF（模拟扫描版 PDF）
+        // 构造一个包含真实光栅图片但无任何文本字形的 PDF（真实模拟扫描版 PDF）
+        var builder = new PdfDocumentBuilder();
+        var page = builder.AddPage(PageSize.A4);
+        page.AddPng(TinyPngBytes, new PdfRectangle(50, 50, 200, 200));
+        return builder.Build();
+    }
+
+    private static byte[] CreateEmptyPdfBytes()
+    {
+        // 构造一个无文字也无图像的纯空白 PDF
         var builder = new PdfDocumentBuilder();
         builder.AddPage(PageSize.A4);
         return builder.Build();
@@ -284,5 +301,101 @@ public class PdfParsingAndScannedDocumentGateTests : IDisposable
             Assert.False(NoiseChunkDetector.IsPdfSyntaxNoise(c.Text));
             Assert.False(NoiseChunkDetector.IsCorruptedNoise(c.Text));
         });
+    }
+
+    [Fact]
+    public void Gate8_MagicGuard_ShouldNotRejectUtf16TextWithBomAsBinary()
+    {
+        // 构造带 BOM 的 UTF-16 LE 中文字符串: "这是一段合法的UTF-16中文测试文本"
+        string sample = "这是一段合法的UTF-16中文测试文本";
+        byte[] utf16LeBytes = Encoding.Unicode.GetPreamble().Concat(Encoding.Unicode.GetBytes(sample)).ToArray();
+
+        // 验证 BinaryMagicGuard 绝不将带 BOM 的 UTF-16 误判为二进制
+        Assert.False(BinaryMagicGuard.IsKnownBinary(utf16LeBytes));
+
+        // 验证 TextEncodingAdapter 能成功探测并解码为正确文本
+        string decoded = TextEncodingAdapter.DetectAndDecode(utf16LeBytes);
+        Assert.Equal(sample, decoded);
+
+        // 验证 UTF-16 BE
+        byte[] utf16BeBytes = Encoding.BigEndianUnicode.GetPreamble().Concat(Encoding.BigEndianUnicode.GetBytes(sample)).ToArray();
+        Assert.False(BinaryMagicGuard.IsKnownBinary(utf16BeBytes));
+        string decodedBe = TextEncodingAdapter.DetectAndDecode(utf16BeBytes);
+        Assert.Equal(sample, decodedBe);
+    }
+
+    [Fact]
+    public async Task Gate9_PdfPigExtractor_ShouldClassifyEmptyPdf_AsEmptyDocument()
+    {
+        var extractor = new PdfPigDocumentExtractor();
+        byte[] emptyPdfBytes = CreateEmptyPdfBytes();
+
+        using var ms = new MemoryStream(emptyPdfBytes);
+        var result = await extractor.ExtractAsync(ms, "blank.pdf");
+
+        // 验证纯空白 PDF（无字也无图）被精准分类为 EmptyDocument，而不是误判为 ScannedRequiresOcr
+        Assert.Equal(DocumentParseStatus.EmptyDocument, result.Status);
+        Assert.False(result.IsScannedPdf);
+        Assert.Empty(result.ExtractedText);
+    }
+
+    [Fact]
+    public async Task Gate10_PdfPigExtractor_RichTextBookWithImages_ShouldBeDigitalNotScanned()
+    {
+        // 模拟《资本论》类文档：每页都有光栅图像，但全书拥有丰富文本内容（>500字）
+        var builder = new PdfDocumentBuilder();
+        var page = builder.AddPage(PageSize.A4);
+        page.AddPng(TinyPngBytes, new PdfRectangle(10, 10, 100, 100));
+        var font = builder.AddStandard14Font(Standard14Font.Helvetica);
+        page.AddText(new string('A', 600), 10, new PdfPoint(50, 700), font);
+        byte[] pdfWithImageAndRichText = builder.Build();
+
+        var extractor = new PdfPigDocumentExtractor();
+        using var ms = new MemoryStream(pdfWithImageAndRichText);
+        var result = await extractor.ExtractAsync(ms, "capital_volume_one.pdf");
+
+        // 验证即使包含光栅图片，只要文字量丰富，必须判定为 Success 电子版 PDF，绝不误判为扫描件！
+        Assert.Equal(DocumentParseStatus.Success, result.Status);
+        Assert.False(result.IsScannedPdf);
+        Assert.Equal(600, result.ExtractedCharCount);
+        Assert.NotEmpty(result.ExtractedText);
+    }
+
+    [Fact]
+    public async Task Gate11_OnnxOcrStrategy_WhenEngineAvailable_ShouldExtractText()
+    {
+        var mockOcr = new MockOcrEngine("识别出的扫描件图书文字内容");
+        var strategy = new OnnxOcrScannedStrategy(mockOcr);
+        var extractor = new PdfPigDocumentExtractor(strategy);
+
+        byte[] scannedPdfBytes = CreateScannedPdfBytes();
+        using var ms = new MemoryStream(scannedPdfBytes);
+        var result = await extractor.ExtractAsync(ms, "scanned_with_ocr.pdf");
+
+        // 验证当 OCR 引擎可用时，扫描件成功提取出文字并标记为 Success
+        Assert.Equal(DocumentParseStatus.Success, result.Status);
+        Assert.True(result.IsScannedPdf);
+        Assert.Contains("识别出的扫描件图书文字内容", result.ExtractedText);
+    }
+
+    [Fact]
+    public void Gate12_NoiseChunkDetector_RealWorldCapitalVol1Syntax_ShouldBeIntercepted()
+    {
+        // 真实截图中《资本论 第一卷》的现场样本切片
+        string realCorruptedChunk = "%PDF-1.6\r\n12691 0 obj<</Filter/FlateDecode/First 2142/Length 4649/N 200/Type/ObjStm>>stream\r\nh[~}pfH\"?EP\x00\x01\x02";
+
+        Assert.True(NoiseChunkDetector.IsPdfSyntaxNoise(realCorruptedChunk));
+        Assert.True(NoiseChunkDetector.IsCorruptedOrPdfSyntaxNoise(realCorruptedChunk));
+    }
+
+    private class MockOcrEngine : IOcrInferenceEngine
+    {
+        private readonly string _mockText;
+        public MockOcrEngine(string mockText) => _mockText = mockText;
+        public bool IsAvailable => true;
+        public Task<OcrRecognitionResult> RecognizeImageAsync(ReadOnlyMemory<byte> imageBytes, CancellationToken ct = default)
+        {
+            return Task.FromResult(new OcrRecognitionResult(_mockText, 0.99f, "MockPP-OCRv4"));
+        }
     }
 }

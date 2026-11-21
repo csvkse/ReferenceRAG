@@ -123,6 +123,16 @@ public sealed class KnowledgeBaseSyncWorker
                         _logger?.LogInformation("[KnowledgeBaseSyncWorker] 文档未生成有效文本切片 [{Status}]: {Key}, 诊断信息: {Msg}",
                             extractResult.Status, change.SourceKey, extractResult.DiagnosticMessage);
 
+                        // 故障隔离门禁 (G-PDF-FAILSAFE-01)：
+                        // 若解析器发生非受控异常失败 (ExtractionFailed)，保留现有版本，不可盲目提交空批次清除！
+                        if (extractResult.Status == DocumentParseStatus.ExtractionFailed)
+                        {
+                            errors++;
+                            processed++;
+                            await stateMachine.UpdateProgressAsync(processed, ct: ct);
+                            continue;
+                        }
+
                         await using var cleanLease = await _storageManager.AcquireLeaseAsync(job.KnowledgeBaseId, StorageAccess.ReadWrite, ct);
                         if (!_enableEmbedding || string.Equals(specId, "spec_lexical_only", StringComparison.OrdinalIgnoreCase))
                             await cleanLease.Store.EnsureLexicalIndexAsync(ct);
@@ -135,13 +145,18 @@ public sealed class KnowledgeBaseSyncWorker
                             SourceKey: change.SourceKey,
                             Locator: change.Locator,
                             SourceRevision: change.SourceRevision,
-                            ContentHash: ComputeSha256(change.SourceKey + ":" + extractResult.Status),
+                            ContentHash: ComputeSha256(change.SourceKey),
                             Chunks: Array.Empty<ChunkData>(),
                             Vectors: null,
-                            ProducerCohort: specId
+                            ProducerCohort: specId,
+                            ParseStatus: extractResult.Status.ToString(),
+                            DiagnosticMessage: extractResult.DiagnosticMessage
                         );
-                        await cleanLease.Store.CommitDocumentAsync(emptyBatch, ct);
-                        await cleanLease.Store.GraphStore.DeleteNodeAsync(change.SourceKey, ct);
+                        var cleanCommit = await cleanLease.Store.CommitDocumentAsync(emptyBatch, ct);
+                        if (cleanCommit.Success)
+                        {
+                            await cleanLease.Store.GraphStore.DeleteNodeAsync(change.SourceKey, ct);
+                        }
 
                         processed++;
                         await stateMachine.UpdateProgressAsync(processed, ct: ct);
@@ -150,13 +165,14 @@ public sealed class KnowledgeBaseSyncWorker
 
                     string textContent = extractResult.ExtractedText;
                     var hash = ComputeSha256(textContent);
-                    var chunks = ChunkTextWithSpec(textContent, chunkSpec, _chunker);
+                    var rawChunks = ChunkTextWithSpec(textContent, chunkSpec, _chunker);
+                    var chunks = rawChunks;
 
                     // 门禁 G-INGEST-TOKEN-02 & G-CHUNK-CORRUPT-04: 过滤残留的 PDF 语法噪音或高乱码率切片
-                    if (chunks.Count > 0)
+                    if (rawChunks.Count > 0)
                     {
-                        var sanitizedChunks = new List<ChunkData>(chunks.Count);
-                        foreach (var c in chunks)
+                        var sanitizedChunks = new List<ChunkData>(rawChunks.Count);
+                        foreach (var c in rawChunks)
                         {
                             if (!NoiseChunkDetector.IsCorruptedOrPdfSyntaxNoise(c.Text))
                             {
@@ -169,6 +185,14 @@ public sealed class KnowledgeBaseSyncWorker
                             }
                         }
                         chunks = sanitizedChunks;
+                    }
+
+                    string docStatus = "Success";
+                    string? docDiag = null;
+                    if (chunks.Count == 0 && rawChunks.Count > 0)
+                    {
+                        docStatus = "QualityRejected";
+                        docDiag = "切片包含过多底层语法噪音或乱码字符，未通过质量准入门禁";
                     }
 
                     // 可选向量提取（纯词法模式下直接旁路跳过）
@@ -206,7 +230,9 @@ public sealed class KnowledgeBaseSyncWorker
                         ContentHash: hash,
                         Chunks: chunks,
                         Vectors: vectors,
-                        ProducerCohort: specId
+                        ProducerCohort: specId,
+                        ParseStatus: docStatus,
+                        DiagnosticMessage: docDiag
                     );
 
                     var commitResult = await lease.Store.CommitDocumentAsync(batch, ct);

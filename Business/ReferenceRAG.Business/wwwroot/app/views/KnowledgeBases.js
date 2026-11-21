@@ -1161,7 +1161,17 @@ const component = /*@__PURE__*/ _defineComponent({
                     try {
                         const res = await knowledgeBasesApi.rechunkDocument(explorerKb.value.id, doc.id);
                         const info = res.data;
-                        message.success(info.message || `文档重新切片完成，生成 ${info.chunkCount} 个切片`);
+                        if (info.status === 'ScannedRequiresOcr') {
+                            message.warning(info.message || '文档为扫描版或图片型PDF，无数字文本层，已安全跳过');
+                        } else if (info.status === 'ExtractionFailed') {
+                            message.error(info.message || '文档重新切片解析失败');
+                        } else if (info.status === 'EmptyDocument') {
+                            message.info(info.message || '文档内容为空');
+                        } else if (info.status === 'QualityRejected') {
+                            message.error(info.message || '切片未通过质量准入门禁');
+                        } else {
+                            message.success(info.message || `文档重新切片完成，生成 ${info.chunkCount} 个切片`);
+                        }
                         await loadExplorerDocuments();
                         await loadExplorerChunks();
                     } catch (err) {
@@ -1977,7 +1987,31 @@ component.template = `
                     <n-thing :title="doc.sourceKey" :description="'ID: ' + doc.id">
                       <template #header-extra>
                         <n-space align="center">
-                          <n-tag size="small" type="info">{{ doc.chunkCount }} 个切片</n-tag>
+                          <n-tooltip v-if="doc.chunkCount === 0 && doc.parseStatus === 'ScannedRequiresOcr'" trigger="hover">
+                            <template #trigger>
+                              <n-tag size="small" type="warning">扫描件 (需OCR)</n-tag>
+                            </template>
+                            {{ doc.diagnosticMessage || '该文档为扫描版或图片型PDF，无数字文本层，当前未配置OCR引擎' }}
+                          </n-tooltip>
+                          <n-tag v-else-if="doc.chunkCount === 0 && doc.parseStatus === 'EmptyDocument'" size="small" type="default">
+                            空文档
+                          </n-tag>
+                          <n-tooltip v-else-if="doc.chunkCount === 0 && doc.parseStatus === 'ExtractionFailed'" trigger="hover">
+                            <template #trigger>
+                              <n-tag size="small" type="error">解析失败</n-tag>
+                            </template>
+                            {{ doc.diagnosticMessage || '文档解析发生异常' }}
+                          </n-tooltip>
+                          <n-tooltip v-else-if="doc.chunkCount === 0 && doc.parseStatus === 'QualityRejected'" trigger="hover">
+                            <template #trigger>
+                              <n-tag size="small" type="error">质量未达标</n-tag>
+                            </template>
+                            {{ doc.diagnosticMessage || '切片包含过多语法噪音或乱码，被门禁拦截' }}
+                          </n-tooltip>
+                          <n-tag v-else-if="doc.chunkCount === 0" size="small" type="warning">
+                            0 个切片
+                          </n-tag>
+                          <n-tag v-else size="small" type="info">{{ doc.chunkCount }} 个切片</n-tag>
                           <n-tag size="small" type="default">v{{ doc.documentVersion }}</n-tag>
                         </n-space>
                       </template>

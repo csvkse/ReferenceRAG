@@ -34,6 +34,17 @@ public static class BinaryMagicGuard
         if (header.Length >= 4 && header.StartsWith(ElfMagic)) return true;
         if (header.Length >= 2 && header.StartsWith(ExeMagic)) return true;
 
+        // 排除合法纯文本编码 BOM（UTF-16 LE/BE, UTF-8），避免含有空字节的正常 UTF-16 文本被误伤
+        if (header.Length >= 2)
+        {
+            if (header[0] == 0xFF && header[1] == 0xFE) return false; // UTF-16 LE BOM
+            if (header[0] == 0xFE && header[1] == 0xFF) return false; // UTF-16 BE BOM
+        }
+        if (header.Length >= 3 && header[0] == 0xEF && header[1] == 0xBB && header[2] == 0xBF)
+        {
+            return false; // UTF-8 BOM
+        }
+
         // 启发式检测：检查前 512 字节是否存在空字节 \0
         int checkLen = Math.Min(header.Length, 512);
         for (int i = 0; i < checkLen; i++)
