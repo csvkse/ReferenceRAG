@@ -3,6 +3,7 @@
 > **编制日期**：2026-11-21  
 > **报告类型**：架构深度头脑风暴、业界对比、设计模式选型与落地实施方案  
 > **关联设计**：
+> - [OCR 基础服务解耦与提取器配置下沉自治架构设计](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/pdf-ocr-decoupling-and-decentralized-config-architecture.md)
 > - [扫描版 PDF 头脑风暴与按需 OCR 架构设计](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/pdf-scanned-ocr-brainstorming-and-hitl-architecture.md)
 > - [PDF 切片空值与二进制乱码治理架构设计](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/pdf-empty-and-corrupted-chunks-deep-dive-and-governance-architecture.md)
 > - [PDF 特性演进、开发与生产环境端到端视觉验收报告](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/pdf-features-and-dev-acceptance-report.md)
