@@ -205,13 +205,55 @@ flowchart TD
 
 ---
 
-## 7. 验收结论与就绪状态
+## 7. 本地 Linux 快速开发部署流水线与全功能交互实测 (Inner-Loop Dev Acceptance)
 
-1. **核心缺陷在生产环境彻底攻克并实测通过**：
+依照根目录 `AGENT.md` 规范与 Linux 快速开发部署流程，使用 `powershell -ExecutionPolicy Bypass -File scripts/deploy-linux.ps1 -Mode Dev` 执行了本地极速流水线，成功构建 `referencerag:dev-cpu` 镜像并启动 `referencerag-dev` 容器（对外服务端口：`5124`）。
+
+使用内置浏览器对系统核心交互与近期改动功能进行了全流程实测验收：
+
+### 7.1 收录文档列表与多版本展示
+- **路径**：`知识库管理 -> 金庸武侠测试知识库 -> 文档切片 -> 收录文档列表`
+- **实测表现**：文档列表精准分页呈现已收录文档，显示切片总数、版本标识（`v4`、`v5`）以及格式化时间戳；操作区完整提供 `[查看切片]`、`[重新切片]`、`[删除文档]`。
+
+![本地开发环境收录文档列表实测](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/dev-09-doc-list.png)
+
+### 7.2 单篇文档重新切片 (Rechunk) 交互与二次确认
+- **操作对象**：`三联版/越女剑.md` (初始版本：46 切片，`v5`)
+- **实测表现**：点击 `[重新切片]` 弹出二次确认弹窗，明确提示“历史异常或乱码切片将被彻底覆盖清除”并提供防重放 loading。
+
+![单篇文档重新切片二次确认弹窗](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/dev-10-doc-rechunk-dialog.png)
+
+- **执行结果**：点击确认重新切片后，后端完成解析与重新分块，前端局部刷新，版本平滑自增至 **`v6`**，更新时间实时同步（2026/11/21 15:33:58）。
+
+![单篇文档重新切片成功与版本递增验证](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/dev-11-doc-rechunk-success.png)
+
+### 7.3 BM25 词法全文索引概览与库级作用域
+- **路径**：`数据管理 -> BM25索引`
+- **实测表现**：FTS5 词法索引概览加载正常（已索引文档 57,733，词汇量 250,000，平均文档长度 403.74），多库单库作用域统计精准对齐，SAG-Wiki 多列权重配置完备。
+
+![BM25词法索引概览与库级统计](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/dev-12-bm25-index.png)
+
+### 7.4 词法检索通道与高亮原位阅读
+- **路径**：`核心功能 -> 向量搜索 -> 词法模式`
+- **实测表现**：输入查询词 `越女剑 阿青`，纯词法检索通道在 81ms 内极速返回 10 条高相关匹配，清晰展示段落文本、行号跨度（如 `行 350-358`）与原位阅读导航。
+
+![词法检索高匹配度结果与耗时分析](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/dev-13-search-lexical.png)
+
+### 7.5 系统健康与长时任务监控看板
+- **路径**：`系统管理 -> 系统监控`
+- **实测表现**：系统健康状态为“健康”，活动告警 0 个；长时任务监控看板正常呈现“暂无正在进行的系统任务”，历史任务记录完整，CPU（0.7%）与内存（803MB）处于健康水位。
+
+![系统监控与长时任务状态看板](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/dev-14-system-monitor.png)
+
+---
+
+## 8. 验收结论与就绪状态
+
+1. **核心缺陷在生产与开发双环境彻底攻克并实测通过**：
    - 扫描件 PDF 不再产生无用垃圾切片，并赋予精准的前端诊断标识 `[扫描件 (需OCR)]`；
-   - 数字化 PDF（如《资本论》）旧版 48,070 个二进制乱码切片已被一键治愈，重构为 2,233 个 100% 可读的优质切片；
-   - 单文档重新切片具备好数据 Failsafe 保障，事务提交严格可靠；
+   - 数字化 PDF（如《资本论》）旧版 48,070 个二进制乱码切片已被彻底清扫，重构为 2,233 个 100% 可读的优质切片；
+   - 单文档重新切片具备好数据 Failsafe 保障与原子化版本流转；
    - 扩展实现了按需 HITL 端侧 OCR 触发通道与混合自适应加速策略。
 2. **生产与开发双环境验证完备**：
    - 自动化门禁 100% 通过（19/19 PDF 策略测试，5/5 任务测试，76/76 Host 测试，133/133 前端测试）；
-   - 正式生产容器 `reference-rag` 与开发容器 `referencerag-dev` 部署并健康运行，全功能上线闭环。
+   - 正式生产容器 `reference-rag`（5123）与开发容器 `referencerag-dev`（5124）部署并健康运行，全功能上线闭环。
