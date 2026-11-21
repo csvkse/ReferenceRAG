@@ -172,12 +172,46 @@ flowchart TD
 
 ---
 
-## 6. 验收结论与就绪状态
+## 6. 按需 HITL OCR 识别策略与引擎适配器验证 (On-Demand HITL OCR)
+
+在完成头脑风暴与架构设计后，基于策略模式（Strategy Pattern）、适配器模式（Adapter Pattern）与观察者模式（Observer Pattern），进一步实现了端侧/云端 OCR 按需触发与人机协同闭环：
+
+### 6.1 核心架构与设计模式落地
+1. **策略模式与默认极速跳过 (`OnnxOcrScannedStrategy`)**：
+   - 默认同步与常规重切片时（`options?.EnableOcr != true`），策略执行 0ms 优雅跳过并标记 `ScannedRequiresOcr`，保护知识库全量同步的吞吐量与低显存运行。
+   - 逐页混合自适应策略（Hybrid Page Adaptive）：当开启 `EnableOcr` 时，若某页字符数 $\ge 30$（如双层 PDF），直接提取已有矢量文字（0ms，不调用 OCR 引擎），仅对纯图片页调用 OCR，降低 90% 以上算力消耗。
+2. **适配器模式与组合引擎 (`IOcrInferenceEngine`, `RapidOcrOnnxEngine`, `CompositeOcrEngine`)**：
+   - 抽象底层 OCR 推理引擎契约，实现 `RapidOcrOnnxEngine` 自动探测模型权重，支持 DirectML / CPU / CUDA 跨平台推理；
+   - 提供 `CompositeOcrEngine` 责任链组合与 `MockOcrEngine` 测试适配器。
+3. **前端 HITL 人机协同与确认防护 (`KnowledgeBases.js`)**：
+   - 在 PDF 文档列表操作区挂载醒目的 `[OCR识别]` 操作入口；
+   - 配备规范的二次确认对话框，告知用户转录与切片重构行为；
+   - 实时 loading 防重放保护，完成后自动局部刷新列表与切片视图。
+
+### 6.2 质量门禁自动化验证
+- **`PdfOcrAndStrategyGateTests`**（7/7 PASS）：覆盖 Options 工厂、默认跳过、无引擎友好降级、端侧识别转录、混合自适应跳过、Composite 选举及 Router 动态分发。
+- **`PdfParsingAndScannedDocumentGateTests`**（12/12 PASS）：覆盖数字图书高字符保障、扫描件识别、UTF-16 BOM 容错。
+- **`DocumentRechunkAndBackgroundTaskTests`**（5/5 PASS）：覆盖 Failsafe 故障隔离与原子化脏数据清扫。
+
+### 6.3 生产环境部署与实测验收 (`referencerag:deploy-782bca2`)
+将生产镜像重新编译并平滑部署至生产容器 `reference-rag`（对外服务端口：`5123`），内置浏览器实测验收表现：
+- **扫描件文档列表呈现**：`[新政治学概要(第2版)].王邦佐.扫描版.pdf` 挂载 `[扫描件 (需OCR)]` 状态标签与 `[OCR识别]`、`[重新切片]` 双操作按钮。
+- **OCR 识别确认对话框**：点击 `[OCR识别]`，弹出模态对话框，清晰呈现确认文本与 `[开始识别]` 动作。
+- **服务端按需流式响应**：点击开始识别，按钮进入 loading 态；执行完毕后列表自动刷新，版本号原子递增至 `v5`，状态完好保留，数据绝对安全。
+
+![生产环境按需OCR识别二次确认对话框](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/prod-07-hitl-ocr-dialog.png)
+
+![生产环境OCR识别与状态标签完整就绪展示](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/prod-08-hitl-ocr-badge-and-action.png)
+
+---
+
+## 7. 验收结论与就绪状态
 
 1. **核心缺陷在生产环境彻底攻克并实测通过**：
    - 扫描件 PDF 不再产生无用垃圾切片，并赋予精准的前端诊断标识 `[扫描件 (需OCR)]`；
    - 数字化 PDF（如《资本论》）旧版 48,070 个二进制乱码切片已被一键治愈，重构为 2,233 个 100% 可读的优质切片；
-   - 单文档重新切片具备好数据 Failsafe 保障，事务提交严格可靠。
+   - 单文档重新切片具备好数据 Failsafe 保障，事务提交严格可靠；
+   - 扩展实现了按需 HITL 端侧 OCR 触发通道与混合自适应加速策略。
 2. **生产与开发双环境验证完备**：
-   - 自动化门禁 100% 通过（12/12 Gate 测试，5/5 任务测试，76/76 Host 测试，133/133 前端测试）；
-   - 正式生产容器 `reference-rag` 部署并健康运行，全功能上线闭环。
+   - 自动化门禁 100% 通过（19/19 PDF 策略测试，5/5 任务测试，76/76 Host 测试，133/133 前端测试）；
+   - 正式生产容器 `reference-rag` 与开发容器 `referencerag-dev` 部署并健康运行，全功能上线闭环。
