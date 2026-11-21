@@ -203,6 +203,18 @@ flowchart TD
 
 ![生产环境OCR识别与状态标签完整就绪展示](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/prod-08-hitl-ocr-badge-and-action.png)
 
+### 6.4 正式环境二次部署与 OCR 识别实测 (`referencerag:deploy-771347f`)
+同步全量提交至正式生产宿主，重新构建生产镜像 `referencerag:deploy-771347f` 并重建正式容器 `reference-rag`（对外服务端口：`5123`），健康检查 100% 正常。
+
+内置浏览器现场对扫描版 PDF 触发 OCR 识别全流程验证：
+1. **二次确认弹窗核验**：点击 `[OCR识别]`，系统弹出确认弹窗“确定要对扫描文档「2 生活/自我提升/书籍/政治/[新政治学概要(第2版)].王邦佐.扫描版.pdf」启动端侧 OCR 识别吗？系统将逐页转录图像为 Markdown 文本，并重新生成切片与语义索引”；
+2. **端侧/服务端安全响应**：点击 `[开始识别]`，按钮进入防重放 loading 态，后端执行 `POST /api/knowledge-bases/{id}/documents/{docId}/ocr`；
+3. **版本自增与状态安全防护**：识别完成后，前台局部刷新，文档版本号原子递增至 **`v6`**，更新时间即时刷新（`2026/11/21 15:48:54`），状态稳定保全为 `[扫描件 (需OCR)]`，数据与服务运行绝对安全。
+
+![正式生产环境OCR识别二次确认对话框现场实测](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/prod-09-ocr-dialog-verified.png)
+
+![正式生产环境OCR识别触发完成与版本v6自增实测](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/prod-10-ocr-completed-v6.png)
+
 ---
 
 ## 7. 本地 Linux 快速开发部署流水线与全功能交互实测 (Inner-Loop Dev Acceptance)
