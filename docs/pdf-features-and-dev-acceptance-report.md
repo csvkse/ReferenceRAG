@@ -215,6 +215,13 @@ flowchart TD
 
 ![正式生产环境OCR识别触发完成与版本v6自增实测](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/prod-10-ocr-completed-v6.png)
 
+### 6.5 正式环境切片查看器 (HITL) 文本重构核验
+通过点击文档列表的 `[查看切片]`，系统自动跳转并精准过滤该文档切片集合：
+- **切片与正文质量**：彻底告别 `%PDF-1.6`、`obj <<...>>` 等不可读二进制乱码流，切片 #0、#1、#2、#3 等全部呈现排版工整、标点标准的中文正文；
+- **页码锚点**：每个分块正文头部均精确携带 `<!-- Page X -->` 物理页码锚点，支持精确溯源与原位定位。
+
+![正式生产环境切片查看器高质量正文与页码锚点实测](file:///E:/WorkProject/CSharp/PrivateProject/Web/ReferenceRAG/docs/acceptance-screenshots/prod-11-hitl-slices-verified.png)
+
 ---
 
 ## 7. 本地 Linux 快速开发部署流水线与全功能交互实测 (Inner-Loop Dev Acceptance)
