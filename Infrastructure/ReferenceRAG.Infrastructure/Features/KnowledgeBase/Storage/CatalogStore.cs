@@ -455,12 +455,30 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
                     @idempotency, @error, @created_at, @finished_at
                 )
                 ON CONFLICT(id) DO UPDATE SET
-                    status = excluded.status,
-                    phase = excluded.phase,
-                    total_units = excluded.total_units,
-                    processed_units = excluded.processed_units,
-                    error_message = excluded.error_message,
-                    finished_at = excluded.finished_at;
+                    status = CASE 
+                        WHEN jobs.status IN ('Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled') THEN jobs.status 
+                        ELSE excluded.status 
+                    END,
+                    phase = CASE 
+                        WHEN jobs.status IN ('Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled') THEN jobs.phase 
+                        ELSE excluded.phase 
+                    END,
+                    total_units = CASE 
+                        WHEN jobs.status IN ('Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled') THEN jobs.total_units 
+                        ELSE excluded.total_units 
+                    END,
+                    processed_units = CASE 
+                        WHEN jobs.status IN ('Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled') THEN jobs.processed_units 
+                        ELSE excluded.processed_units 
+                    END,
+                    error_message = CASE 
+                        WHEN jobs.status IN ('Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled') THEN jobs.error_message 
+                        ELSE excluded.error_message 
+                    END,
+                    finished_at = CASE 
+                        WHEN jobs.status IN ('Succeeded', 'PartiallySucceeded', 'Failed', 'Cancelled') THEN jobs.finished_at 
+                        ELSE excluded.finished_at 
+                    END;
             ";
             cmd.Parameters.AddWithValue("@id", job.Id);
             cmd.Parameters.AddWithValue("@op", job.Operation);
@@ -476,6 +494,21 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             cmd.Parameters.AddWithValue("@finished_at", (object?)job.FinishedAt?.ToString("O") ?? DBNull.Value);
 
             await cmd.ExecuteNonQueryAsync(ct);
+
+            using var readCmd = conn.CreateCommand();
+            readCmd.CommandText = @"
+                SELECT id, operation, knowledge_base_id, expected_index_epoch,
+                       status, phase, total_units, processed_units,
+                       idempotency_key, error_message, created_at, finished_at
+                FROM jobs
+                WHERE id = @id;
+            ";
+            readCmd.Parameters.AddWithValue("@id", job.Id);
+            using var reader = await readCmd.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct))
+            {
+                return ReadJob(reader);
+            }
             return job;
         }
         finally
@@ -533,6 +566,28 @@ public sealed class CatalogStore : ICatalogStore, IDisposable
             ";
             cmd.Parameters.AddWithValue("@kb_id", kbId);
         }
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(ReadJob(reader));
+        }
+        return list;
+    }
+
+    public async Task<IReadOnlyList<JobDefinition>> GetActiveJobsAsync(CancellationToken ct = default)
+    {
+        await InitializeAsync(ct);
+        var list = new List<JobDefinition>();
+        using var conn = CreateConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT id, operation, knowledge_base_id, expected_index_epoch,
+                   status, phase, total_units, processed_units,
+                   idempotency_key, error_message, created_at, finished_at
+            FROM jobs
+            WHERE status IN ('Queued', 'Running', 'Cancelling')
+            ORDER BY created_at DESC;
+        ";
         using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

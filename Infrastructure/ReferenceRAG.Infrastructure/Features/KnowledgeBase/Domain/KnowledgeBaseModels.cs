@@ -489,6 +489,9 @@ public static class JobOperation
 {
     public const string Sync = "sync";
     public const string Reindex = "reindex";
+    public const string Rechunk = "rechunk";
+    public const string BM25 = "bm25";
+    public const string Graph = "graph";
 }
 
 /// <summary>
@@ -546,7 +549,8 @@ public sealed record RechunkResult(
     int ProcessedDocuments,
     int ProcessedChunks,
     bool Success,
-    string Message);
+    string Message,
+    string? JobId = null);
 
 /// <summary>
 /// 单文档重新分段与索引结果

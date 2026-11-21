@@ -7,11 +7,18 @@ public static class KnowledgeBaseBusinessExtensions
 {
     public static IServiceCollection AddKnowledgeBaseServices(this IServiceCollection services)
     {
-        // 进程级作业协调器：Scoped 服务跨请求共享 CTS 注册表与 reindex 单飞占位
+        // 进程级作业协调器：Scoped 服务跨请求共享 CTS 注册表与单飞互斥占位
         services.AddSingleton<KnowledgeBaseJobCoordinator>();
         services.AddScoped<IKnowledgeBaseService, KnowledgeBaseService>();
         services.AddScoped<IKnowledgeBaseSearchService, KnowledgeBaseSearchService>();
         services.AddScoped<IKnowledgeBaseChatService, KnowledgeBaseChatService>();
+
+        // 宿主启动期孤儿作业恢复对账服务（必须在工作者之前注册，优先收口历史中断作业）
+        services.AddHostedService<JobRecoveryService>();
+
+        // 受管后台作业队列与工作者（替代请求内裸 Task.Run，受宿主生命周期管辖）
+        services.AddSingleton<IKnowledgeBaseJobQueue, KnowledgeBaseJobQueue>();
+        services.AddHostedService<KnowledgeBaseJobWorker>();
 
         // P2 事件驱动与漂移治理（remaining-plan §1）：进程内同步事件派发 + 投影缓存 + 定时对账。
         services.AddSingleton<ISourceLinkProjectionCache, SourceLinkProjectionCache>();

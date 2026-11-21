@@ -58,17 +58,19 @@ public sealed class JobStateMachine
         CancellationToken ct = default)
     {
         JobDefinition updated;
+        bool isTerminal;
         lock (_stateLock)
         {
-            if (CurrentJob.Status is JobStatus.Succeeded or JobStatus.Failed or JobStatus.Cancelled)
+            if (CurrentJob.Status is JobStatus.Succeeded or JobStatus.PartiallySucceeded or JobStatus.Failed or JobStatus.Cancelled)
             {
                 _logger?.LogDebug("[JobStateMachine] 任务 {JobId} 已在终态 {Status}，忽略跃迁", JobId, CurrentJob.Status);
                 return false;
             }
 
             var status = nextStatus ?? CurrentJob.Status;
+            isTerminal = status is JobStatus.Succeeded or JobStatus.PartiallySucceeded or JobStatus.Failed or JobStatus.Cancelled;
             DateTime? finishedAt = CurrentJob.FinishedAt;
-            if (status is JobStatus.Succeeded or JobStatus.PartiallySucceeded or JobStatus.Failed or JobStatus.Cancelled)
+            if (isTerminal)
             {
                 finishedAt = DateTime.UtcNow;
             }
@@ -83,11 +85,17 @@ public sealed class JobStateMachine
             CurrentJob = updated;
         }
 
-        await _catalog.SaveJobAsync(updated, ct);
-        _logger?.LogInformation("[JobStateMachine] 任务 {JobId} 状态跃迁 -> Status: {Status}, Phase: {Phase}",
-            JobId, updated.Status, updated.Phase);
+        var saveToken = isTerminal ? CancellationToken.None : ct;
+        var persisted = await _catalog.SaveJobAsync(updated, saveToken);
+        lock (_stateLock)
+        {
+            CurrentJob = persisted;
+        }
 
-        await NotifyChangedAsync(updated);
+        _logger?.LogInformation("[JobStateMachine] 任务 {JobId} 状态跃迁 -> Status: {Status}, Phase: {Phase}",
+            JobId, persisted.Status, persisted.Phase);
+
+        await NotifyChangedAsync(persisted);
         return true;
     }
 
@@ -97,9 +105,10 @@ public sealed class JobStateMachine
     public async Task<bool> RequestCancelAsync(CancellationToken ct = default)
     {
         JobDefinition updated;
+        bool isTerminal;
         lock (_stateLock)
         {
-            if (CurrentJob.Status is JobStatus.Succeeded or JobStatus.Failed or JobStatus.Cancelled)
+            if (CurrentJob.Status is JobStatus.Succeeded or JobStatus.PartiallySucceeded or JobStatus.Failed or JobStatus.Cancelled)
             {
                 return false;
             }
@@ -107,17 +116,25 @@ public sealed class JobStateMachine
             if (CurrentJob.Status == JobStatus.Queued)
             {
                 updated = CurrentJob with { Status = JobStatus.Cancelled, FinishedAt = DateTime.UtcNow };
+                isTerminal = true;
             }
             else
             {
                 updated = CurrentJob with { Status = JobStatus.Cancelling };
+                isTerminal = false;
             }
             CurrentJob = updated;
         }
 
-        await _catalog.SaveJobAsync(updated, ct);
-        _logger?.LogInformation("[JobStateMachine] 任务 {JobId} 请求取消，当前状态: {Status}", JobId, updated.Status);
-        await NotifyChangedAsync(updated);
+        var saveToken = isTerminal ? CancellationToken.None : ct;
+        var persisted = await _catalog.SaveJobAsync(updated, saveToken);
+        lock (_stateLock)
+        {
+            CurrentJob = persisted;
+        }
+
+        _logger?.LogInformation("[JobStateMachine] 任务 {JobId} 请求取消，当前状态: {Status}", JobId, persisted.Status);
+        await NotifyChangedAsync(persisted);
         return true;
     }
 
@@ -129,7 +146,7 @@ public sealed class JobStateMachine
         JobDefinition updated;
         lock (_stateLock)
         {
-            if (CurrentJob.Status is JobStatus.Succeeded or JobStatus.Failed or JobStatus.Cancelled)
+            if (CurrentJob.Status is JobStatus.Succeeded or JobStatus.PartiallySucceeded or JobStatus.Failed or JobStatus.Cancelled)
             {
                 return;
             }
@@ -141,7 +158,11 @@ public sealed class JobStateMachine
             CurrentJob = updated;
         }
 
-        await _catalog.SaveJobAsync(updated, ct);
-        await NotifyChangedAsync(updated);
+        var persisted = await _catalog.SaveJobAsync(updated, ct);
+        lock (_stateLock)
+        {
+            CurrentJob = persisted;
+        }
+        await NotifyChangedAsync(persisted);
     }
 }

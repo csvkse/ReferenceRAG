@@ -37,6 +37,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
     private readonly IEmbeddingAdapterResolver? _adapterResolver;
     private readonly IIndexEventPublisher? _eventPublisher;
     private readonly IDocumentExtractorRouter? _extractorRouter;
+    private readonly IKnowledgeBaseJobQueue? _jobQueue;
 
     public KnowledgeBaseService(
         ICatalogStore catalog,
@@ -51,7 +52,8 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         KnowledgeBaseJobCoordinator? jobCoordinator = null,
         IEmbeddingAdapterResolver? adapterResolver = null,
         IIndexEventPublisher? eventPublisher = null,
-        IDocumentExtractorRouter? extractorRouter = null)
+        IDocumentExtractorRouter? extractorRouter = null,
+        IKnowledgeBaseJobQueue? jobQueue = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _storageManager = storageManager ?? throw new ArgumentNullException(nameof(storageManager));
@@ -66,6 +68,7 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         _adapterResolver = adapterResolver;
         _eventPublisher = eventPublisher;
         _extractorRouter = extractorRouter;
+        _jobQueue = jobQueue;
     }
 
     public async Task<KnowledgeBaseDefinition> CreateKnowledgeBaseAsync(
@@ -690,9 +693,19 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         };
 
         var jobId = Guid.NewGuid().ToString("N")[..16];
+        var cts = new CancellationTokenSource();
+
+        // 单飞互斥门禁：检查知识库是否已有长时写任务，若有抛出 409
+        if (!_coordinator.TryBeginJob(knowledgeBaseId, jobId, JobOperation.Sync, cts, out var activeConflict))
+        {
+            cts.Dispose();
+            throw new KnowledgeBaseJobConflictException(
+                $"知识库 [{knowledgeBaseId}] 已有进行中的后台任务: {activeConflict?.JobId} ({activeConflict?.Operation})，请等待完成或先取消。");
+        }
+
         var job = new JobDefinition(
             Id: jobId,
-            Operation: "sync",
+            Operation: JobOperation.Sync,
             KnowledgeBaseId: knowledgeBaseId,
             ExpectedIndexEpoch: 1,
             Status: JobStatus.Queued,
@@ -707,26 +720,30 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
 
         await _catalog.SaveJobAsync(job, ct);
 
-        // 注册取消源并启动后台工作流（协调器为 Singleton，跨请求可取消）
-        var cts = new CancellationTokenSource();
-        _coordinator.Register(jobId, cts);
-
-        var enableEmbedding = _configManager?.Load().Indexing.EmbeddingEnabled ?? true;
-        _ = Task.Run(async () =>
+        if (_jobQueue != null)
         {
-            try
+            await _jobQueue.EnqueueAsync(KnowledgeBaseJobRequest.ForSync(job, connectorDef, cts), ct);
+        }
+        else
+        {
+            // 降级回退（无托管队列环境，如单元测试单例未注册）
+            var enableEmbedding = _configManager?.Load().Indexing.EmbeddingEnabled ?? true;
+            _ = Task.Run(async () =>
             {
-                var workerLogger = _loggerFactory?.CreateLogger<KnowledgeBaseSyncWorker>();
-                var worker = new KnowledgeBaseSyncWorker(_catalog, _storageManager, _modelRouter, workerLogger, _loggerFactory, enableEmbedding, _markdownChunker, _extractorRouter);
-                await worker.ExecuteSyncAsync(job, connectorInstance, cts.Token);
-            }
-            finally
-            {
-                _coordinator.Unregister(jobId);
-                cts.Dispose();
-                await connectorInstance.DisposeAsync();
-            }
-        });
+                try
+                {
+                    var workerLogger = _loggerFactory?.CreateLogger<KnowledgeBaseSyncWorker>();
+                    var worker = new KnowledgeBaseSyncWorker(_catalog, _storageManager, _modelRouter, workerLogger, _loggerFactory, enableEmbedding, _markdownChunker, _extractorRouter);
+                    await worker.ExecuteSyncAsync(job, connectorInstance, cts.Token);
+                }
+                finally
+                {
+                    _coordinator.EndJob(knowledgeBaseId, jobId);
+                    cts.Dispose();
+                    await connectorInstance.DisposeAsync();
+                }
+            });
+        }
 
         return job;
     }
@@ -743,23 +760,48 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
 
     public async Task<bool> CancelJobAsync(string jobId, CancellationToken ct = default)
     {
+        bool hasRunningWorker = false;
         if (_coordinator.TryGetCts(jobId, out var cts) && cts != null)
         {
-            var smLogger = _loggerFactory?.CreateLogger<JobStateMachine>();
-            var job = await _catalog.GetJobAsync(jobId, ct);
-            if (job != null)
+            hasRunningWorker = true;
+            try
             {
-                var sm = new JobStateMachine(job, _catalog, smLogger,
-                    changed: j => BroadcastReindexJobAsync(j, CancellationToken.None));
-                // 先持久化 Cancelling 再信号取消：worker 被唤醒后写入的 Cancelled 终态必然在后，
-                // 避免两个状态机实例竞态导致 Cancelling 覆盖 Cancelled 而永久卡死。
-                await sm.RequestCancelAsync(ct);
+                cts.Cancel();
             }
-            cts.Cancel();
+            catch (ObjectDisposedException) { }
+        }
+
+        var job = await _catalog.GetJobAsync(jobId, ct);
+        if (job == null) return false;
+
+        // 如果已在终态，幂等返回成功
+        if (job.Status is JobStatus.Succeeded or JobStatus.PartiallySucceeded or JobStatus.Failed or JobStatus.Cancelled)
+        {
             return true;
         }
 
-        return false;
+        if (hasRunningWorker)
+        {
+            var smLogger = _loggerFactory?.CreateLogger<JobStateMachine>();
+            var sm = new JobStateMachine(job, _catalog, smLogger,
+                changed: j => BroadcastReindexJobAsync(j, CancellationToken.None));
+            await sm.RequestCancelAsync(CancellationToken.None);
+        }
+        else
+        {
+            // 孤儿任务或无本地工作者：直接安全收口为已取消终态
+            var updated = job with
+            {
+                Status = JobStatus.Cancelled,
+                ErrorMessage = job.ErrorMessage ?? "用户手动取消任务",
+                FinishedAt = DateTime.UtcNow
+            };
+            await _catalog.SaveJobAsync(updated, CancellationToken.None);
+            await BroadcastReindexJobAsync(updated, CancellationToken.None);
+        }
+
+        _coordinator.EndJob(job.KnowledgeBaseId, jobId);
+        return true;
     }
 
     public Task<bool> DeleteJobAsync(string jobId, CancellationToken ct = default)
@@ -1797,47 +1839,101 @@ public sealed class KnowledgeBaseService : IKnowledgeBaseService
         // 校验目标分段规格与当前嵌入模型的相容性
         await ValidateChunkingSpecAgainstModelAsync(targetChunkSpec, kb.EmbeddingSpecId, ct);
 
-        // 更新知识库分段规格绑定
+        // 校验互斥锁：如果同库已有长时任务进行中，抛出 409
+        var activeJob = _coordinator.GetActiveJob(knowledgeBaseId);
+        if (activeJob != null)
+        {
+            throw new KnowledgeBaseJobConflictException(
+                $"知识库 [{knowledgeBaseId}] 已有进行中的后台任务: {activeJob.JobId} ({activeJob.Operation})，请等待完成或先取消后再重新分段。");
+        }
+
+        var jobId = Guid.NewGuid().ToString("N")[..16];
+        var cts = new CancellationTokenSource();
+        if (!_coordinator.TryBeginJob(knowledgeBaseId, jobId, JobOperation.Rechunk, cts, out var conflict))
+        {
+            cts.Dispose();
+            throw new KnowledgeBaseJobConflictException(
+                $"知识库 [{knowledgeBaseId}] 已有进行中的后台任务: {conflict?.JobId} ({conflict?.Operation})，请等待完成或先取消后再重新分段。");
+        }
+
+        // 更新知识库分段规格与期望版本（注意：只有重切全部成功后才提升 EffectiveConfigRevision）
         var updatedKb = kb with
         {
             ChunkingSpecId = targetChunkSpec.Id,
             DesiredConfigRevision = kb.DesiredConfigRevision + 1,
-            EffectiveConfigRevision = kb.EffectiveConfigRevision + 1,
             UpdatedAt = DateTime.UtcNow
         };
         await _catalog.SaveKnowledgeBaseAsync(updatedKb, ct);
 
         // 触发连接器全量重新同步与切分
         var connectors = await _catalog.GetConnectorsByKnowledgeBaseAsync(knowledgeBaseId, ct);
-        int processedDocs = 0;
+        var enabledConnectors = connectors.Where(c => c.Enabled).ToList();
 
-        foreach (var connDef in connectors)
+        var parentJob = new JobDefinition(
+            Id: jobId,
+            Operation: JobOperation.Rechunk,
+            KnowledgeBaseId: knowledgeBaseId,
+            ExpectedIndexEpoch: 1,
+            Status: JobStatus.Queued,
+            Phase: OperationPhase.Planning,
+            TotalUnits: enabledConnectors.Count,
+            ProcessedUnits: 0,
+            IdempotencyKey: $"{knowledgeBaseId}:rechunk:{DateTime.UtcNow.Ticks}",
+            ErrorMessage: null,
+            CreatedAt: DateTime.UtcNow,
+            FinishedAt: null
+        );
+        await _catalog.SaveJobAsync(parentJob, ct);
+
+        if (_jobQueue != null)
         {
-            if (!connDef.Enabled) continue;
-            await TriggerSyncJobAsync(knowledgeBaseId, connDef.Id, ct);
-            processedDocs++;
+            await _jobQueue.EnqueueAsync(KnowledgeBaseJobRequest.ForRechunk(parentJob, enabledConnectors, cts), ct);
+        }
+        else
+        {
+            // 回退兼容：若无工作队列（如单元测试单例未注册），直接异步处理
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    foreach (var connDef in enabledConnectors)
+                    {
+                        var connectorInstance = connDef.Kind.ToLowerInvariant() switch
+                        {
+                            "singlefile" or "file" => (IDataConnector)new SingleFileConnector(connDef.Id, knowledgeBaseId, connDef.TargetPath),
+                            _ => new LocalFolderConnector(connDef.Id, knowledgeBaseId, connDef.TargetPath, connDef.FilePattern)
+                        };
+                        try
+                        {
+                            var workerLogger = _loggerFactory?.CreateLogger<KnowledgeBaseSyncWorker>();
+                            var worker = new KnowledgeBaseSyncWorker(_catalog, _storageManager, _modelRouter, workerLogger, _loggerFactory, _configManager?.Load().Indexing.EmbeddingEnabled ?? true, _markdownChunker, _extractorRouter);
+                            await worker.ExecuteSyncAsync(parentJob, connectorInstance, cts.Token);
+                        }
+                        finally
+                        {
+                            await connectorInstance.DisposeAsync();
+                        }
+                    }
+                }
+                finally
+                {
+                    _coordinator.EndJob(knowledgeBaseId, jobId);
+                    cts.Dispose();
+                }
+            });
         }
 
-        int processedChunks = 0;
-        try
-        {
-            await using var lease = await _storageManager.AcquireLeaseAsync(knowledgeBaseId, StorageAccess.ReadOnly, ct);
-            var (_, totalCount) = await lease.Store.GetChunksAsync(pageSize: 1, ct: ct);
-            processedChunks = totalCount;
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogWarning(ex, "查询知识库切片数统计异常: {Msg}", ex.Message);
-        }
+        _logger?.LogInformation("[KnowledgeBaseService] 触发全库重新分段作业: KB {Id}, Spec {SpecId}, JobId {JobId}",
+            knowledgeBaseId, targetChunkSpec.Id, jobId);
 
-        _logger?.LogInformation("[KnowledgeBaseService] 触发全库重新分段完成: KB {Id}, Spec {SpecId}", knowledgeBaseId, targetChunkSpec.Id);
         return new RechunkResult(
             KnowledgeBaseId: knowledgeBaseId,
             TargetChunkingSpecId: targetChunkSpec.Id,
-            ProcessedDocuments: processedDocs,
-            ProcessedChunks: processedChunks,
+            ProcessedDocuments: enabledConnectors.Count,
+            ProcessedChunks: 0,
             Success: true,
-            Message: $"已成功应用分段规格 [{targetChunkSpec.Id}] 并启动全库重新切分与向量索引任务。"
+            Message: $"已成功应用分段规格 [{targetChunkSpec.Id}] 并启动全库重新切分受管后台作业。",
+            JobId: jobId
         );
     }
 

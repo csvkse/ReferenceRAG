@@ -232,6 +232,8 @@ public interface ICatalogStore
 
     Task<IReadOnlyList<JobDefinition>> ListJobsAsync(string? kbId = null, CancellationToken ct = default);
 
+    Task<IReadOnlyList<JobDefinition>> GetActiveJobsAsync(CancellationToken ct = default);
+
     Task<bool> DeleteJobAsync(string jobId, CancellationToken ct = default);
 
     Task<int> PruneJobsAsync(string? kbId = null, TimeSpan? olderThan = null, CancellationToken ct = default);

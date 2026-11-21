@@ -567,6 +567,10 @@ public class KnowledgeBasesController : ControllerBase
             var result = await _kbService.TriggerRechunkAsync(id, request?.TargetChunkingSpecId, ct);
             return Ok(result);
         }
+        catch (KnowledgeBaseJobConflictException ex)
+        {
+            return Conflict(new { message = ex.Message });
+        }
         catch (KeyNotFoundException ex)
         {
             return NotFound(new { message = ex.Message });
@@ -777,6 +781,10 @@ public class KnowledgeBasesController : ControllerBase
         {
             var job = await _kbService.TriggerSyncJobAsync(id, request.ConnectorId, ct);
             return Accepted($"/api/jobs/{job.Id}", job);
+        }
+        catch (KnowledgeBaseJobConflictException ex)
+        {
+            return Conflict(new { message = ex.Message });
         }
         catch (InvalidOperationException ex)
         {
